@@ -48,6 +48,12 @@ jobs:
 
       - name: Publish
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # Idempotent: a tag for a version that already exists on
+          # PyPI (e.g. uploaded manually before automated releases
+          # were wired up) becomes a no-op instead of failing the
+          # workflow.
+          skip-existing: true
         # Trusted publishing — no API token needed. Configure your
         # PyPI project at https://pypi.org/manage/account/publishing/
         # with ``release.yml`` as the workflow file and this job's
