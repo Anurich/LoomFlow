@@ -1,0 +1,340 @@
+"""Postgres + pgvector :class:`Memory` backend.
+
+Schema (created by :meth:`init_schema`):
+
+* ``memory_blocks(namespace, name, content, pinned_order, updated_at)``
+* ``episodes(id, namespace, session_id, occurred_at, input, output,
+  embedding vector(N))`` with HNSW cosine index on ``embedding``
+
+The ``vector(N)`` column dimension is fixed at table-creation time and
+must match the configured embedder's ``dimensions``. Switching
+embedders later requires migrating the table.
+
+Both ``asyncpg`` and ``pgvector`` are imported lazily inside
+:meth:`connect` / :meth:`init_schema` so the module loads in
+environments without those extras installed; the import only fires
+when actually opening a connection.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterable
+from datetime import datetime
+from typing import Any
+
+import anyio
+
+from ..core.protocols import Embedder
+from ..core.types import Episode, MemoryBlock
+from .embedder import HashEmbedder
+
+DEFAULT_NAMESPACE = "default"
+
+
+class PostgresMemory:
+    """Postgres-backed :class:`Memory`.
+
+    ``pool`` is an ``asyncpg.Pool`` (or anything with the same API).
+    Tests can pass a fake pool whose ``acquire()`` returns a fake
+    connection.
+    """
+
+    def __init__(
+        self,
+        pool: Any,
+        *,
+        embedder: Embedder | None = None,
+        namespace: str = DEFAULT_NAMESPACE,
+        fact_store: Any | None = None,
+    ) -> None:
+        self._pool = pool
+        self._embedder: Embedder = embedder if embedder is not None else HashEmbedder()
+        self._namespace = namespace
+        # ``facts`` is left as ``None`` by default to avoid forcing the
+        # facts schema on users who don't want it. Pass an explicit
+        # :class:`PostgresFactStore` (or set ``with_facts=True`` on
+        # :meth:`connect`) to enable it.
+        self.facts: Any | None = fact_store
+
+    # ---- factory ---------------------------------------------------------
+
+    @classmethod
+    async def connect(
+        cls,
+        dsn: str,
+        *,
+        embedder: Embedder | None = None,
+        namespace: str = DEFAULT_NAMESPACE,
+        min_size: int = 1,
+        max_size: int = 10,
+        with_facts: bool = False,
+    ) -> PostgresMemory:
+        """Open an asyncpg pool and register the pgvector codec.
+
+        When ``with_facts=True`` a :class:`PostgresFactStore` rooted at
+        the same pool is attached as ``self.facts`` so the agent loop's
+        memory.facts integration just works.
+        """
+        try:
+            import asyncpg  # type: ignore[import-untyped]
+        except ImportError as exc:  # pragma: no cover
+            raise ImportError(
+                "asyncpg is not installed. "
+                "Install with: pip install 'jeevesagent[postgres]'"
+            ) from exc
+        try:
+            from pgvector.asyncpg import (  # type: ignore[import-not-found]
+                register_vector,
+            )
+        except ImportError as exc:  # pragma: no cover
+            raise ImportError(
+                "pgvector is not installed. "
+                "Install with: pip install pgvector"
+            ) from exc
+
+        async def _setup(conn: Any) -> None:
+            await register_vector(conn)
+
+        pool = await asyncpg.create_pool(
+            dsn=dsn,
+            min_size=min_size,
+            max_size=max_size,
+            init=_setup,
+        )
+        instance = cls(pool, embedder=embedder, namespace=namespace)
+        if with_facts:
+            from .postgres_facts import PostgresFactStore
+
+            instance.facts = PostgresFactStore(pool, embedder=embedder)
+        return instance
+
+    async def aclose(self) -> None:
+        if self._pool is not None and hasattr(self._pool, "close"):
+            await self._pool.close()
+
+    # ---- schema ----------------------------------------------------------
+
+    @property
+    def namespace(self) -> str:
+        return self._namespace
+
+    @property
+    def embedding_dimensions(self) -> int:
+        return self._embedder.dimensions
+
+    def schema_sql(self) -> list[str]:
+        """Return the DDL needed to bootstrap this backend's schema.
+
+        Exposed so tests can assert on the SQL without running it; also
+        usable from migration scripts that want to apply the schema in
+        their own transaction.
+        """
+        return [
+            "CREATE EXTENSION IF NOT EXISTS vector;",
+            (
+                "CREATE TABLE IF NOT EXISTS memory_blocks ("
+                "  namespace TEXT NOT NULL,"
+                "  name TEXT NOT NULL,"
+                "  content TEXT NOT NULL,"
+                "  pinned_order INT NOT NULL DEFAULT 0,"
+                "  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),"
+                "  PRIMARY KEY (namespace, name)"
+                ");"
+            ),
+            (
+                f"CREATE TABLE IF NOT EXISTS episodes ("
+                f"  id TEXT PRIMARY KEY,"
+                f"  namespace TEXT NOT NULL,"
+                f"  session_id TEXT NOT NULL,"
+                f"  occurred_at TIMESTAMPTZ NOT NULL,"
+                f"  input TEXT NOT NULL,"
+                f"  output TEXT NOT NULL,"
+                f"  embedding vector({self.embedding_dimensions}) NOT NULL"
+                f");"
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS episodes_namespace_idx "
+                "ON episodes (namespace, occurred_at DESC);"
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS episodes_embedding_idx "
+                "ON episodes USING hnsw (embedding vector_cosine_ops);"
+            ),
+        ]
+
+    async def init_schema(self) -> None:
+        """Apply :meth:`schema_sql` against the connected pool.
+
+        When a :class:`PostgresFactStore` is attached as ``self.facts``,
+        its schema is initialised in the same call.
+        """
+        async with self._pool.acquire() as conn:
+            for stmt in self.schema_sql():
+                await conn.execute(stmt)
+        if self.facts is not None and hasattr(self.facts, "init_schema"):
+            await self.facts.init_schema()
+
+    # ---- working blocks --------------------------------------------------
+
+    async def working(self) -> list[MemoryBlock]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT name, content, updated_at, pinned_order "
+                "FROM memory_blocks WHERE namespace = $1 "
+                "ORDER BY pinned_order ASC",
+                self._namespace,
+            )
+        return [
+            MemoryBlock(
+                name=r["name"],
+                content=r["content"],
+                updated_at=r["updated_at"],
+                pinned_order=r["pinned_order"],
+            )
+            for r in _rows(rows)
+        ]
+
+    async def update_block(self, name: str, content: str) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO memory_blocks(namespace, name, content) "
+                "VALUES ($1, $2, $3) "
+                "ON CONFLICT (namespace, name) DO UPDATE "
+                "SET content = EXCLUDED.content, updated_at = NOW();",
+                self._namespace,
+                name,
+                content,
+            )
+
+    async def append_block(self, name: str, content: str) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO memory_blocks(namespace, name, content) "
+                "VALUES ($1, $2, $3) "
+                "ON CONFLICT (namespace, name) DO UPDATE "
+                "SET content = memory_blocks.content || EXCLUDED.content, "
+                "    updated_at = NOW();",
+                self._namespace,
+                name,
+                content,
+            )
+
+    # ---- episodes --------------------------------------------------------
+
+    async def remember(self, episode: Episode) -> str:
+        if episode.embedding is None:
+            text = "\n".join(p for p in (episode.input, episode.output) if p)
+
+            # Embed in parallel with the connection acquire to amortise
+            # latency. (No-op for HashEmbedder; meaningful for OpenAI.)
+            async with anyio.create_task_group() as tg:
+                holder: list[list[float] | None] = [None]
+
+                async def _do_embed() -> None:
+                    holder[0] = await self._embedder.embed(text)
+
+                tg.start_soon(_do_embed)
+            assert holder[0] is not None
+            episode = episode.model_copy(update={"embedding": holder[0]})
+
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO episodes(id, namespace, session_id, occurred_at, "
+                "                     input, output, embedding) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7) "
+                "ON CONFLICT (id) DO NOTHING;",
+                episode.id,
+                self._namespace,
+                episode.session_id,
+                episode.occurred_at,
+                episode.input,
+                episode.output,
+                episode.embedding,
+            )
+        return episode.id
+
+    async def recall(
+        self,
+        query: str,
+        *,
+        kind: str = "episodic",
+        limit: int = 5,
+        time_range: tuple[datetime, datetime] | None = None,
+    ) -> list[Episode]:
+        if not query.strip():
+            return await self._recall_recent(limit, time_range)
+
+        query_embedding = await self._embedder.embed(query)
+        lo = time_range[0] if time_range is not None else None
+        hi = time_range[1] if time_range is not None else None
+
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT id, session_id, occurred_at, input, output, embedding "
+                "FROM episodes "
+                "WHERE namespace = $1 "
+                "  AND ($2::timestamptz IS NULL OR occurred_at >= $2) "
+                "  AND ($3::timestamptz IS NULL OR occurred_at <= $3) "
+                "ORDER BY embedding <=> $4 "
+                "LIMIT $5",
+                self._namespace,
+                lo,
+                hi,
+                query_embedding,
+                limit,
+            )
+        return _rows_to_episodes(_rows(rows))
+
+    async def _recall_recent(
+        self,
+        limit: int,
+        time_range: tuple[datetime, datetime] | None,
+    ) -> list[Episode]:
+        lo = time_range[0] if time_range is not None else None
+        hi = time_range[1] if time_range is not None else None
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT id, session_id, occurred_at, input, output, embedding "
+                "FROM episodes "
+                "WHERE namespace = $1 "
+                "  AND ($2::timestamptz IS NULL OR occurred_at >= $2) "
+                "  AND ($3::timestamptz IS NULL OR occurred_at <= $3) "
+                "ORDER BY occurred_at DESC "
+                "LIMIT $4",
+                self._namespace,
+                lo,
+                hi,
+                limit,
+            )
+        return _rows_to_episodes(_rows(rows))
+
+    async def consolidate(self) -> None:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _rows(result: Iterable[Any]) -> list[Any]:
+    return list(result) if not isinstance(result, list) else result
+
+
+def _rows_to_episodes(rows: list[Any]) -> list[Episode]:
+    out: list[Episode] = []
+    for r in rows:
+        emb = r["embedding"]
+        # asyncpg + pgvector returns numpy array or list; coerce.
+        emb_list = list(emb) if emb is not None else None
+        out.append(
+            Episode(
+                id=r["id"],
+                session_id=r["session_id"],
+                occurred_at=r["occurred_at"],
+                input=r["input"],
+                output=r["output"],
+                embedding=emb_list,
+            )
+        )
+    return out
