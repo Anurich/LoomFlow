@@ -169,11 +169,23 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
   `jeevesagent.architecture.helpers` (was private in `reflexion.py`).
   Used by Reflexion, Tree of Thoughts, and any future architecture
   with an evaluator step.
-* Total tests: **528** (was 341 in v0.2.0; +187 across the v0.3
+* **32 new ReWOO tests** covering protocol, resolver string,
+  constructor validation, placeholder helpers (`_extract_placeholders` /
+  `_substitute_placeholders` recursion + dedupe + non-string
+  passthrough + unresolved-placeholder leave-as-is), topological
+  helpers (`_topological_levels` linear chain / collapsed
+  independent-steps level / cycle detection / unknown-dep
+  treatment), plan parser (clean JSON / markdown fences /
+  malformed-step skipping / auto-id assignment), full
+  end-to-end loop with real tools, parallel level execution,
+  step-error path that doesn't crash the architecture,
+  `max_steps` cap, cyclic plan handling, full event sequence,
+  and Pydantic round-trip.
+* Total tests: **560** (was 341 in v0.2.0; +219 across the v0.3
   architecture work — 15 foundation + 12 SelfRefine + 19 Reflexion +
   21 Router + 13 Supervisor + 19 ActorCritic + 16 TreeOfThoughts +
   20 MultiAgentDebate + 17 Swarm + 18 BlackboardArchitecture +
-  17 PlanAndExecute).
+  17 PlanAndExecute + 32 ReWOO).
 
 ### Added — Architecture protocol foundation
 

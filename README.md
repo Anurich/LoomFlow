@@ -43,8 +43,8 @@ agents without binding their stack to one model lab**. It's:
   resolver: `model="claude-opus-4-7"`, `"gpt-4o"`, `"mistral-large"`,
   `"command-r-plus"`, … — no decision lock-in.
 * **Pluggable architectures** — the agent loop is a strategy.
-  Eleven shipped: ReAct (default), SelfRefine, Reflexion,
-  TreeOfThoughts, PlanAndExecute (single-agent); Router,
+  Twelve shipped: ReAct (default), SelfRefine, Reflexion,
+  TreeOfThoughts, PlanAndExecute, ReWOO (single-agent); Router,
   Supervisor, ActorCritic, MultiAgentDebate, Swarm,
   BlackboardArchitecture (multi-agent). Same `Agent` surface;
   one kwarg flips the iteration pattern.
@@ -148,7 +148,7 @@ runtime) stays exactly the same.
 from jeevesagent import (
     Agent, ReAct, SelfRefine, Reflexion, Router, RouterRoute,
     Supervisor, ActorCritic, TreeOfThoughts, MultiAgentDebate,
-    Swarm, BlackboardArchitecture, PlanAndExecute,
+    Swarm, BlackboardArchitecture, PlanAndExecute, ReWOO,
 )
 
 # Default — observe / think / act
@@ -223,6 +223,16 @@ agent = Agent(
 # synthesizer.
 agent = Agent("...", model="claude-opus-4-7", architecture="plan-and-execute")
 
+# ReWOO: plan-then-tool-execute with {{En}} placeholders + parallel
+# independent steps. Two LLM calls + N tool calls — 30-50% cheaper
+# than ReAct on tool-heavy multi-step tasks.
+agent = Agent(
+    "...",
+    model="claude-opus-4-7",
+    tools=[search_tool, fetch_tool, summarize_tool],
+    architecture="rewoo",
+)
+
 # Peer agents pass control via a handoff tool. Exploratory only —
 # the spec warns of goal drift; prefer Supervisor for production.
 agent = Agent(
@@ -280,7 +290,7 @@ shipped five don't yet handle.
 
 | Capability | What you get | Where |
 |---|---|---|
-| **Architecture protocol** | Pluggable agent-loop strategy: 11 architectures shipped | `Architecture`, `ReAct`, `SelfRefine`, `Reflexion`, `TreeOfThoughts`, `PlanAndExecute`, `Router`, `Supervisor`, `ActorCritic`, `MultiAgentDebate`, `Swarm`, `BlackboardArchitecture` |
+| **Architecture protocol** | Pluggable agent-loop strategy: 12 architectures shipped | `Architecture`, `ReAct`, `SelfRefine`, `Reflexion`, `TreeOfThoughts`, `PlanAndExecute`, `ReWOO`, `Router`, `Supervisor`, `ActorCritic`, `MultiAgentDebate`, `Swarm`, `BlackboardArchitecture` |
 | **Model adapters** | Anthropic, OpenAI, LiteLLM (~100 providers), Echo (zero-key), Scripted (tests) | `jeevesagent.AnthropicModel`, `OpenAIModel`, `LiteLLMModel`, `EchoModel`, `ScriptedModel` |
 | **String model resolver** | `model="claude-opus-4-7"`, `"gpt-4o"`, `"mistral-large"`, `"command-r"`, `"echo"`, `"litellm/<any>"` | `Agent.__init__` |
 | **Tools** | `@tool` decorator with auto-schema, sync + async; `agent.with_tool` decorator; `add_tool` / `remove_tool` / `tools_list` | `jeevesagent.tool`, `Tool` |
@@ -313,25 +323,25 @@ shipped five don't yet handle.
 | [`Subagent.md`](Subagent.md) | Architecture-protocol design rationale; full 14-architecture catalogue (the 5 shipped, the 9 candidates) |
 | [`project.md`](project.md) | The full engineering plan (the design doc) |
 | [`BUILD_LOG.md`](BUILD_LOG.md) | Slice-by-slice changelog |
-| [`examples/`](examples/) | 19 runnable scripts — `00_hello.py` through `18_plan_and_execute.py`, every shipped architecture covered |
+| [`examples/`](examples/) | 20 runnable scripts — `00_hello.py` through `19_rewoo.py`, every shipped architecture covered |
 
 ---
 
 ## Status
 
-* **528 tests pass** in ~5 seconds (5 env-gated integrations skip
+* **560 tests pass** in ~5 seconds (5 env-gated integrations skip
   without `JEEVES_TEST_PG_DSN` / `JEEVES_TEST_REDIS_URL`)
-* **mypy `--strict`** clean across 73 production source files
+* **mypy `--strict`** clean across 74 production source files
 * **ruff** clean including `flake8-async` lints
 * Phases 1-6 of the engineering plan shipped. v0.3 added the
-  `Architecture` protocol layer with **eleven** shipped
+  `Architecture` protocol layer with **twelve** shipped
   architectures (ReAct, SelfRefine, Reflexion, TreeOfThoughts,
-  PlanAndExecute, Router, Supervisor, ActorCritic,
+  PlanAndExecute, ReWOO, Router, Supervisor, ActorCritic,
   MultiAgentDebate, Swarm, BlackboardArchitecture). LiteLLM,
   SubprocessSandbox, PostgresRuntime, ConsolidationWorker, Voyage /
   Cohere embedders all shipped in v0.2. Temporal / OS-level
-  sandboxes / the remaining 3 architectures from `Subagent.md`
-  (ReWOO, Deep Agent, Graph of Thoughts) are the next chunks.
+  sandboxes / the remaining 2 architectures from `Subagent.md`
+  (Deep Agent, Graph of Thoughts) are the next chunks.
 
 ---
 
@@ -346,7 +356,7 @@ mypy --strict jeevesagent
 pytest tests/ -v
 ```
 
-You should see 528 passed. Five integration tests skip without
+You should see 560 passed. Five integration tests skip without
 `JEEVES_TEST_PG_DSN` / `JEEVES_TEST_REDIS_URL` / API-key env vars set.
 
 ---

@@ -26,6 +26,7 @@ just `pip install -e '.[dev]'`.
 | [`16_swarm.py`](16_swarm.py) | `Swarm` architecture — peer agents pass control via a `handoff` tool; cycle detection + max_handoffs | nothing |
 | [`17_blackboard.py`](17_blackboard.py) | `BlackboardArchitecture` — coordinator + agents share a state board; LLM-driven agent selection per round | nothing |
 | [`18_plan_and_execute.py`](18_plan_and_execute.py) | `PlanAndExecute` architecture — planner → step executor → synthesizer; cheaper than ReAct on predictable multi-step tasks | nothing |
+| [`19_rewoo.py`](19_rewoo.py) | `ReWOO` architecture — plan-then-tool-execute with `{{En}}` placeholder substitution; parallel independent steps; 2 LLM calls + N tool calls | nothing |
 | [`15_debate.py`](15_debate.py) | `MultiAgentDebate` architecture — N debaters argue in parallel rounds, judge synthesizes | nothing |
 
 Read in order; each builds on the last conceptually.

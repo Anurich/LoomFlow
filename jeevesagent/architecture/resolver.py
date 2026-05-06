@@ -18,6 +18,7 @@ from .base import Architecture
 from .plan_and_execute import PlanAndExecute
 from .react import ReAct
 from .reflexion import Reflexion
+from .rewoo import ReWOO
 from .self_refine import SelfRefine
 from .tree_of_thoughts import TreeOfThoughts
 
@@ -25,6 +26,7 @@ KNOWN: dict[str, type[Architecture]] = {
     "plan-and-execute": PlanAndExecute,
     "react": ReAct,
     "reflexion": Reflexion,
+    "rewoo": ReWOO,
     "self-refine": SelfRefine,
     "tree-of-thoughts": TreeOfThoughts,
 }

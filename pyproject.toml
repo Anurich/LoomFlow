@@ -39,6 +39,7 @@ dev = [
     "mypy>=1.10",
     "ruff>=0.4",
     "import-linter>=2.0",
+    "bump-my-version>=0.30",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -81,3 +82,43 @@ addopts = "--strict-markers"
 markers = [
     "anyio: mark test as async (anyio backend)",
 ]
+
+# ---------------------------------------------------------------------------
+# Version bumping (used by ``make release BUMP=...``)
+# ---------------------------------------------------------------------------
+# ``bump-my-version`` reads ``current_version`` here, edits every file
+# listed below in lockstep, commits, and tags. The Makefile target
+# ``release`` calls it then pushes commit + tag, which fires
+# ``.github/workflows/release.yml`` for the PyPI upload.
+#
+# Daily flow stays as plain ``git commit`` / ``git push``. ``make
+# release BUMP=patch|minor|major`` is the explicit "this is a release"
+# flag — see the Makefile for usage.
+[tool.bumpversion]
+current_version = "0.3.0.dev0"
+parse = """(?x)
+    (?P<major>0|[1-9]\\d*)\\.(?P<minor>0|[1-9]\\d*)\\.(?P<patch>0|[1-9]\\d*)
+    (?:\\.(?P<dev_label>dev)(?P<dev_n>\\d+))?
+"""
+serialize = [
+    "{major}.{minor}.{patch}.{dev_label}{dev_n}",
+    "{major}.{minor}.{patch}",
+]
+search = "{current_version}"
+replace = "{new_version}"
+commit = true
+tag = true
+tag_name = "v{new_version}"
+tag_message = "Release v{new_version}"
+message = "Release v{new_version}"
+allow_dirty = false  # refuses to bump if working tree has uncommitted changes
+
+[[tool.bumpversion.files]]
+filename = "pyproject.toml"
+search = 'version = "{current_version}"'
+replace = 'version = "{new_version}"'
+
+[[tool.bumpversion.files]]
+filename = "jeevesagent/__init__.py"
+search = '__version__ = "{current_version}"'
+replace = '__version__ = "{new_version}"'

@@ -26,6 +26,7 @@ from .plan_and_execute import Plan, PlanAndExecute, PlanStep, StepResult
 from .react import ReAct
 from .reflexion import Reflexion
 from .resolver import resolve_architecture
+from .rewoo import ReWOO, ReWOOPlan, ReWOOStep, ReWOOStepResult
 from .router import Router, RouterRoute
 from .self_refine import SelfRefine
 from .supervisor import Supervisor
@@ -45,6 +46,10 @@ __all__ = [
     "PlanAndExecute",
     "PlanStep",
     "ReAct",
+    "ReWOO",
+    "ReWOOPlan",
+    "ReWOOStep",
+    "ReWOOStepResult",
     "Reflexion",
     "Router",
     "RouterRoute",
