@@ -1,6 +1,13 @@
 """JeevesAgent — model-agnostic, MCP-native agent harness."""
 
 from .agent import Agent
+from .architecture import (
+    AgentSession,
+    Architecture,
+    Dependencies,
+    ReAct,
+    resolve_architecture,
+)
 from .core import (
     AuditEntry,
     Budget,
@@ -103,7 +110,7 @@ from .security import (
 )
 from .tools import InProcessToolHost, Tool, tool
 
-__version__ = "0.2.0"
+__version__ = "0.3.0.dev0"
 
 __all__ = [
     "__version__",
@@ -112,6 +119,12 @@ __all__ = [
     "Tool",
     "tool",
     "InProcessToolHost",
+    # architecture
+    "AgentSession",
+    "Architecture",
+    "Dependencies",
+    "ReAct",
+    "resolve_architecture",
     "AllowAll",
     "StandardPermissions",
     "HookRegistry",

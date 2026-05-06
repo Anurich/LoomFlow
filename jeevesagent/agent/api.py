@@ -34,6 +34,12 @@ from typing import Any
 
 import anyio
 
+from ..architecture import (
+    AgentSession,
+    Architecture,
+    Dependencies,
+    resolve_architecture,
+)
 from ..core.ids import new_id
 from ..core.protocols import (
     Budget,
@@ -48,14 +54,7 @@ from ..core.protocols import (
 from ..core.types import (
     Episode,
     Event,
-    Message,
-    ModelChunk,
-    PermissionDecision,
-    Role,
     RunResult,
-    ToolCall,
-    ToolResult,
-    Usage,
 )
 from ..governance.budget import NoBudget
 from ..memory.inmemory import InMemoryMemory
@@ -95,6 +94,7 @@ class Agent:
         audit_log: AuditLog | None = None,
         max_turns: int = DEFAULT_MAX_TURNS,
         auto_consolidate: bool = False,
+        architecture: Architecture | str | None = None,
     ) -> None:
         self._instructions = instructions
         self._model: Model = _resolve_model(model)
@@ -112,6 +112,7 @@ class Agent:
         self._audit_log: AuditLog | None = audit_log
         self._max_turns = max_turns
         self._auto_consolidate = auto_consolidate
+        self._architecture: Architecture = resolve_architecture(architecture)
 
     # ---- hook decorators (user-facing sugar) ----------------------------
 
@@ -168,6 +169,15 @@ class Agent:
     def permissions(self) -> Permissions:
         """The configured :class:`Permissions` policy."""
         return self._permissions
+
+    @property
+    def architecture(self) -> Architecture:
+        """The configured :class:`Architecture` strategy.
+
+        Default is :class:`~jeevesagent.architecture.ReAct`. Pass
+        ``architecture=`` to ``Agent(...)`` to override.
+        """
+        return self._architecture
 
     # ---- public memory shortcuts ---------------------------------------
 
@@ -501,16 +511,20 @@ class Agent:
         emit: Emit,
         session_id: str | None = None,
     ) -> RunResult:
+        """Setup → delegate iteration to the architecture → teardown.
+
+        The architecture (default :class:`ReAct`) drives the iteration
+        and yields events as it goes. Setup wraps the run in a runtime
+        session + telemetry trace so every ``runtime.step`` recorded
+        from inside the architecture lands on the same journal entry.
+        Teardown persists the episode, builds the :class:`RunResult`,
+        emits final metrics, and triggers ``auto_consolidate``.
+        """
         started_at = datetime.now(UTC)
-        # Caller-supplied session_id enables journal replay when paired
-        # with a durable runtime; auto-generated otherwise.
         if session_id is None:
             session_id = new_id("sess")
         loop_started = anyio.current_time()
 
-        # Open a runtime session so journal-backed runtimes can record
-        # every step against this run; in-process runtimes treat it as
-        # a no-op.
         async with (
             self._runtime.session(session_id),
             self._telemetry.trace(
@@ -518,6 +532,7 @@ class Agent:
                 session_id=session_id,
                 max_turns=self._max_turns,
                 model=self._model.name,
+                architecture=self._architecture.name,
             ),
         ):
             await self._audit(
@@ -528,121 +543,52 @@ class Agent:
                     "prompt": prompt[:500],
                     "model": self._model.name,
                     "max_turns": self._max_turns,
+                    "architecture": self._architecture.name,
                 },
             )
             await emit(Event.started(session_id, prompt))
 
-            messages = await self._seed_context(prompt)
+            session = AgentSession(
+                id=session_id,
+                instructions=self._instructions,
+            )
+            deps = Dependencies(
+                model=self._model,
+                memory=self._memory,
+                runtime=self._runtime,
+                tools=self._tool_host,
+                budget=self._budget,
+                permissions=self._permissions,
+                hooks=self._hooks,
+                telemetry=self._telemetry,
+                audit_log=self._audit_log,
+                max_turns=self._max_turns,
+            )
 
-            turns = 0
-            output_text = ""
-            cumulative = Usage()
-            interrupted = False
-            reason: str | None = None
-
-            while True:
-                if turns >= self._max_turns:
-                    interrupted = True
-                    reason = "max_turns_exceeded"
-                    break
-
-                status = await self._budget.allows_step()
-                if status.blocked:
-                    interrupted = True
-                    reason = f"budget:{status.reason}"
-                    await self._telemetry.emit_metric(
-                        "jeeves.budget.exceeded",
-                        1,
-                        session_id=session_id,
-                        reason=status.reason,
-                    )
-                    await emit(Event.budget_exceeded(session_id, status))
-                    break
-                if status.warn:
-                    await emit(Event.budget_warning(session_id, status))
-
-                turns += 1
-                async with self._telemetry.trace(
-                    "jeeves.turn", turn=turns, session_id=session_id
-                ):
-                    text, tool_calls, usage = await self._take_one_turn(
-                        messages, turns, session_id=session_id, emit=emit
-                    )
-
-                    await self._budget.consume(
-                        tokens_in=usage.input_tokens,
-                        tokens_out=usage.output_tokens,
-                        cost_usd=usage.cost_usd,
-                    )
-                    await self._telemetry.emit_metric(
-                        "jeeves.tokens.input",
-                        usage.input_tokens,
-                        session_id=session_id,
-                        model=self._model.name,
-                    )
-                    await self._telemetry.emit_metric(
-                        "jeeves.tokens.output",
-                        usage.output_tokens,
-                        session_id=session_id,
-                        model=self._model.name,
-                    )
-                    if usage.cost_usd:
-                        await self._telemetry.emit_metric(
-                            "jeeves.cost.usd",
-                            usage.cost_usd,
-                            session_id=session_id,
-                            model=self._model.name,
-                        )
-                    cumulative = _add_usage(cumulative, usage)
-                    output_text = text
-
-                    messages.append(
-                        Message(
-                            role=Role.ASSISTANT,
-                            content=text,
-                            tool_calls=tuple(tool_calls),
-                        )
-                    )
-
-                    if not tool_calls:
-                        break
-
-                    results = await self._dispatch_tools(
-                        tool_calls,
-                        turns,
-                        session_id=session_id,
-                        emit=emit,
-                    )
-                    for r in results:
-                        messages.append(
-                            Message(
-                                role=Role.TOOL,
-                                content=_format_tool_message(r),
-                                tool_call_id=r.call_id,
-                            )
-                        )
+            async for event in self._architecture.run(session, deps, prompt):
+                await emit(event)
 
             await self._runtime.step(
-                f"persist_episode_{turns}",
+                f"persist_episode_{session.turns}",
                 self._memory.remember,
                 Episode(
                     session_id=session_id,
                     input=prompt,
-                    output=output_text,
+                    output=session.output,
                 ),
             )
 
             result = RunResult(
                 session_id=session_id,
-                output=output_text,
-                turns=turns,
-                tokens_in=cumulative.input_tokens,
-                tokens_out=cumulative.output_tokens,
-                cost_usd=cumulative.cost_usd,
+                output=session.output,
+                turns=session.turns,
+                tokens_in=session.cumulative_usage.input_tokens,
+                tokens_out=session.cumulative_usage.output_tokens,
+                cost_usd=session.cumulative_usage.cost_usd,
                 started_at=started_at,
                 finished_at=datetime.now(UTC),
-                interrupted=interrupted,
-                interruption_reason=reason,
+                interrupted=session.interrupted,
+                interruption_reason=session.interruption_reason,
             )
 
             elapsed_ms = (anyio.current_time() - loop_started) * 1000
@@ -650,14 +596,14 @@ class Agent:
                 "jeeves.session.duration_ms",
                 elapsed_ms,
                 session_id=session_id,
-                interrupted=interrupted,
-                turns=turns,
+                interrupted=session.interrupted,
+                turns=session.turns,
             )
 
             # Auto-consolidate runs after the response is finalized but
             # before the COMPLETED event so observers see it as part of
-            # the same run. Failures are surfaced as ERROR events but
-            # never break the run — consolidation is best-effort.
+            # the same run. Failures surface as ERROR events but never
+            # break the run — consolidation is best-effort.
             if self._auto_consolidate:
                 try:
                     await self._memory.consolidate()
@@ -669,218 +615,17 @@ class Agent:
                 actor="system",
                 action="run_completed",
                 payload={
-                    "turns": turns,
-                    "interrupted": interrupted,
-                    "interruption_reason": reason,
-                    "tokens_in": cumulative.input_tokens,
-                    "tokens_out": cumulative.output_tokens,
-                    "cost_usd": cumulative.cost_usd,
+                    "turns": session.turns,
+                    "interrupted": session.interrupted,
+                    "interruption_reason": session.interruption_reason,
+                    "tokens_in": session.cumulative_usage.input_tokens,
+                    "tokens_out": session.cumulative_usage.output_tokens,
+                    "cost_usd": session.cumulative_usage.cost_usd,
                     "elapsed_ms": elapsed_ms,
                 },
             )
             await emit(Event.completed(session_id, result.model_dump(mode="json")))
             return result
-
-    # ---- internals -------------------------------------------------------
-
-    async def _seed_context(self, prompt: str) -> list[Message]:
-        messages: list[Message] = [
-            Message(role=Role.SYSTEM, content=self._instructions),
-        ]
-
-        blocks = await self._memory.working()
-        if blocks:
-            block_text = "\n\n".join(b.format() for b in blocks)
-            messages.append(Message(role=Role.SYSTEM, content=block_text))
-
-        # Pull semantic facts via the Memory protocol's ``recall_facts``.
-        # Backends without a fact store implement this as ``return []``,
-        # so this works uniformly across every backend.
-        facts: list[Any] = []
-        try:
-            facts = await self._memory.recall_facts(prompt, limit=5)
-        except AttributeError:
-            # Backwards-compat shim: 0.1.x backends that haven't been
-            # updated to the new protocol method still work — just
-            # without facts in context.
-            facts = []
-
-        episodes = await self._memory.recall(prompt, kind="episodic", limit=3)
-
-        recall_parts: list[str] = []
-        if facts:
-            recall_parts.append(
-                "Known facts:\n" + "\n".join(f"- {f.format()}" for f in facts)
-            )
-        if episodes:
-            recall_parts.append(
-                "Relevant past episodes:\n"
-                + "\n".join(f"- {e.format()}" for e in episodes)
-            )
-        if recall_parts:
-            messages.append(
-                Message(role=Role.SYSTEM, content="\n\n".join(recall_parts))
-            )
-
-        messages.append(Message(role=Role.USER, content=prompt))
-        return messages
-
-    async def _take_one_turn(
-        self,
-        messages: list[Message],
-        turn: int,
-        *,
-        session_id: str,
-        emit: Emit,
-    ) -> tuple[str, list[ToolCall], Usage]:
-        text_parts: list[str] = []
-        tool_calls: list[ToolCall] = []
-        usage = Usage()
-
-        tool_defs = await self._tool_host.list_tools()
-
-        async with self._telemetry.trace(
-            "jeeves.model.stream",
-            model=self._model.name,
-            turn=turn,
-            session_id=session_id,
-            tool_count=len(tool_defs),
-        ):
-            chunks = self._runtime.stream_step(
-                f"model_call_{turn}",
-                self._model.stream,
-                messages,
-                tools=tool_defs or None,
-            )
-            chunk: ModelChunk
-            async for chunk in chunks:
-                await emit(Event.model_chunk(session_id, chunk))
-                if chunk.kind == "text" and chunk.text is not None:
-                    text_parts.append(chunk.text)
-                elif chunk.kind == "tool_call" and chunk.tool_call is not None:
-                    tool_calls.append(chunk.tool_call)
-                elif chunk.kind == "finish" and chunk.usage is not None:
-                    usage = chunk.usage
-
-        return "".join(text_parts), tool_calls, usage
-
-    async def _dispatch_tools(
-        self,
-        calls: list[ToolCall],
-        turn: int,
-        *,
-        session_id: str,
-        emit: Emit,
-    ) -> list[ToolResult]:
-        """Run all tool calls in parallel through a structured task group.
-
-        Each result slot is pre-allocated so we can write into it from a
-        spawned task without locks — order is preserved by index.
-        """
-        results: list[ToolResult | None] = [None] * len(calls)
-
-        async def _run_one(i: int, call: ToolCall) -> None:
-            await emit(Event.tool_call(session_id, call))
-            await self._audit(
-                session_id=session_id,
-                actor="model",
-                action="tool_call",
-                payload={
-                    "tool": call.tool,
-                    "call_id": call.id,
-                    "args": dict(call.args),
-                    "destructive": call.destructive,
-                    "turn": turn,
-                },
-            )
-            r = await self._run_single_tool(call, turn=turn, slot=i)
-            results[i] = r
-            await self._audit(
-                session_id=session_id,
-                actor="system",
-                action="tool_result",
-                payload={
-                    "tool": call.tool,
-                    "call_id": r.call_id,
-                    "ok": r.ok,
-                    "denied": r.denied,
-                    "error": r.error,
-                    "reason": r.reason,
-                    "turn": turn,
-                },
-            )
-            await emit(Event.tool_result(session_id, r))
-
-        async with anyio.create_task_group() as tg:
-            for i, call in enumerate(calls):
-                tg.start_soon(_run_one, i, call)
-
-        return [
-            r if r is not None else ToolResult.error_(c.id, "no_result")
-            for r, c in zip(results, calls, strict=True)
-        ]
-
-    async def _run_single_tool(
-        self, call: ToolCall, *, turn: int, slot: int
-    ) -> ToolResult:
-        started = anyio.current_time()
-        result: ToolResult
-
-        async with self._telemetry.trace(
-            "jeeves.tool",
-            tool=call.tool,
-            call_id=call.id,
-            turn=turn,
-        ):
-            # 1. User pre-tool hooks first. A hook denial short-circuits.
-            hook_decision: PermissionDecision = await self._hooks.pre_tool(call)
-            if hook_decision.deny:
-                result = ToolResult.denied_(
-                    call.id, hook_decision.reason or "denied by hook"
-                )
-            else:
-                # 2. System permission policy. ``ask`` becomes deny in this
-                #    slice (no interactive UI); a hook can override by
-                #    returning allow.
-                perm = await self._permissions.check(call, context={})
-                if perm.deny:
-                    result = ToolResult.denied_(
-                        call.id, perm.reason or "denied by policy"
-                    )
-                elif perm.ask and not hook_decision.allow:
-                    result = ToolResult.denied_(
-                        call.id,
-                        perm.reason or "approval required; no approver",
-                    )
-                else:
-                    # 3. Execute through a journaled runtime step so the
-                    #    result is cached for replay. The host is
-                    #    responsible for surfacing errors as
-                    #    ToolResult.error_; we still wrap defensively.
-                    try:
-                        result = await self._runtime.step(
-                            f"tool_call_{turn}_{slot}",
-                            self._tool_host.call,
-                            call.tool,
-                            call.args,
-                            call_id=call.id,
-                            idempotency_key=call.idempotency_key(),
-                        )
-                    except Exception as exc:  # noqa: BLE001
-                        result = ToolResult.error_(call.id, str(exc))
-
-                    # 4. Best-effort post-tool hooks (timeout-shielded).
-                    await self._hooks.post_tool(call, result)
-
-        elapsed_ms = (anyio.current_time() - started) * 1000
-        await self._telemetry.emit_metric(
-            "jeeves.tool.duration_ms",
-            elapsed_ms,
-            tool=call.tool,
-            ok=result.ok,
-            denied=result.denied,
-        )
-        return result
 
 
 # ---------------------------------------------------------------------------
@@ -1007,17 +752,3 @@ def _coerce_tool_host(
     raise TypeError(f"unsupported tools= argument: {type(tools).__name__}")
 
 
-def _format_tool_message(result: ToolResult) -> str:
-    if result.ok:
-        return str(result.output)
-    if result.denied:
-        return f"DENIED: {result.reason or 'no reason given'}"
-    return f"ERROR: {result.error or 'unknown'}"
-
-
-def _add_usage(a: Usage, b: Usage) -> Usage:
-    return Usage(
-        input_tokens=a.input_tokens + b.input_tokens,
-        output_tokens=a.output_tokens + b.output_tokens,
-        cost_usd=a.cost_usd + b.cost_usd,
-    )

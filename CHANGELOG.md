@@ -7,6 +7,63 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 For development-history detail (per-slice notes, file maps, gate
 counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 
+## [0.3.0] — unreleased
+
+### Added — Architecture protocol foundation
+
+* **`jeevesagent.architecture`** package — pluggable agent-loop
+  strategies. The `Architecture` protocol lets users swap iteration
+  patterns (ReAct, Plan-and-Execute, Reflexion, Router, Supervisor,
+  ...) without touching memory / runtime / tools / governance. See
+  `Subagent.md` in the repo root for the design rationale and
+  catalogue of architectures.
+* **`Architecture` protocol** (`runtime_checkable`) — every
+  architecture implements `name: str`, `async def run(session, deps,
+  prompt) -> AsyncIterator[Event]`, and `declared_workers() ->
+  dict[str, Agent]`. Architectures are async generators that yield
+  `Event` values for milestones; setup / teardown stays in `Agent`.
+* **`AgentSession`** — mutable per-run state (id, instructions,
+  messages, turns, output, cumulative_usage, interrupted,
+  interruption_reason, metadata). Architectures mutate this as they
+  iterate; `Agent` reads the final state to build a `RunResult`.
+* **`Dependencies`** — bundles every protocol implementation an
+  architecture might need (model, memory, runtime, tools, budget,
+  permissions, hooks, telemetry, audit_log, max_turns) into one
+  struct so `run()` signatures stay short.
+* **`ReAct`** — the canonical observe/think/act loop, lifted out of
+  `Agent._loop` verbatim. Now the framework's default architecture.
+  Constructor takes optional `max_turns` override (useful when
+  composing inside other architectures, e.g. `Reflexion(base=ReAct(max_turns=10))`).
+* **`Agent(architecture=...)`** kwarg — accepts an `Architecture`
+  instance, a known string (`"react"`), or `None` (defaults to
+  `ReAct()`). Public `agent.architecture` property exposes it.
+* **`resolve_architecture(spec)`** — string / instance / None →
+  concrete `Architecture`. Unknown strings raise `ConfigError` with
+  the list of known names.
+* **15 new tests** (`tests/test_architecture.py`) covering the
+  Protocol surface, the resolver, Agent integration, and a custom
+  architecture driving an end-to-end run.
+* **`Subagent.md`** committed as the architecture reference manual
+  for upcoming v0.4+ work (Reflexion, Self-Refine, Plan-and-Execute,
+  Router, Supervisor, ...).
+
+### Changed (non-breaking)
+
+* `Agent._loop` is now ~100 lines (was ~330): setup wraps the
+  runtime/telemetry context and audits the run boundary, then
+  delegates iteration to `self._architecture.run(session, deps,
+  prompt)`, then teardown persists the episode and builds the
+  `RunResult`. Helpers (`_seed_context`, `_take_one_turn`,
+  `_dispatch_tools`, `_run_single_tool`) moved into
+  `jeevesagent/architecture/react.py`.
+* The `jeeves.run` telemetry span carries an `architecture` attribute
+  alongside `model` / `max_turns` / `session_id`. The audit
+  `run_started` payload also includes the architecture name.
+* All 341 v0.2.0 tests still pass without modification — the refactor
+  is behaviour-preserving.
+
+---
+
 ## [0.2.0] — 2026-05-06
 
 ### Changed (breaking)
