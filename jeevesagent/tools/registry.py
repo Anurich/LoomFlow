@@ -151,6 +151,10 @@ class InProcessToolHost:
         self._tools[t.name] = t
         return t
 
+    def unregister(self, name: str) -> bool:
+        """Remove a tool by name. Returns ``True`` if removed."""
+        return self._tools.pop(name, None) is not None
+
     def get(self, name: str) -> Tool | None:
         return self._tools.get(name)
 

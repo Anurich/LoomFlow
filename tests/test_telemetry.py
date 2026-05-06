@@ -159,7 +159,7 @@ async def test_otel_metric_attributes_are_propagated() -> None:
 
 async def test_agent_run_emits_run_turn_and_model_spans() -> None:
     tel, exporter, reader = _setup_otel()
-    agent = Agent("hi", telemetry=tel)
+    agent = Agent("hi", model="echo", telemetry=tel)
     await agent.run("hello world")
 
     names = [s.name for s in exporter.get_finished_spans()]
@@ -175,7 +175,7 @@ async def test_agent_run_emits_run_turn_and_model_spans() -> None:
 
 async def test_run_span_has_session_id_and_model_attributes() -> None:
     tel, exporter, _ = _setup_otel()
-    agent = Agent("hi", telemetry=tel)
+    agent = Agent("hi", model="echo", telemetry=tel)
     result = await agent.run("anything")
 
     run_span = next(
@@ -187,7 +187,7 @@ async def test_run_span_has_session_id_and_model_attributes() -> None:
 
 async def test_turn_span_is_a_child_of_run_span() -> None:
     tel, exporter, _ = _setup_otel()
-    agent = Agent("hi", telemetry=tel)
+    agent = Agent("hi", model="echo", telemetry=tel)
     await agent.run("hello")
 
     spans = exporter.get_finished_spans()
@@ -268,7 +268,7 @@ async def test_parallel_tool_calls_emit_independent_tool_spans() -> None:
 async def test_budget_exceeded_increments_metric_and_completes_run() -> None:
     tel, _, reader = _setup_otel()
     budget = StandardBudget(BudgetConfig(max_tokens=0))
-    agent = Agent("hi", budget=budget, telemetry=tel)
+    agent = Agent("hi", model="echo", budget=budget, telemetry=tel)
 
     result = await agent.run("anything")
     assert result.interrupted
@@ -281,7 +281,7 @@ async def test_budget_exceeded_increments_metric_and_completes_run() -> None:
 
 async def test_session_duration_metric_recorded_once_per_run() -> None:
     tel, _, reader = _setup_otel()
-    agent = Agent("hi", telemetry=tel)
+    agent = Agent("hi", model="echo", telemetry=tel)
     await agent.run("first")
     await agent.run("second")
 

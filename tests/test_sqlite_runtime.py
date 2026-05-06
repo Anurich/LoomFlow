@@ -148,7 +148,7 @@ async def test_agent_run_with_sqlite_runtime_writes_journal(
 ) -> None:
     db = tmp_path / "j.db"
     rt = SqliteRuntime(db)
-    agent = Agent("hi", runtime=rt)
+    agent = Agent("hi", model="echo", runtime=rt)
 
     result = await agent.run("hello")
 

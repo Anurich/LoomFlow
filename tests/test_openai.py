@@ -296,5 +296,10 @@ async def test_string_model_spec_resolves_to_correct_adapter(
 
 
 async def test_unknown_model_string_raises() -> None:
-    with pytest.raises(ValueError, match="unknown model spec"):
-        Agent("hi", model="llama-72b")
+    """0.2.0 harmonised the resolver's error to ConfigError (was
+    ValueError in 0.1.x). The message now also lists LiteLLM prefixes
+    and the explicit ``litellm/`` opt-in."""
+    from jeevesagent.core.errors import ConfigError
+
+    with pytest.raises(ConfigError, match="unknown model spec"):
+        Agent("hi", model="totally-unknown-prefix-xyz")

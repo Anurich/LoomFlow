@@ -1,8 +1,9 @@
-"""End-to-end smoke tests: ``await Agent('...').run('...')`` works."""
+"""End-to-end smoke tests: ``await Agent('...', model='echo').run('...')`` works."""
 
 import pytest
 
 from jeevesagent import Agent
+from jeevesagent.core.errors import ConfigError
 from jeevesagent.governance.budget import BudgetConfig, StandardBudget
 from jeevesagent.memory.inmemory import InMemoryMemory
 from jeevesagent.model.echo import EchoModel
@@ -11,8 +12,22 @@ from jeevesagent.runtime.inproc import InProcRuntime
 pytestmark = pytest.mark.anyio
 
 
+def test_agent_without_model_raises_config_error_with_suggestions() -> None:
+    """The user explicitly opted out of the silent EchoModel default
+    in v0.2.0. Forgetting ``model=`` should now fail loudly with a
+    helpful list of options, not produce mysterious ``Echo: ...``
+    output."""
+    with pytest.raises(ConfigError) as excinfo:
+        Agent("hi")
+    msg = str(excinfo.value)
+    assert "model" in msg
+    assert "claude-opus-4-7" in msg
+    assert "gpt-4o" in msg
+    assert "echo" in msg
+
+
 async def test_agent_returns_run_result_with_echoed_output() -> None:
-    agent = Agent("You are helpful.")
+    agent = Agent("You are helpful.", model="echo")
     result = await agent.run("hello there")
 
     assert result.output.startswith("Echo: ")
@@ -26,7 +41,7 @@ async def test_agent_returns_run_result_with_echoed_output() -> None:
 
 async def test_agent_persists_episode_to_memory() -> None:
     memory = InMemoryMemory()
-    agent = Agent("instructions", memory=memory)
+    agent = Agent("instructions", model="echo", memory=memory)
 
     await agent.run("first prompt")
 
@@ -38,7 +53,7 @@ async def test_agent_persists_episode_to_memory() -> None:
 
 
 async def test_agent_two_runs_produce_distinct_sessions() -> None:
-    agent = Agent("hello")
+    agent = Agent("hello", model="echo")
     r1 = await agent.run("a")
     r2 = await agent.run("b")
     assert r1.session_id != r2.session_id
@@ -51,7 +66,7 @@ async def test_recall_surfaces_prior_episode_in_context() -> None:
     we can prove recall happened by checking the memory snapshot grew.
     """
     memory = InMemoryMemory()
-    agent = Agent("be brief", memory=memory)
+    agent = Agent("be brief", model="echo", memory=memory)
 
     await agent.run("alpha")
     await agent.run("beta")
@@ -63,7 +78,7 @@ async def test_recall_surfaces_prior_episode_in_context() -> None:
 async def test_budget_block_interrupts_run() -> None:
     """A zero-token budget refuses the first step."""
     budget = StandardBudget(BudgetConfig(max_tokens=0))
-    agent = Agent("hi", budget=budget)
+    agent = Agent("hi", model="echo", budget=budget)
 
     result = await agent.run("anything")
 

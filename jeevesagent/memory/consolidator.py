@@ -67,13 +67,29 @@ class Consolidator:
         store: FactStore,
     ) -> list[Fact]:
         """Process ``episodes``; append extracted facts to ``store``;
-        return the new :class:`Fact` instances in extraction order."""
+        return the new :class:`Fact` instances in extraction order.
+
+        Uses ``store.append_many`` when available so the underlying
+        store can batch the embedder calls (one ``embed_batch`` API
+        round-trip instead of N individual ``embed`` calls). Falls
+        back to per-fact ``append`` for stores that haven't
+        implemented ``append_many``.
+        """
         new_facts: list[Fact] = []
         for episode in episodes:
             extracted = await self._extract(episode)
-            for fact in extracted:
+            new_facts.extend(extracted)
+
+        if not new_facts:
+            return []
+
+        # Prefer the bulk path when the store supports it.
+        append_many = getattr(store, "append_many", None)
+        if callable(append_many):
+            await append_many(new_facts)
+        else:
+            for fact in new_facts:
                 await store.append(fact)
-                new_facts.append(fact)
         return new_facts
 
     # ---- extraction -----------------------------------------------------

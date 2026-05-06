@@ -54,6 +54,8 @@ from .mcp import MCPClient, MCPRegistry, MCPServerSpec
 from .memory import (
     ChromaFactStore,
     ChromaMemory,
+    CohereEmbedder,
+    ConsolidationWorker,
     Consolidator,
     FactStore,
     HashEmbedder,
@@ -66,14 +68,24 @@ from .memory import (
     RedisMemory,
     SqliteFactStore,
     VectorMemory,
+    VoyageEmbedder,
 )
-from .model import AnthropicModel, EchoModel, OpenAIModel, ScriptedModel, ScriptedTurn
+from .model import (
+    AnthropicModel,
+    EchoModel,
+    LiteLLMModel,
+    OpenAIModel,
+    ScriptedModel,
+    ScriptedTurn,
+)
 from .observability import NoTelemetry, OTelTelemetry
 from .runtime import (
     InMemoryJournalStore,
     InProcRuntime,
     JournaledRuntime,
     JournalStore,
+    PostgresJournalStore,
+    PostgresRuntime,
     SqliteJournalStore,
     SqliteRuntime,
 )
@@ -87,10 +99,11 @@ from .security import (
     Mode,
     NoSandbox,
     StandardPermissions,
+    SubprocessSandbox,
 )
 from .tools import InProcessToolHost, Tool, tool
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "__version__",
@@ -105,6 +118,7 @@ __all__ = [
     "Mode",
     "AnthropicModel",
     "EchoModel",
+    "LiteLLMModel",
     "OpenAIModel",
     "ScriptedModel",
     "ScriptedTurn",
@@ -122,7 +136,10 @@ __all__ = [
     "RedisMemory",
     "HashEmbedder",
     "OpenAIEmbedder",
+    "VoyageEmbedder",
+    "CohereEmbedder",
     "Consolidator",
+    "ConsolidationWorker",
     "FactStore",
     "InMemoryFactStore",
     "SqliteFactStore",
@@ -134,6 +151,7 @@ __all__ = [
     "FileAuditLog",
     "NoSandbox",
     "FilesystemSandbox",
+    "SubprocessSandbox",
     "FreshnessPolicy",
     "LineagePolicy",
     "InProcRuntime",
@@ -142,6 +160,8 @@ __all__ = [
     "InMemoryJournalStore",
     "SqliteJournalStore",
     "SqliteRuntime",
+    "PostgresJournalStore",
+    "PostgresRuntime",
     # types
     "AuditEntry",
     "BudgetStatus",

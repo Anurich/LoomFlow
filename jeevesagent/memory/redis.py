@@ -25,7 +25,7 @@ import anyio
 
 from ..core.errors import MemoryStoreError
 from ..core.protocols import Embedder
-from ..core.types import Episode, MemoryBlock
+from ..core.types import Episode, Fact, MemoryBlock
 from ._embedding_util import pack_float32, unpack_float32
 from .embedder import HashEmbedder
 
@@ -311,6 +311,21 @@ class RedisMemory:
             if cursor == 0:
                 break
         return episodes
+
+    async def recall_facts(
+        self,
+        query: str,
+        *,
+        limit: int = 5,
+        valid_at: datetime | None = None,
+    ) -> list[Fact]:
+        if self.facts is None:
+            return []
+        return list(
+            await self.facts.recall_text(
+                query, limit=limit, valid_at=valid_at
+            )
+        )
 
     async def consolidate(self) -> None:
         return None

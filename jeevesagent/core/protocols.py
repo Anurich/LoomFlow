@@ -21,6 +21,7 @@ from .types import (
     BudgetStatus,
     Episode,
     Event,
+    Fact,
     MemoryBlock,
     Message,
     ModelChunk,
@@ -80,6 +81,22 @@ class Memory(Protocol):
         time_range: tuple[datetime, datetime] | None = None,
     ) -> list[Episode]:
         """Retrieve episodes (or facts, when ``kind='semantic'``)."""
+        ...
+
+    async def recall_facts(
+        self,
+        query: str,
+        *,
+        limit: int = 5,
+        valid_at: datetime | None = None,
+    ) -> list[Fact]:
+        """Retrieve bi-temporal facts matching ``query``.
+
+        Backends that don't expose a fact store return ``[]``. The agent
+        loop calls this directly rather than duck-typing on
+        ``memory.facts`` so backends without fact support don't need
+        any opt-out mechanism.
+        """
         ...
 
     async def consolidate(self) -> None:

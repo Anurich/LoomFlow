@@ -129,10 +129,52 @@ class InMemoryFactStore:
             return fact.id
 
     async def append_many(self, facts: Iterable[Fact]) -> list[str]:
+        """Append a batch of facts. Embedder calls are coalesced via
+        :meth:`Embedder.embed_batch` when an embedder is configured —
+        one network round-trip for the batch instead of N.
+        """
+        materialised = list(facts)
+        if not materialised:
+            return []
+
+        # Single batch embedding for all triples up front.
+        embeddings: list[list[float] | None]
+        if self._embedder is not None:
+            triples = [_triple_text(f) for f in materialised]
+            embeddings = list(await self._embedder.embed_batch(triples))
+        else:
+            embeddings = [None] * len(materialised)
+
         ids: list[str] = []
-        for f in facts:
-            ids.append(await self.append(f))
+        for fact, emb in zip(materialised, embeddings, strict=True):
+            ids.append(await self._append_with_embedding(fact, emb))
         return ids
+
+    async def _append_with_embedding(
+        self,
+        fact: Fact,
+        embedding: list[float] | None,
+    ) -> str:
+        """Append using a pre-computed embedding (skip the per-fact
+        ``embed()`` call). Same supersession rules as :meth:`append`.
+        """
+        async with self._lock:
+            for existing_id, existing in list(self._facts.items()):
+                if existing.subject != fact.subject:
+                    continue
+                if existing.predicate != fact.predicate:
+                    continue
+                if existing.valid_until is not None:
+                    continue
+                if existing.object == fact.object:
+                    continue
+                self._facts[existing_id] = existing.model_copy(
+                    update={"valid_until": fact.valid_from}
+                )
+            self._facts[fact.id] = fact
+            if embedding is not None:
+                self._embeddings[fact.id] = embedding
+            return fact.id
 
     # ---- queries ---------------------------------------------------------
 

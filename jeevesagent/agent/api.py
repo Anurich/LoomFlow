@@ -29,6 +29,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import anyio
@@ -85,7 +86,11 @@ class Agent:
         budget: Budget | None = None,
         permissions: Permissions | None = None,
         hooks: HookRegistry | None = None,
-        tools: list[Tool | Callable[..., object]] | ToolHost | None = None,
+        tools: list[Tool | Callable[..., object]]
+        | ToolHost
+        | Tool
+        | Callable[..., object]
+        | None = None,
         telemetry: Telemetry | None = None,
         audit_log: AuditLog | None = None,
         max_turns: int = DEFAULT_MAX_TURNS,
@@ -122,15 +127,153 @@ class Agent:
     def hooks(self) -> HookHost:
         return self._hooks
 
-    async def consolidate(self) -> None:
+    def __repr__(self) -> str:
+        host_name = type(self._tool_host).__name__
+        return (
+            f"Agent(model={self._model.name!r}, "
+            f"memory={type(self._memory).__name__}, "
+            f"runtime={type(self._runtime).__name__}, "
+            f"tools={host_name}, "
+            f"max_turns={self._max_turns})"
+        )
+
+    # ---- public introspection ------------------------------------------
+
+    @property
+    def model(self) -> Model:
+        """The configured :class:`Model` adapter."""
+        return self._model
+
+    @property
+    def memory(self) -> Memory:
+        """The configured :class:`Memory` backend."""
+        return self._memory
+
+    @property
+    def runtime(self) -> Runtime:
+        """The configured :class:`Runtime`."""
+        return self._runtime
+
+    @property
+    def tool_host(self) -> ToolHost:
+        """The configured :class:`ToolHost`."""
+        return self._tool_host
+
+    @property
+    def budget(self) -> Budget:
+        """The configured :class:`Budget`."""
+        return self._budget
+
+    @property
+    def permissions(self) -> Permissions:
+        """The configured :class:`Permissions` policy."""
+        return self._permissions
+
+    # ---- public memory shortcuts ---------------------------------------
+
+    async def recall(
+        self,
+        query: str,
+        *,
+        kind: str = "episodic",
+        limit: int = 5,
+    ) -> list[Any]:
+        """Convenience wrapper around ``self.memory.recall(query, ...)``.
+
+        Returns episodes matching ``query``. For semantic / fact-store
+        recall, use ``self.memory.facts.recall_text(...)`` directly.
+        """
+        return await self._memory.recall(query, kind=kind, limit=limit)
+
+    # ---- plugin API ----------------------------------------------------
+
+    def add_tool(self, item: Tool | Callable[..., object]) -> Tool:
+        """Register a tool after construction.
+
+        Convenience for plugin-style code that adds tools after the
+        ``Agent`` exists. Only works when the underlying tool host is
+        an :class:`InProcessToolHost` (the default — and the only host
+        that has a writable registry today).
+
+        Returns the constructed :class:`Tool` so callers can introspect
+        the auto-derived schema.
+        """
+        if not isinstance(self._tool_host, InProcessToolHost):
+            from ..core.errors import ConfigError
+
+            raise ConfigError(
+                f"add_tool requires InProcessToolHost; got "
+                f"{type(self._tool_host).__name__}. Pass the tool at "
+                "construction time, or wrap it in a custom ToolHost."
+            )
+        return self._tool_host.register(item)
+
+    def with_tool(
+        self, fn: Callable[..., object]
+    ) -> Callable[..., object]:
+        """Decorator-style equivalent of :meth:`add_tool`.
+
+        Usage::
+
+            @agent.with_tool
+            async def search(query: str) -> str:
+                '''Search a knowledge base.'''
+                return f"results for {query}"
+
+        Returns the original function unchanged (so it can still be
+        called normally), and registers it as a tool on the agent's
+        underlying :class:`InProcessToolHost`. Same constraint as
+        :meth:`add_tool`: the host must be writable.
+        """
+        self.add_tool(fn)
+        return fn
+
+    def remove_tool(self, name: str) -> bool:
+        """Unregister a tool by name. Returns ``True`` if a tool was
+        removed, ``False`` if no tool with that name was registered.
+
+        Same constraint as :meth:`add_tool`: only works with
+        :class:`InProcessToolHost`.
+        """
+        if not isinstance(self._tool_host, InProcessToolHost):
+            from ..core.errors import ConfigError
+
+            raise ConfigError(
+                f"remove_tool requires InProcessToolHost; got "
+                f"{type(self._tool_host).__name__}."
+            )
+        return self._tool_host.unregister(name)
+
+    async def tools_list(self) -> list[str]:
+        """Return the names of all currently-registered tools.
+
+        Convenience that works for any :class:`ToolHost`. Calls
+        ``tool_host.list_tools()`` under the hood and returns just the
+        names; use ``self.tool_host.list_tools()`` directly for the
+        full :class:`ToolDef` records.
+        """
+        defs = await self._tool_host.list_tools()
+        return [d.name for d in defs]
+
+    async def consolidate(self) -> int:
         """Manually trigger memory consolidation.
 
-        Convenience for ``await agent._memory.consolidate()``. Useful
-        when ``auto_consolidate=False`` (the default) and you want to
-        batch consolidation at a controlled cadence — e.g. once a day,
-        or before shutdown.
+        Returns the number of new facts the consolidator extracted,
+        or ``0`` when the memory backend doesn't expose a fact store.
+
+        Useful when ``auto_consolidate=False`` (the default) and you
+        want to batch consolidation at a controlled cadence — e.g.
+        once a day, or before shutdown.
         """
+        fact_store = getattr(self._memory, "facts", None)
+        before = 0
+        if fact_store is not None:
+            before = len(await fact_store.all_facts())
         await self._memory.consolidate()
+        if fact_store is None:
+            return 0
+        after = len(await fact_store.all_facts())
+        return max(0, after - before)
 
     async def _audit(
         self,
@@ -148,6 +291,146 @@ class Agent:
             action=action,
             payload=payload,
         )
+
+    # ---- factory: from dict / TOML config ------------------------------
+
+    @classmethod
+    def from_dict(
+        cls,
+        cfg: dict[str, Any],
+        *,
+        model: Model | None = None,
+        memory: Memory | None = None,
+        runtime: Runtime | None = None,
+        tools: list[Tool | Callable[..., object]] | ToolHost | None = None,
+    ) -> Agent:
+        """Construct an ``Agent`` from a parsed config dict.
+
+        Same shape as :meth:`from_config` but skips the file read.
+        Useful when the config comes from somewhere other than a TOML
+        file — environment variables, a Pydantic settings model, a
+        ``yaml.safe_load`` result, an HTTP API, etc.
+
+        Recognised keys (all optional except ``instructions`` and
+        ``model``):
+
+        * ``instructions: str`` — required
+        * ``model: str`` — required (or pass ``model=`` kwarg)
+        * ``max_turns: int``
+        * ``auto_consolidate: bool``
+        * ``budget: dict`` with any of ``max_tokens``,
+          ``max_input_tokens``, ``max_output_tokens``, ``max_cost_usd``,
+          ``max_wall_clock_minutes``, ``soft_warning_at``
+        """
+        from datetime import timedelta
+
+        from ..core.errors import ConfigError
+        from ..governance.budget import BudgetConfig, StandardBudget
+
+        instructions = cfg.get("instructions")
+        if not isinstance(instructions, str):
+            raise ConfigError(
+                "Agent.from_dict: missing or non-string 'instructions' field"
+            )
+
+        model_spec = model if model is not None else cfg.get("model")
+        if model_spec is None:
+            raise ConfigError(
+                "Agent.from_dict: missing 'model' field. Add e.g. "
+                "model = 'claude-opus-4-7' (or pass model= explicitly)."
+            )
+
+        max_turns = cfg.get("max_turns", DEFAULT_MAX_TURNS)
+        auto_consolidate = bool(cfg.get("auto_consolidate", False))
+
+        budget: Budget | None = None
+        if "budget" in cfg:
+            b = cfg["budget"]
+            wall_clock = None
+            if "max_wall_clock_minutes" in b:
+                wall_clock = timedelta(minutes=float(b["max_wall_clock_minutes"]))
+            budget = StandardBudget(
+                BudgetConfig(
+                    max_tokens=b.get("max_tokens"),
+                    max_input_tokens=b.get("max_input_tokens"),
+                    max_output_tokens=b.get("max_output_tokens"),
+                    max_cost_usd=b.get("max_cost_usd"),
+                    max_wall_clock=wall_clock,
+                    soft_warning_at=float(b.get("soft_warning_at", 0.8)),
+                )
+            )
+
+        return cls(
+            instructions,
+            model=model_spec,
+            memory=memory,
+            runtime=runtime,
+            tools=tools,
+            budget=budget,
+            max_turns=int(max_turns),
+            auto_consolidate=auto_consolidate,
+        )
+
+    @classmethod
+    def from_config(
+        cls,
+        path: str | Path,
+        *,
+        model: Model | None = None,
+        memory: Memory | None = None,
+        runtime: Runtime | None = None,
+        tools: list[Tool | Callable[..., object]] | ToolHost | None = None,
+    ) -> Agent:
+        """Construct an ``Agent`` from a TOML config file.
+
+        Designed for ops/devops users who want declarative agent
+        config separate from code. Supports the textual / numeric
+        bits — instructions, model spec (string), max_turns,
+        auto_consolidate, budget — and lets callers pass concrete
+        instances for the things TOML can't reasonably express
+        (real ``Memory``, ``Runtime``, custom ``Model``, tools).
+
+        Example ``agent.toml``::
+
+            instructions = "You are a research assistant."
+            model = "claude-opus-4-7"
+            max_turns = 100
+            auto_consolidate = true
+
+            [budget]
+            max_tokens = 200_000
+            max_cost_usd = 5.0
+            max_wall_clock_minutes = 10
+            soft_warning_at = 0.8
+
+        Then::
+
+            agent = Agent.from_config("agent.toml")
+        """
+        from ..core.errors import ConfigError
+
+        try:
+            import tomllib  # py3.11+
+        except ImportError as exc:  # pragma: no cover — should never hit on 3.11+
+            raise ConfigError(
+                "tomllib is required (Python 3.11+)."
+            ) from exc
+
+        with Path(path).open("rb") as fh:
+            cfg = tomllib.load(fh)
+
+        try:
+            return cls.from_dict(
+                cfg,
+                model=model,
+                memory=memory,
+                runtime=runtime,
+                tools=tools,
+            )
+        except ConfigError as exc:
+            # Re-raise with the file path in the message so users know
+            # which TOML produced the error.
+            raise ConfigError(f"{path}: {exc}") from None
 
     # ---- public API ------------------------------------------------------
 
@@ -410,17 +693,17 @@ class Agent:
             block_text = "\n\n".join(b.format() for b in blocks)
             messages.append(Message(role=Role.SYSTEM, content=block_text))
 
-        # Pull semantic facts when the memory backend exposes a
-        # FactStore via ``.facts``. Backends without one are skipped.
-        fact_store = getattr(self._memory, "facts", None)
+        # Pull semantic facts via the Memory protocol's ``recall_facts``.
+        # Backends without a fact store implement this as ``return []``,
+        # so this works uniformly across every backend.
         facts: list[Any] = []
-        if fact_store is not None:
-            try:
-                facts = await fact_store.recall_text(prompt, limit=5)
-            except AttributeError:
-                # Some attribute wearing the name "facts" doesn't satisfy
-                # the FactStore protocol; ignore silently.
-                facts = []
+        try:
+            facts = await self._memory.recall_facts(prompt, limit=5)
+        except AttributeError:
+            # Backwards-compat shim: 0.1.x backends that haven't been
+            # updated to the new protocol method still work — just
+            # without facts in context.
+            facts = []
 
         episodes = await self._memory.recall(prompt, kind="episodic", limit=3)
 
@@ -609,20 +892,58 @@ async def _noop_emit(_event: Event) -> None:
     return None
 
 
+_LITELLM_PREFIXES: tuple[str, ...] = (
+    "mistral-",
+    "command-",       # Cohere
+    "bedrock/",       # AWS Bedrock
+    "vertex_ai/",     # Google Vertex
+    "together_ai/",   # Together AI
+    "ollama/",        # Local Ollama
+    "gemini/",        # Google Gemini
+    "groq/",          # Groq
+    "replicate/",     # Replicate
+    "azure/",         # Azure OpenAI
+    "litellm/",       # explicit opt-in: ``litellm/<any>`` strips the prefix
+)
+
+
 def _resolve_model(spec: Model | str | None) -> Model:
     """Resolve a string spec or instance to a concrete :class:`Model`.
 
     Strings dispatch by prefix:
 
-    * ``claude-*`` -> :class:`AnthropicModel`
-    * ``gpt-*`` / ``o1-*`` / ``o3-*`` -> :class:`OpenAIModel`
-    * ``echo`` -> :class:`EchoModel`
+    * ``claude-*`` -> :class:`AnthropicModel` (direct, no LiteLLM hop)
+    * ``gpt-*`` / ``o1-*`` / ``o3-*`` -> :class:`OpenAIModel` (direct)
+    * ``echo`` -> :class:`EchoModel` (zero-key dev / tests)
+    * ``mistral-``, ``command-``, ``bedrock/``, ``vertex_ai/``,
+      ``together_ai/``, ``ollama/``, ``gemini/``, ``groq/``,
+      ``replicate/``, ``azure/``, ``litellm/`` -> :class:`LiteLLMModel`
+      which fans out to ~100 providers via the LiteLLM SDK
+    * ``litellm/<spec>`` strips the prefix before forwarding (handy
+      when you want LiteLLM to handle a spec the direct paths would
+      otherwise grab)
 
-    Anything else passes through if it duck-types as ``Model``; otherwise
-    a ``ValueError`` is raised. ``None`` returns the default ``EchoModel``.
+    ``None`` raises :class:`~jeevesagent.core.errors.ConfigError` with a
+    helpful suggestion list. Unknown specs raise
+    :class:`~jeevesagent.core.errors.ConfigError` too (was ``ValueError``
+    in 0.1.x — harmonised in 0.2.0).
     """
+    from ..core.errors import ConfigError
+
     if spec is None:
-        return EchoModel()
+        raise ConfigError(
+            "Agent() requires a `model` argument. Pass one of:\n"
+            "  model='claude-opus-4-7'   "
+            "(Anthropic, needs ANTHROPIC_API_KEY)\n"
+            "  model='gpt-4o'            "
+            "(OpenAI, needs OPENAI_API_KEY)\n"
+            "  model='echo'              "
+            "(zero-key fake — text echoes the prompt; for dev/tests)\n"
+            "  model='mistral-large'     "
+            "(LiteLLM, also: command-, bedrock/, vertex_ai/, ollama/, ...)\n"
+            "  model=AnthropicModel(...) "
+            "or any Model-protocol instance for full control."
+        )
     if not isinstance(spec, str):
         return spec
     if spec.startswith("claude-"):
@@ -633,15 +954,45 @@ def _resolve_model(spec: Model | str | None) -> Model:
         return OpenAIModel(spec)
     if spec == "echo":
         return EchoModel()
-    raise ValueError(
-        f"unknown model spec: {spec!r}. Pass a Model instance directly "
-        "or use a recognised prefix (claude-, gpt-, o1-, o3-, echo)."
+    if spec.startswith(_LITELLM_PREFIXES):
+        from ..model.litellm import LiteLLMModel
+
+        # ``litellm/<inner>`` strips the explicit-opt-in prefix.
+        inner = spec[len("litellm/"):] if spec.startswith("litellm/") else spec
+        return LiteLLMModel(inner)
+    raise ConfigError(
+        f"unknown model spec: {spec!r}. Recognised prefixes:\n"
+        "  claude-*, gpt-*, o1-*, o3-* (direct adapters)\n"
+        "  mistral-, command-, bedrock/, vertex_ai/, ollama/, "
+        "gemini/, groq/, together_ai/, replicate/, azure/ "
+        "(via LiteLLM)\n"
+        "  echo (zero-key fake)\n"
+        "Or pass a Model-protocol instance directly. To force the "
+        "LiteLLM path for any spec, prefix with 'litellm/'."
     )
 
 
 def _coerce_tool_host(
-    tools: list[Tool | Callable[..., object]] | ToolHost | None,
+    tools: list[Tool | Callable[..., object]]
+    | ToolHost
+    | Tool
+    | Callable[..., object]
+    | None,
 ) -> ToolHost:
+    """Normalize ``tools=`` to a ``ToolHost``.
+
+    Accepts:
+
+    * ``None`` -> empty in-process host
+    * a ``ToolHost`` instance (anything with ``list_tools`` + ``call``)
+    * a list of ``Tool`` / callable
+    * a single ``Tool`` (auto-wrapped in a one-tool list)
+    * a single callable (auto-wrapped via ``@tool``)
+
+    The single-callable / single-``Tool`` shorthand is friendlier
+    when you only have one tool; ``tools=my_fn`` is shorter and
+    less error-prone than ``tools=[my_fn]``.
+    """
     if tools is None:
         return InProcessToolHost([])
     # Duck-type: anything with ``list_tools`` and ``call`` is a host.
@@ -649,6 +1000,10 @@ def _coerce_tool_host(
         return tools  # type: ignore[return-value]
     if isinstance(tools, list):
         return InProcessToolHost(tools)
+    if isinstance(tools, Tool):
+        return InProcessToolHost([tools])
+    if callable(tools):
+        return InProcessToolHost([tools])
     raise TypeError(f"unsupported tools= argument: {type(tools).__name__}")
 
 

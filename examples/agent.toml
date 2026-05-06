@@ -1,0 +1,19 @@
+# Example TOML config for ``Agent.from_config(...)``.
+
+instructions = """
+You are a focused research assistant.
+Cite your sources. Decline anything not in the user's prompt.
+"""
+
+# Pick any string the resolver knows about. Falls back to "echo" when
+# no API key is set so the example always runs.
+model = "echo"
+
+max_turns = 25
+auto_consolidate = false
+
+[budget]
+max_tokens = 200_000
+max_cost_usd = 5.0
+max_wall_clock_minutes = 10
+soft_warning_at = 0.8

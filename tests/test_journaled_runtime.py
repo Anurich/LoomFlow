@@ -181,7 +181,7 @@ async def test_contextvar_propagates_into_spawned_tasks() -> None:
 
 async def test_agent_run_journals_episode_persistence() -> None:
     runtime = JournaledRuntime(InMemoryJournalStore())
-    agent = Agent("hi", runtime=runtime)
+    agent = Agent("hi", model="echo", runtime=runtime)
 
     result = await agent.run("hello")
 

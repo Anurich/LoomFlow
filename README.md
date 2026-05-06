@@ -5,15 +5,20 @@
 ```python
 from jeevesagent import Agent
 
-agent = Agent("You are a helpful assistant.")
+agent = Agent("You are a helpful assistant.", model="claude-opus-4-7")
 result = await agent.run("What's 2 + 2?")
-print(result.output)
+print(result.output)  # "4"
 ```
 
-That's the whole quickstart. No keys, no infrastructure, no scaffolding —
-the default backends echo, store everything in memory, and run in-process.
-Swap in real provider adapters / persistent memory / durable runtime / OTel
-telemetry when you need them, all behind the same `Agent` constructor.
+That's the whole quickstart. Set `ANTHROPIC_API_KEY` and you're talking
+to Claude. Swap `"claude-opus-4-7"` for `"gpt-4o"` to talk to GPT, or
+`"echo"` to use the zero-key fake (echoes the prompt — useful for
+tests and local dev). Memory, runtime, telemetry, sandbox, audit are
+all opt-in behind the same `Agent` constructor.
+
+> ⚠️ **`model` is required** as of v0.2.0. Earlier `0.1.x` releases
+> silently defaulted to `EchoModel` which produced confusing output;
+> now the harness fails fast with a helpful error if you forget.
 
 ---
 
@@ -155,6 +160,7 @@ MODEL_CHUNK × N → COMPLETED` flow through.
 | [`docs/quickstart.md`](docs/quickstart.md) | Step-by-step examples for each backend combo |
 | [`docs/recipes.md`](docs/recipes.md) | Production patterns: persistent memory, MCP, durable replay, audit |
 | [`docs/architecture.md`](docs/architecture.md) | Module tour, lifecycle, extension points |
+| [`docs/migration_0.1_to_0.2.md`](docs/migration_0.1_to_0.2.md) | What changed in 0.2.0; how to migrate |
 | [`project.md`](project.md) | The full engineering plan (the design doc) |
 | [`BUILD_LOG.md`](BUILD_LOG.md) | Slice-by-slice changelog |
 

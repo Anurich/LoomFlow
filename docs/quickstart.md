@@ -29,17 +29,22 @@ import asyncio
 from jeevesagent import Agent
 
 async def main():
-    agent = Agent("You are a helpful assistant.")
+    agent = Agent("You are a helpful assistant.", model="echo")
     result = await agent.run("Tell me a joke.")
     print(result.output)
 
 asyncio.run(main())
 ```
 
-The default model is `EchoModel` — it echoes the prompt back, so you
-can verify the loop works without burning tokens. `result` is a
-`RunResult` with `output`, `turns`, `tokens_in`, `tokens_out`,
-`cost_usd`, `started_at`, `finished_at`, `interrupted`,
+`model="echo"` selects the `EchoModel` — it echoes the prompt back,
+so you can verify the loop works without burning tokens.
+
+> **`model` is required.** Forgetting it raises a `ConfigError` with
+> a list of suggested values; the harness no longer silently picks
+> a fake model.
+
+`result` is a `RunResult` with `output`, `turns`, `tokens_in`,
+`tokens_out`, `cost_usd`, `started_at`, `finished_at`, `interrupted`,
 `interruption_reason`.
 
 ## 2. Real models

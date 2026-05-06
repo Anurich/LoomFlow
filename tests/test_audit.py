@@ -132,7 +132,7 @@ async def test_file_audit_log_creates_parent_directory(tmp_path: Path) -> None:
 
 async def test_agent_run_writes_run_started_and_completed() -> None:
     log = InMemoryAuditLog()
-    agent = Agent("hi", audit_log=log)
+    agent = Agent("hi", model="echo", audit_log=log)
     result = await agent.run("hello")
 
     actions = [e.action for e in await log.query(session_id=result.session_id)]
@@ -176,7 +176,7 @@ async def test_agent_writes_tool_call_and_result_audit_entries() -> None:
 
 async def test_no_audit_log_means_no_audit_overhead() -> None:
     """Default Agent without audit_log must work and produce no audit entries."""
-    agent = Agent("hi")
+    agent = Agent("hi", model="echo")
     result = await agent.run("hello")
     # Just verifying nothing crashed and a result came back.
     assert result.output
@@ -184,7 +184,7 @@ async def test_no_audit_log_means_no_audit_overhead() -> None:
 
 async def test_run_completed_payload_carries_run_summary() -> None:
     log = InMemoryAuditLog()
-    agent = Agent("hi", audit_log=log)
+    agent = Agent("hi", model="echo", audit_log=log)
     await agent.run("hello")
 
     completed = await log.query(action="run_completed")
@@ -198,7 +198,7 @@ async def test_run_completed_payload_carries_run_summary() -> None:
 
 async def test_audit_entries_are_signed_and_verifiable() -> None:
     log = InMemoryAuditLog(secret="prod-secret")
-    agent = Agent("hi", audit_log=log)
+    agent = Agent("hi", model="echo", audit_log=log)
     result = await agent.run("hello")
 
     entries = await log.query(session_id=result.session_id)

@@ -110,7 +110,7 @@ async def test_update_and_append_block() -> None:
 
 async def test_agent_with_vector_memory_persists_and_recalls() -> None:
     mem = VectorMemory()
-    agent = Agent("you are helpful", memory=mem)
+    agent = Agent("you are helpful", model="echo", memory=mem)
 
     await agent.run("first prompt about apples")
     await agent.run("second prompt about sky")

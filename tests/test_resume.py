@@ -33,19 +33,19 @@ pytestmark = pytest.mark.anyio
 
 async def test_run_with_session_id_uses_provided_value() -> None:
     """Passing ``session_id`` propagates into the RunResult."""
-    agent = Agent("hi")
+    agent = Agent("hi", model="echo")
     result = await agent.run("hello", session_id="custom-sess-1")
     assert result.session_id == "custom-sess-1"
 
 
 async def test_resume_is_alias_for_run_with_session_id() -> None:
-    agent = Agent("hi")
+    agent = Agent("hi", model="echo")
     via_resume = await agent.resume("custom-sess-2", "hello")
     assert via_resume.session_id == "custom-sess-2"
 
 
 async def test_default_session_id_is_auto_generated() -> None:
-    agent = Agent("hi")
+    agent = Agent("hi", model="echo")
     r1 = await agent.run("hello")
     r2 = await agent.run("hello")
     assert r1.session_id != r2.session_id  # auto-generated, distinct
@@ -185,7 +185,7 @@ async def test_resume_against_fresh_sqlite_runtime(tmp_path: Path) -> None:
 
 
 async def test_stream_with_session_id_emits_events_with_that_id() -> None:
-    agent = Agent("hi")
+    agent = Agent("hi", model="echo")
     seen_ids: set[str] = set()
     async for event in agent.stream("hello", session_id="streamed-sess"):
         seen_ids.add(event.session_id)

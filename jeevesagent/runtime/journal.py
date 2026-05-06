@@ -144,6 +144,28 @@ CREATE TABLE IF NOT EXISTS journal_streams (
 )
 """
 
+# Postgres-flavoured DDL for :class:`PostgresJournalStore` below.
+# ``BYTEA`` instead of ``BLOB``; ``DOUBLE PRECISION`` instead of ``REAL``.
+_PG_STEP_DDL = """
+CREATE TABLE IF NOT EXISTS journal_steps (
+    session_id TEXT NOT NULL,
+    step_name  TEXT NOT NULL,
+    value      BYTEA NOT NULL,
+    created_at DOUBLE PRECISION NOT NULL,
+    PRIMARY KEY (session_id, step_name)
+)
+"""
+
+_PG_STREAM_DDL = """
+CREATE TABLE IF NOT EXISTS journal_streams (
+    session_id TEXT NOT NULL,
+    step_name  TEXT NOT NULL,
+    chunks     BYTEA NOT NULL,
+    created_at DOUBLE PRECISION NOT NULL,
+    PRIMARY KEY (session_id, step_name)
+)
+"""
+
 
 class SqliteJournalStore:
     """SQLite-backed journal. Durable across process restarts."""
@@ -261,3 +283,144 @@ class SqliteJournalStore:
 
     async def aclose(self) -> None:
         return None
+
+
+# ---------------------------------------------------------------------------
+# Postgres store (Phase 5 production durable runtime)
+# ---------------------------------------------------------------------------
+
+
+class PostgresJournalStore:
+    """Postgres-backed journal. Production-grade durable replay.
+
+    Same shape as :class:`SqliteJournalStore` but uses ``asyncpg`` and
+    a Postgres database. Designed for users who already run a Postgres
+    instance for the rest of their stack (memory, audit, app state)
+    and want their durable-runtime journal to live there too.
+
+    Why not a DBOS adapter?
+
+        DBOS Python's workflow model requires ``@DBOS.workflow()`` and
+        ``@DBOS.communicator()`` decorators at module-load time. Our
+        ``Runtime.step(name, fn, *args)`` API takes arbitrary
+        callables at runtime, which doesn't compose cleanly with
+        DBOS's static-decoration model. ``PostgresJournalStore``
+        gives the same durability guarantee through our existing
+        :class:`JournaledRuntime` architecture, with no decorator
+        intrusion on user code.
+    """
+
+    def __init__(self, pool: Any) -> None:
+        self._pool = pool
+
+    @classmethod
+    async def connect(
+        cls,
+        dsn: str,
+        *,
+        min_size: int = 1,
+        max_size: int = 10,
+    ) -> PostgresJournalStore:
+        """Open an asyncpg pool and return the store rooted at it."""
+        try:
+            import asyncpg  # type: ignore[import-not-found, import-untyped]
+        except ImportError as exc:  # pragma: no cover
+            raise ImportError(
+                "asyncpg is not installed. "
+                "Install with: pip install 'jeevesagent[postgres]'"
+            ) from exc
+        pool = await asyncpg.create_pool(
+            dsn=dsn,
+            min_size=min_size,
+            max_size=max_size,
+        )
+        return cls(pool)
+
+    async def aclose(self) -> None:
+        if self._pool is not None and hasattr(self._pool, "close"):
+            await self._pool.close()
+
+    # ---- schema ---------------------------------------------------------
+
+    @staticmethod
+    def schema_sql() -> list[str]:
+        """Return the DDL needed to bootstrap this store's schema.
+
+        Idempotent; safe to run on every process start.
+        """
+        return [_PG_STEP_DDL.strip(), _PG_STREAM_DDL.strip()]
+
+    async def init_schema(self) -> None:
+        async with self._pool.acquire() as conn:
+            for stmt in self.schema_sql():
+                await conn.execute(stmt)
+
+    # ---- step ops --------------------------------------------------------
+
+    async def get_step(
+        self, session_id: str, step_name: str
+    ) -> JournalEntry | None:
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT value, created_at FROM journal_steps "
+                "WHERE session_id = $1 AND step_name = $2",
+                session_id,
+                step_name,
+            )
+        if row is None:
+            return None
+        return JournalEntry(
+            value=pickle.loads(row["value"]),
+            created_at=row["created_at"],
+        )
+
+    async def put_step(
+        self, session_id: str, step_name: str, value: Any
+    ) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO journal_steps "
+                "(session_id, step_name, value, created_at) "
+                "VALUES ($1, $2, $3, $4) "
+                "ON CONFLICT (session_id, step_name) DO UPDATE "
+                "SET value = EXCLUDED.value, "
+                "    created_at = EXCLUDED.created_at",
+                session_id,
+                step_name,
+                pickle.dumps(value),
+                time.time(),
+            )
+
+    # ---- stream ops -----------------------------------------------------
+
+    async def get_stream(
+        self, session_id: str, step_name: str
+    ) -> list[Any] | None:
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT chunks FROM journal_streams "
+                "WHERE session_id = $1 AND step_name = $2",
+                session_id,
+                step_name,
+            )
+        if row is None:
+            return None
+        loaded = pickle.loads(row["chunks"])
+        return list(loaded) if loaded is not None else []
+
+    async def put_stream(
+        self, session_id: str, step_name: str, chunks: list[Any]
+    ) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO journal_streams "
+                "(session_id, step_name, chunks, created_at) "
+                "VALUES ($1, $2, $3, $4) "
+                "ON CONFLICT (session_id, step_name) DO UPDATE "
+                "SET chunks = EXCLUDED.chunks, "
+                "    created_at = EXCLUDED.created_at",
+                session_id,
+                step_name,
+                pickle.dumps(list(chunks)),
+                time.time(),
+            )

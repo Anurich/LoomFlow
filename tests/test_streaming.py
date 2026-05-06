@@ -31,7 +31,7 @@ pytestmark = pytest.mark.anyio
 
 
 async def test_stream_starts_with_started_and_ends_with_completed() -> None:
-    agent = Agent("hi")  # uses EchoModel by default
+    agent = Agent("hi", model="echo")  # uses EchoModel by default
     events = [e async for e in agent.stream("hello")]
 
     assert events[0].kind == EventKind.STARTED
@@ -41,7 +41,7 @@ async def test_stream_starts_with_started_and_ends_with_completed() -> None:
 
 
 async def test_stream_emits_model_chunks_in_order() -> None:
-    agent = Agent("hi")
+    agent = Agent("hi", model="echo")
     chunks = [
         e
         async for e in agent.stream("alpha beta gamma")
@@ -95,8 +95,8 @@ async def test_stream_emits_tool_call_then_result_event_pair() -> None:
 
 
 async def test_stream_completed_payload_matches_run_output() -> None:
-    a1 = Agent("hi")
-    a2 = Agent("hi")
+    a1 = Agent("hi", model="echo")
+    a2 = Agent("hi", model="echo")
 
     via_run = await a1.run("hello world")
     streamed = [e async for e in a2.stream("hello world")]
@@ -142,7 +142,7 @@ async def test_consumer_break_cancels_producer_quickly() -> None:
 
 async def test_budget_exceeded_event_appears_before_completed() -> None:
     budget = StandardBudget(BudgetConfig(max_tokens=0))
-    agent = Agent("hi", budget=budget)
+    agent = Agent("hi", model="echo", budget=budget)
 
     events = [e async for e in agent.stream("anything")]
     kinds = [e.kind for e in events]

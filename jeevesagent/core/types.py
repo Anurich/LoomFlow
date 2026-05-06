@@ -5,7 +5,7 @@ immutable where possible, validated on construction, and free of behavior
 that requires I/O.
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any, Literal
 
@@ -366,6 +366,16 @@ class RunResult(BaseModel):
     finished_at: datetime
     interrupted: bool = False
     interruption_reason: str | None = None
+
+    @property
+    def total_tokens(self) -> int:
+        """Convenience: ``tokens_in + tokens_out``."""
+        return self.tokens_in + self.tokens_out
+
+    @property
+    def duration(self) -> timedelta:
+        """Wall-clock latency between ``started_at`` and ``finished_at``."""
+        return self.finished_at - self.started_at
 
 
 class CertifiedValue(BaseModel):

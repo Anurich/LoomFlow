@@ -21,5 +21,6 @@ gVisor/Docker for cross-platform) live in subsequent slices.
 
 from .base import NoSandbox
 from .filesystem import FilesystemSandbox
+from .subprocess_ import SubprocessSandbox
 
-__all__ = ["FilesystemSandbox", "NoSandbox"]
+__all__ = ["FilesystemSandbox", "NoSandbox", "SubprocessSandbox"]

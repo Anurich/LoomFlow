@@ -18,7 +18,11 @@ from jeevesagent import Agent
 
 
 async def main() -> None:
-    agent = Agent("You are a helpful assistant.")
+    # ``model="echo"`` is the zero-key fallback — the EchoModel
+    # echoes the prompt back so you can verify the loop works
+    # without burning tokens. For a real LLM, set an API key and
+    # use ``model="claude-opus-4-7"`` or ``model="gpt-4o"``.
+    agent = Agent("You are a helpful assistant.", model="echo")
     result = await agent.run("Say hello.")
     print(f"Output:  {result.output}")
     print(f"Turns:   {result.turns}")

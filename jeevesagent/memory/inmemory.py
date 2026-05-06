@@ -13,7 +13,7 @@ from typing import Any
 
 import anyio
 
-from ..core.types import Episode, MemoryBlock
+from ..core.types import Episode, Fact, MemoryBlock
 from .consolidator import Consolidator
 from .facts import FactStore, InMemoryFactStore
 
@@ -109,6 +109,17 @@ class InMemoryMemory:
                 episodes = matched
         episodes.sort(key=lambda e: e.occurred_at, reverse=True)
         return episodes[:limit]
+
+    async def recall_facts(
+        self,
+        query: str,
+        *,
+        limit: int = 5,
+        valid_at: datetime | None = None,
+    ) -> list[Fact]:
+        return await self.facts.recall_text(
+            query, limit=limit, valid_at=valid_at
+        )
 
     async def consolidate(self) -> None:
         """Process unconsolidated episodes through the configured

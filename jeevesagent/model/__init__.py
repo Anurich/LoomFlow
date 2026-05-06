@@ -13,12 +13,14 @@ the constructor needs to build a default client.
 
 from .anthropic import AnthropicModel
 from .echo import EchoModel
+from .litellm import LiteLLMModel
 from .openai import OpenAIModel
 from .scripted import ScriptedModel, ScriptedTurn
 
 __all__ = [
     "AnthropicModel",
     "EchoModel",
+    "LiteLLMModel",
     "OpenAIModel",
     "ScriptedModel",
     "ScriptedTurn",

@@ -36,7 +36,9 @@ jobs:
           # ``redis`` / ``mcp`` extras install client libs but the
           # matching live tests stay skipped without
           # ``JEEVES_TEST_PG_DSN`` / ``JEEVES_TEST_REDIS_URL``.
-          pip install -e '.[dev,anthropic,openai,otel,chroma,redis,postgres,mcp]'
+          # ``litellm`` / ``voyage`` / ``cohere`` extras let mypy
+          # resolve the SDK type hints in the lazy-import paths.
+          pip install -e '.[dev,anthropic,openai,otel,chroma,redis,postgres,mcp,litellm,voyage,cohere]'
 
       - name: Ruff
         run: ruff check jeevesagent tests

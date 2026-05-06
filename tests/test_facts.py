@@ -487,7 +487,7 @@ async def test_auto_consolidate_extracts_facts_after_run() -> None:
     memory = InMemoryMemory(
         consolidator=Consolidator(model=consolidator_model)
     )
-    agent = Agent("hi", memory=memory, auto_consolidate=True)
+    agent = Agent("hi", model="echo", memory=memory, auto_consolidate=True)
 
     # Before the run, no facts.
     assert await memory.facts.all_facts() == []
@@ -506,7 +506,7 @@ async def test_auto_consolidate_off_by_default() -> None:
     memory = InMemoryMemory(
         consolidator=Consolidator(model=consolidator_model)
     )
-    agent = Agent("hi", memory=memory)  # auto_consolidate defaults to False
+    agent = Agent("hi", model="echo", memory=memory)  # auto_consolidate defaults to False
 
     await agent.run("hello")
 
@@ -526,7 +526,7 @@ async def test_consolidator_failure_emits_error_but_does_not_break_run() -> None
             yield  # pragma: no cover
 
     memory = InMemoryMemory(consolidator=Consolidator(model=_BoomModel()))
-    agent = Agent("hi", memory=memory, auto_consolidate=True)
+    agent = Agent("hi", model="echo", memory=memory, auto_consolidate=True)
 
     # Run still completes despite the consolidation failure.
     result = await agent.run("hello")
@@ -540,7 +540,7 @@ async def test_agent_consolidate_method_runs_extractor() -> None:
     memory = InMemoryMemory(
         consolidator=Consolidator(model=consolidator_model)
     )
-    agent = Agent("hi", memory=memory)
+    agent = Agent("hi", model="echo", memory=memory)
     await agent.run("hello")
 
     # Before manual consolidate: nothing
@@ -557,7 +557,7 @@ async def test_auto_consolidate_with_no_consolidator_is_noop() -> None:
     """auto_consolidate=True on a memory without a consolidator should
     silently do nothing — not raise."""
     memory = InMemoryMemory()  # no consolidator configured
-    agent = Agent("hi", memory=memory, auto_consolidate=True)
+    agent = Agent("hi", model="echo", memory=memory, auto_consolidate=True)
     result = await agent.run("hello")
     assert result.output
     assert await memory.facts.all_facts() == []

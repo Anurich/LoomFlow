@@ -24,7 +24,7 @@ Embedders live in :mod:`jeevesagent.memory.embedder`:
 from .chroma import ChromaMemory
 from .chroma_facts import ChromaFactStore
 from .consolidator import Consolidator
-from .embedder import HashEmbedder, OpenAIEmbedder
+from .embedder import CohereEmbedder, HashEmbedder, OpenAIEmbedder, VoyageEmbedder
 from .facts import FactStore, InMemoryFactStore
 from .inmemory import InMemoryMemory
 from .postgres import PostgresMemory
@@ -33,10 +33,13 @@ from .redis import RedisMemory
 from .redis_facts import RedisFactStore
 from .sqlite_facts import SqliteFactStore
 from .vector import VectorMemory
+from .worker import ConsolidationWorker
 
 __all__ = [
     "ChromaFactStore",
     "ChromaMemory",
+    "CohereEmbedder",
+    "ConsolidationWorker",
     "Consolidator",
     "FactStore",
     "HashEmbedder",
@@ -49,4 +52,5 @@ __all__ = [
     "RedisMemory",
     "SqliteFactStore",
     "VectorMemory",
+    "VoyageEmbedder",
 ]

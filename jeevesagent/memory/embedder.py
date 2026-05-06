@@ -121,3 +121,153 @@ class OpenAIEmbedder:
         result = await self._client.embeddings.create(**kwargs)
         # OpenAI returns data sorted by request order.
         return [list(item.embedding) for item in result.data]
+
+
+# ---------------------------------------------------------------------------
+# Voyage AI
+# ---------------------------------------------------------------------------
+
+
+class VoyageEmbedder:
+    """Embeddings via Voyage AI's ``voyageai`` SDK.
+
+    Models and dimensions:
+
+    * ``voyage-3`` / ``voyage-3-large`` / ``voyage-code-3`` -> 1024
+    * ``voyage-3-lite`` -> 512
+
+    ``input_type`` controls how Voyage encodes the text:
+
+    * ``"document"`` (default) — for corpus / fact-store entries
+    * ``"query"`` — for retrieval queries
+
+    Pass an explicit ``input_type=`` if your embedder is dedicated to
+    one role; for the agent loop's mixed use (we embed both stored
+    triples and recall queries through the same embedder), the
+    ``"document"`` default is the safer choice.
+    """
+
+    _DEFAULT_DIMS: dict[str, int] = {
+        "voyage-3": 1024,
+        "voyage-3-large": 1024,
+        "voyage-code-3": 1024,
+        "voyage-3-lite": 512,
+    }
+
+    def __init__(
+        self,
+        model: str = "voyage-3",
+        *,
+        client: Any | None = None,
+        api_key: str | None = None,
+        input_type: str = "document",
+    ) -> None:
+        self.name: str = model
+        self.dimensions: int = self._DEFAULT_DIMS.get(model, 1024)
+        self._input_type = input_type
+
+        if client is not None:
+            self._client = client
+        else:
+            try:
+                import voyageai  # type: ignore[import-not-found, import-untyped]
+            except ImportError as exc:  # pragma: no cover
+                raise ImportError(
+                    "voyageai is not installed. "
+                    "Install with: pip install 'jeevesagent[voyage]'"
+                ) from exc
+            self._client = voyageai.AsyncClient(
+                api_key=api_key or os.environ.get("VOYAGE_API_KEY"),
+            )
+
+    async def embed(self, text: str) -> list[float]:
+        result = await self._client.embed(
+            texts=[text],
+            model=self.name,
+            input_type=self._input_type,
+        )
+        return list(result.embeddings[0])
+
+    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        if not texts:
+            return []
+        result = await self._client.embed(
+            texts=texts,
+            model=self.name,
+            input_type=self._input_type,
+        )
+        return [list(e) for e in result.embeddings]
+
+
+# ---------------------------------------------------------------------------
+# Cohere
+# ---------------------------------------------------------------------------
+
+
+class CohereEmbedder:
+    """Embeddings via Cohere's ``cohere`` SDK.
+
+    Models and dimensions:
+
+    * ``embed-english-v3.0`` / ``embed-multilingual-v3.0`` -> 1024
+    * ``embed-english-light-v3.0`` / ``embed-multilingual-light-v3.0`` -> 384
+
+    ``input_type`` is required by Cohere v3 models:
+
+    * ``"search_document"`` (default) — corpus / fact-store entries
+    * ``"search_query"`` — retrieval queries
+    * ``"classification"`` / ``"clustering"`` for non-retrieval uses
+    """
+
+    _DEFAULT_DIMS: dict[str, int] = {
+        "embed-english-v3.0": 1024,
+        "embed-multilingual-v3.0": 1024,
+        "embed-english-light-v3.0": 384,
+        "embed-multilingual-light-v3.0": 384,
+    }
+
+    def __init__(
+        self,
+        model: str = "embed-english-v3.0",
+        *,
+        client: Any | None = None,
+        api_key: str | None = None,
+        input_type: str = "search_document",
+    ) -> None:
+        self.name: str = model
+        self.dimensions: int = self._DEFAULT_DIMS.get(model, 1024)
+        self._input_type = input_type
+
+        if client is not None:
+            self._client = client
+        else:
+            try:
+                import cohere  # type: ignore[import-not-found, import-untyped]
+            except ImportError as exc:  # pragma: no cover
+                raise ImportError(
+                    "cohere is not installed. "
+                    "Install with: pip install 'jeevesagent[cohere]'"
+                ) from exc
+            self._client = cohere.AsyncClient(
+                api_key=api_key or os.environ.get("COHERE_API_KEY"),
+            )
+
+    async def embed(self, text: str) -> list[float]:
+        result = await self._client.embed(
+            texts=[text],
+            model=self.name,
+            input_type=self._input_type,
+            embedding_types=["float"],
+        )
+        return list(result.embeddings.float[0])
+
+    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        if not texts:
+            return []
+        result = await self._client.embed(
+            texts=texts,
+            model=self.name,
+            input_type=self._input_type,
+            embedding_types=["float"],
+        )
+        return [list(e) for e in result.embeddings.float]

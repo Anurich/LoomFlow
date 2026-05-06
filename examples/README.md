@@ -14,6 +14,8 @@ just `pip install -e '.[dev]'`.
 | [`04_facts.py`](04_facts.py) | Bi-temporal facts: supersession + `valid_at` queries + auto-consolidation | nothing |
 | [`05_durable.py`](05_durable.py) | `SqliteRuntime` cross-instance replay | nothing |
 | [`06_production.py`](06_production.py) | Full production shape: every cross-cutting concern wired up | optional API key |
+| [`07_litellm.py`](07_litellm.py) | LiteLLM dispatch — ~100 providers (Mistral / Cohere / Bedrock / Vertex / Ollama / Groq / Gemini / ...) through one adapter | optional `MISTRAL_API_KEY` / `COHERE_API_KEY` / `GROQ_API_KEY` / `GEMINI_API_KEY` |
+| [`08_from_config.py`](08_from_config.py) | Declarative `Agent.from_config(toml_path)` + `Agent.from_dict(cfg)` + `@agent.with_tool` decorator | nothing |
 
 Read in order; each builds on the last conceptually.
 

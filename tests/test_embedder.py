@@ -117,3 +117,133 @@ async def test_openai_embedder_batch_empty_returns_empty() -> None:
     fc = _FakeOAIClient()
     e = OpenAIEmbedder("text-embedding-3-small", client=fc)
     assert await e.embed_batch([]) == []
+
+
+# ---------------------------------------------------------------------------
+# VoyageEmbedder (with fake client; no real network)
+# ---------------------------------------------------------------------------
+
+
+class _FakeVoyageClient:
+    def __init__(self) -> None:
+        self.captured_kwargs: dict[str, Any] | None = None
+
+    async def embed(self, **kwargs: Any) -> Any:
+        self.captured_kwargs = kwargs
+        n = len(kwargs["texts"])
+        return NS(embeddings=[[float(i)] * 4 for i in range(n)])
+
+
+async def test_voyage_embedder_default_dimensions() -> None:
+    from jeevesagent import VoyageEmbedder
+
+    fc = _FakeVoyageClient()
+    e = VoyageEmbedder("voyage-3", client=fc)
+    assert e.name == "voyage-3"
+    assert e.dimensions == 1024
+
+
+async def test_voyage_embedder_lite_has_smaller_dim() -> None:
+    from jeevesagent import VoyageEmbedder
+
+    e = VoyageEmbedder("voyage-3-lite", client=_FakeVoyageClient())
+    assert e.dimensions == 512
+
+
+async def test_voyage_embedder_passes_input_type_to_sdk() -> None:
+    from jeevesagent import VoyageEmbedder
+
+    fc = _FakeVoyageClient()
+    e = VoyageEmbedder("voyage-3", client=fc, input_type="query")
+    await e.embed("hi")
+    assert fc.captured_kwargs is not None
+    assert fc.captured_kwargs["input_type"] == "query"
+    assert fc.captured_kwargs["model"] == "voyage-3"
+
+
+async def test_voyage_embedder_batch_returns_per_input() -> None:
+    from jeevesagent import VoyageEmbedder
+
+    fc = _FakeVoyageClient()
+    e = VoyageEmbedder("voyage-3", client=fc)
+    vs = await e.embed_batch(["a", "b", "c"])
+    assert len(vs) == 3
+    assert vs[0] == [0.0, 0.0, 0.0, 0.0]
+    assert vs[2] == [2.0, 2.0, 2.0, 2.0]
+
+
+async def test_voyage_embedder_batch_empty_returns_empty() -> None:
+    from jeevesagent import VoyageEmbedder
+
+    e = VoyageEmbedder("voyage-3", client=_FakeVoyageClient())
+    assert await e.embed_batch([]) == []
+
+
+# ---------------------------------------------------------------------------
+# CohereEmbedder (with fake client; no real network)
+# ---------------------------------------------------------------------------
+
+
+class _FakeCohereEmbedResponse:
+    def __init__(self, n: int) -> None:
+        self.embeddings = NS(float=[[float(i)] * 4 for i in range(n)])
+
+
+class _FakeCohereClient:
+    def __init__(self) -> None:
+        self.captured_kwargs: dict[str, Any] | None = None
+
+    async def embed(self, **kwargs: Any) -> Any:
+        self.captured_kwargs = kwargs
+        return _FakeCohereEmbedResponse(len(kwargs["texts"]))
+
+
+async def test_cohere_embedder_default_dimensions() -> None:
+    from jeevesagent import CohereEmbedder
+
+    fc = _FakeCohereClient()
+    e = CohereEmbedder("embed-english-v3.0", client=fc)
+    assert e.name == "embed-english-v3.0"
+    assert e.dimensions == 1024
+
+
+async def test_cohere_embedder_light_has_smaller_dim() -> None:
+    from jeevesagent import CohereEmbedder
+
+    e = CohereEmbedder(
+        "embed-english-light-v3.0", client=_FakeCohereClient()
+    )
+    assert e.dimensions == 384
+
+
+async def test_cohere_embedder_passes_input_type_and_floats() -> None:
+    """v3 models require ``input_type`` and ``embedding_types``."""
+    from jeevesagent import CohereEmbedder
+
+    fc = _FakeCohereClient()
+    e = CohereEmbedder(
+        "embed-english-v3.0", client=fc, input_type="search_query"
+    )
+    await e.embed("hi")
+    assert fc.captured_kwargs is not None
+    assert fc.captured_kwargs["input_type"] == "search_query"
+    assert fc.captured_kwargs["embedding_types"] == ["float"]
+
+
+async def test_cohere_embedder_batch_returns_per_input() -> None:
+    from jeevesagent import CohereEmbedder
+
+    fc = _FakeCohereClient()
+    e = CohereEmbedder("embed-english-v3.0", client=fc)
+    vs = await e.embed_batch(["a", "b"])
+    assert len(vs) == 2
+    assert vs[0] == [0.0, 0.0, 0.0, 0.0]
+
+
+async def test_cohere_embedder_batch_empty_returns_empty() -> None:
+    from jeevesagent import CohereEmbedder
+
+    e = CohereEmbedder(
+        "embed-english-v3.0", client=_FakeCohereClient()
+    )
+    assert await e.embed_batch([]) == []

@@ -16,9 +16,11 @@ from .journal import (
     InMemoryJournalStore,
     JournalEntry,
     JournalStore,
+    PostgresJournalStore,
     SqliteJournalStore,
 )
 from .journaled import JournaledRuntime, JournaledSession
+from .postgres import PostgresRuntime
 from .sqlite import SqliteRuntime
 
 __all__ = [
@@ -29,6 +31,8 @@ __all__ = [
     "JournalStore",
     "JournaledRuntime",
     "JournaledSession",
+    "PostgresJournalStore",
+    "PostgresRuntime",
     "SqliteJournalStore",
     "SqliteRuntime",
 ]

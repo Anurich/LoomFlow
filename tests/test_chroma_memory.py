@@ -66,7 +66,7 @@ async def test_chroma_working_blocks_are_in_process_only() -> None:
 
 async def test_agent_with_chroma_memory_runs_end_to_end() -> None:
     mem = _fresh_mem()
-    agent = Agent("be terse", memory=mem)
+    agent = Agent("be terse", model="echo", memory=mem)
 
     r1 = await agent.run("apples?")
     assert r1.output
