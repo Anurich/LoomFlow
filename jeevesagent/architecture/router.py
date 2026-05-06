@@ -53,7 +53,7 @@ from typing import TYPE_CHECKING
 
 from ..core.types import Event, Message, Role
 from .base import AgentSession, Dependencies
-from .helpers import add_usage, text_only_model_call
+from .helpers import SubagentInvocation, add_usage, text_only_model_call
 
 if TYPE_CHECKING:
     from ..agent.api import Agent
@@ -199,24 +199,29 @@ class Router:
         # === 3. Dispatch to specialist ===
         # Deterministic specialist session_id: replay finds the same
         # session under the specialist's own journal.
+        # SubagentInvocation forwards the specialist's MODEL_CHUNK /
+        # TOOL_CALL / TOOL_RESULT events into our generator so
+        # token-by-token streaming surfaces in the outer
+        # `agent.stream(...)` consumer.
         specialist_session_id = (
             f"{session.id}__route_{chosen.name}"
         )
-        result = await chosen.agent.run(
-            prompt, session_id=specialist_session_id
+        invocation = SubagentInvocation(
+            chosen.agent, prompt, session_id=specialist_session_id
         )
+        async for ev in invocation.events():
+            yield ev
 
-        session.output = result.output
-        # Specialist's turns count toward the parent's total. Usage
-        # is intentionally NOT merged: the specialist has its own
-        # Budget instance. Users wanting global budget tracking
-        # should share a Budget across specialists.
-        session.turns += result.turns
-        if result.interrupted:
+        result_dict = invocation.result
+        session.output = str(result_dict.get("output", ""))
+        session.turns += int(result_dict.get("turns", 0) or 0)
+        interrupted = bool(result_dict.get("interrupted", False))
+        interruption_reason = result_dict.get("interruption_reason")
+        if interrupted:
             session.interrupted = True
             session.interruption_reason = (
                 f"specialist:{chosen.name}:"
-                f"{result.interruption_reason or 'unknown'}"
+                f"{interruption_reason or 'unknown'}"
             )
 
         yield Event.architecture_event(
@@ -224,8 +229,8 @@ class Router:
             "router.completed",
             route=chosen.name,
             specialist_session_id=specialist_session_id,
-            specialist_turns=result.turns,
-            specialist_interrupted=result.interrupted,
+            specialist_turns=int(result_dict.get("turns", 0) or 0),
+            specialist_interrupted=interrupted,
         )
 
     def _resolve_route(

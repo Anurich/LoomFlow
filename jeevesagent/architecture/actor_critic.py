@@ -70,6 +70,7 @@ from pydantic import BaseModel, Field
 
 from ..core.types import Event
 from .base import AgentSession, Dependencies
+from .helpers import SubagentInvocation
 
 if TYPE_CHECKING:
     from ..agent.api import Agent
@@ -193,19 +194,21 @@ class ActorCritic:
             round=0,
             phase="generate",
         )
-        actor_result = await self._actor.run(
-            prompt,
-            session_id=f"{session.id}__actor_0",
+        actor_inv = SubagentInvocation(
+            self._actor, prompt, session_id=f"{session.id}__actor_0"
         )
-        current_output = actor_result.output
+        async for ev in actor_inv.events():
+            yield ev
+        actor_result = actor_inv.result
+        current_output = str(actor_result.get("output", ""))
         session.output = current_output
-        session.turns += actor_result.turns
+        session.turns += int(actor_result.get("turns", 0) or 0)
 
-        if actor_result.interrupted:
+        if bool(actor_result.get("interrupted", False)):
             session.interrupted = True
             session.interruption_reason = (
                 f"actor:round_0:"
-                f"{actor_result.interruption_reason or 'unknown'}"
+                f"{actor_result.get('interruption_reason') or 'unknown'}"
             )
             return
 
@@ -239,23 +242,29 @@ class ActorCritic:
                 prompt=prompt,
                 output=current_output,
             )
-            critic_result = await self._critic.run(
+            critic_inv = SubagentInvocation(
+                self._critic,
                 critique_prompt,
                 session_id=f"{session.id}__critic_{round_num}",
             )
-            session.turns += critic_result.turns
+            async for ev in critic_inv.events():
+                yield ev
+            critic_result = critic_inv.result
+            session.turns += int(critic_result.get("turns", 0) or 0)
 
-            if critic_result.interrupted:
+            if bool(critic_result.get("interrupted", False)):
                 # Critic interrupted; treat current output as best
                 # we have and stop.
                 session.interrupted = True
                 session.interruption_reason = (
                     f"critic:round_{round_num}:"
-                    f"{critic_result.interruption_reason or 'unknown'}"
+                    f"{critic_result.get('interruption_reason') or 'unknown'}"
                 )
                 return
 
-            critique = _parse_critique(critic_result.output)
+            critique = _parse_critique(
+                str(critic_result.get("output", ""))
+            )
             yield Event.architecture_event(
                 session.id,
                 "actor_critic.critique",
@@ -299,21 +308,25 @@ class ActorCritic:
                 critique=critique.summary or "",
                 issues_bulleted=issues_bulleted,
             )
-            refine_result = await self._actor.run(
+            refine_inv = SubagentInvocation(
+                self._actor,
                 refine_prompt,
                 session_id=f"{session.id}__actor_{round_num}",
             )
-            session.turns += refine_result.turns
+            async for ev in refine_inv.events():
+                yield ev
+            refine_result = refine_inv.result
+            session.turns += int(refine_result.get("turns", 0) or 0)
 
-            if refine_result.interrupted:
+            if bool(refine_result.get("interrupted", False)):
                 session.interrupted = True
                 session.interruption_reason = (
                     f"actor:round_{round_num}:"
-                    f"{refine_result.interruption_reason or 'unknown'}"
+                    f"{refine_result.get('interruption_reason') or 'unknown'}"
                 )
                 return
 
-            current_output = refine_result.output
+            current_output = str(refine_result.get("output", ""))
             session.output = current_output
 
             yield Event.architecture_event(

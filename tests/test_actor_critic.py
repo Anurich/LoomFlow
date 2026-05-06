@@ -317,11 +317,12 @@ async def test_actor_critic_uses_deterministic_session_ids() -> None:
             self._role = role
 
         async def run(  # type: ignore[override]
-            self, prompt: str, *, session_id: str | None = None
+            self, prompt: str, **kwargs: object
         ):
-            assert session_id is not None
-            captured_ids.append((self._role, session_id))
-            return await super().run(prompt, session_id=session_id)
+            sid = kwargs.get("session_id")
+            assert sid is not None
+            captured_ids.append((self._role, sid))
+            return await super().run(prompt, **kwargs)  # type: ignore[arg-type]
 
     actor = _SnoopAgent("actor", ["v0", "v1"])
     critic = _SnoopAgent(

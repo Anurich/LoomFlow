@@ -253,11 +253,12 @@ async def test_supervisor_worker_session_ids_unique_per_call() -> None:
 
     class _CaptureAgent(Agent):
         async def run(  # type: ignore[override]
-            self, prompt: str, *, session_id: str | None = None
+            self, prompt: str, **kwargs: object
         ):
-            assert session_id is not None
-            captured_ids.append(session_id)
-            return await super().run(prompt, session_id=session_id)
+            sid = kwargs.get("session_id")
+            assert sid is not None
+            captured_ids.append(sid)
+            return await super().run(prompt, **kwargs)  # type: ignore[arg-type]
 
     snoop = _CaptureAgent(
         "snooper",

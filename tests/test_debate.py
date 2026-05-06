@@ -302,11 +302,12 @@ async def test_debate_uses_deterministic_session_ids() -> None:
 
     class _SnoopAgent(Agent):
         async def run(  # type: ignore[override]
-            self, prompt: str, *, session_id: str | None = None
+            self, prompt: str, **kwargs: object
         ):
-            assert session_id is not None
-            captured_ids.append(session_id)
-            return await super().run(prompt, session_id=session_id)
+            sid = kwargs.get("session_id")
+            assert sid is not None
+            captured_ids.append(sid)
+            return await super().run(prompt, **kwargs)  # type: ignore[arg-type]
 
     d1 = _SnoopAgent(
         "d1",

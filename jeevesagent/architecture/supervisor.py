@@ -47,10 +47,14 @@ from collections.abc import AsyncIterator
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
+import anyio
+from anyio.streams.memory import MemoryObjectSendStream
+
 from ..core.ids import new_id
 from ..core.types import Event
 from ..tools.registry import Tool
 from .base import AgentSession, Architecture, Dependencies
+from .helpers import SubagentInvocation
 from .react import ReAct
 from .tool_host_wrappers import ExtendedToolHost
 
@@ -129,14 +133,26 @@ class Supervisor:
         deps: Dependencies,
         prompt: str,
     ) -> AsyncIterator[Event]:
-        # 1. Build the delegate tool that routes to workers.
+        # 1. Set up a shared event channel so worker events emitted
+        #    from inside the delegate tool can stream through to the
+        #    supervisor's outer generator alongside the base
+        #    architecture's events. Without this, MODEL_CHUNK and
+        #    TOOL_CALL events from the workers would be dropped on
+        #    the floor.
+        send_chan, recv_chan = anyio.create_memory_object_stream[Event](
+            max_buffer_size=128
+        )
+
+        # 2. Build the delegate tool that routes to workers AND
+        #    forwards worker events into the shared channel.
         delegate_tool = _make_delegate_tool(
             self._workers,
             session.id,
             tool_name=self._delegate_name,
+            event_sink=send_chan,
         )
 
-        # 2. Wrap the parent's ToolHost so the model sees `delegate`
+        # 3. Wrap the parent's ToolHost so the model sees `delegate`
         #    alongside whatever tools the parent already had.
         wrapped_host = ExtendedToolHost(deps.tools, [delegate_tool])
 
@@ -177,13 +193,25 @@ class Supervisor:
             workers=list(self._workers.keys()),
         )
 
-        # 4. Run the base architecture. ReAct sees the delegate tool
-        #    and decides when to call it; multiple delegate calls in
-        #    one turn are dispatched in parallel by ReAct's existing
-        #    parallel tool dispatch.
+        # 4. Run the base architecture in a background task; both
+        #    its events AND any worker events emitted from the
+        #    delegate tool flow through the shared channel. We yield
+        #    from the channel concurrently.
+        async def _run_base() -> None:
+            try:
+                async for event in self._base.run(
+                    session, sup_deps, prompt
+                ):
+                    await send_chan.send(event)
+            finally:
+                await send_chan.aclose()
+
         try:
-            async for event in self._base.run(session, sup_deps, prompt):
-                yield event
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(_run_base)
+                async with recv_chan:
+                    async for ev in recv_chan:
+                        yield ev
         finally:
             # Restore the original instructions on session even
             # though the session is single-use; harmless and keeps
@@ -207,6 +235,7 @@ def _make_delegate_tool(
     parent_session_id: str,
     *,
     tool_name: str,
+    event_sink: MemoryObjectSendStream[Event] | None = None,
 ) -> Tool:
     """Build a :class:`Tool` whose ``execute`` routes to the named
     worker :class:`Agent` and returns its final output.
@@ -215,6 +244,13 @@ def _make_delegate_tool(
     the worker; replay correctness for the parent comes from the
     parent's own runtime journal caching the tool result, so the
     worker's session_id only matters during the first execution.
+
+    When ``event_sink`` is provided, the worker's streaming events
+    (model chunks, nested tool calls, tool results, architecture
+    progress) are forwarded into the channel so the supervisor's
+    outer ``stream(...)`` consumer sees token-by-token output. When
+    ``None``, the worker's events are silently dropped (legacy
+    behaviour, kept as a fallback).
     """
 
     async def _delegate(worker: str, instructions: str) -> str:
@@ -228,10 +264,24 @@ def _make_delegate_tool(
         worker_session_id = (
             f"{parent_session_id}__delegate_{worker}_{suffix}"
         )
-        result = await agent.run(
-            instructions, session_id=worker_session_id
+
+        if event_sink is None:
+            # No event sink → fall back to plain run() (events lost).
+            result = await agent.run(
+                instructions, session_id=worker_session_id
+            )
+            return result.output
+
+        # Stream worker events into the supervisor's shared channel
+        # using a clone of the send half (clone keeps the channel
+        # alive past this tool call's lifetime).
+        invocation = SubagentInvocation(
+            agent, instructions, session_id=worker_session_id
         )
-        return result.output
+        async with event_sink.clone() as sink:
+            async for ev in invocation.events():
+                await sink.send(ev)
+        return str(invocation.result.get("output", ""))
 
     return Tool(
         name=tool_name,

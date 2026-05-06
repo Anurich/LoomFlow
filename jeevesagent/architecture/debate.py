@@ -61,9 +61,11 @@ from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
 import anyio
+from anyio.streams.memory import MemoryObjectSendStream
 
 from ..core.types import Event
 from .base import AgentSession, Dependencies
+from .helpers import SubagentInvocation
 
 if TYPE_CHECKING:
     from ..agent.api import Agent
@@ -149,9 +151,11 @@ class MultiAgentDebate:
             phase="independent",
             num_debaters=len(self._debaters),
         )
-        round0 = await self._run_round_parallel(
-            session, prompt, history=[], round_num=0
-        )
+        round0: dict[str, str] = {}
+        async for ev in self._run_round_parallel(
+            session, prompt, history=[], round_num=0, responses=round0
+        ):
+            yield ev
         history.append(round0)
         for name, resp in round0.items():
             yield Event.architecture_event(
@@ -190,9 +194,12 @@ class MultiAgentDebate:
                 round=r,
                 phase="debate",
             )
-            round_responses = await self._run_round_parallel(
-                session, prompt, history=history, round_num=r
-            )
+            round_responses: dict[str, str] = {}
+            async for ev in self._run_round_parallel(
+                session, prompt, history=history, round_num=r,
+                responses=round_responses,
+            ):
+                yield ev
             history.append(round_responses)
             for name, resp in round_responses.items():
                 yield Event.architecture_event(
@@ -228,25 +235,30 @@ class MultiAgentDebate:
             "debate.judging",
         )
         judge_prompt = self._build_judge_prompt(prompt, history)
-        judge_result = await self._judge.run(
+        judge_inv = SubagentInvocation(
+            self._judge,
             judge_prompt,
             session_id=f"{session.id}__judge",
         )
-        session.turns += judge_result.turns
+        async for ev in judge_inv.events():
+            yield ev
+        judge_result = judge_inv.result
+        session.turns += int(judge_result.get("turns", 0) or 0)
 
-        if judge_result.interrupted:
+        if bool(judge_result.get("interrupted", False)):
             session.interrupted = True
             session.interruption_reason = (
-                f"judge:{judge_result.interruption_reason or 'unknown'}"
+                f"judge:{judge_result.get('interruption_reason') or 'unknown'}"
             )
             return
 
-        session.output = judge_result.output
+        judge_output = str(judge_result.get("output", ""))
+        session.output = judge_output
         yield Event.architecture_event(
             session.id,
             "debate.synthesized",
             method="judge",
-            final=judge_result.output[:300],
+            final=judge_output[:300],
         )
 
     # ---- helpers ---------------------------------------------------------
@@ -257,50 +269,45 @@ class MultiAgentDebate:
         prompt: str,
         history: list[dict[str, str]],
         round_num: int,
-    ) -> dict[str, str]:
-        """Run all debaters for a single round in parallel.
-
-        Each debater sees the same round-specific prompt; results
-        come back keyed by debater name.
-        """
-        responses: dict[str, str] = {}
-
-        async with anyio.create_task_group() as tg:
-            for i, debater in enumerate(self._debaters):
-                name = f"debater_{i}"
-                debater_prompt = self._build_debater_prompt(
-                    prompt, history, name, round_num
-                )
-                tg.start_soon(
-                    self._run_one_debater,
-                    debater,
-                    name,
-                    debater_prompt,
-                    session,
-                    round_num,
-                    responses,
-                )
-
-        return responses
-
-    async def _run_one_debater(
-        self,
-        debater: Agent,
-        name: str,
-        debater_prompt: str,
-        session: AgentSession,
-        round_num: int,
         responses: dict[str, str],
-    ) -> None:
-        sub_session_id = (
-            f"{session.id}__{name}_round_{round_num}"
+    ) -> AsyncIterator[Event]:
+        """Run all debaters for a single round in parallel and yield
+        their streaming events.
+
+        ``responses`` is mutated in place — each debater's final
+        output is written to ``responses[debater_name]``. Events
+        from each debater's own iteration (model chunks, tool calls,
+        nested architecture events) flow through this generator so
+        token-level streaming surfaces in ``agent.stream(...)``.
+        """
+        send, receive = anyio.create_memory_object_stream[Event](
+            max_buffer_size=128
         )
-        result = await debater.run(
-            debater_prompt, session_id=sub_session_id
-        )
-        responses[name] = result.output
-        # Accumulate turns into the parent for accurate accounting.
-        session.turns += result.turns
+
+        async def _dispatch_all() -> None:
+            async with send:
+                async with anyio.create_task_group() as inner_tg:
+                    for i, debater in enumerate(self._debaters):
+                        name = f"debater_{i}"
+                        debater_prompt = self._build_debater_prompt(
+                            prompt, history, name, round_num
+                        )
+                        inner_tg.start_soon(
+                            _run_one_debater_streaming,
+                            debater,
+                            name,
+                            debater_prompt,
+                            session,
+                            round_num,
+                            responses,
+                            send.clone(),
+                        )
+
+        async with anyio.create_task_group() as outer_tg:
+            outer_tg.start_soon(_dispatch_all)
+            async with receive:
+                async for ev in receive:
+                    yield ev
 
     def _build_debater_prompt(
         self,
@@ -350,6 +357,29 @@ class MultiAgentDebate:
                 lines.append(f"{n}: {resp}")
         lines.append("\nProduce the final answer.")
         return "\n".join(lines)
+
+
+async def _run_one_debater_streaming(
+    debater: Agent,
+    name: str,
+    debater_prompt: str,
+    session: AgentSession,
+    round_num: int,
+    responses: dict[str, str],
+    send: MemoryObjectSendStream[Event],
+) -> None:
+    """Single-debater worker for parallel dispatch: run the debater
+    via :class:`SubagentInvocation`, forward its events into ``send``,
+    write final output into ``responses[name]``."""
+    async with send:
+        sub_session_id = f"{session.id}__{name}_round_{round_num}"
+        invocation = SubagentInvocation(
+            debater, debater_prompt, session_id=sub_session_id
+        )
+        async for ev in invocation.events():
+            await send.send(ev)
+        responses[name] = str(invocation.result.get("output", ""))
+        session.turns += int(invocation.result.get("turns", 0) or 0)
 
 
 # ---------------------------------------------------------------------------

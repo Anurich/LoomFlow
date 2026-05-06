@@ -23,6 +23,8 @@ Covers:
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from jeevesagent import (
@@ -342,11 +344,12 @@ async def test_router_uses_deterministic_specialist_session_id() -> None:
 
     class _SnoopAgent(Agent):
         async def run(  # type: ignore[override]
-            self, prompt: str, *, session_id: str | None = None
+            self, prompt: str, **kwargs: Any
         ):
-            assert session_id is not None
-            captured_session_ids.append(session_id)
-            return await super().run(prompt, session_id=session_id)
+            sid = kwargs.get("session_id")
+            assert sid is not None
+            captured_session_ids.append(sid)
+            return await super().run(prompt, **kwargs)
 
     specialist = _SnoopAgent("snooper", model=_CaptureModel())  # type: ignore[arg-type]
 

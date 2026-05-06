@@ -462,6 +462,7 @@ class Agent:
         *,
         session_id: str | None = None,
         extra_tools: list[Tool] | None = None,
+        emit: Emit | None = None,
     ) -> RunResult:
         """Run the agent to completion and return its :class:`RunResult`.
 
@@ -477,10 +478,21 @@ class Agent:
         that need to inject coordination tools (e.g. Swarm's
         ``handoff(target, message)``) into a peer agent's loop without
         permanently mutating that agent's static configuration.
+
+        ``emit`` is an awaitable callback invoked once per
+        :class:`Event` produced during the run (model chunks, tool
+        calls, tool results, architecture progress, errors, ...).
+        Default ``None`` drops events on the floor (regular ``run``
+        semantics — return only the final ``RunResult``). Multi-agent
+        architectures pass an emit that forwards a sub-Agent's events
+        into the parent's stream, so calls like ``await
+        worker.run(prompt, emit=parent_send)`` surface the worker's
+        token-by-token streaming to the outermost ``agent.stream(...)``
+        consumer.
         """
         return await self._loop(
             prompt,
-            emit=_noop_emit,
+            emit=emit if emit is not None else _noop_emit,
             session_id=session_id,
             extra_tools=extra_tools,
         )
@@ -491,6 +503,7 @@ class Agent:
         prompt: str,
         *,
         extra_tools: list[Tool] | None = None,
+        emit: Emit | None = None,
     ) -> RunResult:
         """Resume a previously-interrupted run from its journal.
 
@@ -500,7 +513,10 @@ class Agent:
         plan.
         """
         return await self.run(
-            prompt, session_id=session_id, extra_tools=extra_tools
+            prompt,
+            session_id=session_id,
+            extra_tools=extra_tools,
+            emit=emit,
         )
 
     async def stream(

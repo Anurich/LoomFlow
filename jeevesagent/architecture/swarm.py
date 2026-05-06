@@ -46,6 +46,7 @@ from typing import TYPE_CHECKING
 from ..core.types import Event
 from ..tools.registry import Tool
 from .base import AgentSession, Dependencies
+from .helpers import SubagentInvocation
 
 if TYPE_CHECKING:
     from ..agent.api import Agent
@@ -173,22 +174,33 @@ class Swarm:
             )
 
             # Run the active agent with the handoff tool injected.
+            # SubagentInvocation forwards the worker's MODEL_CHUNK /
+            # TOOL_CALL / TOOL_RESULT events into our generator so
+            # token-by-token streaming surfaces in the outer
+            # `agent.stream(...)` consumer.
             sub_session_id = (
                 f"{session.id}__swarm_{active_name}_{handoff_count}"
             )
-            result = await active_agent.run(
+            invocation = SubagentInvocation(
+                active_agent,
                 active_prompt,
                 session_id=sub_session_id,
                 extra_tools=[handoff_tool],
             )
-            session.turns += result.turns
-            last_output = result.output
+            async for ev in invocation.events():
+                yield ev
+            session.turns += int(invocation.result.get("turns", 0) or 0)
+            last_output = str(invocation.result.get("output", ""))
+            interrupted = bool(invocation.result.get("interrupted", False))
+            interruption_reason = invocation.result.get(
+                "interruption_reason"
+            )
 
-            if result.interrupted:
+            if interrupted:
                 session.interrupted = True
                 session.interruption_reason = (
                     f"swarm:{active_name}:"
-                    f"{result.interruption_reason or 'unknown'}"
+                    f"{interruption_reason or 'unknown'}"
                 )
                 session.output = last_output
                 yield Event.architecture_event(

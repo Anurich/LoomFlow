@@ -64,6 +64,7 @@ from typing import TYPE_CHECKING
 
 from ..core.types import Event
 from .base import AgentSession, Dependencies
+from .helpers import SubagentInvocation
 
 if TYPE_CHECKING:
     from ..agent.api import Agent
@@ -238,9 +239,13 @@ class BlackboardArchitecture:
                 yield Event.budget_exceeded(session.id, status)
                 return
 
-            decision = await self._coordinate(
-                session, bb, round_num
-            )
+            # Coordinator: stream its events through, capture decision.
+            decision_holder: list[_CoordinatorDecision] = []
+            async for ev in self._coordinate_streaming(
+                session, bb, round_num, decision_holder
+            ):
+                yield ev
+            decision = decision_holder[0]
             yield Event.architecture_event(
                 session.id,
                 "blackboard.coordinator_decided",
@@ -298,13 +303,17 @@ class BlackboardArchitecture:
             sub_session_id = (
                 f"{session.id}__bb_{decision.next_agent}_round_{round_num}"
             )
-            result = await picked.run(
-                agent_prompt, session_id=sub_session_id
+            invocation = SubagentInvocation(
+                picked, agent_prompt, session_id=sub_session_id
             )
-            session.turns += result.turns
+            async for ev in invocation.events():
+                yield ev
+            picked_result = invocation.result
+            session.turns += int(picked_result.get("turns", 0) or 0)
+            output = str(picked_result.get("output", ""))
             bb.post(
                 decision.next_agent,
-                result.output,
+                output,
                 kind="contribution",
             )
             yield Event.architecture_event(
@@ -312,11 +321,16 @@ class BlackboardArchitecture:
                 "blackboard.contribution",
                 round=round_num,
                 agent=decision.next_agent,
-                content=result.output[:300],
+                content=output[:300],
             )
 
         # === Synthesize ===
-        final = await self._decide_final(session, bb)
+        final_holder: list[str] = []
+        async for ev in self._decide_final_streaming(
+            session, bb, final_holder
+        ):
+            yield ev
+        final = final_holder[0]
         session.output = final
         yield Event.architecture_event(
             session.id,
@@ -327,22 +341,29 @@ class BlackboardArchitecture:
 
     # ---- helpers -----------------------------------------------------
 
-    async def _coordinate(
+    async def _coordinate_streaming(
         self,
         session: AgentSession,
         bb: Blackboard,
         round_num: int,
-    ) -> _CoordinatorDecision:
+        decision_holder: list[_CoordinatorDecision],
+    ) -> AsyncIterator[Event]:
+        """Run the coordinator (LLM Agent or round-robin fallback)
+        and stream its events; write the decision into
+        ``decision_holder[0]``."""
         if self._coordinator is None:
-            # Round-robin fallback
+            # Round-robin fallback — no LLM call, no events.
             names = list(self._agents)
             picked = names[(round_num - 1) % len(names)]
-            return _CoordinatorDecision(
-                terminate=False,
-                next_agent=picked,
-                instruction=None,
-                raw="(round-robin fallback)",
+            decision_holder.append(
+                _CoordinatorDecision(
+                    terminate=False,
+                    next_agent=picked,
+                    instruction=None,
+                    raw="(round-robin fallback)",
+                )
             )
+            return
 
         coord_prompt = self._coordinator_instructions.format(
             agents="\n".join(
@@ -355,35 +376,53 @@ class BlackboardArchitecture:
         sub_session_id = (
             f"{session.id}__bb_coord_round_{round_num}"
         )
-        result = await self._coordinator.run(
-            coord_prompt, session_id=sub_session_id
+        invocation = SubagentInvocation(
+            self._coordinator, coord_prompt, session_id=sub_session_id
         )
-        session.turns += result.turns
-        return _parse_coordinator_decision(result.output)
+        async for ev in invocation.events():
+            yield ev
+        coord_result = invocation.result
+        session.turns += int(coord_result.get("turns", 0) or 0)
+        decision_holder.append(
+            _parse_coordinator_decision(
+                str(coord_result.get("output", ""))
+            )
+        )
 
-    async def _decide_final(
-        self, session: AgentSession, bb: Blackboard
-    ) -> str:
+    async def _decide_final_streaming(
+        self,
+        session: AgentSession,
+        bb: Blackboard,
+        final_holder: list[str],
+    ) -> AsyncIterator[Event]:
+        """Run the decider (LLM Agent or fallback) and stream its
+        events; write the final answer into ``final_holder[0]``."""
         if self._decider is None:
             # Last "answer"-kind entry wins; fall through to last
             # public entry; finally the empty string.
             for entry in reversed(bb.public):
                 if entry.kind == "answer":
-                    return entry.content
+                    final_holder.append(entry.content)
+                    return
             for entry in reversed(bb.public):
                 if entry.kind == "contribution":
-                    return entry.content
-            return ""
+                    final_holder.append(entry.content)
+                    return
+            final_holder.append("")
+            return
 
         decide_prompt = self._decider_instructions + (
             f"\n\nFull blackboard state:\n{bb.render_for('__decider')}"
         )
         sub_session_id = f"{session.id}__bb_decider"
-        result = await self._decider.run(
-            decide_prompt, session_id=sub_session_id
+        invocation = SubagentInvocation(
+            self._decider, decide_prompt, session_id=sub_session_id
         )
-        session.turns += result.turns
-        return result.output
+        async for ev in invocation.events():
+            yield ev
+        decider_result = invocation.result
+        session.turns += int(decider_result.get("turns", 0) or 0)
+        final_holder.append(str(decider_result.get("output", "")))
 
 
 def _parse_coordinator_decision(text: str) -> _CoordinatorDecision:
