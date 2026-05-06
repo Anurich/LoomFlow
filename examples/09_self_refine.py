@@ -1,111 +1,109 @@
-"""09_self_refine — Iterative refinement via critique.
+"""09_self_refine — Iterative copywriting with self-critique.
 
 What it shows:
-* The ``SelfRefine`` architecture wraps any base (default ``ReAct``)
-  with a critic + refiner loop. Same model plays all three roles.
-* Critique events surface through ``agent.stream`` so you can watch
-  what the critic flagged and how the refiner addressed it.
-* Convergence detection: when the critic emits the configured
-  ``stop_phrase`` (default ``"no issues"``), refinement halts.
-
-We use ``ScriptedModel`` for determinism — no API key, no network.
-The script simulates a generator → critic → refiner → critic
-sequence where round 2 converges.
+* SelfRefine wraps any base architecture (default ReAct) with a
+  critic + refiner cycle. The same model plays all three roles.
+* Real-world use: marketing copy / tweet polishing — the model
+  writes a draft, critiques itself, refines until the critic
+  emits ``stop_phrase`` (default ``"no issues"``).
+* Token-level streaming surfaces the draft and refinements live;
+  architecture events show convergence.
 
 Run:
+    pip install -e '.[dev,openai]'
+    # add OPENAI_API_KEY=sk-... to .env at repo root
     python examples/09_self_refine.py
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
+import sys
+from pathlib import Path
 
-from jeevesagent import Agent, ScriptedModel, ScriptedTurn, SelfRefine
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+
+if not os.environ.get("OPENAI_API_KEY"):
+    sys.exit(
+        "\n  ✗ OPENAI_API_KEY required. "
+        "Add OPENAI_API_KEY=sk-... to .env at repo root.\n"
+    )
+
+from jeevesagent import Agent, ReAct, SelfRefine  # noqa: E402
 
 
 async def main() -> None:
-    # Three model turns:
-    # 1. Generator (round 0): produces an initial draft.
-    # 2. Critic (round 1): finds issues.
-    # 3. Refiner (round 1): produces a revision.
-    # 4. Critic (round 2): says "no issues" → converge.
-    model = ScriptedModel(
-        [
-            ScriptedTurn(text="Draft: Tokyo is a city in Japan."),
-            ScriptedTurn(
-                text=(
-                    "Issues: too short; missing population; missing "
-                    "any specific cultural detail."
-                )
-            ),
-            ScriptedTurn(
-                text=(
-                    "Revised: Tokyo is the capital of Japan and "
-                    "home to ~14 million people in the metropolis "
-                    "(37M+ in the greater metro area). Famous for "
-                    "Shibuya Crossing, Tsukiji's old fish market, "
-                    "and a punctual rail network."
-                )
-            ),
-            ScriptedTurn(text="no issues"),
-        ]
-    )
-
     agent = Agent(
-        "You write factual answers about cities.",
-        model=model,
-        architecture=SelfRefine(max_rounds=3),
+        instructions=(
+            "You are a senior copywriter. You write tight, "
+            "engaging marketing copy. When asked to revise, "
+            "address every point of the critique fully."
+        ),
+        model="gpt-4.1-mini",
+        architecture=SelfRefine(
+            base=ReAct(),
+            max_rounds=2,
+            stop_phrase="no issues",
+        ),
     )
 
-    print("=== Streaming events ===")
-    async for event in agent.stream("Tell me about Tokyo."):
-        if event.kind == "architecture_event":
-            name = event.payload.get("name", "")
-            if name == "self_refine.critique":
-                critique = event.payload.get("critique", "")
-                print(f"\n[critic, round {event.payload['round']}] {critique}")
-            elif name == "self_refine.refined":
-                refined = event.payload.get("output", "")[:80]
+    prompt = (
+        "Write a tweet (under 280 characters) announcing the launch "
+        "of JeevesAgent — a model-agnostic, MCP-native, async agent "
+        "harness for production teams. Include exactly one emoji, "
+        "no hashtags, and a clear value prop in the first line."
+    )
+
+    print("=" * 70)
+    print("SelfRefine — iterative copywriting (token-streaming live)")
+    print("=" * 70)
+
+    in_critique = False
+    async for ev in agent.stream(prompt):
+        kind = ev.kind.value
+        if kind == "model_chunk":
+            chunk = ev.payload.get("chunk", {})
+            if chunk.get("kind") == "text" and chunk.get("text"):
+                print(chunk["text"], end="", flush=True)
+        elif kind == "architecture_event":
+            name = ev.payload.get("name", "")
+            if name == "self_refine.round_started":
+                role = ev.payload.get("role", "?")
+                round_num = ev.payload.get("round", "?")
+                in_critique = role == "critic"
                 print(
-                    f"\n[refiner, round {event.payload['round']}] "
-                    f"{refined}..."
+                    f"\n\n--- {role.upper()} (round {round_num}) ---"
                 )
+            elif name == "self_refine.critique":
+                # Optional summary; the streaming model_chunks already
+                # showed the full critique text live.
+                pass
             elif name == "self_refine.converged":
                 print(
-                    f"\n[converged after round "
-                    f"{event.payload['round']}]"
+                    f"\n\n--- ✓ converged at round "
+                    f"{ev.payload.get('round')} ---"
                 )
+            elif name == "self_refine.max_rounds_reached":
+                print(
+                    f"\n\n--- max rounds reached "
+                    f"({ev.payload.get('rounds')}) ---"
+                )
+        elif kind == "completed":
+            result = ev.payload.get("result") or {}
+            print("\n\n" + "=" * 70)
+            print("FINAL TWEET")
+            print("=" * 70)
+            print(result.get("output", "(no output)"))
+            print(
+                f"\nTurns: {result.get('turns')}  "
+                f"Tokens: in={result.get('tokens_in')} "
+                f"out={result.get('tokens_out')}"
+            )
 
-    # Re-run with a fresh ScriptedModel to print the final RunResult.
-    # In production, you'd consume ``stream()`` once and read the
-    # last ``COMPLETED`` event's ``result`` payload — but for this
-    # demo we want both views.
-    fresh_model = ScriptedModel(
-        [
-            ScriptedTurn(text="Draft: Tokyo is a city in Japan."),
-            ScriptedTurn(text="Issues: too short; missing details."),
-            ScriptedTurn(
-                text=(
-                    "Revised: Tokyo is Japan's capital, ~14M in the "
-                    "metropolis (37M+ greater metro). Famous for "
-                    "Shibuya Crossing and Tsukiji."
-                )
-            ),
-            ScriptedTurn(text="no issues"),
-        ]
-    )
-    fresh_agent = Agent(
-        "You write factual answers about cities.",
-        model=fresh_model,
-        architecture=SelfRefine(max_rounds=3),
-    )
-    result = await fresh_agent.run("Tell me about Tokyo.")
-    print("\n=== Final ===")
-    print(result.output)
-    print(f"\nTurns:  {result.turns}")
-    print(
-        f"Tokens: {result.tokens_in} in / {result.tokens_out} out"
-    )
+    _ = in_critique  # quiet linter; reserved for future use
 
 
 if __name__ == "__main__":

@@ -1,180 +1,140 @@
-"""13_actor_critic — Actor + adversarial critic, asymmetric by design.
+"""13_actor_critic — Code generation with adversarial review.
 
 What it shows:
-* The ``ActorCritic`` architecture orchestrates two separate ``Agent``
-  instances: an actor that generates output and a critic that
-  reviews it adversarially. Different prompts (and ideally different
-  models) catch different blind spots.
-* The critic emits structured JSON with ``issues``, ``score``, and
-  ``summary``. ``ActorCritic`` parses it (markdown fences and loose
-  text are both handled) and either terminates on
-  ``score >= approval_threshold`` or feeds the critique back to the
-  actor for revision.
-* Quality-driven termination — no fixed ``max_turns``; loops until
-  the critic approves OR ``max_rounds`` is hit.
-
-Production canonical use: code review. Configure actor with one
-model (e.g. Claude Opus) and critic with a different model (e.g.
-GPT-4o) plus an adversarial system prompt. The asymmetry — different
-priors, different blind spots — is the point.
-
-We use ``ScriptedModel`` so the example runs deterministically. In
-production each agent has its own real ``model="claude-opus-4-7"``
-or similar.
+* ActorCritic requires two separate Agents — actor and critic.
+  The actor generates; the critic reviews adversarially with
+  structured JSON output (issues + 0-1 score). Below threshold,
+  the actor refines.
+* Real-world use: quality-critical code, security-sensitive
+  text — anywhere you'd otherwise have a human review cycle.
+* Use DIFFERENT models for actor and critic in production
+  (e.g. Claude actor + GPT critic) — different priors catch
+  different blind spots. Here we use the same model for the
+  example; the asymmetry comes from the prompts.
 
 Run:
+    pip install -e '.[dev,openai]'
+    # add OPENAI_API_KEY=sk-... to .env at repo root
     python examples/13_actor_critic.py
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
+import sys
+from pathlib import Path
 
-from jeevesagent import (
-    ActorCritic,
-    Agent,
-    ScriptedModel,
-    ScriptedTurn,
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+
+if not os.environ.get("OPENAI_API_KEY"):
+    sys.exit(
+        "\n  ✗ OPENAI_API_KEY required. "
+        "Add OPENAI_API_KEY=sk-... to .env at repo root.\n"
+    )
+
+from jeevesagent import ActorCritic, Agent  # noqa: E402
+
+actor = Agent(
+    instructions=(
+        "You write production Python code. Be complete, typed, "
+        "and idiomatic. When given a critique, address every "
+        "point. Output ONLY the code — no markdown fences, no "
+        "commentary."
+    ),
+    model="gpt-4.1-mini",
+)
+
+critic = Agent(
+    instructions=(
+        "You are an ADVERSARIAL code reviewer. Your job is to find "
+        "EVERY issue: missing type hints, no docstring, unhandled "
+        "edge cases, mutable default args, weak error handling, "
+        "performance concerns. Be ruthless.\n\n"
+        "Output ONLY a JSON object — no markdown fences, no prose:\n"
+        '{"issues": ["...", "..."], "score": 0.0-1.0, '
+        '"summary": "..."}\n\n'
+        "Score: 1.0 = ship it; 0.7-0.9 = mostly good; "
+        "0.4-0.6 = real issues; 0.0-0.3 = unusable."
+    ),
+    model="gpt-4.1-mini",
 )
 
 
-def _scripted_agent(role_instructions: str, replies: list[str]) -> Agent:
-    return Agent(
-        role_instructions,
-        model=ScriptedModel([ScriptedTurn(text=r) for r in replies]),
-    )
-
-
 async def main() -> None:
-    # Actor produces a draft, then a polished revision after critique.
-    actor = _scripted_agent(
-        (
-            "You write production Python. Be complete and correct. "
-            "When given a critique, address every point."
-        ),
-        replies=[
-            # Round 0: initial draft (a deliberately incomplete one)
-            "def divide(a, b):\n    return a / b",
-            # Round 1 refine: improved version addressing the critique
-            (
-                "def divide(a: float, b: float) -> float:\n"
-                '    """Divide a by b. Raises ValueError on b == 0."""\n'
-                "    if b == 0:\n"
-                "        raise ValueError('cannot divide by zero')\n"
-                "    return a / b"
-            ),
-        ],
-    )
-
-    # Critic plays an adversarial reviewer with structured JSON output.
-    # In production, give the critic a DIFFERENT model than the actor —
-    # the asymmetry is what catches actor blind spots.
-    critic = _scripted_agent(
-        (
-            "You review code adversarially. Find every issue: missing "
-            "type hints, no docstring, unhandled edge cases, bad names. "
-            'Output JSON: {"issues": [...], "score": 0-1, "summary": str}.'
-        ),
-        replies=[
-            (
-                "{\n"
-                '  "issues": [\n'
-                '    "no type hints",\n'
-                '    "no docstring",\n'
-                '    "unhandled ZeroDivisionError"\n'
-                "  ],\n"
-                '  "score": 0.4,\n'
-                '  "summary": "Functional but unsafe and undocumented."\n'
-                "}"
-            ),
-            (
-                "{\n"
-                '  "issues": [],\n'
-                '  "score": 0.95,\n'
-                '  "summary": "Clean, typed, documented, handles edge."\n'
-                "}"
-            ),
-        ],
-    )
-
     agent = Agent(
         "Code-quality coordinator.",
-        model=ScriptedModel(
-            [ScriptedTurn(text="never reached")]
-        ),  # outer model unused — ActorCritic drives sub-agents
+        model="gpt-4.1-mini",  # unused; ActorCritic drives sub-agents
         architecture=ActorCritic(
             actor=actor,
             critic=critic,
-            max_rounds=3,
-            approval_threshold=0.9,
+            max_rounds=2,
+            approval_threshold=0.85,
         ),
     )
 
-    print("=== Streaming events ===")
-    async for event in agent.stream(
-        "Write a Python function that divides two numbers."
-    ):
-        if event.kind == "architecture_event":
-            name = event.payload.get("name", "")
+    prompt = (
+        "Write a Python function `safe_divide(a: float, b: float) "
+        "-> float` that divides two numbers safely. Handle edge "
+        "cases."
+    )
+
+    print("=" * 70)
+    print("ActorCritic — adversarial code review")
+    print("=" * 70)
+    print(f"Task: {prompt}\n")
+
+    async for ev in agent.stream(prompt):
+        kind = ev.kind.value
+        if kind == "model_chunk":
+            chunk = ev.payload.get("chunk", {})
+            if chunk.get("kind") == "text" and chunk.get("text"):
+                print(chunk["text"], end="", flush=True)
+        elif kind == "architecture_event":
+            name = ev.payload.get("name", "")
             if name == "actor_critic.actor_started":
-                round_num = event.payload["round"]
-                phase = event.payload.get("phase", "?")
-                print(f"\n[actor, round {round_num}, {phase}]")
-            elif name == "actor_critic.critique":
-                round_num = event.payload["round"]
-                score = event.payload["score"]
-                issues = event.payload["issues"]
+                round_num = ev.payload.get("round")
+                phase = ev.payload.get("phase", "?")
+                print(f"\n\n--- ACTOR (round {round_num}, {phase}) ---")
+            elif name == "actor_critic.critic_started":
                 print(
-                    f"[critic, round {round_num}] score={score:.2f}"
+                    f"\n\n--- CRITIC (round "
+                    f"{ev.payload.get('round')}) ---"
                 )
-                for issue in issues:
+            elif name == "actor_critic.critique":
+                score = ev.payload.get("score", 0.0)
+                issues = ev.payload.get("issues") or []
+                print(
+                    f"\n[critic verdict] score={score:.2f}, "
+                    f"{len(issues)} issue(s):"
+                )
+                for issue in issues[:5]:
                     print(f"  • {issue}")
             elif name == "actor_critic.approved":
-                round_num = event.payload["round"]
-                score = event.payload["score"]
                 print(
-                    f"\n[approved on round {round_num}, "
-                    f"score={score:.2f}]"
+                    f"\n--- ✓ APPROVED at round "
+                    f"{ev.payload.get('round')} "
+                    f"(score={ev.payload.get('score', 0.0):.2f}) ---"
                 )
             elif name == "actor_critic.max_rounds_reached":
-                print("\n[max rounds reached]")
-
-    # Re-run with fresh scripted agents to print the final result.
-    fresh_actor = _scripted_agent(
-        "actor",
-        [
-            "def divide(a, b):\n    return a / b",
-            (
-                "def divide(a: float, b: float) -> float:\n"
-                '    """Divide a by b. Raises on b == 0."""\n'
-                "    if b == 0:\n"
-                "        raise ValueError('cannot divide by zero')\n"
-                "    return a / b"
-            ),
-        ],
-    )
-    fresh_critic = _scripted_agent(
-        "critic",
-        [
-            '{"issues": ["no types", "no docstring"], "score": 0.4, "summary": ""}',
-            '{"issues": [], "score": 0.95, "summary": ""}',
-        ],
-    )
-    fresh_agent = Agent(
-        "host",
-        model=ScriptedModel([ScriptedTurn(text="never reached")]),
-        architecture=ActorCritic(
-            actor=fresh_actor,
-            critic=fresh_critic,
-            max_rounds=3,
-            approval_threshold=0.9,
-        ),
-    )
-    result = await fresh_agent.run(
-        "Write a divide function with proper handling."
-    )
-    print("\n=== Final code ===")
-    print(result.output)
+                print(
+                    f"\n--- max rounds reached "
+                    f"(final score "
+                    f"{ev.payload.get('final_score', 0.0):.2f}) ---"
+                )
+        elif kind == "completed":
+            result = ev.payload.get("result") or {}
+            print("\n\n" + "=" * 70)
+            print("FINAL CODE")
+            print("=" * 70)
+            print(result.get("output", "(no output)"))
+            print(
+                f"\nTurns: {result.get('turns')}  "
+                f"Tokens: in={result.get('tokens_in')} "
+                f"out={result.get('tokens_out')}"
+            )
 
 
 if __name__ == "__main__":

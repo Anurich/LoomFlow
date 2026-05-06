@@ -1,101 +1,87 @@
-"""15_debate — N debaters argue, judge synthesizes.
+"""15_debate — Investment-decision debate with judge synthesis.
 
 What it shows:
-* The ``MultiAgentDebate`` architecture orchestrates N debater
-  Agents across multiple rounds. Round 0 is independent (parallel
-  via anyio task group). Rounds 1..K each debater sees the full
-  prior transcript and defends or updates its position.
-* Optional convergence check terminates early when all debaters
-  converge on the same answer (whitespace-normalized).
-* Judge synthesizes the final answer from the transcript. Pass
-  ``judge=None`` to fall back to majority vote across the final
-  round.
-* Each debater + judge invocation gets a deterministic session_id
-  (``{parent}__debater_<i>_round_<r>`` / ``{parent}__judge``) for
-  replay correctness.
-
-A toy investment-decision debate: optimist + skeptic + analyst
-disagree about a Series B investment; a judge synthesizes the
-verdict. ``ScriptedModel`` makes the example deterministic.
+* MultiAgentDebate runs N debater Agents across rounds. Round 0 is
+  independent (parallel). Subsequent rounds each debater sees the
+  full transcript so far and defends or updates its position.
+* Real-world use: high-stakes contested questions where blind-spot
+  triangulation matters — investment calls, plan reviews, factual
+  research where one model's confidence is suspect.
+* In production, use DIFFERENT models for each debater (Claude +
+  GPT + Llama) for genuine prior diversity. Here we differentiate
+  via persona prompts on the same base model.
 
 Run:
+    pip install -e '.[dev,openai]'
+    # add OPENAI_API_KEY=sk-... to .env at repo root
     python examples/15_debate.py
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
+import sys
+from pathlib import Path
 
-from jeevesagent import (
-    Agent,
-    MultiAgentDebate,
-    ScriptedModel,
-    ScriptedTurn,
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+
+if not os.environ.get("OPENAI_API_KEY"):
+    sys.exit(
+        "\n  ✗ OPENAI_API_KEY required. "
+        "Add OPENAI_API_KEY=sk-... to .env at repo root.\n"
+    )
+
+from jeevesagent import Agent, MultiAgentDebate  # noqa: E402
+
+optimist = Agent(
+    instructions=(
+        "You are an optimist VC. Look for the upside case. "
+        "Cite growth, market timing, founder strengths. "
+        "Be specific; cite numbers from the prompt. Keep it "
+        "under 5 sentences per round."
+    ),
+    model="gpt-4.1-mini",
+)
+
+skeptic = Agent(
+    instructions=(
+        "You are a skeptical investor. Stress-test claims. "
+        "Cite burn rate, market risk, execution risk, "
+        "competitive threats. Be specific; cite numbers. "
+        "Under 5 sentences per round."
+    ),
+    model="gpt-4.1-mini",
+)
+
+analyst = Agent(
+    instructions=(
+        "You are a quantitative analyst. Stick to the unit "
+        "economics — LTV/CAC, runway, growth rate, payback. "
+        "If you don't have a number, say so explicitly. "
+        "Under 5 sentences per round."
+    ),
+    model="gpt-4.1-mini",
+)
+
+judge = Agent(
+    instructions=(
+        "You are an impartial chief investment officer "
+        "synthesizing the debate. Output a final decision "
+        "(INVEST / PASS / CONDITIONAL) with one paragraph of "
+        "reasoning that integrates the strongest points from "
+        "each debater."
+    ),
+    model="gpt-4.1-mini",
 )
 
 
-def _scripted_agent(label: str, replies: list[str]) -> Agent:
-    return Agent(
-        f"You are the {label}.",
-        model=ScriptedModel([ScriptedTurn(text=r) for r in replies]),
-    )
-
-
 async def main() -> None:
-    # Three debaters with deliberately divergent priors. In production,
-    # use different MODELS (Claude + GPT + Llama) for genuine diversity.
-    optimist = _scripted_agent(
-        "investment optimist",
-        replies=[
-            "INVEST. 200% ARR growth is rare; the upside swamps the burn.",
-            (
-                "Maintaining INVEST. The skeptic raises good points on "
-                "burn but at this growth rate the company will outrun "
-                "those concerns within two quarters."
-            ),
-        ],
-    )
-    skeptic = _scripted_agent(
-        "investment skeptic",
-        replies=[
-            "PASS. $4M annual burn against $2M ARR is unsustainable.",
-            (
-                "Maintaining PASS. The optimist hand-waves the burn. "
-                "Two quarters of cash runway is not a margin of safety."
-            ),
-        ],
-    )
-    analyst = _scripted_agent(
-        "quantitative analyst",
-        replies=[
-            (
-                "CONDITIONAL: only invest if a clear path to $10M ARR "
-                "exists within 18 months. Otherwise pass."
-            ),
-            (
-                "Refining CONDITIONAL. The growth trajectory does suggest "
-                "$10M ARR is reachable; the burn-rate concern is "
-                "secondary if the unit economics improve at scale."
-            ),
-        ],
-    )
-
-    judge = _scripted_agent(
-        "impartial chief investment officer",
-        replies=[
-            (
-                "DECISION: invest, with conditions. The growth "
-                "trajectory is too strong to pass; structure the "
-                "investment with milestone-based releases tied to "
-                "ARR targets to address the burn-rate concern."
-            )
-        ],
-    )
-
-    parent_model = ScriptedModel([ScriptedTurn(text="never reached")])
     agent = Agent(
         "Investment committee moderator.",
-        model=parent_model,
+        model="gpt-4.1-mini",
         architecture=MultiAgentDebate(
             debaters=[optimist, skeptic, analyst],
             judge=judge,
@@ -104,54 +90,52 @@ async def main() -> None:
         ),
     )
 
-    print("=== Streaming events ===")
-    async for event in agent.stream(
-        "Should we invest $10M in Series B of a vertical AI startup with "
-        "$2M ARR, growing 200% YoY but burning $4M annually?"
-    ):
-        if event.kind != "architecture_event":
-            continue
-        name = event.payload.get("name", "")
-        if name == "debate.round_started":
-            r = event.payload["round"]
-            phase = event.payload.get("phase", "?")
-            print(f"\n[round {r} started — {phase}]")
-        elif name == "debate.response":
-            r = event.payload["round"]
-            d = event.payload["debater"]
-            resp = event.payload["response"]
-            print(f"  [{d} @ r{r}] {resp[:100]}...")
-        elif name == "debate.converged":
-            r = event.payload["round"]
-            print(f"\n[converged at round {r}]")
-        elif name == "debate.judging":
-            print("\n[judge deliberating...]")
-        elif name == "debate.synthesized":
-            method = event.payload["method"]
-            print(f"\n[synthesized via {method}]")
+    prompt = (
+        "Should we invest $5M in Series A of a vertical AI startup "
+        "with these metrics? ARR: $1.2M, growing 180% YoY. Burn: "
+        "$300K/month. Runway: 12 months at current burn. Market: "
+        "estimated $2B TAM in legaltech AI. Founder: ex-Google, "
+        "second-time CEO. Competition: 3 well-funded competitors."
+    )
 
-    # Re-run with fresh agents for the final answer print.
-    fresh_optimist = _scripted_agent("optimist", ["INVEST", "INVEST still"])
-    fresh_skeptic = _scripted_agent("skeptic", ["PASS", "PASS still"])
-    fresh_analyst = _scripted_agent(
-        "analyst", ["CONDITIONAL", "CONDITIONAL refined"]
-    )
-    fresh_judge = _scripted_agent(
-        "judge",
-        ["Final verdict: INVEST with milestone-based releases."],
-    )
-    fresh_agent = Agent(
-        "moderator",
-        model=ScriptedModel([ScriptedTurn(text="never reached")]),
-        architecture=MultiAgentDebate(
-            debaters=[fresh_optimist, fresh_skeptic, fresh_analyst],
-            judge=fresh_judge,
-            rounds=1,
-            convergence_check=False,
-        ),
-    )
-    result = await fresh_agent.run("invest or pass?")
-    print(f"\n=== Final verdict ===\n{result.output}")
+    print("=" * 70)
+    print("MultiAgentDebate — investment decision")
+    print("=" * 70)
+    print(f"Question: {prompt}\n")
+
+    current_debater = ""
+    async for ev in agent.stream(prompt):
+        kind = ev.kind.value
+        if kind == "model_chunk":
+            chunk = ev.payload.get("chunk", {})
+            if chunk.get("kind") == "text" and chunk.get("text"):
+                print(chunk["text"], end="", flush=True)
+        elif kind == "architecture_event":
+            name = ev.payload.get("name", "")
+            if name == "debate.round_started":
+                round_num = ev.payload.get("round")
+                phase = ev.payload.get("phase", "?")
+                print(
+                    f"\n\n=== ROUND {round_num} — {phase.upper()} ==="
+                )
+            elif name == "debate.response":
+                debater = ev.payload.get("debater", "")
+                if debater != current_debater:
+                    current_debater = debater
+                    # No print — model_chunks for that debater
+                    # already printed (they came right before this
+                    # event in the stream).
+            elif name == "debate.judging":
+                print("\n\n=== JUDGE DELIBERATING ===")
+            elif name == "debate.synthesized":
+                method = ev.payload.get("method", "?")
+                print(f"\n\n--- synthesized via {method} ---")
+        elif kind == "completed":
+            result = ev.payload.get("result") or {}
+            print("\n\n" + "=" * 70)
+            print("FINAL VERDICT")
+            print("=" * 70)
+            print(result.get("output", "(no output)"))
 
 
 if __name__ == "__main__":

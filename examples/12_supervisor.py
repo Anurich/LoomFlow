@@ -1,185 +1,160 @@
-"""12_supervisor — Workers + a delegate(...) tool, parallel for free.
+"""12_supervisor — Software-dev team coordinated by a supervisor.
 
 What it shows:
-* The ``Supervisor`` architecture wraps a base (default ``ReAct``)
-  with one extra tool: ``delegate(worker, instructions)``. When
-  the supervising model emits a ``delegate`` call, the named worker
-  ``Agent`` runs to completion and returns its output as the tool
-  result.
-* Parallel delegation comes free: ``ReAct``'s tool dispatch is
-  already a structured task group, so two ``delegate`` calls in
-  one supervisor turn → both workers run concurrently.
-* Workers are full ``Agent`` instances. They can be any architecture
-  themselves (Reflexion-wrapped, DeepAgent-wrapped, etc.).
-* Each worker invocation gets a fresh session id, so the same
-  worker can be called twice in one turn without journal collisions.
-
-A research-team supervisor with a researcher and a coder. The
-supervisor delegates to both in one turn (parallel), then synthesizes
-their outputs.
+* Supervisor wraps a base architecture (default ReAct) with a
+  ``delegate(worker, instructions)`` tool injected into the loop.
+  Multiple delegations in one supervisor turn run in parallel.
+* Real-world use: any decomposable task with specialist roles —
+  research → code → review pipelines, multi-domain queries.
+* Streaming + tool events from BOTH the supervisor AND its workers
+  flow through to ``agent.stream(...)`` consumers.
 
 Run:
+    pip install -e '.[dev,openai]'
+    # add OPENAI_API_KEY=sk-... to .env at repo root
     python examples/12_supervisor.py
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
+import sys
+from pathlib import Path
 
-from jeevesagent import (
-    Agent,
-    ScriptedModel,
-    ScriptedTurn,
-    Supervisor,
-)
-from jeevesagent.core.types import ToolCall
+from dotenv import load_dotenv
 
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
-def _worker(label: str, reply: str) -> Agent:
-    return Agent(
-        f"You are the {label} specialist.",
-        model=ScriptedModel([ScriptedTurn(text=reply)]),
+if not os.environ.get("OPENAI_API_KEY"):
+    sys.exit(
+        "\n  ✗ OPENAI_API_KEY required. "
+        "Add OPENAI_API_KEY=sk-... to .env at repo root.\n"
     )
+
+from jeevesagent import Agent, Supervisor, tool  # noqa: E402
+
+
+@tool
+def search_best_practices(topic: str) -> str:
+    """Look up canonical best practices for a programming topic."""
+    fake_kb = {
+        "email validation": (
+            "Best practice: do NOT roll your own regex. Use the "
+            "rules from RFC 5321/5322 (or simply send a confirmation "
+            "email). For a quick check, ensure exactly one '@', a "
+            "non-empty local part, and a dotted domain. Recommended "
+            "library in Python: ``email-validator``."
+        ),
+        "password hashing": (
+            "Use Argon2id (preferred) or bcrypt. Never MD5/SHA-1. "
+            "Always use a per-user salt. Library: ``argon2-cffi``."
+        ),
+    }
+    for k, v in fake_kb.items():
+        if k in topic.lower():
+            return v
+    return f"no entry for {topic!r}"
+
+
+@tool
+def lint_python(code: str) -> str:
+    """Static-check a Python snippet for common issues. Returns a
+    list of findings (or 'clean' if none)."""
+    findings = []
+    if "import re" not in code and "re.match" in code:
+        findings.append("uses re without importing")
+    if "except:" in code or "except Exception:" in code:
+        findings.append(
+            "broad except — catch specific exceptions instead"
+        )
+    if "print(" in code:
+        findings.append(
+            "uses print for non-debug output — consider logging"
+        )
+    if not findings:
+        return "clean: no issues found"
+    return "issues: " + "; ".join(findings)
+
+
+# ---------------------------------------------------------------------------
+# Workers
+# ---------------------------------------------------------------------------
+
+
+researcher = Agent(
+    "You are a senior engineer who researches best practices. "
+    "Use search_best_practices to find canonical guidance. "
+    "Summarize findings tightly.",
+    model="gpt-4.1-mini",
+    tools=[search_best_practices],
+)
+
+coder = Agent(
+    "You are a Python developer. Write idiomatic, well-typed code "
+    "that follows the best practices the researcher provided. "
+    "Output ONLY the code — no markdown fences, no commentary.",
+    model="gpt-4.1-mini",
+)
+
+reviewer = Agent(
+    "You review Python code for issues. Use lint_python on the "
+    "code, then add any human-eye issues you spot. Be concise.",
+    model="gpt-4.1-mini",
+    tools=[lint_python],
+)
 
 
 async def main() -> None:
-    researcher = _worker(
-        "researcher",
-        "Found three papers: Yao et al. 2022 (ReAct), Madaan et al. "
-        "2023 (Self-Refine), Shinn et al. 2023 (Reflexion).",
-    )
-    coder = _worker(
-        "coder",
-        "Implemented `class Architecture(Protocol)` with `name`, "
-        "`run`, and `declared_workers`.",
-    )
-
-    # The supervisor's model:
-    # Turn 1: emit TWO delegate calls in one turn → parallel
-    #         (research + coding run concurrently).
-    # Turn 2: synthesize the two results into a final answer.
-    supervisor_model = ScriptedModel(
-        [
-            ScriptedTurn(
-                tool_calls=[
-                    ToolCall(
-                        id="c1",
-                        tool="delegate",
-                        args={
-                            "worker": "researcher",
-                            "instructions": (
-                                "Find the seminal papers on agent "
-                                "loop architectures."
-                            ),
-                        },
-                    ),
-                    ToolCall(
-                        id="c2",
-                        tool="delegate",
-                        args={
-                            "worker": "coder",
-                            "instructions": (
-                                "Implement an Architecture protocol "
-                                "in Python."
-                            ),
-                        },
-                    ),
-                ]
-            ),
-            ScriptedTurn(
-                text=(
-                    "I found the seminal papers (ReAct, Self-Refine, "
-                    "Reflexion) and implemented an Architecture "
-                    "protocol class with the three required methods. "
-                    "Both pieces are ready."
-                )
-            ),
-        ]
-    )
-
     agent = Agent(
-        "You are a research lead managing a small team.",
-        model=supervisor_model,
+        "You manage a small dev team. Delegate research first, "
+        "then coding, then review. Combine the outputs into a "
+        "final answer with the reviewed code + a short summary "
+        "of best practices.",
+        model="gpt-4.1-mini",
         architecture=Supervisor(
             workers={
                 "researcher": researcher,
                 "coder": coder,
+                "reviewer": reviewer,
             }
         ),
     )
 
-    print("=== Streaming events ===")
-    delegations: list[str] = []
-    async for event in agent.stream(
-        "Build a reference implementation of the Architecture protocol "
-        "with citations to the relevant literature."
-    ):
-        if event.kind == "tool_call":
-            call = event.payload.get("call", {})
-            if call.get("tool") == "delegate":
-                worker = call.get("args", {}).get("worker", "?")
-                delegations.append(worker)
-                print(f"[delegating] → {worker}")
-        elif event.kind == "tool_result":
-            result = event.payload.get("result", {})
-            output = (result.get("output") or "")[:80]
-            print(f"[worker returned] {output}...")
-        elif event.kind == "architecture_event":
-            name = event.payload.get("name", "")
-            if name == "supervisor.workers_ready":
-                print(
-                    f"[workers ready] {event.payload['workers']}"
-                )
-            elif name == "supervisor.completed":
-                print("[supervisor completed]")
+    prompt = (
+        "Build a Python function `is_valid_email(email: str) -> bool` "
+        "that follows current best practices."
+    )
 
-    print(f"\nDelegated to: {delegations}")
+    print("=" * 70)
+    print("Supervisor — software dev team")
+    print("=" * 70)
+    print(f"Task: {prompt}\n")
 
-    # Re-run for the final RunResult.
-    supervisor_model_2 = ScriptedModel(
-        [
-            ScriptedTurn(
-                tool_calls=[
-                    ToolCall(
-                        id="c1",
-                        tool="delegate",
-                        args={
-                            "worker": "researcher",
-                            "instructions": "research it",
-                        },
-                    ),
-                    ToolCall(
-                        id="c2",
-                        tool="delegate",
-                        args={
-                            "worker": "coder",
-                            "instructions": "code it",
-                        },
-                    ),
-                ]
-            ),
-            ScriptedTurn(
-                text=(
-                    "Both deliverables are ready: "
-                    "(a) literature review, (b) reference impl."
-                )
-            ),
-        ]
-    )
-    agent2 = Agent(
-        "You are a research lead.",
-        model=supervisor_model_2,
-        architecture=Supervisor(
-            workers={
-                "researcher": _worker("researcher", "research done"),
-                "coder": _worker("coder", "code done"),
-            }
-        ),
-    )
-    result = await agent2.run(
-        "Build a reference implementation with citations."
-    )
-    print(f"\n=== Final answer ===\n{result.output}")
+    async for ev in agent.stream(prompt):
+        kind = ev.kind.value
+        if kind == "model_chunk":
+            chunk = ev.payload.get("chunk", {})
+            if chunk.get("kind") == "text" and chunk.get("text"):
+                print(chunk["text"], end="", flush=True)
+        elif kind == "tool_call":
+            call = ev.payload.get("call", {})
+            tool_name = call.get("tool", "")
+            args = call.get("args", {})
+            if tool_name == "delegate":
+                worker = args.get("worker", "?")
+                preview = args.get("instructions", "")[:70]
+                print(f"\n\n  [supervisor → {worker}] {preview}...")
+            else:
+                print(f"\n  [tool] {tool_name}({args})")
+        elif kind == "tool_result":
+            result = ev.payload.get("result", {})
+            call_id = result.get("call_id", "")
+            # Only print delegate results (worker outputs); inner
+            # tool results already printed by their workers.
+            if call_id.startswith("call_"):
+                output = (result.get("output") or "")[:100]
+                print(f"  [→] {output}")
 
 
 if __name__ == "__main__":

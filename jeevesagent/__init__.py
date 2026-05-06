@@ -129,7 +129,18 @@ from .security import (
     StandardPermissions,
     SubprocessSandbox,
 )
-from .tools import InProcessToolHost, Tool, tool
+from .tools import (
+    InProcessToolHost,
+    PathEscapeError,
+    Tool,
+    bash_tool,
+    default_workdir,
+    edit_tool,
+    filesystem_tools,
+    read_tool,
+    tool,
+    write_tool,
+)
 
 __version__ = "0.4.0"
 
@@ -140,6 +151,14 @@ __all__ = [
     "Tool",
     "tool",
     "InProcessToolHost",
+    # built-in tools (filesystem + shell)
+    "PathEscapeError",
+    "bash_tool",
+    "default_workdir",
+    "edit_tool",
+    "filesystem_tools",
+    "read_tool",
+    "write_tool",
     # architecture
     "ActorCritic",
     "AgentSession",

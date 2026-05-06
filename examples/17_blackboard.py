@@ -1,115 +1,103 @@
-"""17_blackboard — Coordinator + agents share a state board.
+"""17_blackboard — Coordinator-led data analysis.
 
 What it shows:
-* The ``BlackboardArchitecture`` orchestrates a team via a shared
-  blackboard. A coordinator (LLM Agent) reads the current state and
-  decides which agent contributes next; each contribution is posted
-  back to the board; an optional decider synthesizes the final.
-* Without a coordinator, falls back to round-robin selection
-  (useful for smoke tests / prototyping).
-* Without a decider, falls back to "last contribution wins" or
-  "last answer-kind entry."
-* Coordinator output is parsed as JSON
-  (``{"terminate": ..., "next_agent": ..., "instruction": ...}``)
-  with markdown-fence stripping and a safe-default on parse
-  failure.
-
-Toy data-discovery scenario: hypothesis + evidence + critic agents
-take turns; coordinator picks who; decider synthesizes.
+* BlackboardArchitecture has agents that share a public state
+  board. A coordinator (LLM) reads the board each round and
+  decides who contributes next; an optional decider synthesizes
+  the final answer.
+* Real-world use: exploratory analysis where the decomposition
+  isn't known upfront — data discovery, research, root-cause
+  investigation. Particularly strong for problems where you don't
+  know which specialist's view will be needed when.
+* Demonstrates: round-by-round contributions, transparent state,
+  coordinator-driven turn order.
 
 Run:
+    pip install -e '.[dev,openai]'
+    # add OPENAI_API_KEY=sk-... to .env at repo root
     python examples/17_blackboard.py
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
+import sys
+from pathlib import Path
 
-from jeevesagent import (
-    Agent,
-    BlackboardArchitecture,
-    ScriptedModel,
-    ScriptedTurn,
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+
+if not os.environ.get("OPENAI_API_KEY"):
+    sys.exit(
+        "\n  ✗ OPENAI_API_KEY required. "
+        "Add OPENAI_API_KEY=sk-... to .env at repo root.\n"
+    )
+
+from jeevesagent import Agent, BlackboardArchitecture  # noqa: E402
+
+hypothesis = Agent(
+    instructions=(
+        "You propose causal hypotheses for unexplained phenomena. "
+        "Read the blackboard; if there's an open question, propose "
+        "ONE concrete hypothesis with a brief mechanism. If others "
+        "have proposed hypotheses, propose alternatives or refine "
+        "existing ones. Be specific; under 4 sentences."
+    ),
+    model="gpt-4.1-mini",
+)
+
+evidence = Agent(
+    instructions=(
+        "You assess what evidence would support or refute the "
+        "hypotheses on the blackboard. List 2-3 specific data "
+        "points or queries that would discriminate between the "
+        "hypotheses. Under 4 sentences."
+    ),
+    model="gpt-4.1-mini",
+)
+
+critic = Agent(
+    instructions=(
+        "You critique the analysis on the blackboard. Find weak "
+        "claims, missing evidence, alternative explanations not "
+        "yet considered. Be specific. Under 4 sentences."
+    ),
+    model="gpt-4.1-mini",
+)
+
+coordinator = Agent(
+    instructions=(
+        "You coordinate a small research team. Read the "
+        "blackboard state and decide who should contribute "
+        "next, or whether to terminate.\n\n"
+        "Output JSON exactly:\n"
+        '{"terminate": <bool>, "next_agent": '
+        '<"hypothesis"|"evidence"|"critic"|null>, '
+        '"instruction": <str|null>}\n\n'
+        "Terminate when the hypotheses, evidence, and critique "
+        "together support a clear conclusion. No prose, no "
+        "markdown fences."
+    ),
+    model="gpt-4.1-mini",
+)
+
+decider = Agent(
+    instructions=(
+        "You synthesize the final answer from a multi-agent "
+        "blackboard discussion. Give a confident conclusion that "
+        "integrates the hypotheses, supporting evidence, and the "
+        "critic's caveats. 2-4 sentences."
+    ),
+    model="gpt-4.1-mini",
 )
 
 
-def _scripted_agent(label: str, replies: list[str]) -> Agent:
-    return Agent(
-        f"You are the {label} agent.",
-        model=ScriptedModel([ScriptedTurn(text=r) for r in replies]),
-    )
-
-
 async def main() -> None:
-    # Three specialist agents take turns when the coordinator picks them.
-    hypothesis = _scripted_agent(
-        "hypothesis",
-        [
-            (
-                "Hypothesis: 30% YoY growth driven primarily by "
-                "expansion into mid-market accounts."
-            )
-        ],
-    )
-    evidence = _scripted_agent(
-        "evidence",
-        [
-            (
-                "Evidence: mid-market segment (51-500 employees) "
-                "grew 47% vs 18% in enterprise. Data: "
-                "revenue/segment.csv."
-            )
-        ],
-    )
-    critic = _scripted_agent(
-        "critic",
-        [
-            (
-                "Critic: hypothesis well-supported but doesn't "
-                "explain enterprise softness. Suggest digging into "
-                "churn data."
-            )
-        ],
-    )
-
-    # Coordinator picks each agent in turn, then terminates.
-    coordinator = _scripted_agent(
-        "coordinator",
-        [
-            (
-                '{"terminate": false, "next_agent": "hypothesis", '
-                '"instruction": "propose a hypothesis"}'
-            ),
-            (
-                '{"terminate": false, "next_agent": "evidence", '
-                '"instruction": "find supporting evidence"}'
-            ),
-            (
-                '{"terminate": false, "next_agent": "critic", '
-                '"instruction": "challenge the analysis"}'
-            ),
-            (
-                '{"terminate": true, "next_agent": null, '
-                '"instruction": null}'
-            ),
-        ],
-    )
-    decider = _scripted_agent(
-        "decider",
-        [
-            (
-                "FINAL: The 30% YoY growth is driven by mid-market "
-                "expansion (47% growth), evidenced by segment-level "
-                "revenue data. The critic's call to investigate "
-                "enterprise churn is well-taken — that's a follow-up."
-            )
-        ],
-    )
-
-    parent_model = ScriptedModel([ScriptedTurn(text="never reached")])
     agent = Agent(
-        "Data-discovery analyst",
-        model=parent_model,
+        "Root-cause analysis coordinator.",
+        model="gpt-4.1-mini",
         architecture=BlackboardArchitecture(
             agents={
                 "hypothesis": hypothesis,
@@ -118,69 +106,57 @@ async def main() -> None:
             },
             coordinator=coordinator,
             decider=decider,
-            max_rounds=8,
+            max_rounds=6,
         ),
     )
 
-    print("=== Streaming events ===")
-    async for event in agent.stream(
-        "What's driving our 30% YoY growth?"
-    ):
-        if event.kind != "architecture_event":
-            continue
-        name = event.payload.get("name", "")
-        if name == "blackboard.started":
-            agents = event.payload["agents"]
-            print(f"[started] agents={agents}")
-        elif name == "blackboard.coordinator_decided":
-            r = event.payload["round"]
-            terminate = event.payload["terminate"]
-            picked = event.payload.get("next_agent")
-            if terminate:
-                print(f"[round {r}] coordinator → terminate")
-            else:
-                print(f"[round {r}] coordinator → {picked}")
-        elif name == "blackboard.contribution":
-            r = event.payload["round"]
-            ag = event.payload["agent"]
-            content = event.payload["content"]
-            print(f"  [{ag} @ r{r}] {content[:80]}...")
-        elif name == "blackboard.completed":
-            board_size = event.payload["board_size"]
-            print(f"\n[completed; board has {board_size} entries]")
+    prompt = (
+        "Our SaaS product saw a 35% drop in daily active users "
+        "over the past 14 days. Nothing changed in our pricing, "
+        "marketing, or product. What's the most likely cause?"
+    )
 
-    # Re-run with fresh agents for final answer.
-    fresh_hyp = _scripted_agent("hypothesis", ["mid-market hypothesis"])
-    fresh_ev = _scripted_agent("evidence", ["evidence found"])
-    fresh_critic = _scripted_agent("critic", ["concerns noted"])
-    fresh_coord = _scripted_agent(
-        "coordinator",
-        [
-            '{"terminate": false, "next_agent": "hypothesis", "instruction": ""}',
-            '{"terminate": false, "next_agent": "evidence", "instruction": ""}',
-            '{"terminate": false, "next_agent": "critic", "instruction": ""}',
-            '{"terminate": true, "next_agent": null, "instruction": null}',
-        ],
-    )
-    fresh_decider = _scripted_agent(
-        "decider", ["Final synthesized answer about mid-market growth."]
-    )
-    fresh_agent = Agent(
-        "host",
-        model=ScriptedModel([ScriptedTurn(text="never")]),
-        architecture=BlackboardArchitecture(
-            agents={
-                "hypothesis": fresh_hyp,
-                "evidence": fresh_ev,
-                "critic": fresh_critic,
-            },
-            coordinator=fresh_coord,
-            decider=fresh_decider,
-            max_rounds=8,
-        ),
-    )
-    result = await fresh_agent.run("growth analysis")
-    print(f"\n=== Final answer ===\n{result.output}")
+    print("=" * 70)
+    print("BlackboardArchitecture — root-cause analysis")
+    print("=" * 70)
+    print(f"Problem: {prompt}\n")
+
+    async for ev in agent.stream(prompt):
+        kind = ev.kind.value
+        if kind == "model_chunk":
+            chunk = ev.payload.get("chunk", {})
+            if chunk.get("kind") == "text" and chunk.get("text"):
+                print(chunk["text"], end="", flush=True)
+        elif kind == "architecture_event":
+            name = ev.payload.get("name", "")
+            if name == "blackboard.coordinator_decided":
+                round_num = ev.payload.get("round")
+                terminate = ev.payload.get("terminate")
+                picked = ev.payload.get("next_agent")
+                if terminate:
+                    print(
+                        f"\n\n--- Round {round_num}: "
+                        f"coordinator → terminate ---"
+                    )
+                else:
+                    print(
+                        f"\n\n--- Round {round_num}: "
+                        f"coordinator → {picked} ---"
+                    )
+            elif name == "blackboard.invoking":
+                ag = ev.payload.get("agent")
+                print(f"\n[{ag} contributes:]")
+            elif name == "blackboard.completed":
+                size = ev.payload.get("board_size")
+                print(
+                    f"\n\n--- ✓ completed; board has {size} entries ---"
+                )
+        elif kind == "completed":
+            result = ev.payload.get("result") or {}
+            print("\n" + "=" * 70)
+            print("FINAL ANALYSIS")
+            print("=" * 70)
+            print(result.get("output", "(no output)"))
 
 
 if __name__ == "__main__":
