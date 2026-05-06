@@ -6,6 +6,46 @@ the test count after the slice landed. Newest at the top.
 
 ---
 
+## Slice 18 — Agent.resume(session_id) public API
+
+**What landed.** The user-facing payoff for slice 11's durable
+runtime. `agent.run(prompt, session_id=...)` now accepts an explicit
+session id; `agent.resume(session_id, prompt)` is the conventional
+spelling. When paired with `SqliteRuntime` (or any
+`JournaledRuntime`), already-completed model calls and tool dispatches
+replay from the journal instead of re-executing.
+
+### `agent/api.py`
+
+* `Agent.run(prompt, *, session_id=None)` — `None` (default)
+  auto-generates an id; pass an explicit string to resume.
+* `Agent.resume(session_id, prompt)` — alias for
+  `agent.run(prompt, session_id=session_id)` so the intent is
+  explicit at call sites.
+* `Agent.stream(prompt, *, session_id=None)` — same parameter on the
+  streaming surface.
+* `_loop` now accepts `session_id: str | None = None` and
+  auto-generates only when `None`.
+
+### Tests added (7)
+
+- `run(prompt, session_id=...)` propagates into `RunResult`.
+- `resume()` is an alias for `run()` with `session_id`.
+- Default `session_id` is auto-generated and distinct across calls.
+- **Replay against same `session_id`**: model script exhausted after
+  first run; second `resume()` returns cached chunks without
+  consuming any more script turns.
+- **Tool replay**: tool function never re-executes on resume.
+- **Cross-instance Sqlite replay**: brand-new `SqliteRuntime` against
+  the same DB file, same session id, replays cached chunks + tool
+  results without touching the underlying generators.
+- `stream(session_id=...)` emits events whose `session_id` matches.
+
+**Gates:** ruff clean, mypy `--strict` clean across **53 source
+files**, **243 passed + 4 skipped in 2.46s**.
+
+---
+
 ## Slice 17 — Examples + CI workflows
 
 **What landed.** Seven runnable example scripts that mirror the
@@ -1248,14 +1288,15 @@ package imports cleanly with 46 public names exported. No tests yet
 
 ---
 
-## Cumulative state (after slice 17)
+## Cumulative state (after slice 18)
 
-* **77 source files** under `jeevesagent/` and `tests/`
-* **236 tests passing** + 4 skipped (live-integration) in ~2.5 seconds total
+* **78 source files** under `jeevesagent/` and `tests/`
+* **243 tests passing** + 4 skipped (live-integration) in ~2.5 seconds total
 * **mypy `--strict` clean** across 53 production source files
 * **4 user-facing docs** (README + quickstart + recipes + architecture) totaling ~1295 lines
 * **7 runnable example scripts** + index, all verified end-to-end
 * **CI** (ruff + mypy + pytest matrix on Python 3.11 / 3.12 + examples smoke job) and **release** (PyPI trusted publishing on `v*` tags) workflows configured
+* **Pushed to GitHub:** https://github.com/Anurich/JeevesHarness
 * **ruff clean** including ASYNC lints (no `asyncio.gather` /
   `create_task` anywhere — everything goes through anyio task groups
   and memory-object streams)

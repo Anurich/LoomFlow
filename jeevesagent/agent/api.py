@@ -151,16 +151,40 @@ class Agent:
 
     # ---- public API ------------------------------------------------------
 
-    async def run(self, prompt: str) -> RunResult:
-        """Run the agent to completion and return its :class:`RunResult`."""
-        return await self._loop(prompt, emit=_noop_emit)
+    async def run(
+        self, prompt: str, *, session_id: str | None = None
+    ) -> RunResult:
+        """Run the agent to completion and return its :class:`RunResult`.
 
-    async def stream(self, prompt: str) -> AsyncIterator[Event]:
+        Pass ``session_id`` to resume a journaled run — when paired with
+        a durable runtime (e.g. :class:`SqliteRuntime`), already-completed
+        steps replay from the journal instead of re-executing. Without a
+        durable runtime, ``session_id`` just labels the run.
+        """
+        return await self._loop(prompt, emit=_noop_emit, session_id=session_id)
+
+    async def resume(
+        self, session_id: str, prompt: str
+    ) -> RunResult:
+        """Resume a previously-interrupted run from its journal.
+
+        Equivalent to ``agent.run(prompt, session_id=session_id)``.
+        Exists as a separate method so the intent is explicit at the
+        call site and to match the surface advertised by the engineering
+        plan.
+        """
+        return await self.run(prompt, session_id=session_id)
+
+    async def stream(
+        self, prompt: str, *, session_id: str | None = None
+    ) -> AsyncIterator[Event]:
         """Stream :class:`Event`\\ s as the loop produces them.
 
         The loop runs as a background task; events are pushed through a
         bounded memory stream so a slow consumer applies backpressure.
         Breaking out of the iteration cancels the producer cleanly.
+        ``session_id`` works the same as :meth:`run`'s — pass an
+        existing one to resume against a durable runtime's journal.
         """
         send, receive = anyio.create_memory_object_stream[Event](
             max_buffer_size=DEFAULT_STREAM_BUFFER
@@ -168,7 +192,7 @@ class Agent:
 
         async def _produce() -> None:
             try:
-                await self._loop(prompt, emit=send.send)
+                await self._loop(prompt, emit=send.send, session_id=session_id)
             except Exception as exc:  # noqa: BLE001 — surface as ERROR + re-raise
                 with anyio.CancelScope(shield=True):
                     await send.send(Event.error("", exc))
@@ -187,9 +211,18 @@ class Agent:
 
     # ---- the loop --------------------------------------------------------
 
-    async def _loop(self, prompt: str, *, emit: Emit) -> RunResult:
+    async def _loop(
+        self,
+        prompt: str,
+        *,
+        emit: Emit,
+        session_id: str | None = None,
+    ) -> RunResult:
         started_at = datetime.now(UTC)
-        session_id = new_id("sess")
+        # Caller-supplied session_id enables journal replay when paired
+        # with a durable runtime; auto-generated otherwise.
+        if session_id is None:
+            session_id = new_id("sess")
         loop_started = anyio.current_time()
 
         # Open a runtime session so journal-backed runtimes can record

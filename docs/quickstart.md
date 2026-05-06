@@ -308,6 +308,22 @@ The runtime journals every model call and tool dispatch by
 same DB file, replaying the same session returns cached results
 without re-executing anything.
 
+To resume an interrupted run explicitly:
+
+```python
+# First run — interrupted by Ctrl-C / OOM / power outage:
+result = await agent.run("complex task", session_id="my-task-2026-05-01")
+
+# Later, after the process restarted — same session_id picks up
+# where the journal left off. Already-completed model calls and
+# tool dispatches replay from the SQLite journal; only the
+# un-completed work runs fresh.
+result = await agent.resume("my-task-2026-05-01", "complex task")
+```
+
+`resume(session_id, prompt)` is just sugar for
+`run(prompt, session_id=session_id)`.
+
 ## 10. Telemetry (OpenTelemetry)
 
 ```python

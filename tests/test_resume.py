@@ -1,0 +1,194 @@
+"""Agent.resume / session_id round-trip against the journaled runtime.
+
+The bar: when an agent runs once with a given ``session_id`` against a
+journaled runtime, a *second* call with the same ``session_id`` (and
+the same prompt) returns cached model output and tool results without
+re-executing the underlying functions.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from jeevesagent import (
+    Agent,
+    InMemoryJournalStore,
+    JournaledRuntime,
+    ScriptedModel,
+    ScriptedTurn,
+    SqliteRuntime,
+    tool,
+)
+from jeevesagent.core.types import EventKind, ToolCall
+
+pytestmark = pytest.mark.anyio
+
+
+# ---------------------------------------------------------------------------
+# session_id round-trip — explicit
+# ---------------------------------------------------------------------------
+
+
+async def test_run_with_session_id_uses_provided_value() -> None:
+    """Passing ``session_id`` propagates into the RunResult."""
+    agent = Agent("hi")
+    result = await agent.run("hello", session_id="custom-sess-1")
+    assert result.session_id == "custom-sess-1"
+
+
+async def test_resume_is_alias_for_run_with_session_id() -> None:
+    agent = Agent("hi")
+    via_resume = await agent.resume("custom-sess-2", "hello")
+    assert via_resume.session_id == "custom-sess-2"
+
+
+async def test_default_session_id_is_auto_generated() -> None:
+    agent = Agent("hi")
+    r1 = await agent.run("hello")
+    r2 = await agent.run("hello")
+    assert r1.session_id != r2.session_id  # auto-generated, distinct
+
+
+# ---------------------------------------------------------------------------
+# Journal-backed replay against the same session_id
+# ---------------------------------------------------------------------------
+
+
+async def test_resume_replays_model_call_from_journal() -> None:
+    """Running twice with the same session_id and journal returns the
+    cached model output without re-running the underlying generator."""
+
+    class CountingModel:
+        name = "counting"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def stream(self, messages, **kwargs):  # type: ignore[no-untyped-def]
+            self.calls += 1
+            yield {"kind": "text", "text": f"call-{self.calls}"}
+            yield {"kind": "finish", "finish_reason": "stop", "usage": None}
+
+    # Use ScriptedModel for the actual agent loop; CountingModel above
+    # is for documentation only. The real verification: ScriptedModel
+    # exhausts its turns after one call, so the *second* run with the
+    # same session_id must replay rather than re-stream.
+    model = ScriptedModel(
+        [ScriptedTurn(text="The answer is 42.")]
+    )
+
+    runtime = JournaledRuntime(InMemoryJournalStore())
+    agent = Agent("hi", model=model, runtime=runtime)
+
+    r1 = await agent.run("what is the answer", session_id="fixed")
+    assert r1.output == "The answer is 42."
+    assert model.remaining == 0  # script consumed
+
+    # Replay against the same session_id: model.stream is journaled,
+    # so we get the cached chunks back without consuming any more
+    # ScriptedTurns.
+    r2 = await agent.resume("fixed", "what is the answer")
+    assert r2.output == "The answer is 42."
+    assert model.remaining == 0  # still consumed; nothing new asked
+
+
+async def test_resume_replays_tool_call_from_journal() -> None:
+    """Tool calls are journaled; second run reuses cached results."""
+
+    call_log: list[str] = []
+
+    @tool
+    async def expensive(label: str) -> str:
+        """Pretend to do work."""
+        call_log.append(label)
+        return f"result-for-{label}"
+
+    model = ScriptedModel(
+        [
+            ScriptedTurn(
+                tool_calls=[
+                    ToolCall(id="c1", tool="expensive", args={"label": "x"})
+                ]
+            ),
+            ScriptedTurn(text="ok"),
+        ]
+    )
+    runtime = JournaledRuntime(InMemoryJournalStore())
+    agent = Agent("hi", model=model, tools=[expensive], runtime=runtime)
+
+    r1 = await agent.run("do the thing", session_id="fixed-tool")
+    assert "ok" in r1.output
+    assert call_log == ["x"]
+
+    # The model script is exhausted; without replay, the second run
+    # would emit nothing useful. With replay, the journaled model
+    # chunks AND the journaled tool result both come from cache.
+    r2 = await agent.resume("fixed-tool", "do the thing")
+    assert r2.output == r1.output
+    # Tool function NEVER ran a second time.
+    assert call_log == ["x"]
+
+
+# ---------------------------------------------------------------------------
+# Cross-instance replay via SqliteRuntime
+# ---------------------------------------------------------------------------
+
+
+async def test_resume_against_fresh_sqlite_runtime(tmp_path: Path) -> None:
+    """A new SqliteRuntime instance against the same DB file replays
+    cached steps when given the same session_id."""
+
+    counter = {"runs": 0}
+
+    @tool
+    async def expensive() -> str:
+        counter["runs"] += 1
+        return f"v{counter['runs']}"
+
+    db = tmp_path / "journal.db"
+
+    # First instance writes the journal.
+    model_a = ScriptedModel(
+        [
+            ScriptedTurn(
+                tool_calls=[ToolCall(id="c1", tool="expensive", args={})]
+            ),
+            ScriptedTurn(text="done"),
+        ]
+    )
+    rt_a = SqliteRuntime(db)
+    agent_a = Agent("hi", model=model_a, tools=[expensive], runtime=rt_a)
+    r_a = await agent_a.run("go", session_id="resumable")
+    assert "done" in r_a.output
+    assert counter["runs"] == 1
+
+    # Simulate process restart: brand-new model, brand-new runtime,
+    # same DB, same session_id.
+    model_b = ScriptedModel(
+        [ScriptedTurn(text="this should not be reached")]
+    )
+    rt_b = SqliteRuntime(db)
+    agent_b = Agent("hi", model=model_b, tools=[expensive], runtime=rt_b)
+    r_b = await agent_b.resume("resumable", "go")
+
+    # Same output (model chunks replayed from journal); tool function
+    # NEVER ran again.
+    assert r_b.output == r_a.output
+    assert counter["runs"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Streaming with explicit session_id
+# ---------------------------------------------------------------------------
+
+
+async def test_stream_with_session_id_emits_events_with_that_id() -> None:
+    agent = Agent("hi")
+    seen_ids: set[str] = set()
+    async for event in agent.stream("hello", session_id="streamed-sess"):
+        seen_ids.add(event.session_id)
+        if event.kind == EventKind.COMPLETED:
+            assert event.payload["result"]["session_id"] == "streamed-sess"
+    assert seen_ids == {"streamed-sess"}
