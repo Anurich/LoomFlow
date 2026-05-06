@@ -16,6 +16,14 @@ just `pip install -e '.[dev]'`.
 | [`06_production.py`](06_production.py) | Full production shape: every cross-cutting concern wired up | optional API key |
 | [`07_litellm.py`](07_litellm.py) | LiteLLM dispatch — ~100 providers (Mistral / Cohere / Bedrock / Vertex / Ollama / Groq / Gemini / ...) through one adapter | optional `MISTRAL_API_KEY` / `COHERE_API_KEY` / `GROQ_API_KEY` / `GEMINI_API_KEY` |
 | [`08_from_config.py`](08_from_config.py) | Declarative `Agent.from_config(toml_path)` + `Agent.from_dict(cfg)` + `@agent.with_tool` decorator | nothing |
+| [`09_self_refine.py`](09_self_refine.py) | `SelfRefine` architecture — generator → critic → refiner cycles with stop-phrase convergence | nothing |
+| [`10_reflexion.py`](10_reflexion.py) | `Reflexion` architecture — verbal RL: lessons from failed attempts persist via `memory.working()` and shape the next attempt | nothing |
+| [`11_router.py`](11_router.py) | `Router` architecture — classify input, dispatch to one specialist `Agent` (with confidence threshold + fallback) | nothing |
+| [`12_supervisor.py`](12_supervisor.py) | `Supervisor` architecture — workers + a `delegate(...)` tool, parallel delegations in one turn | nothing |
+| [`13_actor_critic.py`](13_actor_critic.py) | `ActorCritic` architecture — actor + adversarial critic with structured JSON critique parsing | nothing |
+| [`14_tree_of_thoughts.py`](14_tree_of_thoughts.py) | `TreeOfThoughts` architecture — BFS beam search with per-node evaluation; observable search tree | nothing |
+| [`15_debate.py`](15_debate.py) | `MultiAgentDebate` architecture — N debaters argue across rounds, judge synthesizes; parallel debater dispatch per round | nothing |
+| [`15_debate.py`](15_debate.py) | `MultiAgentDebate` architecture — N debaters argue in parallel rounds, judge synthesizes | nothing |
 
 Read in order; each builds on the last conceptually.
 

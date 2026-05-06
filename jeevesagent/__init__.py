@@ -2,10 +2,19 @@
 
 from .agent import Agent
 from .architecture import (
+    ActorCritic,
     AgentSession,
     Architecture,
     Dependencies,
+    MultiAgentDebate,
     ReAct,
+    Reflexion,
+    Router,
+    RouterRoute,
+    SelfRefine,
+    Supervisor,
+    ThoughtNode,
+    TreeOfThoughts,
     resolve_architecture,
 )
 from .core import (
@@ -120,10 +129,19 @@ __all__ = [
     "tool",
     "InProcessToolHost",
     # architecture
+    "ActorCritic",
     "AgentSession",
     "Architecture",
     "Dependencies",
+    "MultiAgentDebate",
     "ReAct",
+    "Reflexion",
+    "Router",
+    "RouterRoute",
+    "SelfRefine",
+    "Supervisor",
+    "ThoughtNode",
+    "TreeOfThoughts",
     "resolve_architecture",
     "AllowAll",
     "StandardPermissions",

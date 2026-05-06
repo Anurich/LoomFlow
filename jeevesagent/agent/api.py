@@ -171,6 +171,17 @@ class Agent:
         return self._permissions
 
     @property
+    def instructions(self) -> str:
+        """The system prompt the agent runs with.
+
+        Surfaced as a public property so multi-agent architectures
+        (e.g. :class:`~jeevesagent.architecture.Supervisor`) can read
+        each worker's intended role when composing instructions for
+        the supervising model.
+        """
+        return self._instructions
+
+    @property
     def architecture(self) -> Architecture:
         """The configured :class:`Architecture` strategy.
 

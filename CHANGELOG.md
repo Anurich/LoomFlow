@@ -9,6 +9,171 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 
 ## [0.3.0] — unreleased
 
+### Added — Architectures
+
+* **`MultiAgentDebate`** — N debater Agents argue across rounds with
+  optional judge synthesis. Round 0 is independent (parallel via
+  anyio task group); rounds 1..K each debater sees the full prior
+  transcript and defends or updates its position. Naive convergence
+  check (whitespace-normalized exact match) terminates early when
+  all debaters agree; pass `convergence_check=False` to disable.
+  When `judge=None`, falls back to majority vote on the final
+  round (modal answer wins, original casing preserved). Each
+  debater + judge invocation uses deterministic session ids
+  (`{parent}__debater_<i>_round_<r>` / `{parent}__judge`) for
+  replay correctness. Min 2 debaters; min 1 round. Useful for
+  high-stakes contested questions; reserve for cases where a wrong
+  answer is expensive (3-5× cost over single-agent).
+* **`TreeOfThoughts`** + **`ThoughtNode`** — branching exploration
+  with per-node evaluation (Yao et al. 2023). BFS beam search:
+  each level generates `branch_factor` candidates per frontier
+  node, evaluator scores each, top `beam_width` survive to the
+  next level. Best leaf wins. Early-exit on
+  `score >= solved_threshold` (default 1.0). Per-call uses
+  `text_only_model_call` so every propose / evaluate is journaled.
+  Architecture events surface tree state at each step (`tot.proposed`,
+  `tot.evaluated`, `tot.pruned`, `tot.solved`, `tot.completed`).
+  Full search tree is stashed on `session.metadata["tot_nodes"]`
+  for post-hoc rendering. Resolver string `"tree-of-thoughts"`.
+* **`ActorCritic`** — generator + adversarial critic. Both the
+  actor and critic are required, separate `Agent` instances —
+  same-model self-iteration is what `SelfRefine` is for; ActorCritic
+  earns its complexity only when there's actual asymmetry (different
+  models, different prompts, different blind spots). Round 0 is
+  actor; each round is critic → approve check → actor refine. Critic
+  output parsed as JSON (with markdown-fence stripping) into
+  `CriticOutput(issues, score, summary)`; regex-only fallback when
+  JSON parsing fails. Each actor / critic invocation uses a
+  deterministic session id (`{parent}__actor_<round>` /
+  `{parent}__critic_<round>`) for replay correctness. Constructor:
+  `ActorCritic(actor=..., critic=..., max_rounds=3,
+  approval_threshold=0.9)`. Composes inside Supervisor (per-worker
+  quality control) and inside Reflexion (cross-session learning of
+  effective critique patterns).
+* **`Supervisor`** — second multi-agent architecture; the
+  hierarchical pattern. Workers (dict of `Agent` instances) +
+  a base architecture (default `ReAct`). The supervisor's
+  ToolHost is wrapped to inject one extra tool —
+  `delegate(worker, instructions)` — that routes calls to the
+  named worker `Agent` and returns its output as the tool result.
+  Multiple `delegate` calls in a single supervisor turn run in
+  parallel for free (ReAct's tool dispatch is already a
+  task-group). Custom `delegate_tool_name=` to avoid clashes.
+  Worker session ids are uniquely generated per delegation, so
+  the same worker can be invoked multiple times in one turn
+  without journal collisions. Composition: workers can be any
+  architecture themselves (DeepAgent for research, Reflexion for
+  cross-session learning). The agent's own `instructions` are
+  preserved and the supervisor template is appended.
+* **`Agent.instructions`** public property — symmetric with
+  `model`/`memory`/`runtime`/`architecture`/etc. Surfaced so
+  multi-agent architectures (Supervisor, future Actor-Critic) can
+  read each worker's role description when composing supervising
+  prompts.
+* **`Router`** + **`RouterRoute`** — first multi-agent architecture.
+  Classify input → dispatch to ONE specialist `Agent`. Each route is
+  a fully-constructed `Agent` (its own model / memory / tools /
+  architecture). Specialist runs with a deterministic session_id
+  (`{parent}__route_{route_name}`) so replay flows through both the
+  parent's classifier journal and the specialist's own journal.
+  Optional `fallback_route` + `require_confidence_above` for graceful
+  handling of ambiguous inputs and unknown routes from the
+  classifier. `declared_workers()` exposes routes by name for
+  introspection. NOT registered as a resolver string — Router needs
+  config; pass an instance:
+  `architecture=Router(routes=[RouterRoute(name="billing",
+  agent=billing_agent), ...], fallback_route="general")`.
+* **`Reflexion`** — verbal reinforcement learning via memory
+  (Shinn et al. 2023). Wraps any base architecture (default
+  `ReAct`); each attempt, an evaluator scores the output (0-1) and
+  if below `threshold` (default 0.8) a reflector produces a
+  one-sentence lesson. Lessons are appended via
+  `memory.append_block(lessons_block_name, ...)` so the base
+  architecture's own `memory.working()` recall picks them up on
+  the next attempt — zero plumbing on the base side. With a
+  persistent memory backend (Sqlite / Postgres / Redis), lessons
+  carry across process restarts (cross-session learning).
+  Constructor: `architecture=Reflexion(base=ReAct(),
+  threshold=0.8, max_attempts=3, lessons_block_name="...")` or
+  `architecture="reflexion"`.
+* **`SelfRefine`** — iterative refinement via critique
+  (Madaan et al. 2023). Wraps any `base` architecture (default
+  `ReAct`); each round, the same model plays critic and refiner.
+  Stops on `stop_phrase` (default `"no issues"`) or after
+  `max_rounds`. Composable: `architecture=SelfRefine(base=ReAct(...),
+  max_rounds=3)` or `architecture="self-refine"`.
+* **`EventKind.ARCHITECTURE_EVENT`** + `Event.architecture_event(
+  session_id, name, **data)` factory — generic progress event for
+  architecture-specific milestones. Each architecture uses a
+  namespaced name (`"self_refine.critique"`,
+  `"self_refine.refined"`, `"self_refine.converged"`,
+  `"self_refine.max_rounds_reached"`) so consumers can pattern-match
+  without expanding `EventKind` per architecture.
+* **`jeevesagent.architecture.helpers`** — shared utilities
+  architectures reuse: `text_only_model_call(deps, step_name,
+  messages) -> (text, usage)` (one-shot text-only model call,
+  journaled for replay) and `add_usage(a, b)` (sum two `Usage`
+  records).
+* **12 new SelfRefine tests** covering protocol satisfaction,
+  stop-phrase early exit, full critique → refine cycles,
+  `max_rounds` enforcement, budget gating, progress events, and
+  `architecture="self-refine"` resolver string.
+* **19 new Reflexion tests** covering protocol, constructor
+  validation, score parsing (`"score: X"` patterns +
+  fallbacks + clamping), threshold-met early exit, full
+  evaluate → reflect → retry cycles, `max_attempts` enforcement,
+  lesson persistence into the memory block, lesson visibility on
+  the next attempt's seed_context, end-to-end via `ReAct` base,
+  and resolver-string construction.
+* **21 new Router tests** covering protocol, constructor validation
+  (empty / duplicate / invalid fallback / confidence range),
+  classification regex (`route:` + `confidence:` + `=`-separator +
+  defaults + clamping), successful dispatch, fallback paths
+  (low confidence, unknown route), specialist interruption
+  propagation, deterministic specialist session_id, architecture
+  events surfacing through `Agent.stream`.
+* **13 new Supervisor tests** covering protocol, constructor
+  validation, single delegation, parallel delegations (two
+  delegate calls in one turn), unknown-worker error handling,
+  instructions composition (user prompt + template + worker
+  descriptions), unique worker session ids per delegation, custom
+  delegate tool name, and the helper `_make_delegate_tool`
+  building a valid `Tool`.
+* **19 new ActorCritic tests** covering protocol, constructor
+  validation, critique-parsing (pure JSON / markdown-fenced JSON /
+  regex fallback / empty-string default), single-round approval
+  (no refine call when critic approves on round 1), full
+  refine-then-approve cycles, max_rounds enforcement, full event
+  sequence emission, deterministic actor/critic session ids per
+  round, and interruption propagation from sub-agents.
+* **16 new TreeOfThoughts tests** covering protocol, constructor
+  validation (branch_factor / max_depth / beam_width /
+  solved_threshold ranges), single-level beam pruning, multi-level
+  expansion with deterministic top-by-score selection, early
+  termination on solved_threshold, max_depth enforcement, helper
+  `_chain_to_root`, full event sequence emission, and beam pruning
+  to top-N per level.
+* **20 new MultiAgentDebate tests** covering protocol, constructor
+  validation (≥2 debaters, ≥1 rounds), helpers (`_normalize`,
+  `_converged`, `_majority_vote` including casing preservation),
+  parallel round 0, multi-round with history visibility, convergence
+  early-exit, judge synthesis path, majority-vote fallback,
+  deterministic debater + judge session ids, and full event
+  sequence emission.
+* **7 new examples** — `examples/09_self_refine.py`,
+  `10_reflexion.py`, `11_router.py`, `12_supervisor.py`,
+  `13_actor_critic.py`, `14_tree_of_thoughts.py`, `15_debate.py`.
+  Each runs deterministically with `ScriptedModel` (no API key) and
+  prints a streaming event view plus the final answer.
+* **`parse_score(text) -> float`** promoted to
+  `jeevesagent.architecture.helpers` (was private in `reflexion.py`).
+  Used by Reflexion, Tree of Thoughts, and any future architecture
+  with an evaluator step.
+* Total tests: **476** (was 341 in v0.2.0; +135 across the v0.3
+  architecture work — 15 foundation + 12 SelfRefine + 19 Reflexion +
+  21 Router + 13 Supervisor + 19 ActorCritic + 16 TreeOfThoughts +
+  20 MultiAgentDebate).
+
 ### Added — Architecture protocol foundation
 
 * **`jeevesagent.architecture`** package — pluggable agent-loop

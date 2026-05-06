@@ -24,7 +24,6 @@ import anyio
 from anyio.streams.memory import MemoryObjectSendStream
 
 from ..core.types import (
-    Episode,
     Event,
     Message,
     PermissionDecision,
@@ -35,6 +34,7 @@ from ..core.types import (
 )
 from ..security.audit import AuditLog
 from .base import AgentSession, Dependencies
+from .helpers import add_usage
 
 if TYPE_CHECKING:
     from ..agent.api import Agent
@@ -165,7 +165,7 @@ class ReAct:
                         session_id=session.id,
                         model=deps.model.name,
                     )
-                session.cumulative_usage = _add_usage(
+                session.cumulative_usage = add_usage(
                     session.cumulative_usage, usage
                 )
                 session.output = text
@@ -410,15 +410,4 @@ def _format_tool_message(result: ToolResult) -> str:
     return f"ERROR: {result.error or 'unknown'}"
 
 
-def _add_usage(a: Usage, b: Usage) -> Usage:
-    return Usage(
-        input_tokens=a.input_tokens + b.input_tokens,
-        output_tokens=a.output_tokens + b.output_tokens,
-        cost_usd=a.cost_usd + b.cost_usd,
-    )
-
-
-# Public re-exports for callers that want to compose with ReAct
-# helpers (e.g. Reflexion will reuse _build_seed_messages with a
-# lessons-prefix injected).
-__all__ = ["ReAct", "Episode"]
+__all__ = ["ReAct"]

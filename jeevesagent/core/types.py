@@ -273,6 +273,12 @@ class EventKind(StrEnum):
     PERMISSION_DECISION = "permission_decision"
     ERROR = "error"
     COMPLETED = "completed"
+    ARCHITECTURE_EVENT = "architecture_event"
+    """Generic architecture-progress event. Carries a namespaced
+    ``name`` in the payload (e.g. ``"self_refine.critique"``,
+    ``"reflexion.lesson_persisted"``, ``"router.classified"``) so
+    each architecture can stream its own progress signal without
+    expanding :class:`EventKind`."""
 
 
 class Event(BaseModel):
@@ -345,6 +351,29 @@ class Event(BaseModel):
             kind=EventKind.COMPLETED,
             session_id=session_id,
             payload={"result": result},
+        )
+
+    @classmethod
+    def architecture_event(
+        cls,
+        session_id: str,
+        name: str,
+        **data: Any,
+    ) -> "Event":
+        """Generic architecture-progress event.
+
+        ``name`` is a namespaced string identifying the source
+        architecture and the kind of progress
+        (e.g. ``"self_refine.critique"``,
+        ``"reflexion.lesson_persisted"``,
+        ``"router.classified"``). ``data`` is merged into the
+        payload alongside ``name`` so consumers can pattern-match
+        on ``name`` and read structured fields off the rest.
+        """
+        return cls(
+            kind=EventKind.ARCHITECTURE_EVENT,
+            session_id=session_id,
+            payload={"name": name, **data},
         )
 
 

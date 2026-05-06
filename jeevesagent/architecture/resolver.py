@@ -16,9 +16,15 @@ from __future__ import annotations
 from ..core.errors import ConfigError
 from .base import Architecture
 from .react import ReAct
+from .reflexion import Reflexion
+from .self_refine import SelfRefine
+from .tree_of_thoughts import TreeOfThoughts
 
 KNOWN: dict[str, type[Architecture]] = {
     "react": ReAct,
+    "reflexion": Reflexion,
+    "self-refine": SelfRefine,
+    "tree-of-thoughts": TreeOfThoughts,
 }
 
 

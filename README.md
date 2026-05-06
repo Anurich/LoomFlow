@@ -37,9 +37,19 @@ Every agent framework today forces a choice you shouldn't have to make:
 JeevesAgent is the harness for engineers who want to **ship production
 agents without binding their stack to one model lab**. It's:
 
-* **Model-agnostic** — Anthropic, OpenAI, and (soon) LiteLLM behind one
-  `Model` protocol. String-based resolver: `model="claude-opus-4-7"` or
-  `model="gpt-4o"` — no decision lock-in.
+* **Model-agnostic** — Anthropic, OpenAI, and ~100 more via LiteLLM
+  (Mistral, Cohere, Bedrock, Vertex, Together, Ollama, Gemini, Groq,
+  Replicate, Azure …) behind one `Model` protocol. String-based
+  resolver: `model="claude-opus-4-7"`, `"gpt-4o"`, `"mistral-large"`,
+  `"command-r-plus"`, … — no decision lock-in.
+* **Pluggable architectures** — the agent loop is a strategy. Pick
+  ReAct (default), Self-Refine (critique + iterate), Reflexion
+  (verbal RL via memory), Router (classify + dispatch to one
+  specialist), Supervisor (workers + delegate), ActorCritic
+  (actor + adversarial critic), TreeOfThoughts (BFS beam search
+  over branching reasoning paths), or MultiAgentDebate (N debaters
+  argue, judge synthesizes). Same `Agent` surface; one kwarg flips
+  the iteration pattern.
 * **MCP-native** — MCP isn't an integration, it's the spine. Plug
   Jeeves Gateway, Composio, or any MCP server into a single
   `MCPRegistry` and your tools just work.
@@ -129,27 +139,138 @@ MODEL_CHUNK × N → COMPLETED` flow through.
 
 ---
 
+## Architectures: the agent loop is a strategy
+
+The default loop is ReAct (observe / think / act). When that doesn't
+fit your problem, swap it for a different iteration pattern with one
+kwarg — everything else (model, memory, tools, budget, telemetry,
+runtime) stays exactly the same.
+
+```python
+from jeevesagent import (
+    Agent, ReAct, SelfRefine, Reflexion, Router, RouterRoute,
+    Supervisor, ActorCritic, TreeOfThoughts, MultiAgentDebate,
+)
+
+# Default — observe / think / act
+agent = Agent("...", model="claude-opus-4-7")
+
+# Iterate until critic says no more issues
+agent = Agent("...", model="claude-opus-4-7", architecture="self-refine")
+
+# Verbal RL: lessons from failed attempts persist via memory.working()
+# and shape future runs.
+agent = Agent("...", model="claude-opus-4-7", architecture="reflexion")
+
+# Classify input → dispatch to one specialist Agent
+agent = Agent(
+    "Customer support entry point",
+    model="claude-haiku-4-5",        # cheap classifier
+    architecture=Router(routes=[
+        RouterRoute(name="billing", agent=billing_agent, description="..."),
+        RouterRoute(name="tech",    agent=tech_agent,    description="..."),
+        RouterRoute(name="general", agent=general_agent, description="..."),
+    ], fallback_route="general"),
+)
+
+# Workers + a delegate(...) tool. Multiple delegations in one
+# supervisor turn run in parallel for free.
+agent = Agent(
+    "You manage a small team",
+    model="claude-opus-4-7",
+    architecture=Supervisor(workers={
+        "researcher": researcher_agent,
+        "coder":      coder_agent,
+        "writer":     writer_agent,
+    }),
+)
+
+# Actor + adversarial critic with different models — the canonical
+# pattern for code review and quality-critical work.
+agent = Agent(
+    "Code-quality coordinator",
+    architecture=ActorCritic(
+        actor=Agent("...", model="claude-opus-4-7"),
+        critic=Agent("...", model="gpt-4o"),  # different model = different blind spots
+        max_rounds=3, approval_threshold=0.9,
+    ),
+)
+
+# BFS beam search over candidate reasoning steps. Each level proposes
+# branch_factor candidates, evaluator scores them, top beam_width
+# survive. Useful for combinatorial / planning / math tasks.
+agent = Agent(
+    "...",
+    model="claude-opus-4-7",
+    architecture=TreeOfThoughts(
+        branch_factor=3, beam_width=2, max_depth=4, solved_threshold=0.95,
+    ),
+)
+
+# N debaters argue across rounds; judge synthesizes. Use different
+# MODELS for genuine prior diversity. Reserve for contested questions
+# where wrong answers are expensive (3-5× cost).
+agent = Agent(
+    "Investment committee moderator",
+    architecture=MultiAgentDebate(
+        debaters=[optimist_agent, skeptic_agent, analyst_agent],
+        judge=cio_agent,
+        rounds=2,
+    ),
+)
+
+# N debaters argue across parallel rounds; judge synthesizes the
+# verdict. Use different MODELS for genuine prior diversity.
+agent = Agent(
+    "Investment committee moderator",
+    model="claude-opus-4-7",
+    architecture=MultiAgentDebate(
+        debaters=[optimist_agent, skeptic_agent, analyst_agent],
+        judge=cio_agent,
+        rounds=2, convergence_check=True,
+    ),
+)
+
+# Composition: Reflexion *of* a Supervisor — cross-session learning
+# of which worker handles which intent best.
+agent = Agent(
+    "...",
+    model="claude-opus-4-7",
+    architecture=Reflexion(base=Supervisor(workers={...}), threshold=0.85),
+)
+```
+
+Architectures are pluggable via the `Architecture` protocol — three
+methods (`name`, `run`, `declared_workers`) and you have a custom
+strategy. See [`Subagent.md`](Subagent.md) for the full design
+rationale and 14-architecture catalogue covering the cases the
+shipped five don't yet handle.
+
+---
+
 ## Capability matrix
 
 | Capability | What you get | Where |
 |---|---|---|
-| **Model adapters** | Anthropic, OpenAI, Echo (zero-key), Scripted (tests) | `jeevesagent.AnthropicModel`, `OpenAIModel`, `EchoModel`, `ScriptedModel` |
-| **String model resolver** | `model="claude-opus-4-7"`, `"gpt-4o"`, `"echo"` | `Agent.__init__` |
-| **Tools** | `@tool` decorator with auto-schema, sync + async | `jeevesagent.tool`, `Tool` |
+| **Architecture protocol** | Pluggable agent-loop strategy: ReAct, SelfRefine, Reflexion, Router, Supervisor, ActorCritic, TreeOfThoughts, MultiAgentDebate | `Architecture`, `ReAct`, `SelfRefine`, `Reflexion`, `Router`, `Supervisor`, `ActorCritic`, `TreeOfThoughts`, `MultiAgentDebate` |
+| **Model adapters** | Anthropic, OpenAI, LiteLLM (~100 providers), Echo (zero-key), Scripted (tests) | `jeevesagent.AnthropicModel`, `OpenAIModel`, `LiteLLMModel`, `EchoModel`, `ScriptedModel` |
+| **String model resolver** | `model="claude-opus-4-7"`, `"gpt-4o"`, `"mistral-large"`, `"command-r"`, `"echo"`, `"litellm/<any>"` | `Agent.__init__` |
+| **Tools** | `@tool` decorator with auto-schema, sync + async; `agent.with_tool` decorator; `add_tool` / `remove_tool` / `tools_list` | `jeevesagent.tool`, `Tool` |
 | **MCP servers** | stdio + Streamable HTTP, multi-server registry, name disambiguation | `MCPRegistry`, `MCPServerSpec` |
 | **Jeeves Gateway** | One-line: `tools=JeevesGateway.from_env()` | `jeevesagent.jeeves` |
 | **Memory backends** | In-memory dict, vector cosine, Chroma, Postgres+pgvector, Redis | `InMemoryMemory`, `VectorMemory`, `ChromaMemory`, `PostgresMemory`, `RedisMemory` |
-| **Embedders** | HashEmbedder (deterministic, zero deps), OpenAIEmbedder | `HashEmbedder`, `OpenAIEmbedder` |
-| **Bi-temporal facts** | All five memory backends. LLM-driven `Consolidator`. Auto-consolidate. | `Fact`, `Consolidator`, `*FactStore` |
-| **Durable runtime** | sqlite-backed replay across process restarts | `SqliteRuntime`, `JournaledRuntime` |
+| **Embedders** | HashEmbedder (deterministic, zero deps), OpenAIEmbedder, VoyageEmbedder, CohereEmbedder | `HashEmbedder`, `OpenAIEmbedder`, `VoyageEmbedder`, `CohereEmbedder` |
+| **Bi-temporal facts** | All five memory backends. LLM-driven `Consolidator`. Auto-consolidate, plus `ConsolidationWorker` for long-lived agents. | `Fact`, `Consolidator`, `*FactStore` |
+| **Durable runtime** | sqlite or postgres-backed replay across process restarts | `SqliteRuntime`, `PostgresRuntime`, `JournaledRuntime` |
 | **Streaming** | `agent.stream()` → `AsyncIterator[Event]` with backpressure | `Agent.stream` |
 | **Permissions** | mode-based + allow/deny lists, mirrors Claude Agent SDK | `StandardPermissions`, `Mode` |
 | **Hooks** | `@agent.before_tool` / `@agent.after_tool` decorators | `HookRegistry` |
-| **Sandbox** | `FilesystemSandbox` blocks path-arg escapes (incl. symlinks) | `FilesystemSandbox` |
+| **Sandbox** | `FilesystemSandbox` blocks path-arg escapes; `SubprocessSandbox` for full isolation | `FilesystemSandbox`, `SubprocessSandbox` |
 | **Budget** | Per-token / per-cost / per-wall-clock limits with soft warnings | `StandardBudget`, `BudgetConfig` |
 | **Telemetry** | OpenTelemetry spans + metrics for every milestone | `OTelTelemetry` |
 | **Audit log** | HMAC-signed JSONL or in-memory; tracks every tool call | `FileAuditLog`, `InMemoryAuditLog` |
 | **Certified values** | Freshness + lineage policies | `FreshnessPolicy`, `LineagePolicy` |
+| **Declarative config** | Build agents from TOML or dicts | `Agent.from_config(path)`, `Agent.from_dict(cfg)` |
 
 ---
 
@@ -161,19 +282,28 @@ MODEL_CHUNK × N → COMPLETED` flow through.
 | [`docs/recipes.md`](docs/recipes.md) | Production patterns: persistent memory, MCP, durable replay, audit |
 | [`docs/architecture.md`](docs/architecture.md) | Module tour, lifecycle, extension points |
 | [`docs/migration_0.1_to_0.2.md`](docs/migration_0.1_to_0.2.md) | What changed in 0.2.0; how to migrate |
+| [`Subagent.md`](Subagent.md) | Architecture-protocol design rationale; full 14-architecture catalogue (the 5 shipped, the 9 candidates) |
 | [`project.md`](project.md) | The full engineering plan (the design doc) |
 | [`BUILD_LOG.md`](BUILD_LOG.md) | Slice-by-slice changelog |
+| [`examples/`](examples/) | 16 runnable scripts — `00_hello.py` through `15_debate.py`, every shipped architecture covered |
 
 ---
 
 ## Status
 
-* **236 tests pass** in ~2.5 seconds
-* **mypy `--strict`** clean across 53 production source files
+* **476 tests pass** in ~5 seconds (5 env-gated integrations skip
+  without `JEEVES_TEST_PG_DSN` / `JEEVES_TEST_REDIS_URL`)
+* **mypy `--strict`** clean across 69 production source files
 * **ruff** clean including `flake8-async` lints
-* Phases 1, 2, 3, 4, 5 (essentials), 6 (essentials) of the engineering
-  plan all shipped. DBOS / Temporal / OS-level sandboxes / LiteLLM
-  remain as follow-ups.
+* Phases 1-6 of the engineering plan shipped. v0.3 added the
+  `Architecture` protocol layer with eight shipped architectures
+  (ReAct, SelfRefine, Reflexion, Router, Supervisor, ActorCritic,
+  TreeOfThoughts, MultiAgentDebate). LiteLLM, SubprocessSandbox,
+  PostgresRuntime, ConsolidationWorker, Voyage / Cohere embedders
+  all shipped in v0.2. Temporal / OS-level sandboxes / the
+  remaining 6 architectures from `Subagent.md` (Plan-and-Execute,
+  ReWOO, Deep Agent, Blackboard, Swarm, Graph of Thoughts) are the
+  next chunks.
 
 ---
 
@@ -188,8 +318,8 @@ mypy --strict jeevesagent
 pytest tests/ -v
 ```
 
-You should see 236 passed. Two integration tests skip without
-`JEEVES_TEST_PG_DSN` / `JEEVES_TEST_REDIS_URL` env vars set.
+You should see 476 passed. Five integration tests skip without
+`JEEVES_TEST_PG_DSN` / `JEEVES_TEST_REDIS_URL` / API-key env vars set.
 
 ---
 

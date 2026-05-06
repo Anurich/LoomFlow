@@ -18,14 +18,30 @@ Public surface:
 * :func:`resolve_architecture` — string -> Architecture instance
 """
 
+from .actor_critic import ActorCritic
 from .base import AgentSession, Architecture, Dependencies
+from .debate import MultiAgentDebate
 from .react import ReAct
+from .reflexion import Reflexion
 from .resolver import resolve_architecture
+from .router import Router, RouterRoute
+from .self_refine import SelfRefine
+from .supervisor import Supervisor
+from .tree_of_thoughts import ThoughtNode, TreeOfThoughts
 
 __all__ = [
+    "ActorCritic",
     "AgentSession",
     "Architecture",
     "Dependencies",
+    "MultiAgentDebate",
     "ReAct",
+    "Reflexion",
+    "Router",
+    "RouterRoute",
+    "SelfRefine",
+    "Supervisor",
+    "ThoughtNode",
+    "TreeOfThoughts",
     "resolve_architecture",
 ]
