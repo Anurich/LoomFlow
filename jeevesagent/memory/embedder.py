@@ -176,7 +176,15 @@ class VoyageEmbedder:
                     "voyageai is not installed. "
                     "Install with: pip install 'jeevesagent[voyage]'"
                 ) from exc
-            self._client = voyageai.AsyncClient(
+            # voyageai ships py.typed in newer releases but doesn't
+            # re-export AsyncClient from its package __init__. The
+            # class exists at runtime (defined in voyageai.client_async
+            # and bound on the package). Locally without the stubs the
+            # whole module is Any and this never fires; CI with the
+            # stubs sees attr-defined — hence the inline ignore.
+            # Paired with disable_error_code = ["unused-ignore"] in
+            # pyproject so the ignore is a no-op in stub-less envs.
+            self._client = voyageai.AsyncClient(  # type: ignore[attr-defined]
                 api_key=api_key or os.environ.get("VOYAGE_API_KEY"),
             )
 
