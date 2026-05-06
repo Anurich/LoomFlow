@@ -42,14 +42,12 @@ agents without binding their stack to one model lab**. It's:
   Replicate, Azure …) behind one `Model` protocol. String-based
   resolver: `model="claude-opus-4-7"`, `"gpt-4o"`, `"mistral-large"`,
   `"command-r-plus"`, … — no decision lock-in.
-* **Pluggable architectures** — the agent loop is a strategy. Pick
-  ReAct (default), Self-Refine (critique + iterate), Reflexion
-  (verbal RL via memory), Router (classify + dispatch to one
-  specialist), Supervisor (workers + delegate), ActorCritic
-  (actor + adversarial critic), TreeOfThoughts (BFS beam search
-  over branching reasoning paths), or MultiAgentDebate (N debaters
-  argue, judge synthesizes). Same `Agent` surface; one kwarg flips
-  the iteration pattern.
+* **Pluggable architectures** — the agent loop is a strategy.
+  Eleven shipped: ReAct (default), SelfRefine, Reflexion,
+  TreeOfThoughts, PlanAndExecute (single-agent); Router,
+  Supervisor, ActorCritic, MultiAgentDebate, Swarm,
+  BlackboardArchitecture (multi-agent). Same `Agent` surface;
+  one kwarg flips the iteration pattern.
 * **MCP-native** — MCP isn't an integration, it's the spine. Plug
   Jeeves Gateway, Composio, or any MCP server into a single
   `MCPRegistry` and your tools just work.
@@ -150,6 +148,7 @@ runtime) stays exactly the same.
 from jeevesagent import (
     Agent, ReAct, SelfRefine, Reflexion, Router, RouterRoute,
     Supervisor, ActorCritic, TreeOfThoughts, MultiAgentDebate,
+    Swarm, BlackboardArchitecture, PlanAndExecute,
 )
 
 # Default — observe / think / act
@@ -219,6 +218,35 @@ agent = Agent(
     ),
 )
 
+# Plan once, execute step-by-step. Cheaper than ReAct on tasks with
+# predictable structure: one planner call + N step calls + one
+# synthesizer.
+agent = Agent("...", model="claude-opus-4-7", architecture="plan-and-execute")
+
+# Peer agents pass control via a handoff tool. Exploratory only —
+# the spec warns of goal drift; prefer Supervisor for production.
+agent = Agent(
+    "...",
+    model="claude-opus-4-7",
+    architecture=Swarm(
+        agents={"triage": triage_agent, "billing": billing_agent, "tech": tech_agent},
+        entry_agent="triage",
+        max_handoffs=5,
+    ),
+)
+
+# Coordinator + agents share a state board. Each round the
+# coordinator picks who contributes next; decider synthesizes.
+agent = Agent(
+    "...",
+    model="claude-opus-4-7",
+    architecture=BlackboardArchitecture(
+        agents={"hypothesis": h_agent, "evidence": e_agent, "critic": c_agent},
+        coordinator=coord_agent,
+        decider=decider_agent,
+    ),
+)
+
 # N debaters argue across parallel rounds; judge synthesizes the
 # verdict. Use different MODELS for genuine prior diversity.
 agent = Agent(
@@ -252,7 +280,7 @@ shipped five don't yet handle.
 
 | Capability | What you get | Where |
 |---|---|---|
-| **Architecture protocol** | Pluggable agent-loop strategy: ReAct, SelfRefine, Reflexion, Router, Supervisor, ActorCritic, TreeOfThoughts, MultiAgentDebate | `Architecture`, `ReAct`, `SelfRefine`, `Reflexion`, `Router`, `Supervisor`, `ActorCritic`, `TreeOfThoughts`, `MultiAgentDebate` |
+| **Architecture protocol** | Pluggable agent-loop strategy: 11 architectures shipped | `Architecture`, `ReAct`, `SelfRefine`, `Reflexion`, `TreeOfThoughts`, `PlanAndExecute`, `Router`, `Supervisor`, `ActorCritic`, `MultiAgentDebate`, `Swarm`, `BlackboardArchitecture` |
 | **Model adapters** | Anthropic, OpenAI, LiteLLM (~100 providers), Echo (zero-key), Scripted (tests) | `jeevesagent.AnthropicModel`, `OpenAIModel`, `LiteLLMModel`, `EchoModel`, `ScriptedModel` |
 | **String model resolver** | `model="claude-opus-4-7"`, `"gpt-4o"`, `"mistral-large"`, `"command-r"`, `"echo"`, `"litellm/<any>"` | `Agent.__init__` |
 | **Tools** | `@tool` decorator with auto-schema, sync + async; `agent.with_tool` decorator; `add_tool` / `remove_tool` / `tools_list` | `jeevesagent.tool`, `Tool` |
@@ -285,25 +313,25 @@ shipped five don't yet handle.
 | [`Subagent.md`](Subagent.md) | Architecture-protocol design rationale; full 14-architecture catalogue (the 5 shipped, the 9 candidates) |
 | [`project.md`](project.md) | The full engineering plan (the design doc) |
 | [`BUILD_LOG.md`](BUILD_LOG.md) | Slice-by-slice changelog |
-| [`examples/`](examples/) | 16 runnable scripts — `00_hello.py` through `15_debate.py`, every shipped architecture covered |
+| [`examples/`](examples/) | 19 runnable scripts — `00_hello.py` through `18_plan_and_execute.py`, every shipped architecture covered |
 
 ---
 
 ## Status
 
-* **476 tests pass** in ~5 seconds (5 env-gated integrations skip
+* **528 tests pass** in ~5 seconds (5 env-gated integrations skip
   without `JEEVES_TEST_PG_DSN` / `JEEVES_TEST_REDIS_URL`)
-* **mypy `--strict`** clean across 69 production source files
+* **mypy `--strict`** clean across 73 production source files
 * **ruff** clean including `flake8-async` lints
 * Phases 1-6 of the engineering plan shipped. v0.3 added the
-  `Architecture` protocol layer with eight shipped architectures
-  (ReAct, SelfRefine, Reflexion, Router, Supervisor, ActorCritic,
-  TreeOfThoughts, MultiAgentDebate). LiteLLM, SubprocessSandbox,
-  PostgresRuntime, ConsolidationWorker, Voyage / Cohere embedders
-  all shipped in v0.2. Temporal / OS-level sandboxes / the
-  remaining 6 architectures from `Subagent.md` (Plan-and-Execute,
-  ReWOO, Deep Agent, Blackboard, Swarm, Graph of Thoughts) are the
-  next chunks.
+  `Architecture` protocol layer with **eleven** shipped
+  architectures (ReAct, SelfRefine, Reflexion, TreeOfThoughts,
+  PlanAndExecute, Router, Supervisor, ActorCritic,
+  MultiAgentDebate, Swarm, BlackboardArchitecture). LiteLLM,
+  SubprocessSandbox, PostgresRuntime, ConsolidationWorker, Voyage /
+  Cohere embedders all shipped in v0.2. Temporal / OS-level
+  sandboxes / the remaining 3 architectures from `Subagent.md`
+  (ReWOO, Deep Agent, Graph of Thoughts) are the next chunks.
 
 ---
 
@@ -318,7 +346,7 @@ mypy --strict jeevesagent
 pytest tests/ -v
 ```
 
-You should see 476 passed. Five integration tests skip without
+You should see 528 passed. Five integration tests skip without
 `JEEVES_TEST_PG_DSN` / `JEEVES_TEST_REDIS_URL` / API-key env vars set.
 
 ---

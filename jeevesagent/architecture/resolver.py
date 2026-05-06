@@ -15,12 +15,14 @@ from __future__ import annotations
 
 from ..core.errors import ConfigError
 from .base import Architecture
+from .plan_and_execute import PlanAndExecute
 from .react import ReAct
 from .reflexion import Reflexion
 from .self_refine import SelfRefine
 from .tree_of_thoughts import TreeOfThoughts
 
 KNOWN: dict[str, type[Architecture]] = {
+    "plan-and-execute": PlanAndExecute,
     "react": ReAct,
     "reflexion": Reflexion,
     "self-refine": SelfRefine,

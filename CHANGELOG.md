@@ -169,10 +169,11 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
   `jeevesagent.architecture.helpers` (was private in `reflexion.py`).
   Used by Reflexion, Tree of Thoughts, and any future architecture
   with an evaluator step.
-* Total tests: **476** (was 341 in v0.2.0; +135 across the v0.3
+* Total tests: **528** (was 341 in v0.2.0; +187 across the v0.3
   architecture work — 15 foundation + 12 SelfRefine + 19 Reflexion +
   21 Router + 13 Supervisor + 19 ActorCritic + 16 TreeOfThoughts +
-  20 MultiAgentDebate).
+  20 MultiAgentDebate + 17 Swarm + 18 BlackboardArchitecture +
+  17 PlanAndExecute).
 
 ### Added — Architecture protocol foundation
 

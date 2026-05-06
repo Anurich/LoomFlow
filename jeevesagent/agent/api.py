@@ -40,6 +40,7 @@ from ..architecture import (
     Dependencies,
     resolve_architecture,
 )
+from ..architecture.tool_host_wrappers import ExtendedToolHost
 from ..core.ids import new_id
 from ..core.protocols import (
     Budget,
@@ -456,7 +457,11 @@ class Agent:
     # ---- public API ------------------------------------------------------
 
     async def run(
-        self, prompt: str, *, session_id: str | None = None
+        self,
+        prompt: str,
+        *,
+        session_id: str | None = None,
+        extra_tools: list[Tool] | None = None,
     ) -> RunResult:
         """Run the agent to completion and return its :class:`RunResult`.
 
@@ -464,11 +469,28 @@ class Agent:
         a durable runtime (e.g. :class:`SqliteRuntime`), already-completed
         steps replay from the journal instead of re-executing. Without a
         durable runtime, ``session_id`` just labels the run.
+
+        ``extra_tools`` injects additional :class:`Tool`\\ s for this
+        run only — the agent's configured ``ToolHost`` is wrapped so
+        the model sees the extras alongside whatever tools were
+        registered at construction. Used by multi-agent architectures
+        that need to inject coordination tools (e.g. Swarm's
+        ``handoff(target, message)``) into a peer agent's loop without
+        permanently mutating that agent's static configuration.
         """
-        return await self._loop(prompt, emit=_noop_emit, session_id=session_id)
+        return await self._loop(
+            prompt,
+            emit=_noop_emit,
+            session_id=session_id,
+            extra_tools=extra_tools,
+        )
 
     async def resume(
-        self, session_id: str, prompt: str
+        self,
+        session_id: str,
+        prompt: str,
+        *,
+        extra_tools: list[Tool] | None = None,
     ) -> RunResult:
         """Resume a previously-interrupted run from its journal.
 
@@ -477,10 +499,16 @@ class Agent:
         call site and to match the surface advertised by the engineering
         plan.
         """
-        return await self.run(prompt, session_id=session_id)
+        return await self.run(
+            prompt, session_id=session_id, extra_tools=extra_tools
+        )
 
     async def stream(
-        self, prompt: str, *, session_id: str | None = None
+        self,
+        prompt: str,
+        *,
+        session_id: str | None = None,
+        extra_tools: list[Tool] | None = None,
     ) -> AsyncIterator[Event]:
         """Stream :class:`Event`\\ s as the loop produces them.
 
@@ -489,6 +517,7 @@ class Agent:
         Breaking out of the iteration cancels the producer cleanly.
         ``session_id`` works the same as :meth:`run`'s — pass an
         existing one to resume against a durable runtime's journal.
+        ``extra_tools`` works the same as :meth:`run`'s.
         """
         send, receive = anyio.create_memory_object_stream[Event](
             max_buffer_size=DEFAULT_STREAM_BUFFER
@@ -496,7 +525,12 @@ class Agent:
 
         async def _produce() -> None:
             try:
-                await self._loop(prompt, emit=send.send, session_id=session_id)
+                await self._loop(
+                    prompt,
+                    emit=send.send,
+                    session_id=session_id,
+                    extra_tools=extra_tools,
+                )
             except Exception as exc:  # noqa: BLE001 — surface as ERROR + re-raise
                 with anyio.CancelScope(shield=True):
                     await send.send(Event.error("", exc))
@@ -521,6 +555,7 @@ class Agent:
         *,
         emit: Emit,
         session_id: str | None = None,
+        extra_tools: list[Tool] | None = None,
     ) -> RunResult:
         """Setup → delegate iteration to the architecture → teardown.
 
@@ -563,11 +598,20 @@ class Agent:
                 id=session_id,
                 instructions=self._instructions,
             )
+            # Per-run tool injection: if extra_tools provided, wrap
+            # the agent's host so the model sees them alongside the
+            # statically-configured tools. The wrap is local to this
+            # run; the agent's _tool_host is unchanged.
+            effective_tools = (
+                ExtendedToolHost(self._tool_host, extra_tools)
+                if extra_tools
+                else self._tool_host
+            )
             deps = Dependencies(
                 model=self._model,
                 memory=self._memory,
                 runtime=self._runtime,
-                tools=self._tool_host,
+                tools=effective_tools,
                 budget=self._budget,
                 permissions=self._permissions,
                 hooks=self._hooks,

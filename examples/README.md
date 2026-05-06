@@ -23,6 +23,9 @@ just `pip install -e '.[dev]'`.
 | [`13_actor_critic.py`](13_actor_critic.py) | `ActorCritic` architecture — actor + adversarial critic with structured JSON critique parsing | nothing |
 | [`14_tree_of_thoughts.py`](14_tree_of_thoughts.py) | `TreeOfThoughts` architecture — BFS beam search with per-node evaluation; observable search tree | nothing |
 | [`15_debate.py`](15_debate.py) | `MultiAgentDebate` architecture — N debaters argue across rounds, judge synthesizes; parallel debater dispatch per round | nothing |
+| [`16_swarm.py`](16_swarm.py) | `Swarm` architecture — peer agents pass control via a `handoff` tool; cycle detection + max_handoffs | nothing |
+| [`17_blackboard.py`](17_blackboard.py) | `BlackboardArchitecture` — coordinator + agents share a state board; LLM-driven agent selection per round | nothing |
+| [`18_plan_and_execute.py`](18_plan_and_execute.py) | `PlanAndExecute` architecture — planner → step executor → synthesizer; cheaper than ReAct on predictable multi-step tasks | nothing |
 | [`15_debate.py`](15_debate.py) | `MultiAgentDebate` architecture — N debaters argue in parallel rounds, judge synthesizes | nothing |
 
 Read in order; each builds on the last conceptually.

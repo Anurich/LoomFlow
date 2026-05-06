@@ -43,19 +43,19 @@ Composition
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from ..core.ids import new_id
-from ..core.types import Event, ToolDef, ToolEvent, ToolResult
+from ..core.types import Event
 from ..tools.registry import Tool
 from .base import AgentSession, Architecture, Dependencies
 from .react import ReAct
+from .tool_host_wrappers import ExtendedToolHost
 
 if TYPE_CHECKING:
     from ..agent.api import Agent
-    from ..core.protocols import ToolHost
 
 
 DEFAULT_SUPERVISOR_TEMPLATE = """\
@@ -138,7 +138,7 @@ class Supervisor:
 
         # 2. Wrap the parent's ToolHost so the model sees `delegate`
         #    alongside whatever tools the parent already had.
-        wrapped_host = _SupervisorToolHost(deps.tools, delegate_tool)
+        wrapped_host = ExtendedToolHost(deps.tools, [delegate_tool])
 
         # 3. Compose instructions: user's domain prompt + supervisor
         #    template (with worker descriptions). Worker descriptions
@@ -265,46 +265,3 @@ def _make_delegate_tool(
     )
 
 
-class _SupervisorToolHost:
-    """Wraps a base :class:`ToolHost` and adds one ``delegate`` tool.
-
-    All other tool calls are forwarded to the wrapped base host, so
-    workers + parent-defined tools coexist transparently.
-    """
-
-    def __init__(self, base: ToolHost, delegate_tool: Tool) -> None:
-        self._base = base
-        self._delegate = delegate_tool
-
-    async def list_tools(
-        self, *, query: str | None = None
-    ) -> list[ToolDef]:
-        defs = list(await self._base.list_tools(query=query))
-        delegate_def = self._delegate.to_def()
-        if query is None or (
-            query.lower() in delegate_def.name.lower()
-            or query.lower() in delegate_def.description.lower()
-        ):
-            defs.append(delegate_def)
-        return defs
-
-    async def call(
-        self,
-        tool: str,
-        args: Mapping[str, Any],
-        *,
-        call_id: str = "",
-    ) -> ToolResult:
-        if tool == self._delegate.name:
-            try:
-                output = await self._delegate.execute(args)
-            except Exception as exc:  # noqa: BLE001
-                return ToolResult.error_(
-                    call_id=call_id, message=str(exc)
-                )
-            return ToolResult.success(call_id=call_id, output=output)
-        return await self._base.call(tool, args, call_id=call_id)
-
-    async def watch(self) -> AsyncIterator[ToolEvent]:
-        async for ev in self._base.watch():
-            yield ev
