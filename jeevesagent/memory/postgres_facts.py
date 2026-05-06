@@ -49,14 +49,14 @@ class PostgresFactStore:
         max_size: int = 10,
     ) -> PostgresFactStore:
         try:
-            import asyncpg  # type: ignore[import-untyped]
+            import asyncpg  # type: ignore[import-not-found, import-untyped]
         except ImportError as exc:  # pragma: no cover
             raise ImportError(
                 "asyncpg is not installed. "
                 "Install with: pip install 'jeevesagent[postgres]'"
             ) from exc
         try:
-            from pgvector.asyncpg import (  # type: ignore[import-not-found]
+            from pgvector.asyncpg import (  # type: ignore[import-not-found, import-untyped]
                 register_vector,
             )
         except ImportError as exc:  # pragma: no cover

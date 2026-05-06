@@ -62,7 +62,14 @@ ignore = [
 [tool.mypy]
 strict = true
 python_version = "3.11"
-warn_unused_ignores = true
+# ``unused-ignore`` is suppressed because lazy SDK imports
+# (asyncpg, pgvector, mcp.client.*, redis.asyncio) raise different
+# mypy error codes depending on whether the package is installed in
+# the env (``import-not-found`` vs ``import-untyped``). Multi-code
+# ignores cover both cases, but mypy then flags the unused half.
+# ``disable_error_code`` (unlike ``warn_unused_ignores``) is not
+# overridden by ``--strict``.
+disable_error_code = ["unused-ignore"]
 warn_redundant_casts = true
 warn_unreachable = true
 disallow_untyped_decorators = false  # pydantic decorators

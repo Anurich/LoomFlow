@@ -64,7 +64,7 @@ class RedisFactStore:
         key_prefix: str = DEFAULT_KEY_PREFIX,
     ) -> RedisFactStore:
         try:
-            from redis.asyncio import (  # type: ignore[import-not-found]
+            from redis.asyncio import (  # type: ignore[import-not-found, import-untyped]
                 from_url,
             )
         except ImportError as exc:  # pragma: no cover

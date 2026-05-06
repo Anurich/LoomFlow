@@ -80,7 +80,9 @@ class RedisMemory:
         they don't collide with episode keys.
         """
         try:
-            from redis.asyncio import from_url  # type: ignore[import-not-found]
+            from redis.asyncio import (  # type: ignore[import-not-found, import-untyped]
+                from_url,
+            )
         except ImportError as exc:  # pragma: no cover
             raise ImportError(
                 "redis is not installed. "

@@ -58,7 +58,9 @@ class MCPClient:
         try:
             read, write = await self._open_transport(stack)
             try:
-                from mcp.client.session import ClientSession
+                from mcp.client.session import (  # type: ignore[import-not-found, import-untyped]
+                    ClientSession,
+                )
             except ImportError as exc:  # pragma: no cover — depends on user env
                 raise MCPError(
                     "MCP SDK not installed. "
@@ -122,7 +124,10 @@ class MCPClient:
         """Open the right transport for the spec; return ``(read, write)``."""
         if self._spec.transport == "stdio":
             try:
-                from mcp.client.stdio import StdioServerParameters, stdio_client
+                from mcp.client.stdio import (  # type: ignore[import-not-found, import-untyped]
+                    StdioServerParameters,
+                    stdio_client,
+                )
             except ImportError as exc:  # pragma: no cover
                 raise MCPError(
                     "MCP SDK not installed. "
@@ -142,7 +147,9 @@ class MCPClient:
 
         if self._spec.transport == "http":
             try:
-                from mcp.client.streamable_http import streamablehttp_client
+                from mcp.client.streamable_http import (  # type: ignore[import-not-found, import-untyped]
+                    streamablehttp_client,
+                )
             except ImportError as exc:  # pragma: no cover
                 raise MCPError(
                     "MCP SDK not installed. "
