@@ -110,6 +110,35 @@ class Dependencies:
     events for fewer task-group / channel allocations on the
     hot path."""
 
+    # ---------------------------------------------------------------
+    # Fast-mode flags — auto-set by Agent._loop based on which
+    # protocol implementations are no-op defaults vs production-
+    # configured. Hot paths skip integration points when their
+    # layer is no-op so users with a default agent get LangChain-
+    # class latency. The moment a user wires up a real audit log /
+    # telemetry exporter / permissions policy / etc., the
+    # corresponding flag flips False and the integration point
+    # becomes active.
+    # ---------------------------------------------------------------
+    fast_audit: bool = True
+    """Skip ``_audit(...)`` calls when ``audit_log`` is ``None``."""
+    fast_telemetry: bool = True
+    """Skip ``telemetry.trace(...)`` contextmanagers + ``emit_metric``
+    calls when ``telemetry`` is ``NoTelemetry``."""
+    fast_permissions: bool = True
+    """Skip per-tool ``permissions.check(...)`` when permissions is
+    the no-op ``AllowAll``."""
+    fast_hooks: bool = True
+    """Skip ``hooks.pre_tool`` / ``hooks.post_tool`` dispatch when
+    no hooks have been registered."""
+    fast_runtime: bool = True
+    """Inline ``await fn(*args)`` (skipping ``runtime.step(...)``
+    wrapping + idempotency-key derivation) when runtime is
+    ``InProcRuntime``."""
+    fast_budget: bool = True
+    """Skip ``budget.allows_step()`` and ``budget.consume(...)``
+    when budget is ``NoBudget``."""
+
 
 @runtime_checkable
 class Architecture(Protocol):

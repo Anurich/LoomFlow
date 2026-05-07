@@ -17,6 +17,7 @@ Behaviour is identical; the refactor only changes the shape.
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any
 
@@ -34,6 +35,12 @@ from ..core.types import (
 from ..security.audit import AuditLog
 from .base import AgentSession, Dependencies
 from .helpers import add_usage
+
+# Module-level singleton no-op async context manager. ``contextlib.nullcontext``
+# implements both the sync and async protocols (since Python 3.10), so we can
+# reuse a single instance everywhere a hot path wants to *maybe* enter a
+# telemetry span via ``async with (NULL_CTX if fast else tel.trace(...)):``.
+_NULL_CTX: contextlib.AbstractAsyncContextManager[None] = contextlib.nullcontext()
 
 if TYPE_CHECKING:
     from ..agent.api import Agent
@@ -84,28 +91,39 @@ class ReAct:
                 session.interruption_reason = "max_turns_exceeded"
                 break
 
-            status = await deps.budget.allows_step()
-            if status.blocked:
-                session.interrupted = True
-                session.interruption_reason = f"budget:{status.reason}"
-                await deps.telemetry.emit_metric(
-                    "jeeves.budget.exceeded",
-                    1,
-                    session_id=session.id,
-                    reason=status.reason,
-                )
-                yield Event.budget_exceeded(session.id, status)
-                break
-            if status.warn:
-                yield Event.budget_warning(session.id, status)
+            # Budget gate. ``NoBudget.allows_step()`` returns OK every
+            # time — when ``fast_budget`` is True we skip the call
+            # entirely.
+            if not deps.fast_budget:
+                status = await deps.budget.allows_step()
+                if status.blocked:
+                    session.interrupted = True
+                    session.interruption_reason = f"budget:{status.reason}"
+                    if not deps.fast_telemetry:
+                        await deps.telemetry.emit_metric(
+                            "jeeves.budget.exceeded",
+                            1,
+                            session_id=session.id,
+                            reason=status.reason,
+                        )
+                    yield Event.budget_exceeded(session.id, status)
+                    break
+                if status.warn:
+                    yield Event.budget_warning(session.id, status)
 
             session.turns += 1
 
-            async with deps.telemetry.trace(
-                "jeeves.turn",
-                turn=session.turns,
-                session_id=session.id,
-            ):
+            turn_trace: contextlib.AbstractAsyncContextManager[Any] = (
+                _NULL_CTX
+                if deps.fast_telemetry
+                else deps.telemetry.trace(
+                    "jeeves.turn",
+                    turn=session.turns,
+                    session_id=session.id,
+                )
+            )
+
+            async with turn_trace:
                 # 2a. Model call.
                 #
                 # Non-streaming hot path: when nobody's reading from
@@ -124,36 +142,64 @@ class ReAct:
                 usage = Usage()
 
                 if not deps.streaming and hasattr(deps.model, "complete"):
-                    async with deps.telemetry.trace(
-                        "jeeves.model.complete",
-                        model=deps.model.name,
-                        turn=session.turns,
-                        session_id=session.id,
-                        tool_count=len(tool_defs),
-                    ):
-                        text, tool_calls, usage, _finish_reason = (
-                            await deps.runtime.step(  # type: ignore[func-returns-value]
-                                f"model_call_{session.turns}",
-                                deps.model.complete,
+                    model_trace: contextlib.AbstractAsyncContextManager[Any] = (
+                        _NULL_CTX
+                        if deps.fast_telemetry
+                        else deps.telemetry.trace(
+                            "jeeves.model.complete",
+                            model=deps.model.name,
+                            turn=session.turns,
+                            session_id=session.id,
+                            tool_count=len(tool_defs),
+                        )
+                    )
+                    async with model_trace:
+                        if deps.fast_runtime:
+                            # Inline path: skip ``runtime.step`` wrapping
+                            # (no idempotency_key derivation, no journal
+                            # write — InProcRuntime's step is a literal
+                            # ``await fn(*args)``).
+                            text, tool_calls, usage, _finish_reason = (
+                                await deps.model.complete(
+                                    session.messages,
+                                    tools=tool_defs or None,
+                                )
+                            )
+                        else:
+                            text, tool_calls, usage, _finish_reason = (
+                                await deps.runtime.step(  # type: ignore[func-returns-value]
+                                    f"model_call_{session.turns}",
+                                    deps.model.complete,
+                                    session.messages,
+                                    tools=tool_defs or None,
+                                )
+                            )
+                else:
+                    text_parts: list[str] = []
+                    stream_trace: contextlib.AbstractAsyncContextManager[Any] = (
+                        _NULL_CTX
+                        if deps.fast_telemetry
+                        else deps.telemetry.trace(
+                            "jeeves.model.stream",
+                            model=deps.model.name,
+                            turn=session.turns,
+                            session_id=session.id,
+                            tool_count=len(tool_defs),
+                        )
+                    )
+                    async with stream_trace:
+                        if deps.fast_runtime:
+                            chunks = deps.model.stream(
                                 session.messages,
                                 tools=tool_defs or None,
                             )
-                        )
-                else:
-                    text_parts: list[str] = []
-                    async with deps.telemetry.trace(
-                        "jeeves.model.stream",
-                        model=deps.model.name,
-                        turn=session.turns,
-                        session_id=session.id,
-                        tool_count=len(tool_defs),
-                    ):
-                        chunks = deps.runtime.stream_step(
-                            f"model_call_{session.turns}",
-                            deps.model.stream,
-                            session.messages,
-                            tools=tool_defs or None,
-                        )
+                        else:
+                            chunks = deps.runtime.stream_step(
+                                f"model_call_{session.turns}",
+                                deps.model.stream,
+                                session.messages,
+                                tools=tool_defs or None,
+                            )
                         async for chunk in chunks:
                             yield Event.model_chunk(session.id, chunk)
                             if chunk.kind == "text" and chunk.text is not None:
@@ -168,30 +214,32 @@ class ReAct:
                     text = "".join(text_parts)
 
                 # 2b. Update budget + telemetry + cumulative usage.
-                await deps.budget.consume(
-                    tokens_in=usage.input_tokens,
-                    tokens_out=usage.output_tokens,
-                    cost_usd=usage.cost_usd,
-                )
-                await deps.telemetry.emit_metric(
-                    "jeeves.tokens.input",
-                    usage.input_tokens,
-                    session_id=session.id,
-                    model=deps.model.name,
-                )
-                await deps.telemetry.emit_metric(
-                    "jeeves.tokens.output",
-                    usage.output_tokens,
-                    session_id=session.id,
-                    model=deps.model.name,
-                )
-                if usage.cost_usd:
+                if not deps.fast_budget:
+                    await deps.budget.consume(
+                        tokens_in=usage.input_tokens,
+                        tokens_out=usage.output_tokens,
+                        cost_usd=usage.cost_usd,
+                    )
+                if not deps.fast_telemetry:
                     await deps.telemetry.emit_metric(
-                        "jeeves.cost.usd",
-                        usage.cost_usd,
+                        "jeeves.tokens.input",
+                        usage.input_tokens,
                         session_id=session.id,
                         model=deps.model.name,
                     )
+                    await deps.telemetry.emit_metric(
+                        "jeeves.tokens.output",
+                        usage.output_tokens,
+                        session_id=session.id,
+                        model=deps.model.name,
+                    )
+                    if usage.cost_usd:
+                        await deps.telemetry.emit_metric(
+                            "jeeves.cost.usd",
+                            usage.cost_usd,
+                            session_id=session.id,
+                            model=deps.model.name,
+                        )
                 session.cumulative_usage = add_usage(
                     session.cumulative_usage, usage
                 )
@@ -341,38 +389,40 @@ async def _dispatch_streaming(
     ) -> None:
         async with sender:
             await sender.send(Event.tool_call(session.id, call))
-            await _audit(
-                deps.audit_log,
-                session.id,
-                "model",
-                "tool_call",
-                {
-                    "tool": call.tool,
-                    "call_id": call.id,
-                    "args": dict(call.args),
-                    "destructive": call.destructive,
-                    "turn": session.turns,
-                },
-            )
+            if not deps.fast_audit:
+                await _audit(
+                    deps.audit_log,
+                    session.id,
+                    "model",
+                    "tool_call",
+                    {
+                        "tool": call.tool,
+                        "call_id": call.id,
+                        "args": dict(call.args),
+                        "destructive": call.destructive,
+                        "turn": session.turns,
+                    },
+                )
             result = await _run_single_tool(
                 deps, call, turn=session.turns, slot=slot
             )
             results[slot] = result
-            await _audit(
-                deps.audit_log,
-                session.id,
-                "system",
-                "tool_result",
-                {
-                    "tool": call.tool,
-                    "call_id": result.call_id,
-                    "ok": result.ok,
-                    "denied": result.denied,
-                    "error": result.error,
-                    "reason": result.reason,
-                    "turn": session.turns,
-                },
-            )
+            if not deps.fast_audit:
+                await _audit(
+                    deps.audit_log,
+                    session.id,
+                    "system",
+                    "tool_result",
+                    {
+                        "tool": call.tool,
+                        "call_id": result.call_id,
+                        "ok": result.ok,
+                        "denied": result.denied,
+                        "error": result.error,
+                        "reason": result.reason,
+                        "turn": session.turns,
+                    },
+                )
             await sender.send(Event.tool_result(session.id, result))
 
     async with anyio.create_task_group() as tg:
@@ -398,59 +448,83 @@ async def _run_one_tool(
     ``event_buffer`` so the caller can yield events in deterministic
     call order after the parallel dispatch completes."""
     event_buffer.append(Event.tool_call(session.id, call))
-    await _audit(
-        deps.audit_log,
-        session.id,
-        "model",
-        "tool_call",
-        {
-            "tool": call.tool,
-            "call_id": call.id,
-            "args": dict(call.args),
-            "destructive": call.destructive,
-            "turn": session.turns,
-        },
-    )
+    if not deps.fast_audit:
+        await _audit(
+            deps.audit_log,
+            session.id,
+            "model",
+            "tool_call",
+            {
+                "tool": call.tool,
+                "call_id": call.id,
+                "args": dict(call.args),
+                "destructive": call.destructive,
+                "turn": session.turns,
+            },
+        )
     result = await _run_single_tool(deps, call, turn=session.turns, slot=slot)
     results[slot] = result
-    await _audit(
-        deps.audit_log,
-        session.id,
-        "system",
-        "tool_result",
-        {
-            "tool": call.tool,
-            "call_id": result.call_id,
-            "ok": result.ok,
-            "denied": result.denied,
-            "error": result.error,
-            "reason": result.reason,
-            "turn": session.turns,
-        },
-    )
+    if not deps.fast_audit:
+        await _audit(
+            deps.audit_log,
+            session.id,
+            "system",
+            "tool_result",
+            {
+                "tool": call.tool,
+                "call_id": result.call_id,
+                "ok": result.ok,
+                "denied": result.denied,
+                "error": result.error,
+                "reason": result.reason,
+                "turn": session.turns,
+            },
+        )
     event_buffer.append(Event.tool_result(session.id, result))
 
 
 async def _run_single_tool(
     deps: Dependencies, call: ToolCall, *, turn: int, slot: int
 ) -> ToolResult:
-    """Hooks → permission → journaled tool host call → post-hook."""
+    """Hooks → permission → journaled tool host call → post-hook.
+
+    Layers (hooks / permissions / runtime / telemetry) are skipped
+    when their corresponding ``fast_*`` flag on ``deps`` is set —
+    e.g. ``AllowAll`` permissions short-circuit the ``check`` call,
+    an empty ``HookRegistry`` short-circuits ``pre_tool`` /
+    ``post_tool`` dispatch, and ``InProcRuntime`` lets us inline
+    the tool host call (skipping idempotency-key derivation).
+    """
     started = anyio.current_time()
     result: ToolResult
 
-    async with deps.telemetry.trace(
-        "jeeves.tool",
-        tool=call.tool,
-        call_id=call.id,
-        turn=turn,
-    ):
-        hook_decision: PermissionDecision = await deps.hooks.pre_tool(call)
+    tool_trace: contextlib.AbstractAsyncContextManager[Any] = (
+        _NULL_CTX
+        if deps.fast_telemetry
+        else deps.telemetry.trace(
+            "jeeves.tool",
+            tool=call.tool,
+            call_id=call.id,
+            turn=turn,
+        )
+    )
+
+    async with tool_trace:
+        if deps.fast_hooks:
+            hook_decision: PermissionDecision = PermissionDecision.allow_()
+        else:
+            hook_decision = await deps.hooks.pre_tool(call)
+
         if hook_decision.deny:
             result = ToolResult.denied_(
                 call.id, hook_decision.reason or "denied by hook"
             )
         else:
-            perm = await deps.permissions.check(call, context={})
+            if deps.fast_permissions:
+                # AllowAll always allows — skip the dataclass round-trip.
+                perm: PermissionDecision = PermissionDecision.allow_()
+            else:
+                perm = await deps.permissions.check(call, context={})
             if perm.deny:
                 result = ToolResult.denied_(
                     call.id, perm.reason or "denied by policy"
@@ -462,27 +536,36 @@ async def _run_single_tool(
                 )
             else:
                 try:
-                    result = await deps.runtime.step(
-                        f"tool_call_{turn}_{slot}",
-                        deps.tools.call,
-                        call.tool,
-                        call.args,
-                        call_id=call.id,
-                        idempotency_key=call.idempotency_key(),
-                    )
+                    if deps.fast_runtime:
+                        result = await deps.tools.call(
+                            call.tool,
+                            call.args,
+                            call_id=call.id,
+                        )
+                    else:
+                        result = await deps.runtime.step(
+                            f"tool_call_{turn}_{slot}",
+                            deps.tools.call,
+                            call.tool,
+                            call.args,
+                            call_id=call.id,
+                            idempotency_key=call.idempotency_key(),
+                        )
                 except Exception as exc:  # noqa: BLE001
                     result = ToolResult.error_(call.id, str(exc))
 
-                await deps.hooks.post_tool(call, result)
+                if not deps.fast_hooks:
+                    await deps.hooks.post_tool(call, result)
 
-    elapsed_ms = (anyio.current_time() - started) * 1000
-    await deps.telemetry.emit_metric(
-        "jeeves.tool.duration_ms",
-        elapsed_ms,
-        tool=call.tool,
-        ok=result.ok,
-        denied=result.denied,
-    )
+    if not deps.fast_telemetry:
+        elapsed_ms = (anyio.current_time() - started) * 1000
+        await deps.telemetry.emit_metric(
+            "jeeves.tool.duration_ms",
+            elapsed_ms,
+            tool=call.tool,
+            ok=result.ok,
+            denied=result.denied,
+        )
     return result
 
 

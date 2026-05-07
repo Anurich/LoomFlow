@@ -612,6 +612,62 @@ walkthrough of all three modes side by side.
 
 ---
 
+## Fast path by default
+
+JeevesAgent ships with the full production surface — audit log, OTel
+telemetry, permissions, hooks, durable runtime, budget — but **you
+don't pay for what you don't wire up**. Every layer has a no-op
+default, and the loop detects those defaults at construction time
+and skips the integration points entirely on the hot path.
+
+The result: a barebones `Agent("hi", model="gpt-4.1-mini",
+tools=[...])` runs at LangChain-class latency. The moment you pass
+`audit_log=`, `telemetry=`, `permissions=`, `runtime=`, etc., the
+corresponding layer flips on and the integration becomes active —
+same `Agent` class, same API, no flags to set.
+
+```text
+                  default Agent              production Agent
+                  ─────────────────         ─────────────────────
+audit_log         None        → SKIP       FileAuditLog(...)    → wired
+telemetry         NoTelemetry → SKIP       OTelTelemetry(...)   → wired
+permissions       AllowAll    → SKIP       StandardPermissions  → wired
+hooks             empty       → SKIP       @before_tool/@after_tool → wired
+runtime           InProc      → INLINE     SqliteRuntime(...)   → wired
+budget            NoBudget    → SKIP       StandardBudget(...)  → wired
+```
+
+When a layer is detected as no-op, the loop:
+
+* skips the `await audit_log.append(...)` call (so even the function
+  call dispatch is removed)
+* skips `telemetry.trace(...)` async-context-manager entry/exit and
+  the kwargs-dict construction for `emit_metric` calls
+* skips `permissions.check(call, context={})` (returns `allow_()`
+  inline)
+* skips `hooks.pre_tool` / `hooks.post_tool` iteration
+* inlines `await fn(*args)` instead of routing through
+  `runtime.step(name, fn, ...)` — saves the idempotency-key hash
+  derivation per tool call
+* skips `budget.allows_step()` / `budget.consume(...)`
+
+Measured against `langchain.agents.create_agent` on `gpt-4.1-mini`
+(median of 3 runs, end-to-end including OpenAI round-trip):
+
+| Scenario | Jeeves | LangChain | Δ |
+|---|---|---|---|
+| `one_tool_call` | **2548 ms** | 2558 ms | Jeeves +0.4% faster |
+| `two_tool_calls` | **2971 ms** | 3012 ms | Jeeves +1.3% faster |
+
+Run it yourself: `python bench/jeeves_vs_langchain.py --warmup`.
+
+The point isn't to win the benchmark — it's that "framework is
+slow because it's full-featured" stops being the trade-off. You
+get the harness when you want it, the speed when you don't, with
+no code changes between modes.
+
+---
+
 ## Capability matrix
 
 | Capability | What you get | Where |
@@ -664,6 +720,13 @@ walkthrough of all three modes side by side.
   without `JEEVES_TEST_PG_DSN` / `JEEVES_TEST_REDIS_URL`)
 * **mypy `--strict`** clean across 102 production source files
 * **ruff** clean including `flake8-async` lints
+* v0.10 ships the **fast path by default** — every layer (audit,
+  telemetry, permissions, hooks, runtime, budget) is detected as
+  no-op or production-wired at construction time, and the hot path
+  skips the integration when the layer is no-op. Result: barebones
+  `Agent(...)` is at parity with `langchain.agents.create_agent` on
+  median tool-using runs (`one_tool_call`: +0.4%, `two_tool_calls`:
+  +1.3%) — same `Agent` class, same API, no flags.
 * v0.9 ships **Skills** (Anthropic Agent Skills format, with
   `tools.py` auto-discovery for in-process Python tools and
   frontmatter `tools:` manifest for any-language scripts wrapped

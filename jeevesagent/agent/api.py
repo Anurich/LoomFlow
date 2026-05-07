@@ -27,6 +27,7 @@ unboundedly.
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -71,6 +72,12 @@ DEFAULT_MAX_TURNS = 50
 DEFAULT_STREAM_BUFFER = 128
 
 Emit = Callable[[Event], Awaitable[None]]
+
+# Module-level singleton no-op async context manager. ``contextlib.nullcontext``
+# implements both the sync and async protocols (since Python 3.10), so we can
+# reuse a single instance everywhere a hot path wants to *maybe* enter a
+# telemetry span: ``async with (NULL_CTX if fast else tel.trace(...)):``.
+_NULL_CTX: contextlib.AbstractAsyncContextManager[None] = contextlib.nullcontext()
 
 
 class Agent:
@@ -675,27 +682,49 @@ class Agent:
             session_id = new_id("sess")
         loop_started = anyio.current_time()
 
-        async with (
-            self._runtime.session(session_id),
-            self._telemetry.trace(
+        # Fast-mode flags — auto-detect "no-op default" implementations
+        # so hot-path call sites can skip the integration layer
+        # entirely. The moment a user wires up a real audit log /
+        # telemetry exporter / permission policy / etc., the
+        # corresponding flag flips False and the integration becomes
+        # active. See ``Dependencies`` for the field-level docstrings
+        # and the README "Fast path by default" section for the user-
+        # facing story.
+        fast_audit = self._audit_log is None
+        fast_telemetry = isinstance(self._telemetry, NoTelemetry)
+        fast_permissions = isinstance(self._permissions, AllowAll)
+        fast_hooks = (
+            len(self._hooks.pre_tool_hooks) == 0
+            and len(self._hooks.post_tool_hooks) == 0
+        )
+        fast_runtime = isinstance(self._runtime, InProcRuntime)
+        fast_budget = isinstance(self._budget, NoBudget)
+
+        run_trace: contextlib.AbstractAsyncContextManager[Any] = (
+            _NULL_CTX
+            if fast_telemetry
+            else self._telemetry.trace(
                 "jeeves.run",
                 session_id=session_id,
                 max_turns=self._max_turns,
                 model=self._model.name,
                 architecture=self._architecture.name,
-            ),
-        ):
-            await self._audit(
-                session_id=session_id,
-                actor="user",
-                action="run_started",
-                payload={
-                    "prompt": prompt[:500],
-                    "model": self._model.name,
-                    "max_turns": self._max_turns,
-                    "architecture": self._architecture.name,
-                },
             )
+        )
+
+        async with self._runtime.session(session_id), run_trace:
+            if not fast_audit:
+                await self._audit(
+                    session_id=session_id,
+                    actor="user",
+                    action="run_started",
+                    payload={
+                        "prompt": prompt[:500],
+                        "model": self._model.name,
+                        "max_turns": self._max_turns,
+                        "architecture": self._architecture.name,
+                    },
+                )
             await emit(Event.started(session_id, prompt))
 
             session = AgentSession(
@@ -725,20 +754,30 @@ class Agent:
                 # Architectures consult this to pick fast (buffered)
                 # vs streaming (channel) paths for parallel work.
                 streaming=emit is not _noop_emit,
+                fast_audit=fast_audit,
+                fast_telemetry=fast_telemetry,
+                fast_permissions=fast_permissions,
+                fast_hooks=fast_hooks,
+                fast_runtime=fast_runtime,
+                fast_budget=fast_budget,
             )
 
             async for event in self._architecture.run(session, deps, prompt):
                 await emit(event)
 
-            await self._runtime.step(
-                f"persist_episode_{session.turns}",
-                self._memory.remember,
-                Episode(
-                    session_id=session_id,
-                    input=prompt,
-                    output=session.output,
-                ),
+            episode = Episode(
+                session_id=session_id,
+                input=prompt,
+                output=session.output,
             )
+            if fast_runtime:
+                await self._memory.remember(episode)
+            else:
+                await self._runtime.step(
+                    f"persist_episode_{session.turns}",
+                    self._memory.remember,
+                    episode,
+                )
 
             result = RunResult(
                 session_id=session_id,
@@ -754,13 +793,14 @@ class Agent:
             )
 
             elapsed_ms = (anyio.current_time() - loop_started) * 1000
-            await self._telemetry.emit_metric(
-                "jeeves.session.duration_ms",
-                elapsed_ms,
-                session_id=session_id,
-                interrupted=session.interrupted,
-                turns=session.turns,
-            )
+            if not fast_telemetry:
+                await self._telemetry.emit_metric(
+                    "jeeves.session.duration_ms",
+                    elapsed_ms,
+                    session_id=session_id,
+                    interrupted=session.interrupted,
+                    turns=session.turns,
+                )
 
             # Auto-consolidate runs after the response is finalized but
             # before the COMPLETED event so observers see it as part of
@@ -772,20 +812,21 @@ class Agent:
                 except Exception as exc:  # noqa: BLE001
                     await emit(Event.error(session_id, exc))
 
-            await self._audit(
-                session_id=session_id,
-                actor="system",
-                action="run_completed",
-                payload={
-                    "turns": session.turns,
-                    "interrupted": session.interrupted,
-                    "interruption_reason": session.interruption_reason,
-                    "tokens_in": session.cumulative_usage.input_tokens,
-                    "tokens_out": session.cumulative_usage.output_tokens,
-                    "cost_usd": session.cumulative_usage.cost_usd,
-                    "elapsed_ms": elapsed_ms,
-                },
-            )
+            if not fast_audit:
+                await self._audit(
+                    session_id=session_id,
+                    actor="system",
+                    action="run_completed",
+                    payload={
+                        "turns": session.turns,
+                        "interrupted": session.interrupted,
+                        "interruption_reason": session.interruption_reason,
+                        "tokens_in": session.cumulative_usage.input_tokens,
+                        "tokens_out": session.cumulative_usage.output_tokens,
+                        "cost_usd": session.cumulative_usage.cost_usd,
+                        "elapsed_ms": elapsed_ms,
+                    },
+                )
             await emit(Event.completed(session_id, result.model_dump(mode="json")))
             return result
 
