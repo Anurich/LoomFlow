@@ -78,8 +78,8 @@ from jeevesagent import Agent as JeevesAgent  # noqa: E402
 from jeevesagent import tool as jeeves_tool  # noqa: E402
 
 
-@jeeves_tool
-async def jeeves_get_weather(city: str) -> str:
+@jeeves_tool(name="get_weather")
+async def _jeeves_get_weather(city: str) -> str:
     """Look up the current weather for a city."""
     return f"It's sunny and 72°F in {city}."
 
@@ -88,7 +88,7 @@ def _build_jeeves_agent() -> JeevesAgent:
     return JeevesAgent(
         "You are a helpful assistant. Be concise.",
         model=MODEL_ID,
-        tools=[jeeves_get_weather],
+        tools=[_jeeves_get_weather],
     )
 
 
@@ -107,8 +107,8 @@ from langchain.agents import create_agent  # noqa: E402
 from langchain_core.tools import tool as lc_tool  # noqa: E402
 
 
-@lc_tool
-def lc_get_weather(city: str) -> str:
+@lc_tool("get_weather")
+def _lc_get_weather(city: str) -> str:
     """Look up the current weather for a city."""
     return f"It's sunny and 72°F in {city}."
 
@@ -116,19 +116,21 @@ def lc_get_weather(city: str) -> str:
 def _build_lc_agent() -> object:
     return create_agent(
         model=f"openai:{MODEL_ID}",
-        tools=[lc_get_weather],
+        tools=[_lc_get_weather],
         system_prompt="You are a helpful assistant. Be concise.",
     )
 
 
-def _run_lc(agent: object, prompt: str) -> tuple[str, int, int]:
+async def _run_lc(agent: object, prompt: str) -> tuple[str, int, int]:
     """Run LangChain agent end to end. Returns (output, tokens_in, tokens_out).
 
-    LangChain's create_agent is sync (built on LangGraph). We invoke
-    it synchronously and read tokens from the final AIMessage's
-    ``usage_metadata`` if present.
+    Uses ``ainvoke`` so LangChain goes through the async OpenAI
+    client (``AsyncOpenAI``), matching JeevesAgent's transport.
+    Comparing ``invoke`` (sync httpx pool) against ``agent.run()``
+    (async httpx pool) muddles framework overhead with
+    transport-level differences in connection management.
     """
-    result = agent.invoke(  # type: ignore[attr-defined]
+    result = await agent.ainvoke(  # type: ignore[attr-defined]
         {"messages": [{"role": "user", "content": prompt}]}
     )
     messages = result.get("messages", [])
@@ -199,10 +201,10 @@ async def _time_jeeves(prompt: str) -> RunResult:
     )
 
 
-def _time_lc(prompt: str) -> RunResult:
+async def _time_lc(prompt: str) -> RunResult:
     agent = _build_lc_agent()
     t0 = time.perf_counter()
-    output, t_in, t_out = _run_lc(agent, prompt)
+    output, t_in, t_out = await _run_lc(agent, prompt)
     elapsed = time.perf_counter() - t0
     return RunResult(
         seconds=elapsed,
@@ -253,7 +255,7 @@ async def main() -> None:
     if args.warmup:
         print("\nWarmup (1 call each, not timed)...")
         await _time_jeeves("Say hi.")
-        _time_lc("Say hi.")
+        await _time_lc("Say hi.")
 
     all_stats: list[ScenarioStats] = []
 
@@ -268,10 +270,7 @@ async def main() -> None:
         ]:
             stats = ScenarioStats(name=scenario_name, framework=framework_name)
             for i in range(args.iterations):
-                if framework_name == "Jeeves":
-                    res = await runner(prompt)  # type: ignore[misc]
-                else:
-                    res = runner(prompt)  # type: ignore[misc]
+                res = await runner(prompt)
                 stats.runs.append(res)
                 print(
                     f"   {framework_name:9s} run {i + 1}: "
