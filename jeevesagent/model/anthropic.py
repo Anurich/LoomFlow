@@ -63,6 +63,95 @@ class AnthropicModel:
             key = api_key or os.environ.get("ANTHROPIC_API_KEY")
             self._client = AsyncAnthropic(api_key=key)
 
+    async def complete(
+        self,
+        messages: list[Message],
+        *,
+        tools: list[ToolDef] | None = None,
+        temperature: float = 1.0,
+        max_tokens: int | None = None,
+    ) -> tuple[str, list[ToolCall], Usage, str]:
+        """Single-shot non-streaming completion.
+
+        Calls ``client.messages.create(...)`` (no ``stream=True``,
+        no ``stream`` context manager) — Anthropic returns the full
+        ``Message`` in one HTTP response. We walk its ``content``
+        blocks once to assemble ``(text, tool_calls, usage,
+        stop_reason)``. Used by the non-streaming hot path
+        (``agent.run()``); ``agent.stream()`` keeps using
+        :meth:`stream`.
+
+        Falls back to consuming :meth:`stream` if the underlying
+        client raises (test fakes that only support streaming, or
+        transports that don't honour single-shot creation).
+        """
+        system, anth_messages = _to_anthropic_messages(messages)
+        anth_tools = [_to_anthropic_tool(t) for t in (tools or [])]
+
+        kwargs: dict[str, Any] = {
+            "model": self.name,
+            "messages": anth_messages,
+            "max_tokens": max_tokens or self._max_tokens,
+            "temperature": temperature,
+        }
+        if system:
+            kwargs["system"] = system
+        if anth_tools:
+            kwargs["tools"] = anth_tools
+
+        try:
+            response = await self._client.messages.create(**kwargs)
+        except Exception:  # noqa: BLE001 — fallback for fake / non-conforming clients
+            return await _consume_anthropic_stream(
+                self.stream(
+                    messages,
+                    tools=tools,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+            )
+
+        # If the SDK actually returned a stream object instead of a
+        # Message (some test fakes), drain the stream path.
+        if hasattr(response, "__aiter__") and not hasattr(response, "content"):
+            return await _consume_anthropic_stream(
+                self.stream(
+                    messages,
+                    tools=tools,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+            )
+
+        text_parts: list[str] = []
+        tool_calls: list[ToolCall] = []
+        for block in getattr(response, "content", None) or []:
+            btype = getattr(block, "type", None)
+            if btype == "text":
+                text_parts.append(getattr(block, "text", "") or "")
+            elif btype == "tool_use":
+                args_raw = getattr(block, "input", None)
+                args: dict[str, Any] = (
+                    dict(args_raw) if isinstance(args_raw, dict) else {}
+                )
+                tool_calls.append(
+                    ToolCall(
+                        id=getattr(block, "id", "") or "",
+                        tool=getattr(block, "name", "") or "",
+                        args=args,
+                    )
+                )
+
+        u = getattr(response, "usage", None)
+        usage = Usage(
+            input_tokens=getattr(u, "input_tokens", 0) or 0,
+            output_tokens=getattr(u, "output_tokens", 0) or 0,
+        )
+        stop_reason = (
+            getattr(response, "stop_reason", None) or "end_turn"
+        )
+        return "".join(text_parts), tool_calls, usage, str(stop_reason)
+
     async def stream(
         self,
         messages: list[Message],
@@ -158,6 +247,31 @@ class AnthropicModel:
             finish_reason=finish_reason or "end_turn",
             usage=Usage(input_tokens=agg_input, output_tokens=agg_output),
         )
+
+
+async def _consume_anthropic_stream(
+    chunks: AsyncIterator[ModelChunk],
+) -> tuple[str, list[ToolCall], Usage, str]:
+    """Drain a ``ModelChunk`` stream into the same return tuple as
+    :meth:`AnthropicModel.complete`. Used when the non-streaming
+    transport path is unavailable (test fakes / niche SDKs)."""
+    text_parts: list[str] = []
+    tool_calls: list[ToolCall] = []
+    usage = Usage()
+    finish_reason = "end_turn"
+    async for chunk in chunks:
+        if chunk.kind == "text" and chunk.text is not None:
+            text_parts.append(chunk.text)
+        elif (
+            chunk.kind == "tool_call" and chunk.tool_call is not None
+        ):
+            tool_calls.append(chunk.tool_call)
+        elif chunk.kind == "finish":
+            if chunk.usage is not None:
+                usage = chunk.usage
+            if chunk.finish_reason:
+                finish_reason = chunk.finish_reason
+    return "".join(text_parts), tool_calls, usage, finish_reason
 
 
 # ---------------------------------------------------------------------------

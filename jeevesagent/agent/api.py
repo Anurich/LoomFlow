@@ -722,6 +722,9 @@ class Agent:
                 telemetry=self._telemetry,
                 audit_log=self._audit_log,
                 max_turns=self._max_turns,
+                # Architectures consult this to pick fast (buffered)
+                # vs streaming (channel) paths for parallel work.
+                streaming=emit is not _noop_emit,
             )
 
             async for event in self._architecture.run(session, deps, prompt):

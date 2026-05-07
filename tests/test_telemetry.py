@@ -165,7 +165,13 @@ async def test_agent_run_emits_run_turn_and_model_spans() -> None:
     names = [s.name for s in exporter.get_finished_spans()]
     assert "jeeves.run" in names
     assert "jeeves.turn" in names
-    assert "jeeves.model.stream" in names
+    # ReAct emits ``jeeves.model.complete`` on the non-streaming hot
+    # path (agent.run) and ``jeeves.model.stream`` when consuming
+    # via agent.stream. Either span name is correct.
+    assert (
+        "jeeves.model.complete" in names
+        or "jeeves.model.stream" in names
+    )
 
     metrics = _metrics_by_name(reader)
     assert "jeeves.tokens.input" in metrics

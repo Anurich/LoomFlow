@@ -59,6 +59,102 @@ class OpenAIModel:
                 base_url=base_url,
             )
 
+    async def complete(
+        self,
+        messages: list[Message],
+        *,
+        tools: list[ToolDef] | None = None,
+        temperature: float = 1.0,
+        max_tokens: int | None = None,
+    ) -> tuple[str, list[ToolCall], Usage, str]:
+        """Single-shot completion (no per-chunk yields).
+
+        Tries the OpenAI non-streaming endpoint
+        (``stream=False``) first. If that fails — e.g. when a test
+        fake client only supports streaming, or a transport doesn't
+        honor ``stream=False`` — falls back to consuming
+        :meth:`stream` internally and accumulating the result. The
+        fallback still saves the per-chunk yield + Event
+        construction overhead on the architecture side because
+        ReAct calls ``complete`` with a single ``await``.
+        """
+        oai_messages = _to_openai_messages(messages)
+        oai_tools = [_to_openai_tool(t) for t in (tools or [])]
+
+        kwargs: dict[str, Any] = {
+            "model": self.name,
+            "messages": oai_messages,
+            "stream": False,
+        }
+        if temperature != 1.0:
+            kwargs["temperature"] = temperature
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
+        if oai_tools:
+            kwargs["tools"] = oai_tools
+
+        try:
+            response = await self._client.chat.completions.create(**kwargs)
+        except Exception:  # noqa: BLE001 — surface the fallback transparently
+            return await _consume_stream(
+                self.stream(
+                    messages,
+                    tools=tools,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+            )
+
+        choices = getattr(response, "choices", None) or []
+        if not choices:
+            # Some clients (test fakes; transports that don't honour
+            # ``stream=False``) return an iterator instead of a
+            # single response object. Fall back to consuming the
+            # adapter's own ``stream`` — it knows how to parse the
+            # chunks into ModelChunks.
+            if hasattr(response, "__aiter__"):
+                return await _consume_stream(
+                    self.stream(
+                        messages,
+                        tools=tools,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                    )
+                )
+            return ("", [], Usage(), "stop")
+        choice = choices[0]
+        message = getattr(choice, "message", None)
+
+        text = (getattr(message, "content", None) or "") if message else ""
+
+        tool_calls: list[ToolCall] = []
+        raw_tool_calls = (
+            getattr(message, "tool_calls", None) if message else None
+        )
+        for tc in raw_tool_calls or []:
+            fn = getattr(tc, "function", None)
+            name = getattr(fn, "name", "") if fn else ""
+            args_json = getattr(fn, "arguments", "") if fn else ""
+            try:
+                args = json.loads(args_json) if args_json else {}
+            except json.JSONDecodeError:
+                args = {}
+            tool_calls.append(
+                ToolCall(
+                    id=getattr(tc, "id", None) or new_id("tc"),
+                    tool=name,
+                    args=args,
+                )
+            )
+
+        u = getattr(response, "usage", None)
+        usage = Usage(
+            input_tokens=getattr(u, "prompt_tokens", 0) or 0,
+            output_tokens=getattr(u, "completion_tokens", 0) or 0,
+        )
+        finish_reason = getattr(choice, "finish_reason", None) or "stop"
+        return text, tool_calls, usage, str(finish_reason)
+
     async def stream(
         self,
         messages: list[Message],
@@ -151,6 +247,45 @@ class OpenAIModel:
             finish_reason=finish_reason or "stop",
             usage=usage,
         )
+
+
+# ---------------------------------------------------------------------------
+# Stream-consumption fallback for complete()
+# ---------------------------------------------------------------------------
+
+
+async def _consume_stream(
+    chunks: AsyncIterator[ModelChunk],
+) -> tuple[str, list[ToolCall], Usage, str]:
+    """Drain a ``ModelChunk`` stream into the same return tuple as
+    :meth:`OpenAIModel.complete`. Used when the non-streaming
+    transport isn't available."""
+    text_parts: list[str] = []
+    tool_calls: list[ToolCall] = []
+    usage = Usage()
+    finish_reason = "stop"
+    async for chunk in chunks:
+        if chunk.kind == "text" and chunk.text is not None:
+            text_parts.append(chunk.text)
+        elif (
+            chunk.kind == "tool_call" and chunk.tool_call is not None
+        ):
+            tool_calls.append(chunk.tool_call)
+        elif chunk.kind == "finish":
+            if chunk.usage is not None:
+                usage = chunk.usage
+            if chunk.finish_reason:
+                finish_reason = chunk.finish_reason
+    return "".join(text_parts), tool_calls, usage, finish_reason
+
+
+async def _replay(it: AsyncIterator[Any]) -> AsyncIterator[ModelChunk]:
+    """Last-resort: yield from an unknown async iterator that we
+    couldn't classify as a Response. Only used when a fake test
+    client returns an iterator from a ``stream=False`` call."""
+    async for item in it:
+        if isinstance(item, ModelChunk):
+            yield item
 
 
 # ---------------------------------------------------------------------------

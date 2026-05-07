@@ -36,7 +36,17 @@ from .types import (
 
 @runtime_checkable
 class Model(Protocol):
-    """LLM provider interface. One adapter per lab (Anthropic, OpenAI, ...)."""
+    """LLM provider interface. One adapter per lab (Anthropic, OpenAI, ...).
+
+    The required surface is ``stream(...)`` — every adapter must
+    implement it. Adapters MAY additionally override ``complete(...)``
+    with a non-streaming (single-shot) call; if not, ``complete``
+    falls back to consuming the stream internally and assembling the
+    full response, which is correct but slower (per-chunk wire +
+    parsing overhead). Architectures use ``complete`` on the
+    non-streaming hot path (``agent.run()``) and ``stream`` when a
+    consumer is reading from ``agent.stream()``.
+    """
 
     name: str
 

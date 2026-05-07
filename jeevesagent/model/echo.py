@@ -11,7 +11,7 @@ from collections.abc import AsyncIterator
 
 import anyio
 
-from ..core.types import Message, ModelChunk, Role, ToolDef, Usage
+from ..core.types import Message, ModelChunk, Role, ToolCall, ToolDef, Usage
 
 
 class EchoModel:
@@ -29,6 +29,32 @@ class EchoModel:
         self._prefix = prefix
         self._chunk_delay = chunk_delay_s
         self._cost_per_token = cost_per_token
+
+    async def complete(
+        self,
+        messages: list[Message],
+        *,
+        tools: list[ToolDef] | None = None,
+        temperature: float = 1.0,
+        max_tokens: int | None = None,
+    ) -> tuple[str, list[ToolCall], Usage, str]:
+        """Single-shot echo. Returns the echoed user prompt as one
+        string with synthetic usage. No per-token chunking — used by
+        the non-streaming hot path (``agent.run()``)."""
+        last_user = next(
+            (m for m in reversed(messages) if m.role == Role.USER),
+            None,
+        )
+        text = f"{self._prefix}{last_user.content if last_user else ''}"
+        input_tokens = sum(len(m.content.split()) for m in messages)
+        output_tokens = max(1, len(text.split()))
+        cost = (input_tokens + output_tokens) * self._cost_per_token
+        usage = Usage(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cost_usd=cost,
+        )
+        return text, [], usage, "stop"
 
     async def stream(
         self,

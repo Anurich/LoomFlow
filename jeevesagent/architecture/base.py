@@ -101,6 +101,14 @@ class Dependencies:
     telemetry: Telemetry
     audit_log: AuditLog | None
     max_turns: int
+    streaming: bool = False
+    """Whether a downstream consumer is reading from
+    ``agent.stream()``. When True, architectures should preserve
+    real-time event-arrival semantics so a consumer that breaks
+    out of the iterator triggers prompt cancellation. When False
+    (the default for ``agent.run()``), architectures may batch
+    events for fewer task-group / channel allocations on the
+    hot path."""
 
 
 @runtime_checkable

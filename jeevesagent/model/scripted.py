@@ -34,6 +34,33 @@ class ScriptedModel:
     def remaining(self) -> int:
         return max(0, len(self._turns) - self._idx)
 
+    async def complete(
+        self,
+        messages: list[Message],
+        *,
+        tools: list[ToolDef] | None = None,
+        temperature: float = 1.0,
+        max_tokens: int | None = None,
+    ) -> tuple[str, list[ToolCall], Usage, str]:
+        """Single-shot replay of the next scripted turn.
+
+        Mirrors :meth:`stream` but returns the turn's text +
+        tool_calls + usage in one tuple. Used by the non-streaming
+        hot path (``agent.run()``); ``agent.stream()`` keeps using
+        :meth:`stream` for per-chunk replay.
+        """
+        if self._idx >= len(self._turns):
+            return "", [], Usage(), "stop"
+        turn = self._turns[self._idx]
+        self._idx += 1
+        finish_reason = "tool_use" if turn.tool_calls else "stop"
+        return (
+            turn.text,
+            list(turn.tool_calls),
+            turn.usage,
+            finish_reason,
+        )
+
     async def stream(
         self,
         messages: list[Message],
