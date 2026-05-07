@@ -96,8 +96,31 @@ class Agent:
         max_turns: int = DEFAULT_MAX_TURNS,
         auto_consolidate: bool = False,
         architecture: Architecture | str | None = None,
+        skills: list[Any] | None = None,
     ) -> None:
+        # Skills — packaged on-disk playbooks loaded on demand.
+        # Build the registry first so frontmatter validation fires
+        # at construction time (not later, when the model first
+        # tries to load).
+        from ..architecture.tool_host_wrappers import ExtendedToolHost
+        from ..skills import SkillRegistry, make_load_skill_tool
+
+        skill_registry = (
+            SkillRegistry(skills) if skills else None
+        )
+        has_skills = skill_registry is not None and len(skill_registry) > 0
+
         self._instructions = instructions
+        if has_skills:
+            # Append the skill catalog to the system prompt — the
+            # cheap "metadata" tier of progressive disclosure
+            # (~50 tokens per skill, regardless of body size).
+            assert skill_registry is not None
+            self._instructions = (
+                f"{instructions.rstrip()}\n\n"
+                f"{skill_registry.catalog_section()}"
+            )
+
         self._model: Model = _resolve_model(model)
         self._memory: Memory = memory if memory is not None else InMemoryMemory()
         self._runtime: Runtime = runtime if runtime is not None else InProcRuntime()
@@ -106,7 +129,24 @@ class Agent:
             permissions if permissions is not None else AllowAll()
         )
         self._hooks = hooks if hooks is not None else HookRegistry()
-        self._tool_host: ToolHost = _coerce_tool_host(tools)
+        self._skills = skill_registry
+
+        host = _coerce_tool_host(tools)
+        if has_skills:
+            assert skill_registry is not None
+            # InProcessToolHost and ExtendedToolHost both expose
+            # ``register``; for any other host implementation
+            # (MCP / custom), wrap with ExtendedToolHost so we
+            # have a place to push the load_skill tool plus any
+            # pending tools the skills lazy-register on demand.
+            if not isinstance(host, InProcessToolHost):
+                host = ExtendedToolHost(host, [])
+            load_tool = make_load_skill_tool(
+                skill_registry, host=host
+            )
+            host.register(load_tool)
+        self._tool_host: ToolHost = host
+
         self._telemetry: Telemetry = (
             telemetry if telemetry is not None else NoTelemetry()
         )
@@ -160,6 +200,13 @@ class Agent:
     def tool_host(self) -> ToolHost:
         """The configured :class:`ToolHost`."""
         return self._tool_host
+
+    @property
+    def skills(self) -> Any | None:
+        """The :class:`SkillRegistry` of skills registered on this
+        agent (or ``None`` if no skills were configured). Useful for
+        inspecting / mutating the skill set after construction."""
+        return self._skills
 
     @property
     def budget(self) -> Budget:

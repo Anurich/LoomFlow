@@ -475,6 +475,143 @@ agent = Agent(
 
 ---
 
+## Skills: packaged playbooks the agent loads on demand
+
+Tools tell the agent **what** it can do. Skills tell it **how** —
+domain-specific recipes the agent reads when relevant, ignores when
+not. Same shape as [Anthropic Agent Skills (Oct 2025)](https://docs.claude.com/en/docs/agents-and-tools/agent-skills/overview):
+a directory with `SKILL.md` (frontmatter + markdown body) and
+optional bundled files. Drop your existing Anthropic-format skills
+into our `skills=[...]` and they Just Work.
+
+```python
+from jeevesagent import Agent
+
+agent = Agent(
+    "...",
+    model="claude-opus-4-7",
+    skills=[
+        "~/.jeeves/skills/system/",          # base layer
+        "~/.jeeves/skills/user/",            # user override
+        ("./.jeeves-skills/", "Project"),    # project-local with label
+    ],
+)
+```
+
+**Progressive disclosure**: only `name` + `description` (~50 tokens
+per skill) load into the system prompt at startup. The model calls
+a `load_skill(name)` tool when a skill is relevant — only THEN does
+the full body enter context. A 50-skill agent costs ~2,500 tokens at
+rest; nothing more until the model actually loads one.
+
+### Three skill modes — coexist freely in any skill
+
+```
+skills/my-skill/
+├── SKILL.md         ← required: frontmatter + markdown body
+├── tools.py         ← OPTIONAL: @tool functions (Mode B, in-process Python)
+└── scripts/         ← OPTIONAL: executable scripts (Mode A or Mode C)
+    └── helper.py
+```
+
+**Mode A — pure markdown.** SKILL.md teaches the model how to use
+your existing tools (`read`, `write`, `bash`). The model issues
+those tool calls itself based on the body's instructions.
+
+**Mode C — frontmatter declares a script as a typed tool.** Any
+language. The framework wraps the script in a subprocess-backed
+`Tool` with proper args; the model calls it like any built-in tool.
+
+```yaml
+---
+name: calc
+description: Arithmetic helpers.
+tools:
+  add:
+    description: Sum two integers.
+    script: scripts/add.py
+    args:
+      a:
+        type: string
+        description: First int
+      b:
+        type: string
+        description: Second int
+---
+```
+```python
+# scripts/add.py — plain Python, no decorators
+import sys
+print(int(sys.argv[1]) + int(sys.argv[2]))
+```
+The model calls `calc__add(a="2", b="3")` → framework execs the
+script → captures stdout → returns to the model.
+
+**Mode B — `tools.py` ships `@tool` functions.** Auto-discovered by
+filename presence; imported at construction; registered into the
+agent's tool host when the skill is loaded.
+
+```python
+# skills/greeter/tools.py
+from jeevesagent import tool
+
+@tool
+async def say_hi(name: str) -> str:
+    """Say hi."""
+    return f"Hi {name}!"
+```
+The model calls `greeter__say_hi(name="Anupam")` directly. In-process,
+fast, can share the agent's state.
+
+### Auto-namespacing prevents collisions
+
+Tool names get prefixed with the skill name automatically:
+
+| Skill ships | Registered as |
+|---|---|
+| `add` (Mode C, calc skill) | `calc__add` |
+| `say_hi` (Mode B, greeter skill) | `greeter__say_hi` |
+| `search` (in two skills A and B) | `a__search` and `b__search` — no clash |
+
+### Inline skills — one-off in code
+
+For tiny one-off skills that don't justify a folder:
+
+```python
+from jeevesagent import Skill
+
+skill = Skill.from_text("""
+---
+name: standup
+description: Format a daily standup from rough notes.
+---
+# Standup
+Always 3 sections: Yesterday, Today, Blockers.
+""")
+
+agent = Agent("...", skills=[skill])
+```
+
+### Layered sources with last-wins override
+
+When two sources ship a skill with the same name, the later source
+wins. Lets you stack: system → user → project.
+
+```python
+agent = Agent(
+    skills=[
+        "~/.jeeves/skills/system/",      # base
+        "~/.jeeves/skills/user/",        # user customizes
+        "./.jeeves-skills/",             # project-local override
+    ],
+)
+```
+
+See [`examples/28_skills.py`](examples/28_skills.py) for a complete
+walkthrough of all three modes side by side.
+
+---
+
 ## Capability matrix
 
 | Capability | What you get | Where |
@@ -484,6 +621,7 @@ agent = Agent(
 | **Vector store** | `add` / `search` / `delete` with Mongo-style filters, MMR diversity, BM25 hybrid search, save/load | `InMemoryVectorStore`, `ChromaVectorStore`, `PostgresVectorStore`, `FAISSVectorStore`, `SearchResult` |
 | **Document loader** | One-line load for PDF / DOCX / Excel / CSV / HTML / Markdown into chunks | `jeevesagent.loader.load`, `MarkdownChunker`, `RecursiveChunker`, `SentenceChunker`, `TokenChunker` |
 | **Built-in tools** | `read` / `write` / `edit` / `bash` factories with sandbox-aware workdirs | `read_tool`, `write_tool`, `edit_tool`, `bash_tool`, `default_workdir` |
+| **Skills (Anthropic-compatible)** | Packaged playbooks loaded on demand. Three modes coexist: pure markdown, frontmatter-declared subprocess tools (any language), and `tools.py` with `@tool` (Python, in-process). Layered sources with last-wins override. | `Skill`, `SkillRegistry`, `SkillSource`, `SkillMetadata`, `SkillError`, `Agent(skills=...)` |
 | **Model adapters** | Anthropic, OpenAI, LiteLLM (~100 providers), Echo (zero-key), Scripted (tests) | `jeevesagent.AnthropicModel`, `OpenAIModel`, `LiteLLMModel`, `EchoModel`, `ScriptedModel` |
 | **String model resolver** | `model="claude-opus-4-7"`, `"gpt-4o"`, `"mistral-large"`, `"command-r"`, `"echo"`, `"litellm/<any>"` | `Agent.__init__` |
 | **Tools** | `@tool` decorator with auto-schema, sync + async; `agent.with_tool` decorator; `add_tool` / `remove_tool` / `tools_list` | `jeevesagent.tool`, `Tool` |
@@ -516,21 +654,25 @@ agent = Agent(
 | [`Subagent.md`](Subagent.md) | Architecture-protocol design rationale; full 14-architecture catalogue (the 5 shipped, the 9 candidates) |
 | [`project.md`](project.md) | The full engineering plan (the design doc) |
 | [`BUILD_LOG.md`](BUILD_LOG.md) | Slice-by-slice changelog |
-| [`examples/`](examples/) | 26 runnable scripts: `00_hello`–`19_rewoo` cover every architecture; `20_rag_supervisor`–`22_rag_with_loader` are RAG patterns; `23_coding_agent`, `24_support_triage`, `25_document_pipeline`, `26_devops_diagnostic` are real-world use cases with permissions / audit / budget wired up |
+| [`examples/`](examples/) | 29 runnable scripts: `00_hello`–`19_rewoo` cover every architecture; `20_rag_supervisor`–`22_rag_with_loader` are RAG patterns; `23_coding_agent`, `24_support_triage`, `25_document_pipeline`, `26_devops_diagnostic` are real-world use cases with permissions / audit / budget wired up; `27_visualize_agents` shows graph generation; `28_skills` walks through all three skill modes |
 
 ---
 
 ## Status
 
-* **743 tests pass** in ~6 seconds (5 env-gated integrations skip
+* **815 tests pass** in ~6 seconds (5 env-gated integrations skip
   without `JEEVES_TEST_PG_DSN` / `JEEVES_TEST_REDIS_URL`)
-* **mypy `--strict`** clean across 95 production source files
+* **mypy `--strict`** clean across 102 production source files
 * **ruff** clean including `flake8-async` lints
-* v0.5 ships the full vector-store stack (`InMemoryVectorStore` /
-  Chroma / Postgres / FAISS, all with Mongo-style filters, MMR
-  diversity, BM25 hybrid search, persistence), the document loader
-  with chunking strategies, the `Team` facade for ergonomic
-  multi-agent construction, and 12 architectures with selective
+* v0.9 ships **Skills** (Anthropic Agent Skills format, with
+  `tools.py` auto-discovery for in-process Python tools and
+  frontmatter `tools:` manifest for any-language scripts wrapped
+  as typed tools), agent-graph visualization (`agent.generate_graph()`
+  → Mermaid / PNG), the `Team` facade for ergonomic multi-agent
+  construction, the full vector-store stack (`InMemoryVectorStore` /
+  Chroma / Postgres / FAISS — Mongo-style filters, MMR diversity,
+  BM25 hybrid search, persistence), the document loader with
+  chunking strategies, and 12 architectures including selective
   lesson recall (Reflexion), typed handoffs (Swarm),
   forward_message (Supervisor), Jaccard convergence (Debate), and
   parallel proposer/evaluator with min_score floor (TreeOfThoughts).
@@ -548,7 +690,7 @@ mypy --strict jeevesagent
 pytest tests/ -v
 ```
 
-You should see 743 passed. Five integration tests skip without
+You should see 815 passed. Five integration tests skip without
 `JEEVES_TEST_PG_DSN` / `JEEVES_TEST_REDIS_URL` / API-key env vars set.
 
 ---

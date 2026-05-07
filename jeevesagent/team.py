@@ -128,6 +128,7 @@ class Team:
         audit_log: AuditLog | None = None,
         max_turns: int = DEFAULT_MAX_TURNS,
         auto_consolidate: bool = False,
+        skills: list[Any] | None = None,
         # --- supervisor-specific options ---
         instructions_template: str | None = None,
         delegate_tool_name: str = "delegate",
@@ -153,6 +154,7 @@ class Team:
             audit_log=audit_log,
             max_turns=max_turns,
             auto_consolidate=auto_consolidate,
+            skills=skills,
             architecture=Supervisor(
                 workers=workers,
                 instructions_template=instructions_template,
@@ -188,6 +190,7 @@ class Team:
         audit_log: AuditLog | None = None,
         max_turns: int = DEFAULT_MAX_TURNS,
         auto_consolidate: bool = False,
+        skills: list[Any] | None = None,
         # --- swarm-specific options ---
         max_handoffs: int = 8,
         detect_cycles: bool = True,
@@ -214,6 +217,7 @@ class Team:
             audit_log=audit_log,
             max_turns=max_turns,
             auto_consolidate=auto_consolidate,
+            skills=skills,
             architecture=Swarm(
                 agents=agents,
                 entry_agent=entry_agent,
@@ -250,6 +254,7 @@ class Team:
         audit_log: AuditLog | None = None,
         max_turns: int = DEFAULT_MAX_TURNS,
         auto_consolidate: bool = False,
+        skills: list[Any] | None = None,
         # --- router-specific options ---
         fallback_route: str | None = None,
         require_confidence_above: float = 0.0,
@@ -272,6 +277,7 @@ class Team:
             audit_log=audit_log,
             max_turns=max_turns,
             auto_consolidate=auto_consolidate,
+            skills=skills,
             architecture=Router(
                 routes=routes,
                 fallback_route=fallback_route,
@@ -307,6 +313,7 @@ class Team:
         audit_log: AuditLog | None = None,
         max_turns: int = DEFAULT_MAX_TURNS,
         auto_consolidate: bool = False,
+        skills: list[Any] | None = None,
         # --- debate-specific options ---
         rounds: int = 2,
         convergence_check: bool = True,
@@ -331,6 +338,7 @@ class Team:
             audit_log=audit_log,
             max_turns=max_turns,
             auto_consolidate=auto_consolidate,
+            skills=skills,
             architecture=MultiAgentDebate(
                 debaters=debaters,
                 judge=judge,
@@ -369,6 +377,7 @@ class Team:
         audit_log: AuditLog | None = None,
         max_turns: int = DEFAULT_MAX_TURNS,
         auto_consolidate: bool = False,
+        skills: list[Any] | None = None,
         # --- actor-critic-specific options ---
         max_rounds: int = 3,
         approval_threshold: float = 0.9,
@@ -391,6 +400,7 @@ class Team:
             audit_log=audit_log,
             max_turns=max_turns,
             auto_consolidate=auto_consolidate,
+            skills=skills,
             architecture=ActorCritic(
                 actor=actor,
                 critic=critic,
@@ -429,6 +439,7 @@ class Team:
         audit_log: AuditLog | None = None,
         max_turns: int = DEFAULT_MAX_TURNS,
         auto_consolidate: bool = False,
+        skills: list[Any] | None = None,
         # --- blackboard-specific options ---
         max_rounds: int = 10,
         coordinator_instructions: str | None = None,
@@ -451,6 +462,7 @@ class Team:
             audit_log=audit_log,
             max_turns=max_turns,
             auto_consolidate=auto_consolidate,
+            skills=skills,
             architecture=BlackboardArchitecture(
                 agents=agents,
                 coordinator=coordinator,

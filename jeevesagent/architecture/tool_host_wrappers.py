@@ -47,6 +47,17 @@ class ExtendedToolHost:
             t.name: t for t in extras
         }
 
+    def register(self, item: Tool) -> Tool:
+        """Mutably append a Tool to the extras pool.
+
+        Mirrors :meth:`InProcessToolHost.register` so callers
+        (notably the skills system, which lazy-registers Tools when
+        ``load_skill`` fires) can add to either host kind without
+        special-casing."""
+        self._extras.append(item)
+        self._extras_by_name[item.name] = item
+        return item
+
     async def list_tools(
         self, *, query: str | None = None
     ) -> list[ToolDef]:

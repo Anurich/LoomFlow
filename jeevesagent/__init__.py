@@ -131,6 +131,13 @@ from .security import (
     StandardPermissions,
     SubprocessSandbox,
 )
+from .skills import (
+    Skill,
+    SkillError,
+    SkillMetadata,
+    SkillRegistry,
+    SkillSource,
+)
 from .team import Team, run_architecture
 from .tools import (
     InProcessToolHost,
@@ -311,4 +318,10 @@ __all__ = [
     "AgentGraph",
     "build_graph",
     "write_graph",
+    # skills
+    "Skill",
+    "SkillError",
+    "SkillMetadata",
+    "SkillRegistry",
+    "SkillSource",
 ]
