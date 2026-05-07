@@ -61,10 +61,11 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
+import anyio
 from pydantic import BaseModel
 
 from ..core.ids import new_id
-from ..core.types import Event, Message, Role
+from ..core.types import Event, Message, Role, Usage
 from .base import AgentSession, Dependencies
 from .helpers import add_usage, parse_score, text_only_model_call
 
@@ -130,6 +131,8 @@ class TreeOfThoughts:
         max_depth: int = 3,
         beam_width: int = 2,
         solved_threshold: float = 1.0,
+        min_score: float = 0.0,
+        parallel: bool = True,
         proposer_prompt: str | None = None,
         evaluator_prompt: str | None = None,
     ) -> None:
@@ -143,10 +146,23 @@ class TreeOfThoughts:
             raise ValueError(
                 "solved_threshold must be in [0.0, 1.0]"
             )
+        if not 0.0 <= min_score <= 1.0:
+            raise ValueError("min_score must be in [0.0, 1.0]")
         self._branch_factor = branch_factor
         self._max_depth = max_depth
         self._beam_width = beam_width
         self._solved_threshold = solved_threshold
+        # Floor below which a candidate is dropped REGARDLESS of beam
+        # capacity. Lets bad branches die quickly instead of riding
+        # along just because the beam has room. 0.0 = legacy behavior
+        # (no floor).
+        self._min_score = min_score
+        # Run proposer + evaluator calls within a level concurrently
+        # via anyio.create_task_group. Pure speedup — branch_factor *
+        # beam_width independent calls are now wall-clock parallel
+        # instead of sequential. Disable for deterministic test
+        # ordering or when your model provider has tight rate limits.
+        self._parallel = parallel
         self._proposer_prompt = (
             proposer_prompt or DEFAULT_PROPOSER_PROMPT
         )
@@ -202,53 +218,52 @@ class TreeOfThoughts:
             )
 
             # === Expand: generate branch_factor candidates per node ===
+            #
+            # Parallel mode runs every (parent × k) proposer call
+            # concurrently — independent calls, big wall-clock win
+            # at moderate fan-out. Sequential mode preserves
+            # deterministic ordering for tests / strict rate limits.
             candidates: list[ThoughtNode] = []
-            for parent in frontier:
-                for k in range(self._branch_factor):
-                    chain = _chain_to_root(all_nodes, parent)
-                    msgs = _proposer_messages(
-                        self._proposer_prompt, prompt, chain
-                    )
-                    text, usage = await text_only_model_call(
-                        deps,
-                        f"tot_propose_d{depth}_p{parent.id}_k{k}",
-                        msgs,
-                    )
-                    await deps.budget.consume(
-                        tokens_in=usage.input_tokens,
-                        tokens_out=usage.output_tokens,
-                        cost_usd=usage.cost_usd,
-                    )
-                    session.cumulative_usage = add_usage(
-                        session.cumulative_usage, usage
-                    )
-                    session.turns += 1
-                    candidate = ThoughtNode(
-                        id=new_id("thot"),
-                        parent_id=parent.id,
-                        content=text.strip(),
-                        depth=depth,
-                    )
-                    candidates.append(candidate)
-                    all_nodes.append(candidate)
-                    yield Event.architecture_event(
-                        session.id,
-                        "tot.proposed",
-                        depth=depth,
-                        node_id=candidate.id,
-                        parent_id=parent.id,
-                        content=candidate.content[:200],
-                    )
+            propose_jobs = [
+                (parent, k)
+                for parent in frontier
+                for k in range(self._branch_factor)
+            ]
+            propose_results: list[tuple[str, Usage] | None] = [
+                None
+            ] * len(propose_jobs)
 
-            # === Evaluate every candidate ===
-            for cand in candidates:
-                chain = _chain_to_root(all_nodes, cand)
-                msgs = _evaluator_messages(
-                    self._evaluator_prompt, prompt, chain, cand
+            # B023 false positive: the task_group below joins on
+            # all spawned tasks before the for-loop advances, so the
+            # captured ``depth`` / ``propose_results`` are stable
+            # for the closure's entire lifetime.
+            async def _propose_one(  # noqa: B023
+                idx: int, parent: ThoughtNode, k: int
+            ) -> None:
+                chain = _chain_to_root(all_nodes, parent)
+                msgs = _proposer_messages(
+                    self._proposer_prompt, prompt, chain
                 )
                 text, usage = await text_only_model_call(
-                    deps, f"tot_eval_d{depth}_n{cand.id}", msgs
+                    deps,
+                    f"tot_propose_d{depth}_p{parent.id}_k{k}",  # noqa: B023
+                    msgs,
                 )
+                propose_results[idx] = (text, usage)  # noqa: B023
+
+            if self._parallel:
+                async with anyio.create_task_group() as tg:
+                    for idx, (parent, k) in enumerate(propose_jobs):
+                        tg.start_soon(_propose_one, idx, parent, k)
+            else:
+                for idx, (parent, k) in enumerate(propose_jobs):
+                    await _propose_one(idx, parent, k)
+
+            for (parent, _k), pr in zip(
+                propose_jobs, propose_results, strict=True
+            ):
+                assert pr is not None
+                text, usage = pr
                 await deps.budget.consume(
                     tokens_in=usage.input_tokens,
                     tokens_out=usage.output_tokens,
@@ -258,7 +273,62 @@ class TreeOfThoughts:
                     session.cumulative_usage, usage
                 )
                 session.turns += 1
-                cand.score = parse_score(text)
+                candidate = ThoughtNode(
+                    id=new_id("thot"),
+                    parent_id=parent.id,
+                    content=text.strip(),
+                    depth=depth,
+                )
+                candidates.append(candidate)
+                all_nodes.append(candidate)
+                yield Event.architecture_event(
+                    session.id,
+                    "tot.proposed",
+                    depth=depth,
+                    node_id=candidate.id,
+                    parent_id=parent.id,
+                    content=candidate.content[:200],
+                )
+
+            # === Evaluate every candidate (parallel where possible) ===
+            eval_results: list[tuple[float, Usage] | None] = [
+                None
+            ] * len(candidates)
+
+            # Same B023-safe pattern as the proposer task group above.
+            async def _eval_one(idx: int, cand: ThoughtNode) -> None:  # noqa: B023
+                chain = _chain_to_root(all_nodes, cand)
+                msgs = _evaluator_messages(
+                    self._evaluator_prompt, prompt, chain, cand
+                )
+                text, usage = await text_only_model_call(
+                    deps, f"tot_eval_d{depth}_n{cand.id}", msgs  # noqa: B023
+                )
+                eval_results[idx] = (parse_score(text), usage)  # noqa: B023
+
+            if self._parallel:
+                async with anyio.create_task_group() as tg:
+                    for idx, cand in enumerate(candidates):
+                        tg.start_soon(_eval_one, idx, cand)
+            else:
+                for idx, cand in enumerate(candidates):
+                    await _eval_one(idx, cand)
+
+            for cand, er in zip(
+                candidates, eval_results, strict=True
+            ):
+                assert er is not None
+                score, usage = er
+                await deps.budget.consume(
+                    tokens_in=usage.input_tokens,
+                    tokens_out=usage.output_tokens,
+                    cost_usd=usage.cost_usd,
+                )
+                session.cumulative_usage = add_usage(
+                    session.cumulative_usage, usage
+                )
+                session.turns += 1
+                cand.score = score
                 yield Event.architecture_event(
                     session.id,
                     "tot.evaluated",
@@ -267,15 +337,23 @@ class TreeOfThoughts:
                     score=cand.score,
                 )
 
-            # === Prune: keep top beam_width by score ===
+            # === Prune: top beam_width by score, AND drop anything
+            # below the min_score floor. The floor lets a clearly-
+            # losing branch die immediately even if the beam has
+            # room — saves the next level's compute. ===
             candidates.sort(key=lambda n: n.score, reverse=True)
-            frontier = candidates[: self._beam_width]
+            survivors = [
+                c for c in candidates if c.score >= self._min_score
+            ]
+            frontier = survivors[: self._beam_width]
+            n_pruned_floor = len(candidates) - len(survivors)
             yield Event.architecture_event(
                 session.id,
                 "tot.pruned",
                 depth=depth,
                 kept=[n.id for n in frontier],
                 kept_scores=[n.score for n in frontier],
+                pruned_below_floor=n_pruned_floor,
             )
 
             # === Early exit if any candidate is "solved" ===

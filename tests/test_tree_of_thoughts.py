@@ -351,3 +351,77 @@ async def test_tot_beam_keeps_top_n_per_level() -> None:
     kept_scores = pruned.payload["kept_scores"]
     # Kept are top 2 by score: 0.9 and 0.5; 0.2 is pruned.
     assert sorted(kept_scores, reverse=True) == [0.9, 0.5]
+
+
+# ---------------------------------------------------------------------------
+# min_score floor pruning
+# ---------------------------------------------------------------------------
+
+
+async def test_tot_min_score_floor_drops_weak_branches() -> None:
+    """Candidates scoring below ``min_score`` are pruned regardless
+    of beam capacity. Saves the next level's compute."""
+    model = ScriptedModel(
+        [
+            ScriptedTurn(text="thought a"),
+            ScriptedTurn(text="thought b"),
+            ScriptedTurn(text="thought c"),
+            ScriptedTurn(text="score: 0.9"),
+            ScriptedTurn(text="score: 0.2"),
+            ScriptedTurn(text="score: 0.4"),
+        ]
+    )
+    agent = Agent(
+        "solver",
+        model=model,
+        architecture=TreeOfThoughts(
+            branch_factor=3,
+            max_depth=1,
+            beam_width=3,  # beam has room for all 3
+            min_score=0.5,  # ...but floor drops 0.2 and 0.4
+        ),
+    )
+    events = [e async for e in agent.stream("task")]
+    pruned = next(
+        e for e in events if e.kind == "architecture_event"
+        and e.payload.get("name") == "tot.pruned"
+    )
+    # Only the 0.9 candidate survives the floor.
+    assert pruned.payload["kept_scores"] == [0.9]
+    assert pruned.payload["pruned_below_floor"] == 2
+
+
+def test_tot_rejects_invalid_min_score() -> None:
+    with pytest.raises(ValueError, match="min_score"):
+        TreeOfThoughts(min_score=1.5)
+
+
+async def test_tot_parallel_and_sequential_agree() -> None:
+    """Parallel and sequential modes must produce the same result
+    given identical scripted scores."""
+    proposer_replies = ["thought a", "thought b"]
+    eval_replies = ["score: 0.9", "score: 0.3"]
+    seq_model = ScriptedModel(
+        [ScriptedTurn(text=t) for t in proposer_replies + eval_replies]
+    )
+    par_model = ScriptedModel(
+        [ScriptedTurn(text=t) for t in proposer_replies + eval_replies]
+    )
+    seq_agent = Agent(
+        "solver",
+        model=seq_model,
+        architecture=TreeOfThoughts(
+            branch_factor=2, max_depth=1, beam_width=1, parallel=False
+        ),
+    )
+    par_agent = Agent(
+        "solver",
+        model=par_model,
+        architecture=TreeOfThoughts(
+            branch_factor=2, max_depth=1, beam_width=1, parallel=True
+        ),
+    )
+    seq = await seq_agent.run("task")
+    par = await par_agent.run("task")
+    assert seq.output == par.output
+    assert "thought a" in seq.output

@@ -130,6 +130,54 @@ def test_converged_false_when_empty() -> None:
     assert not _converged({})
 
 
+def test_converged_jaccard_default_handles_minor_wording() -> None:
+    """Default threshold (0.85) accepts near-identical answers
+    that differ only in trivial wording."""
+    responses = {
+        "d0": "the answer is 42 because of physics",
+        "d1": "the answer is 42 because of physics",
+        "d2": "the answer is 42 because of physics indeed",
+    }
+    assert _converged(responses)
+
+
+def test_converged_strict_threshold_rejects_minor_wording() -> None:
+    """``threshold=1.0`` reproduces the legacy strict-equality
+    behaviour — any wording difference fails convergence."""
+    responses = {
+        "d0": "yes the answer is 42",
+        "d1": "the answer is 42",
+    }
+    assert not _converged(responses, threshold=1.0)
+
+
+def test_converged_low_threshold_accepts_loose_overlap() -> None:
+    """Low threshold (0.4) accepts answers that broadly agree
+    on most tokens but differ in some."""
+    responses = {
+        "d0": "the answer is forty two",
+        "d1": "I think the answer is forty two for sure",
+    }
+    assert _converged(responses, threshold=0.4)
+
+
+def test_converged_disagreement_fails_at_any_threshold() -> None:
+    """Genuinely opposite answers fail convergence at every
+    sensible threshold."""
+    responses = {"d0": "yes", "d1": "no"}
+    assert not _converged(responses, threshold=0.85)
+    assert not _converged(responses, threshold=0.4)
+
+
+def test_debate_rejects_invalid_convergence_similarity() -> None:
+    a = _scripted_agent(["x"])
+    b = _scripted_agent(["y"])
+    with pytest.raises(ValueError, match="convergence_similarity"):
+        MultiAgentDebate(
+            debaters=[a, b], convergence_similarity=1.5
+        )
+
+
 def test_majority_vote_picks_modal_answer() -> None:
     responses = {
         "d0": "go left",

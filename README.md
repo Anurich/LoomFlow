@@ -140,149 +140,333 @@ MODEL_CHUNK × N → COMPLETED` flow through.
 ## Architectures: the agent loop is a strategy
 
 The default loop is ReAct (observe / think / act). When that doesn't
-fit your problem, swap it for a different iteration pattern with one
-kwarg — everything else (model, memory, tools, budget, telemetry,
-runtime) stays exactly the same.
+fit your problem, swap it with one kwarg — everything else (model,
+memory, tools, budget, telemetry, runtime) stays exactly the same.
+
+### Single-agent loops: pass `architecture=`
 
 ```python
-from jeevesagent import (
-    Agent, ReAct, SelfRefine, Reflexion, Router, RouterRoute,
-    Supervisor, ActorCritic, TreeOfThoughts, MultiAgentDebate,
-    Swarm, BlackboardArchitecture, PlanAndExecute, ReWOO,
-)
+from jeevesagent import Agent
 
-# Default — observe / think / act
-agent = Agent("...", model="claude-opus-4-7")
+agent = Agent("...", model="claude-opus-4-7")                            # ReAct default
+agent = Agent("...", model="...", architecture="self-refine")            # iterate until critic happy
+agent = Agent("...", model="...", architecture="reflexion")              # verbal RL with lessons
+agent = Agent("...", model="...", architecture="plan-and-execute")       # plan once, execute steps
+agent = Agent("...", model="...", architecture="rewoo")                  # plan + parallel tools, 30-50% cheaper
+agent = Agent("...", model="...", architecture="tree-of-thoughts")       # BFS beam over candidate thoughts
+```
 
-# Iterate until critic says no more issues
-agent = Agent("...", model="claude-opus-4-7", architecture="self-refine")
+### Multi-agent teams: use `Team` builders (the ergonomic facade)
 
-# Verbal RL: lessons from failed attempts persist via memory.working()
-# and shape future runs.
-agent = Agent("...", model="claude-opus-4-7", architecture="reflexion")
+`Team` mirrors the builder shape every other framework uses
+(`create_supervisor` / `Crew` / `GroupChatManager`) so migrating from
+LangGraph / CrewAI / AutoGen / OpenAI Agents SDK is muscle-memory.
+Each builder returns a regular `Agent` — same `.run()` / `.stream()`
+interface, no special calling convention.
 
-# Classify input → dispatch to one specialist Agent
-agent = Agent(
-    "Customer support entry point",
-    model="claude-haiku-4-5",        # cheap classifier
-    architecture=Router(routes=[
-        RouterRoute(name="billing", agent=billing_agent, description="..."),
-        RouterRoute(name="tech",    agent=tech_agent,    description="..."),
-        RouterRoute(name="general", agent=general_agent, description="..."),
-    ], fallback_route="general"),
-)
+```python
+from jeevesagent import Agent, Team, RouterRoute
 
-# Workers + a delegate(...) tool. Multiple delegations in one
-# supervisor turn run in parallel for free.
-agent = Agent(
-    "You manage a small team",
+# Coordinator + workers; the manager calls delegate(...) or forward_message(...)
+team = Team.supervisor(
+    workers={"researcher": researcher, "writer": writer, "reviewer": reviewer},
+    instructions="manage the pipeline",
     model="claude-opus-4-7",
-    architecture=Supervisor(workers={
-        "researcher": researcher_agent,
-        "coder":      coder_agent,
-        "writer":     writer_agent,
-    }),
 )
 
-# Actor + adversarial critic with different models — the canonical
-# pattern for code review and quality-critical work.
-agent = Agent(
-    "Code-quality coordinator",
-    architecture=ActorCritic(
-        actor=Agent("...", model="claude-opus-4-7"),
-        critic=Agent("...", model="gpt-4o"),  # different model = different blind spots
-        max_rounds=3, approval_threshold=0.9,
-    ),
+# Classify-and-dispatch — cheaper than Supervisor when one specialist
+# is enough (1 classifier call + 1 specialist run, no synthesis pass)
+team = Team.router(
+    routes=[
+        RouterRoute(name="billing", agent=billing, description="..."),
+        RouterRoute(name="tech",    agent=tech,    description="..."),
+    ],
+    instructions="customer support entry point",
+    model="claude-haiku-4-5",
 )
 
-# BFS beam search over candidate reasoning steps. Each level proposes
-# branch_factor candidates, evaluator scores them, top beam_width
-# survive. Useful for combinatorial / planning / math tasks.
+# Peer agents passing control via typed handoffs (input_type= for
+# structured payloads, input_filter= for selective history pruning)
+team = Team.swarm(
+    agents={"triage": triage, "billing": billing, "tech": tech},
+    entry_agent="triage",
+    model="claude-opus-4-7",
+)
+
+# Actor + critic with different models for blind-spot diversity
+team = Team.actor_critic(
+    actor=Agent("...", model="claude-opus-4-7"),
+    critic=Agent("...", model="gpt-4o"),       # different model
+    max_rounds=3,
+    approval_threshold=0.9,
+    model="claude-opus-4-7",                    # coordinator
+)
+
+# N debaters + optional judge with similarity-based early termination
+team = Team.debate(
+    debaters=[optimist, skeptic, analyst],
+    judge=cio,
+    rounds=2,
+    convergence_similarity=0.85,
+    model="claude-opus-4-7",
+)
+
+# Coordinator + agents share a workspace; decider synthesizes
+team = Team.blackboard(
+    agents={"hypothesis": h_agent, "evidence": e_agent, "critic": c_agent},
+    coordinator=coord_agent,
+    decider=decider_agent,
+    model="claude-opus-4-7",
+)
+```
+
+### Recursive composition (the differentiator)
+
+Architectures wrap each other naturally — the property no
+sibling-only framework gives you. Wrap a Supervisor in Reflexion for
+cross-session learning of delegation patterns; nest Supervisors for
+hierarchical teams; wrap an entire pipeline in `Reflexion` to retry
+on low scores:
+
+```python
+from jeevesagent import Agent, Reflexion, Supervisor
+
 agent = Agent(
     "...",
     model="claude-opus-4-7",
-    architecture=TreeOfThoughts(
-        branch_factor=3, beam_width=2, max_depth=4, solved_threshold=0.95,
+    architecture=Reflexion(
+        base=Supervisor(workers={"researcher": ..., "writer": ...}),
+        max_attempts=3,
+        threshold=0.85,
+        lesson_store=InMemoryVectorStore(embedder=HashEmbedder()),  # selective recall
     ),
 )
+```
 
-# N debaters argue across rounds; judge synthesizes. Use different
-# MODELS for genuine prior diversity. Reserve for contested questions
-# where wrong answers are expensive (3-5× cost).
-agent = Agent(
-    "Investment committee moderator",
-    architecture=MultiAgentDebate(
-        debaters=[optimist_agent, skeptic_agent, analyst_agent],
-        judge=cio_agent,
-        rounds=2,
-    ),
-)
+The explicit nested form (`Agent(architecture=...)`) and `Team`
+builders are interchangeable — `Team.supervisor(workers={...})` is
+exactly `Agent(architecture=Supervisor(workers={...}))` under the
+hood. Use `Team` for single-level teams (matches what you've seen
+in other frameworks); use the nested form for recursive composition.
 
-# Plan once, execute step-by-step. Cheaper than ReAct on tasks with
-# predictable structure: one planner call + N step calls + one
-# synthesizer.
-agent = Agent("...", model="claude-opus-4-7", architecture="plan-and-execute")
+### Standalone testing of orchestrators
 
-# ReWOO: plan-then-tool-execute with {{En}} placeholders + parallel
-# independent steps. Two LLM calls + N tool calls — 30-50% cheaper
-# than ReAct on tool-heavy multi-step tasks.
-agent = Agent(
-    "...",
-    model="claude-opus-4-7",
-    tools=[search_tool, fetch_tool, summarize_tool],
-    architecture="rewoo",
-)
+```python
+from jeevesagent import Supervisor, run_architecture
 
-# Peer agents pass control via a handoff tool. Exploratory only —
-# the spec warns of goal drift; prefer Supervisor for production.
-agent = Agent(
-    "...",
-    model="claude-opus-4-7",
-    architecture=Swarm(
-        agents={"triage": triage_agent, "billing": billing_agent, "tech": tech_agent},
-        entry_agent="triage",
-        max_handoffs=5,
-    ),
-)
-
-# Coordinator + agents share a state board. Each round the
-# coordinator picks who contributes next; decider synthesizes.
-agent = Agent(
-    "...",
-    model="claude-opus-4-7",
-    architecture=BlackboardArchitecture(
-        agents={"hypothesis": h_agent, "evidence": e_agent, "critic": c_agent},
-        coordinator=coord_agent,
-        decider=decider_agent,
-    ),
-)
-
-# N debaters argue across parallel rounds; judge synthesizes the
-# verdict. Use different MODELS for genuine prior diversity.
-agent = Agent(
-    "Investment committee moderator",
-    model="claude-opus-4-7",
-    architecture=MultiAgentDebate(
-        debaters=[optimist_agent, skeptic_agent, analyst_agent],
-        judge=cio_agent,
-        rounds=2, convergence_check=True,
-    ),
-)
-
-# Composition: Reflexion *of* a Supervisor — cross-session learning
-# of which worker handles which intent best.
-agent = Agent(
-    "...",
-    model="claude-opus-4-7",
-    architecture=Reflexion(base=Supervisor(workers={...}), threshold=0.85),
-)
+sup = Supervisor(workers={"a": agent_a})
+result = await run_architecture(sup, "do the thing", model="claude-opus-4-7")
 ```
 
 Architectures are pluggable via the `Architecture` protocol — three
 methods (`name`, `run`, `declared_workers`) and you have a custom
 strategy. See [`Subagent.md`](Subagent.md) for the full design
-rationale and 14-architecture catalogue covering the cases the
-shipped five don't yet handle.
+rationale.
+
+---
+
+## Architecture cheat sheet
+
+Visual reference for picking the right pattern. Each diagram shows
+the actual data flow + LLM-call structure for that architecture.
+
+### Single-agent loops
+
+**`ReAct`** — observe / think / act loop. The default. One model call per turn; tools dispatch in parallel.
+
+```
+                 ┌────────── loop until no tool calls ──────────┐
+                 │                                              │
+   prompt ───► Model ───► tool calls? ──yes──► run tools ──► results
+                 │                              (parallel)
+                 └─────────► no calls ───► final output
+```
+
+**`SelfRefine`** — single-agent generate → critique → refine. Same model wears both hats.
+
+```
+   prompt ───► generate ───► critique ──┬── score ≥ threshold ──► output
+                              ▲         │
+                              │         └── below ──► refine ──┐
+                              │                                │
+                              └────────────────────────────────┘
+```
+
+**`Reflexion`** — wraps any base architecture with verbal-RL retry. Failed attempts produce a "lesson" stored in memory or a vector store; next attempt sees the relevant lessons.
+
+```
+   ┌─────────── attempt loop (max_attempts) ───────────┐
+   │                                                    │
+   │   prompt ──► [recall lessons] ──► base.run() ──► evaluator
+   │                                                    │
+   │                                              score < threshold?
+   │                                                    │
+   │                                              yes ──┴── no ──► output
+   │                                                    │
+   │                                              reflector ──► lesson
+   │                                                    │
+   └────────────────────────────────── persist ─────────┘
+                                          │
+                          memory block  OR  vector store (selective recall)
+```
+
+**`TreeOfThoughts`** — BFS beam search over candidate thoughts. Proposer + evaluator at every depth; beam keeps top-k; min_score floor drops weak branches early.
+
+```
+              proposer (×branch_factor)         evaluator
+   prompt ──► [t1, t2, t3]  ──score──►  [0.9, 0.4, 0.7]
+                                              │
+                                         keep top beam_width
+                                         drop below min_score
+                                              │
+                                              ▼
+                                         [t1, t3]   ←── frontier for depth 2
+                                              │
+                                         (repeat to max_depth)
+                                              │
+                                              ▼
+                                       best leaf wins
+```
+
+**`PlanAndExecute`** — planner emits a step list once; executor walks each step; synthesizer composes the final answer.
+
+```
+   prompt ───► planner ───► [step1, step2, step3]
+                                     │
+                                     ▼
+                              executor (per step) ───► [r1, r2, r3]
+                                                            │
+                                                            ▼
+                                                      synthesizer ───► output
+```
+
+**`ReWOO`** — like PlanAndExecute but the planner emits structured tool calls with `{{En}}` placeholders, and **independent steps run in parallel**. Two LLM calls + N tool calls — 30-50% cheaper than ReAct on tool-heavy workloads.
+
+```
+   prompt ───► planner ───► [search({{E1}}), fetch({{E2}}=search.url)]
+                                          │
+                                          ▼
+                            parallel tool dispatch
+                            (independent steps run concurrently;
+                             dependent steps wait for {{En}})
+                                          │
+                                          ▼
+                                    synthesizer ───► output
+```
+
+### Multi-agent teams
+
+**`Router`** — classify-and-dispatch. ONE classifier call decides which specialist runs; that one specialist owns the answer.
+
+```
+                       ┌── refund_agent
+   prompt ──► classifier ──► technical_agent      ◄── only ONE
+                       └── faq_agent ◄── chosen      runs
+
+   1 classifier call + 1 specialist run. The cheapest multi-agent pattern.
+```
+
+**`Supervisor`** — coordinator + workers, glued by a `delegate(worker, instructions)` tool. Multiple delegations in one supervisor turn run in parallel. `forward_message(worker)` returns a worker's output verbatim with no synthesis.
+
+```
+   prompt ───► manager ───► delegate(...) ─┬─► worker A ─┐
+                              │            ├─► worker B ─┤  parallel
+                              │            └─► worker C ─┤
+                              ▼                          │
+                          [worker outputs] ◄─────────────┘
+                              │
+                              ├─► synthesize ──► output
+                              │
+                              └─► forward_message(worker) ──► verbatim output
+```
+
+**`ActorCritic`** — actor + critic pair (use *different models* for blind-spot diversity). Critic returns structured JSON `{score, issues, summary}`; actor refines below threshold.
+
+```
+   prompt ───► actor ───► critic ──┬── score ≥ threshold ──► output
+                  ▲                │
+                  │                └── below ──► refine (apply rubric)
+                  │                                  │
+                  └──────────── max_rounds cap ──────┘
+```
+
+**`MultiAgentDebate`** — N debaters argue across rounds (in parallel each round). Jaccard convergence detects early agreement; optional judge synthesizes the final answer.
+
+```
+   prompt ──► [debater1, debater2, debater3]   ◄── round 1 (parallel)
+                              │
+                       converged? (Jaccard ≥ 0.85)
+                       yes ───► output
+                       no  ───► [responses fed back]
+                              │
+              [debater1, debater2, debater3]    ◄── round 2 (sees prior)
+                              │
+                              ▼
+                          judge ──► output     (or majority vote if no judge)
+```
+
+**`Swarm`** — peer agents handing off control via a `handoff` tool (or per-target `transfer_to_<name>` tools when peers are wrapped in `Handoff` with an `input_type`). No central coordinator.
+
+```
+   prompt ──► agent A
+                 │
+                 │ handoff(B, payload)
+                 ▼
+              agent B
+                 │
+                 │ transfer_to_C(typed_args)
+                 ▼
+              agent C ──► final output
+                 ▲
+                 │ cycle detection: A→B→A→B kills the loop
+                 │ max_handoffs caps total depth
+```
+
+**`BlackboardArchitecture`** — agents collaborate via a shared mutable workspace. Coordinator picks who acts next; decider says when work is done.
+
+```
+                ┌───────────── shared blackboard ─────────────┐
+                │   facts · hypotheses · partial results       │
+                └────▲──────▲──────▲──────▲────────────▲───────┘
+                     │ r/w  │ r/w  │ r/w  │ r/w        │
+                     │      │      │      │            │
+   prompt ──► coordinator ──► picks who acts next      │
+                     │      │      │      │            │
+                  agent A  agent B  agent C            │
+                     │      │      │      │            │
+                     ▼      ▼      ▼      ▼            │
+                              decider ◄────────────────┘
+                                 │
+                                 ├─ done? ──► output
+                                 │
+                                 └─ not done ──► next round
+```
+
+### Recursive composition
+
+Any architecture can wrap any other. The killer combination: `Reflexion` *of* `Supervisor` — the team learns across attempts which worker handles which intent best.
+
+```
+   ┌────── Reflexion attempt loop ──────┐
+   │                                     │
+   │   prompt ──► Supervisor ──► output ─┤── score ≥ threshold ──► done
+   │              (manager + 3 workers)  │
+   │                                     │
+   │                                     └── below ──► lesson ──► retry
+   │                                                                │
+   └────────────────────────────────────────────────────────────────┘
+```
+
+```python
+agent = Agent(
+    "...",
+    model="claude-opus-4-7",
+    architecture=Reflexion(
+        base=Supervisor(workers={"researcher": ..., "writer": ..., "reviewer": ...}),
+        lesson_store=InMemoryVectorStore(embedder=HashEmbedder()),  # selective recall
+    ),
+)
+```
 
 ---
 
@@ -291,6 +475,10 @@ shipped five don't yet handle.
 | Capability | What you get | Where |
 |---|---|---|
 | **Architecture protocol** | Pluggable agent-loop strategy: 12 architectures shipped | `Architecture`, `ReAct`, `SelfRefine`, `Reflexion`, `TreeOfThoughts`, `PlanAndExecute`, `ReWOO`, `Router`, `Supervisor`, `ActorCritic`, `MultiAgentDebate`, `Swarm`, `BlackboardArchitecture` |
+| **Team facade** | Sibling-style builders (`Team.supervisor`, `Team.swarm`, `Team.router`, `Team.debate`, `Team.actor_critic`, `Team.blackboard`) for the common multi-agent shapes | `Team`, `Handoff`, `run_architecture` |
+| **Vector store** | `add` / `search` / `delete` with Mongo-style filters, MMR diversity, BM25 hybrid search, save/load | `InMemoryVectorStore`, `ChromaVectorStore`, `PostgresVectorStore`, `FAISSVectorStore`, `SearchResult` |
+| **Document loader** | One-line load for PDF / DOCX / Excel / CSV / HTML / Markdown into chunks | `jeevesagent.loader.load`, `MarkdownChunker`, `RecursiveChunker`, `SentenceChunker`, `TokenChunker` |
+| **Built-in tools** | `read` / `write` / `edit` / `bash` factories with sandbox-aware workdirs | `read_tool`, `write_tool`, `edit_tool`, `bash_tool`, `default_workdir` |
 | **Model adapters** | Anthropic, OpenAI, LiteLLM (~100 providers), Echo (zero-key), Scripted (tests) | `jeevesagent.AnthropicModel`, `OpenAIModel`, `LiteLLMModel`, `EchoModel`, `ScriptedModel` |
 | **String model resolver** | `model="claude-opus-4-7"`, `"gpt-4o"`, `"mistral-large"`, `"command-r"`, `"echo"`, `"litellm/<any>"` | `Agent.__init__` |
 | **Tools** | `@tool` decorator with auto-schema, sync + async; `agent.with_tool` decorator; `add_tool` / `remove_tool` / `tools_list` | `jeevesagent.tool`, `Tool` |
@@ -323,25 +511,24 @@ shipped five don't yet handle.
 | [`Subagent.md`](Subagent.md) | Architecture-protocol design rationale; full 14-architecture catalogue (the 5 shipped, the 9 candidates) |
 | [`project.md`](project.md) | The full engineering plan (the design doc) |
 | [`BUILD_LOG.md`](BUILD_LOG.md) | Slice-by-slice changelog |
-| [`examples/`](examples/) | 20 runnable scripts — `00_hello.py` through `19_rewoo.py`, every shipped architecture covered |
+| [`examples/`](examples/) | 26 runnable scripts: `00_hello`–`19_rewoo` cover every architecture; `20_rag_supervisor`–`22_rag_with_loader` are RAG patterns; `23_coding_agent`, `24_support_triage`, `25_document_pipeline`, `26_devops_diagnostic` are real-world use cases with permissions / audit / budget wired up |
 
 ---
 
 ## Status
 
-* **560 tests pass** in ~5 seconds (5 env-gated integrations skip
+* **743 tests pass** in ~6 seconds (5 env-gated integrations skip
   without `JEEVES_TEST_PG_DSN` / `JEEVES_TEST_REDIS_URL`)
-* **mypy `--strict`** clean across 74 production source files
+* **mypy `--strict`** clean across 95 production source files
 * **ruff** clean including `flake8-async` lints
-* Phases 1-6 of the engineering plan shipped. v0.3 added the
-  `Architecture` protocol layer with **twelve** shipped
-  architectures (ReAct, SelfRefine, Reflexion, TreeOfThoughts,
-  PlanAndExecute, ReWOO, Router, Supervisor, ActorCritic,
-  MultiAgentDebate, Swarm, BlackboardArchitecture). LiteLLM,
-  SubprocessSandbox, PostgresRuntime, ConsolidationWorker, Voyage /
-  Cohere embedders all shipped in v0.2. Temporal / OS-level
-  sandboxes / the remaining 2 architectures from `Subagent.md`
-  (Deep Agent, Graph of Thoughts) are the next chunks.
+* v0.5 ships the full vector-store stack (`InMemoryVectorStore` /
+  Chroma / Postgres / FAISS, all with Mongo-style filters, MMR
+  diversity, BM25 hybrid search, persistence), the document loader
+  with chunking strategies, the `Team` facade for ergonomic
+  multi-agent construction, and 12 architectures with selective
+  lesson recall (Reflexion), typed handoffs (Swarm),
+  forward_message (Supervisor), Jaccard convergence (Debate), and
+  parallel proposer/evaluator with min_score floor (TreeOfThoughts).
 
 ---
 
@@ -356,7 +543,7 @@ mypy --strict jeevesagent
 pytest tests/ -v
 ```
 
-You should see 560 passed. Five integration tests skip without
+You should see 743 passed. Five integration tests skip without
 `JEEVES_TEST_PG_DSN` / `JEEVES_TEST_REDIS_URL` / API-key env vars set.
 
 ---

@@ -69,7 +69,12 @@ For each task you receive:
 1. Decide which workers are needed.
 2. Call `delegate(worker, instructions)` to invoke a specialist.
 3. Each worker runs independently and returns its final answer.
-4. Synthesize worker outputs into a unified response.
+4. Either synthesize worker outputs into a unified response, OR
+   call `forward_message(worker)` if a single worker's output IS
+   already the final answer the user wants. Forwarding skips a
+   paraphrase round-trip: the worker's output is returned verbatim
+   as YOUR final response. End your turn immediately after a
+   forward_message call.
 
 You can delegate multiple workers in a single turn — they will run
 in parallel. Be specific in the ``instructions`` you pass; workers
@@ -103,6 +108,13 @@ class Supervisor:
     * ``delegate_tool_name``: defaults to ``"delegate"``. Customize
       to avoid clashes with user-defined tools that happen to have
       the same name.
+    * ``forward_tool_name``: defaults to ``"forward_message"``. The
+      supervisor calls this with a worker name to return that
+      worker's last output VERBATIM as the supervisor's final
+      response. Skips a synthesis round-trip — the
+      `langchain.com/blog/benchmarking-multi-agent-architectures`_
+      benchmark showed +50% quality on tasks where the supervisor
+      would otherwise paraphrase a worker's output.
     """
 
     name = "supervisor"
@@ -114,6 +126,7 @@ class Supervisor:
         base: Architecture | None = None,
         instructions_template: str | None = None,
         delegate_tool_name: str = "delegate",
+        forward_tool_name: str = "forward_message",
     ) -> None:
         if not workers:
             raise ValueError("Supervisor requires at least one worker")
@@ -123,9 +136,31 @@ class Supervisor:
             instructions_template or DEFAULT_SUPERVISOR_TEMPLATE
         )
         self._delegate_name = delegate_tool_name
+        self._forward_name = forward_tool_name
 
     def declared_workers(self) -> dict[str, Agent]:
         return dict(self._workers)
+
+    def add_worker(self, name: str, agent: Agent) -> None:
+        """Register a worker between runs.
+
+        Safe to call between :meth:`Agent.run` invocations on the
+        agent that owns this supervisor; the new worker becomes
+        available for ``delegate(name, ...)`` on the next run.
+        Calling mid-run is undefined — the supervisor's prompt is
+        composed at run start.
+        """
+        if not name or not name.isidentifier():
+            raise ValueError(
+                f"worker name {name!r} must be a valid identifier"
+            )
+        self._workers[name] = agent
+
+    def remove_worker(self, name: str) -> Agent | None:
+        """Unregister a worker by name. Returns the removed Agent
+        if it was registered, ``None`` otherwise. Same lifecycle
+        rules as :meth:`add_worker`."""
+        return self._workers.pop(name, None)
 
     async def run(
         self,
@@ -143,18 +178,38 @@ class Supervisor:
             max_buffer_size=128
         )
 
-        # 2. Build the delegate tool that routes to workers AND
-        #    forwards worker events into the shared channel.
+        # 2. Build the delegate + forward_message tools.
+        #    - delegate routes to workers and forwards events.
+        #    - forward_message lets the supervisor return a
+        #      worker's last output verbatim, bypassing a
+        #      paraphrase round-trip.
+        # Both tools share the ``last_outputs`` dict (delegate
+        # writes, forward_message reads). ``forward_request``
+        # captures the worker text the supervisor wants forwarded;
+        # we override session.output with it after the base
+        # architecture completes.
+        last_outputs: dict[str, str] = {}
+        forward_request: dict[str, str] = {}
+
         delegate_tool = _make_delegate_tool(
             self._workers,
             session.id,
             tool_name=self._delegate_name,
             event_sink=send_chan,
+            last_outputs=last_outputs,
+        )
+        forward_tool = _make_forward_message_tool(
+            last_outputs=last_outputs,
+            forward_request=forward_request,
+            tool_name=self._forward_name,
         )
 
         # 3. Wrap the parent's ToolHost so the model sees `delegate`
-        #    alongside whatever tools the parent already had.
-        wrapped_host = ExtendedToolHost(deps.tools, [delegate_tool])
+        #    + `forward_message` alongside whatever tools the parent
+        #    already had.
+        wrapped_host = ExtendedToolHost(
+            deps.tools, [delegate_tool, forward_tool]
+        )
 
         # 3. Compose instructions: user's domain prompt + supervisor
         #    template (with worker descriptions). Worker descriptions
@@ -218,6 +273,18 @@ class Supervisor:
             # the abstraction clean for tests that re-use sessions.
             session.instructions = original_instructions
 
+        # If the supervisor model called forward_message at any
+        # point, override the final output with the captured worker
+        # text. The model's own final assistant message (typically
+        # "[done]" or similar after the forward call) is discarded.
+        if "output" in forward_request:
+            session.output = forward_request["output"]
+            yield Event.architecture_event(
+                session.id,
+                "supervisor.forwarded",
+                worker=forward_request.get("worker", ""),
+            )
+
         yield Event.architecture_event(
             session.id,
             "supervisor.completed",
@@ -236,6 +303,7 @@ def _make_delegate_tool(
     *,
     tool_name: str,
     event_sink: MemoryObjectSendStream[Event] | None = None,
+    last_outputs: dict[str, str] | None = None,
 ) -> Tool:
     """Build a :class:`Tool` whose ``execute`` routes to the named
     worker :class:`Agent` and returns its final output.
@@ -270,7 +338,10 @@ def _make_delegate_tool(
             result = await agent.run(
                 instructions, session_id=worker_session_id
             )
-            return result.output
+            output = result.output
+            if last_outputs is not None:
+                last_outputs[worker] = output
+            return output
 
         # Stream worker events into the supervisor's shared channel
         # using a clone of the send half (clone keeps the channel
@@ -281,7 +352,10 @@ def _make_delegate_tool(
         async with event_sink.clone() as sink:
             async for ev in invocation.events():
                 await sink.send(ev)
-        return str(invocation.result.get("output", ""))
+        output = str(invocation.result.get("output", ""))
+        if last_outputs is not None:
+            last_outputs[worker] = output
+        return output
 
     return Tool(
         name=tool_name,
@@ -314,4 +388,61 @@ def _make_delegate_tool(
         },
     )
 
+
+def _make_forward_message_tool(
+    *,
+    last_outputs: dict[str, str],
+    forward_request: dict[str, str],
+    tool_name: str,
+) -> Tool:
+    """Build the ``forward_message`` tool.
+
+    Reads from ``last_outputs`` (populated by the delegate tool)
+    and writes the chosen worker's output into ``forward_request``.
+    The supervisor's run loop checks ``forward_request`` after the
+    base architecture finishes; if set, the agent's final output
+    is overridden with the captured text — no synthesis round-trip.
+    """
+
+    async def _forward(worker: str) -> str:
+        output = last_outputs.get(worker)
+        if output is None:
+            known = ", ".join(sorted(last_outputs)) or "(none yet)"
+            return (
+                f"Error: no captured output for worker {worker!r}. "
+                f"You must call delegate({worker}, ...) first. "
+                f"Workers with captured output: {known}"
+            )
+        forward_request["output"] = output
+        forward_request["worker"] = worker
+        return (
+            f"[forward_message recorded — {worker}'s last output "
+            "will be returned verbatim as the final response. End "
+            "your turn now without writing any additional text.]"
+        )
+
+    return Tool(
+        name=tool_name,
+        description=(
+            "Return a worker's last delegated output VERBATIM as "
+            "the supervisor's final response. Use this when one "
+            "worker already produced exactly what the user asked "
+            "for and synthesis would just paraphrase it. End your "
+            "turn immediately after calling — no additional text."
+        ),
+        fn=_forward,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "worker": {
+                    "type": "string",
+                    "description": (
+                        "Name of the worker whose last output "
+                        "should be forwarded as the final answer."
+                    ),
+                },
+            },
+            "required": ["worker"],
+        },
+    )
 

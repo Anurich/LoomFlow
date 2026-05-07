@@ -55,7 +55,6 @@ Run::
 from __future__ import annotations
 
 import asyncio
-import math
 import os
 import sys
 from pathlib import Path
@@ -73,13 +72,15 @@ if not os.environ.get("OPENAI_API_KEY"):
 from jeevesagent import (  # noqa: E402
     Agent,
     HashEmbedder,
-    Supervisor,
+    InMemoryVectorStore,
+    Team,
     default_workdir,
     edit_tool,
     read_tool,
     tool,
     write_tool,
 )
+from jeevesagent.loader import Chunk  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # In-memory corpus — fake "JeevesAgent v0.3 architecture docs". In
@@ -144,27 +145,23 @@ CORPUS: dict[str, str] = {
 
 
 # ---------------------------------------------------------------------------
-# Tiny semantic index — HashEmbedder + cosine similarity. In
-# production swap for OpenAIEmbedder + a vector DB.
+# Vector store — single-line setup via the framework's
+# ``InMemoryVectorStore``. Replaces the manual cosine + parallel-list
+# scaffolding the older examples carried. Swap the class for
+# ``ChromaVectorStore`` / ``PostgresVectorStore`` / ``FAISSVectorStore``
+# for production with no other code changes.
 # ---------------------------------------------------------------------------
 
-_EMBEDDER = HashEmbedder(dimensions=256)
-_DOC_VECTORS: dict[str, list[float]] = {}
-
-
-def _cosine(a: list[float], b: list[float]) -> float:
-    dot = sum(x * y for x, y in zip(a, b, strict=True))
-    na = math.sqrt(sum(x * x for x in a))
-    nb = math.sqrt(sum(y * y for y in b))
-    if na == 0 or nb == 0:
-        return 0.0
-    return dot / (na * nb)
+_STORE = InMemoryVectorStore(embedder=HashEmbedder(dimensions=256))
 
 
 async def _build_index() -> None:
     """Embed every doc once at startup."""
-    for doc_id, content in CORPUS.items():
-        _DOC_VECTORS[doc_id] = await _EMBEDDER.embed(content)
+    chunks = [
+        Chunk(content=content, metadata={"doc_id": doc_id})
+        for doc_id, content in CORPUS.items()
+    ]
+    await _STORE.add(chunks)
 
 
 # ---------------------------------------------------------------------------
@@ -177,20 +174,15 @@ async def search_corpus(query: str) -> str:
     """Search the architecture corpus by semantic similarity.
     Returns the top-3 matching doc IDs with cosine scores and a
     one-line snippet from each."""
-    if not _DOC_VECTORS:
-        return "ERROR: index not built yet"
-    q_vec = await _EMBEDDER.embed(query)
-    scored = [
-        (doc_id, _cosine(q_vec, vec))
-        for doc_id, vec in _DOC_VECTORS.items()
-    ]
-    scored.sort(key=lambda x: -x[1])
-    top = scored[:3]
+    results = await _STORE.search(query, k=3)
+    if not results:
+        return "ERROR: index empty"
     lines = []
-    for doc_id, score in top:
+    for r in results:
+        doc_id = r.chunk.metadata["doc_id"]
         first_para = CORPUS[doc_id].split("\n", 2)[1]
         lines.append(
-            f"  - {doc_id} (score={score:.3f}): {first_para[:120]}..."
+            f"  - {doc_id} (score={r.score:.3f}): {first_para[:120]}..."
         )
     return "\n".join(lines)
 
@@ -292,7 +284,12 @@ async def main() -> None:
     await _build_index()
     print(f"✓ ({len(CORPUS)} docs)\n")
 
-    agent = Agent(
+    agent = Team.supervisor(
+        workers={
+            "researcher": researcher,
+            "writer": writer,
+            "reviewer": reviewer,
+        },
         instructions=(
             "You are a research project manager. You answer "
             "research questions by coordinating a team of "
@@ -318,13 +315,6 @@ async def main() -> None:
             "to them."
         ),
         model="gpt-4.1-mini",
-        architecture=Supervisor(
-            workers={
-                "researcher": researcher,
-                "writer": writer,
-                "reviewer": reviewer,
-            }
-        ),
     )
 
     prompt = (

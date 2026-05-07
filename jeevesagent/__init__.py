@@ -9,6 +9,7 @@ from .architecture import (
     BlackboardArchitecture,
     BlackboardEntry,
     Dependencies,
+    Handoff,
     MultiAgentDebate,
     Plan,
     PlanAndExecute,
@@ -129,6 +130,7 @@ from .security import (
     StandardPermissions,
     SubprocessSandbox,
 )
+from .team import Team, run_architecture
 from .tools import (
     InProcessToolHost,
     PathEscapeError,
@@ -140,6 +142,14 @@ from .tools import (
     read_tool,
     tool,
     write_tool,
+)
+from .vectorstore import (
+    ChromaVectorStore,
+    FAISSVectorStore,
+    InMemoryVectorStore,
+    PostgresVectorStore,
+    SearchResult,
+    VectorStore,
 )
 
 __version__ = "0.5.0"
@@ -167,6 +177,7 @@ __all__ = [
     "BlackboardArchitecture",
     "BlackboardEntry",
     "Dependencies",
+    "Handoff",
     "MultiAgentDebate",
     "Plan",
     "PlanAndExecute",
@@ -285,4 +296,14 @@ __all__ = [
     # ids
     "deterministic_hash",
     "new_id",
+    # vector stores
+    "VectorStore",
+    "SearchResult",
+    "InMemoryVectorStore",
+    "ChromaVectorStore",
+    "PostgresVectorStore",
+    "FAISSVectorStore",
+    # team builders / standalone runner
+    "Team",
+    "run_architecture",
 ]

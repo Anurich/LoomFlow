@@ -39,7 +39,6 @@ Run:
 from __future__ import annotations
 
 import asyncio
-import math
 import os
 import sys
 from pathlib import Path
@@ -55,10 +54,12 @@ except ImportError:
 from jeevesagent import (
     Agent,
     HashEmbedder,
-    Supervisor,
+    InMemoryVectorStore,
+    Team,
     tool,
 )
 from jeevesagent.core.types import ToolCall  # noqa: F401 — used in docstrings
+from jeevesagent.loader import Chunk
 
 # ---------------------------------------------------------------------------
 # Fake corpus — 6 internal docs from "Acme Corp" Q3 planning.
@@ -121,44 +122,34 @@ CORPUS: dict[str, str] = {
 
 
 # ---------------------------------------------------------------------------
-# Tiny semantic index. HashEmbedder + cosine similarity. In production
-# you'd swap HashEmbedder for OpenAIEmbedder and a vector DB.
+# Vector store. ``InMemoryVectorStore`` owns the embed/store/search loop —
+# no manual cosine, no parallel lists. We tag each chunk's metadata with
+# its ``status`` (DRAFT / FINAL) so callers can pre-filter the search via
+# Mongo-style operators (``filter={"status": "FINAL"}``). Swap the class
+# for ``ChromaVectorStore`` / ``PostgresVectorStore`` / ``FAISSVectorStore``
+# for production with no other code changes.
 # ---------------------------------------------------------------------------
 
 
-class _Index:
-    """In-memory cosine-similarity search over the corpus."""
-
-    def __init__(self) -> None:
-        self._embedder = HashEmbedder(dimensions=256)
-        self._vectors: dict[str, list[float]] = {}
-
-    async def build(self) -> None:
-        """Embed every doc once at startup."""
-        for doc_id, content in CORPUS.items():
-            self._vectors[doc_id] = await self._embedder.embed(content)
-
-    async def search(self, query: str, k: int = 3) -> list[tuple[str, float]]:
-        """Return the top-k (doc_id, score) by cosine similarity."""
-        q = await self._embedder.embed(query)
-        scored = [
-            (doc_id, _cosine(q, v))
-            for doc_id, v in self._vectors.items()
-        ]
-        scored.sort(key=lambda x: x[1], reverse=True)
-        return scored[:k]
+_STORE = InMemoryVectorStore(embedder=HashEmbedder(dimensions=256))
 
 
-def _cosine(a: list[float], b: list[float]) -> float:
-    dot = sum(x * y for x, y in zip(a, b, strict=True))
-    na = math.sqrt(sum(x * x for x in a))
-    nb = math.sqrt(sum(y * y for y in b))
-    if na == 0 or nb == 0:
-        return 0.0
-    return dot / (na * nb)
+def _status_of(content: str) -> str:
+    """Pull the STATUS line so we can index it as metadata."""
+    return "DRAFT" if "STATUS: DRAFT" in content else "FINAL"
 
 
-_INDEX = _Index()  # populated in main()
+async def _build_index() -> None:
+    """Embed every doc once at startup. Each chunk's metadata carries
+    the doc_id + status so search results can be filtered by status."""
+    chunks = [
+        Chunk(
+            content=content,
+            metadata={"doc_id": doc_id, "status": _status_of(content)},
+        )
+        for doc_id, content in CORPUS.items()
+    ]
+    await _STORE.add(chunks)
 
 
 # ---------------------------------------------------------------------------
@@ -174,18 +165,24 @@ _LOADED_DOCS: dict[str, str] = {}
 
 
 @tool
-async def search_corpus(query: str) -> str:
-    """Search the internal doc corpus by semantic similarity. Returns
-    the top-3 matching doc IDs with similarity scores and a snippet
-    from each."""
-    matches = await _INDEX.search(query, k=3)
-    if not matches:
+async def search_corpus(query: str, finals_only: bool = False) -> str:
+    """Search the internal doc corpus by semantic similarity.
+
+    Returns the top-3 matching doc IDs with similarity scores and a
+    snippet from each. Pass ``finals_only=true`` to skip docs marked
+    STATUS: DRAFT — useful when you only want approved material.
+    """
+    filter_expr = {"status": "FINAL"} if finals_only else None
+    results = await _STORE.search(query, k=3, filter=filter_expr)
+    if not results:
         return "(no matches)"
     lines = []
-    for doc_id, score in matches:
-        snippet = CORPUS[doc_id].replace("\n", " ")[:120]
+    for r in results:
+        doc_id = r.chunk.metadata["doc_id"]
+        snippet = r.chunk.content.replace("\n", " ")[:120]
+        status = r.chunk.metadata.get("status", "?")
         lines.append(
-            f"  - {doc_id} (score={score:.3f}): {snippet}..."
+            f"  - {doc_id} [{status}] (score={r.score:.3f}): {snippet}..."
         )
     return "Matches:\n" + "\n".join(lines)
 
@@ -271,7 +268,9 @@ def _build_agents() -> Agent:
             "doc corpus.\n\n"
             "Process:\n"
             "1. Call `search_corpus(query)` with a focused query "
-            "from the supervisor's instruction.\n"
+            "from the supervisor's instruction. Pass "
+            "`finals_only=true` if the question wants approved / "
+            "current numbers (skips DRAFT docs at the index level).\n"
             "2. For each promising hit, call `fetch_full_doc(doc_id)` "
             "to read the full text. Always fetch the FULL doc — "
             "snippets are previews only.\n"
@@ -319,7 +318,12 @@ def _build_agents() -> Agent:
         tools=[format_brief],
     )
 
-    return Agent(
+    return Team.supervisor(
+        workers={
+            "researcher": researcher,
+            "curator": curator,
+            "synthesizer": synthesizer,
+        },
         instructions=(
             "You answer questions about Acme Corp's internal "
             "documents by coordinating a research team.\n\n"
@@ -337,13 +341,6 @@ def _build_agents() -> Agent:
             "4. Return the synthesizer's final brief as your answer."
         ),
         model=model_name,
-        architecture=Supervisor(
-            workers={
-                "researcher": researcher,
-                "curator": curator,
-                "synthesizer": synthesizer,
-            }
-        ),
     )
 
 
@@ -354,7 +351,7 @@ def _build_agents() -> Agent:
 
 async def main() -> None:
     print("=== Building corpus index... ===")
-    await _INDEX.build()
+    await _build_index()
     print(f"  ✓ indexed {len(CORPUS)} docs\n")
 
     agent = _build_agents()

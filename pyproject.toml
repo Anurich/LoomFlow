@@ -32,6 +32,28 @@ otel = [
     "opentelemetry-api>=1.24.0",
     "opentelemetry-sdk>=1.24.0",
 ]
+loader-pdf = ["pypdf>=4.0"]
+loader-docx = ["python-docx>=1.0"]
+loader-excel = ["openpyxl>=3.1"]
+loader-html = ["beautifulsoup4>=4.12"]
+loader-token = ["tiktoken>=0.7"]
+loader = [
+    "pypdf>=4.0",
+    "python-docx>=1.0",
+    "openpyxl>=3.1",
+    "beautifulsoup4>=4.12",
+    "tiktoken>=0.7",
+]
+vectorstore-chroma = ["chromadb>=0.5.0"]
+vectorstore-postgres = ["asyncpg>=0.29.0", "pgvector>=0.2.5"]
+vectorstore-faiss = ["faiss-cpu>=1.8.0", "numpy>=1.26"]
+vectorstore = [
+    "chromadb>=0.5.0",
+    "asyncpg>=0.29.0",
+    "pgvector>=0.2.5",
+    "faiss-cpu>=1.8.0",
+    "numpy>=1.26",
+]
 dev = [
     "pytest>=8.0",
     "anyio[trio]>=4.4.0",

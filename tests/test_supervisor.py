@@ -431,6 +431,81 @@ async def test_supervisor_accepts_custom_delegate_name() -> None:
 # ---------------------------------------------------------------------------
 
 
+async def test_supervisor_forward_message_returns_worker_output_verbatim() -> None:
+    """``forward_message(worker)`` overrides the supervisor's final
+    output with the worker's last delegated output — no paraphrase
+    round-trip. Even if the supervisor model says something else
+    after, the captured worker text wins."""
+    worker_output = "The exact polished answer the user wants."
+    coder = _worker(worker_output)
+
+    parent_model = ScriptedModel(
+        [
+            ScriptedTurn(
+                tool_calls=[
+                    ToolCall(
+                        id="c1",
+                        tool="delegate",
+                        args={
+                            "worker": "coder",
+                            "instructions": "do the thing",
+                        },
+                    )
+                ]
+            ),
+            ScriptedTurn(
+                tool_calls=[
+                    ToolCall(
+                        id="c2",
+                        tool="forward_message",
+                        args={"worker": "coder"},
+                    )
+                ]
+            ),
+            # Supervisor's last text would normally become the
+            # output; forward_message must override it.
+            ScriptedTurn(text="[done]"),
+        ]
+    )
+    agent = Agent(
+        "manager",
+        model=parent_model,
+        architecture=Supervisor(workers={"coder": coder}),
+    )
+    result = await agent.run("write some code")
+    assert result.output == worker_output
+
+
+async def test_supervisor_forward_message_unknown_worker_returns_error() -> None:
+    """``forward_message(worker)`` for a worker that hasn't been
+    delegated to yet returns an error string instead of overriding
+    the output."""
+    coder = _worker("hello")
+    parent_model = ScriptedModel(
+        [
+            ScriptedTurn(
+                tool_calls=[
+                    ToolCall(
+                        id="c1",
+                        tool="forward_message",
+                        args={"worker": "coder"},
+                    )
+                ]
+            ),
+            ScriptedTurn(text="fallback supervisor response"),
+        ]
+    )
+    agent = Agent(
+        "manager",
+        model=parent_model,
+        architecture=Supervisor(workers={"coder": coder}),
+    )
+    result = await agent.run("forward without delegating")
+    # forward_message returned an error — supervisor's own final
+    # response stands.
+    assert result.output == "fallback supervisor response"
+
+
 def test_make_delegate_tool_returns_a_real_tool_instance() -> None:
     """Smoke-test the helper that builds the delegate tool."""
     from jeevesagent.architecture.supervisor import _make_delegate_tool

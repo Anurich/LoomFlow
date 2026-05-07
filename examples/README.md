@@ -29,6 +29,7 @@ just `pip install -e '.[dev]'`.
 | [`19_rewoo.py`](19_rewoo.py) | `ReWOO` — country fact-sheet builder (parallel tool execution; 2 LLM calls total) | `OPENAI_API_KEY` |
 | [`20_rag_supervisor.py`](20_rag_supervisor.py) | `Supervisor` + RAG — three-worker pipeline (Researcher → Curator → Synthesizer) over a small fake corpus, with the Curator catching DRAFT-vs-FINAL hallucinations | `OPENAI_API_KEY` |
 | [`21_research_pipeline.py`](21_research_pipeline.py) | **Showcase**: Plan + parallel research + real `.md` file I/O + review + update cycle. Three-worker pipeline over a semantic-indexed corpus. Writes a real markdown report to disk, reads it back, has it reviewed, applies fixes via `update_section`. Demonstrates the framework's full depth. | `OPENAI_API_KEY` |
+| [`22_rag_with_loader.py`](22_rag_with_loader.py) | **Full RAG showcase**: Loader (`load(path)`) → MarkdownChunker (preserves header trail) → HashEmbedder cosine index → Supervisor with researcher / writer / reviewer using the framework's built-in `read_tool` / `write_tool` / `edit_tool`. End-to-end production-shape RAG pipeline using every layer of the framework. | `OPENAI_API_KEY` |
 | [`15_debate.py`](15_debate.py) | `MultiAgentDebate` architecture — N debaters argue in parallel rounds, judge synthesizes | nothing |
 
 Read in order; each builds on the last conceptually.

@@ -4,59 +4,60 @@ Shinn et al. 2023 — `Reflexion: Language Agents with Verbal
 Reinforcement Learning <https://arxiv.org/abs/2303.11366>`_. After
 each attempt, an evaluator scores the output. Below threshold, a
 reflector produces a single-sentence "lesson" — written advice the
-agent can read on its next attempt. Lessons accumulate in a memory
-block, so future runs (this session and beyond, depending on the
-memory backend) see what went wrong before.
+agent can read on its next attempt.
+
+Lesson storage modes
+--------------------
+
+Two storage modes for the persisted lessons:
+
+* **Monotonic block (legacy default).** Every lesson is appended
+  to ``memory.<lessons_block_name>`` and shown to the agent on
+  every subsequent attempt. Simple but bloats context as lessons
+  accumulate.
+* **Selective recall (recommended).** Pass ``lesson_store=`` a
+  :class:`VectorStore`. Lessons are stored as embedded chunks;
+  before each attempt, only the **top-k most relevant lessons**
+  for the current task are retrieved and surfaced. Avoids
+  context bloat and keeps tutorial advice scoped to where it
+  applies. Pair with :class:`InMemoryVectorStore` for in-process,
+  or :class:`PostgresVectorStore` for cross-session learning.
 
 Pattern
 -------
 
 For each attempt up to ``max_attempts``:
 
-1. **Run base architecture** (default
-   :class:`~jeevesagent.architecture.ReAct`). The base seeds its
-   context from ``memory.working()`` so any prior lessons are
-   already visible to the model.
-2. **Evaluate.** A text-only model call scores the output (0-1).
-3. **Threshold check.** If ``score >= threshold``, terminate
-   (success).
-4. **Max-attempts check.** If we've hit the cap, terminate (give
-   up; output is the latest attempt).
-5. **Reflect.** A text-only model call produces a single sentence
+1. **Recall** (selective-recall mode only): query ``lesson_store``
+   with the current prompt; write the top-k results into the
+   working memory block for this attempt.
+2. **Run base architecture** (default
+   :class:`~jeevesagent.architecture.ReAct`).
+3. **Evaluate.** A text-only model call scores the output (0-1).
+4. **Threshold check.** If ``score >= threshold``, terminate.
+5. **Max-attempts check.** If we've hit the cap, terminate.
+6. **Reflect.** A text-only model call produces a single sentence
    identifying what went wrong.
-6. **Persist.** ``memory.append_block(lessons_block_name, ...)``
-   appends the lesson. The base architecture's
-   ``memory.working()`` recall picks it up on the next attempt
-   automatically — no plumbing on the base side.
-7. **Reset.** Clear ``session.messages`` so the base re-seeds its
-   context (including the new lesson). Cumulative usage and turn
-   count carry across attempts.
-
-The "verbal RL" framing is real: the lesson is a *prompt-level*
-gradient. The model doesn't update weights; it just gets a richer
-prompt next time.
+7. **Persist.** Append (legacy) or add to ``lesson_store``
+   (selective-recall) — keyed by the failing prompt so future
+   recall can find it.
+8. **Reset.** Clear ``session.messages`` so the base re-seeds its
+   context. Cumulative usage and turn count carry across attempts.
 
 Strengths
 ---------
-* **Cross-session learning** when paired with a persistent memory
-  backend (Sqlite / Postgres / Redis). Lessons survive process
-  restarts; future runs benefit.
-* **Wraps any base** that reads ``memory.working()`` — works with
-  ReAct, Plan-and-Execute, Self-Refine, etc.
-* **Cheap relative to multi-agent debate**: 1 evaluator call + 1
-  reflector call per failed attempt; no separate workers.
+* **Cross-session learning** when paired with a persistent
+  memory backend (legacy) or a persistent vector store
+  (selective recall).
+* **Wraps any base** that reads ``memory.working()``.
+* **Cheap**: 1 evaluator + 1 reflector call per failed attempt.
 
 Weaknesses
 ----------
-* **Same-model evaluation.** Self-grading is biased; the score may
-  not match human judgment. Pair with an external eval signal for
-  high-stakes work.
-* **Lesson block grows monotonically.** All past lessons stay in
-  context; long-running agents will see context bloat. Cap or
-  rotate lessons in the application layer.
-* **Score parsing is best-effort.** The evaluator might emit prose
-  instead of a number; we fall back to 0.0 (treated as failure)
-  with a warning event.
+* **Same-model evaluation.** Self-grading is biased; the score
+  may not match human judgment.
+* **Score parsing is best-effort.** Falls back to 0.0 on parse
+  failure (treated as a failed attempt).
 """
 
 from __future__ import annotations
@@ -65,12 +66,14 @@ from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
 from ..core.types import Event, Message, Role
+from ..loader.base import Chunk
 from .base import AgentSession, Architecture, Dependencies
 from .helpers import add_usage, parse_score, text_only_model_call
 from .react import ReAct
 
 if TYPE_CHECKING:
     from ..agent.api import Agent
+    from ..vectorstore.base import VectorStore
 
 
 DEFAULT_EVALUATOR_PROMPT = """\
@@ -122,6 +125,13 @@ class Reflexion:
       persisted lessons. Default ``"reflexion_lessons"``. Multiple
       Reflexion-wrapped agents in the same memory should pick
       distinct names.
+    * ``lesson_store`` — optional :class:`VectorStore` enabling
+      selective recall. When set, lessons are stored as embedded
+      chunks and only the top-``top_k_lessons`` most relevant
+      lessons are surfaced on each attempt (instead of all past
+      lessons). Avoids context bloat as lessons accumulate.
+    * ``top_k_lessons`` — how many lessons to recall per attempt
+      (selective-recall mode only). Default 5.
     """
 
     name = "reflexion"
@@ -135,17 +145,23 @@ class Reflexion:
         evaluator_prompt: str | None = None,
         reflector_prompt: str | None = None,
         lessons_block_name: str = "reflexion_lessons",
+        lesson_store: VectorStore | None = None,
+        top_k_lessons: int = 5,
     ) -> None:
         if max_attempts < 1:
             raise ValueError("max_attempts must be >= 1")
         if not 0.0 <= threshold <= 1.0:
             raise ValueError("threshold must be in [0.0, 1.0]")
+        if top_k_lessons < 1:
+            raise ValueError("top_k_lessons must be >= 1")
         self._base: Architecture = base if base is not None else ReAct()
         self._max_attempts = max_attempts
         self._threshold = threshold
         self._evaluator_prompt = evaluator_prompt or DEFAULT_EVALUATOR_PROMPT
         self._reflector_prompt = reflector_prompt or DEFAULT_REFLECTOR_PROMPT
         self._lessons_block = lessons_block_name
+        self._lesson_store = lesson_store
+        self._top_k = top_k_lessons
 
     def declared_workers(self) -> dict[str, Agent]:
         return {}
@@ -163,6 +179,29 @@ class Reflexion:
                 attempt=attempt,
                 max_attempts=self._max_attempts,
             )
+
+            # Selective recall: when a lesson_store is configured,
+            # query for lessons relevant to THIS prompt and write
+            # them to the working memory block. The block is
+            # rewritten (not appended) so the agent only sees the
+            # top-k relevant lessons, not the full lesson history.
+            if self._lesson_store is not None:
+                hits = await self._lesson_store.search(
+                    prompt, k=self._top_k
+                )
+                if hits:
+                    bullets = "\n".join(
+                        f"- {r.chunk.content}" for r in hits
+                    )
+                    await deps.memory.update_block(
+                        self._lessons_block, bullets
+                    )
+                    yield Event.architecture_event(
+                        session.id,
+                        "reflexion.lessons_recalled",
+                        attempt=attempt,
+                        n_recalled=len(hits),
+                    )
 
             # Each attempt is a fresh seed: clear messages so the
             # base re-runs seed_context, which will pick up lessons
@@ -215,17 +254,38 @@ class Reflexion:
                 lesson=lesson,
             )
 
-            # --- Persist into memory's working block. The base
-            # architecture's seed_context picks this up via
-            # memory.working() on the next attempt.
-            await deps.memory.append_block(
-                self._lessons_block, f"- {lesson}"
-            )
+            # --- Persist the lesson.
+            #
+            # Selective-recall mode: write to the vector store with
+            # the failing prompt as metadata so future recalls of
+            # similar prompts surface this lesson. The store handles
+            # the embedding internally.
+            #
+            # Legacy mode: append to the memory working block.
+            if self._lesson_store is not None:
+                await self._lesson_store.add(
+                    [
+                        Chunk(
+                            content=lesson,
+                            metadata={
+                                "attempt": attempt,
+                                "score": score,
+                                "prompt_excerpt": prompt[:200],
+                            },
+                        )
+                    ]
+                )
+                persist_target = "lesson_store"
+            else:
+                await deps.memory.append_block(
+                    self._lessons_block, f"- {lesson}"
+                )
+                persist_target = self._lessons_block
             yield Event.architecture_event(
                 session.id,
                 "reflexion.lesson_persisted",
                 attempt=attempt,
-                block=self._lessons_block,
+                block=persist_target,
             )
 
     # ---- helpers ---------------------------------------------------------

@@ -108,6 +108,7 @@ class MultiAgentDebate:
         judge: Agent | None = None,
         rounds: int = 2,
         convergence_check: bool = True,
+        convergence_similarity: float = 0.85,
         debater_instructions: str | None = None,
         judge_instructions: str | None = None,
     ) -> None:
@@ -115,10 +116,19 @@ class MultiAgentDebate:
             raise ValueError("Debate requires at least 2 debaters")
         if rounds < 1:
             raise ValueError("rounds must be >= 1")
+        if not 0.0 <= convergence_similarity <= 1.0:
+            raise ValueError(
+                "convergence_similarity must be in [0.0, 1.0]"
+            )
         self._debaters = list(debaters)
         self._judge = judge
         self._rounds = rounds
         self._convergence_check = convergence_check
+        # 0.85 = "essentially the same answer, possibly different
+        # wording" — empirically the sweet spot for debate convergence.
+        # 1.0 reproduces the legacy strict-equality behaviour. Lower
+        # values are more aggressive (cuts cost, risks premature exit).
+        self._convergence_similarity = convergence_similarity
         self._debater_instructions = (
             debater_instructions or DEFAULT_DEBATER_INSTRUCTIONS
         )
@@ -166,11 +176,14 @@ class MultiAgentDebate:
                 response=resp[:300],
             )
 
-        if self._convergence_check and _converged(round0):
+        if self._convergence_check and _converged(
+            round0, threshold=self._convergence_similarity
+        ):
             yield Event.architecture_event(
                 session.id,
                 "debate.converged",
                 round=0,
+                threshold=self._convergence_similarity,
             )
             session.output = next(iter(round0.values()))
             return
@@ -210,11 +223,15 @@ class MultiAgentDebate:
                     response=resp[:300],
                 )
 
-            if self._convergence_check and _converged(round_responses):
+            if self._convergence_check and _converged(
+                round_responses,
+                threshold=self._convergence_similarity,
+            ):
                 yield Event.architecture_event(
                     session.id,
                     "debate.converged",
                     round=r,
+                    threshold=self._convergence_similarity,
                 )
                 break
 
@@ -392,20 +409,47 @@ def _normalize(text: str) -> str:
     return " ".join(text.split()).strip().lower()
 
 
-def _converged(round_responses: dict[str, str]) -> bool:
-    """All debaters in this round agree (after whitespace normalize).
+def _jaccard(a: str, b: str) -> float:
+    """Token-level Jaccard similarity in [0, 1].
 
-    Naive but conservative — false negatives are fine (debate
-    continues an extra round); false positives would prematurely
-    end debate. Production users wanting semantic convergence can
-    write a custom architecture that subclasses
-    :class:`MultiAgentDebate` and overrides this check, or pass
-    ``convergence_check=False`` to disable.
+    Whitespace-normalized + lowercased on both sides. Empty/empty
+    is 1.0 (vacuously equal); empty/non-empty is 0.0. No external
+    dependencies — simple, transparent, deterministic.
+    """
+    tokens_a = set(_normalize(a).split())
+    tokens_b = set(_normalize(b).split())
+    if not tokens_a and not tokens_b:
+        return 1.0
+    if not tokens_a or not tokens_b:
+        return 0.0
+    intersection = len(tokens_a & tokens_b)
+    union = len(tokens_a | tokens_b)
+    return intersection / union
+
+
+def _converged(
+    round_responses: dict[str, str], *, threshold: float = 0.85
+) -> bool:
+    """Pairwise Jaccard similarity ≥ ``threshold`` for every pair.
+
+    With ``threshold=1.0`` this reduces to strict (whitespace-
+    normalized) equality — the legacy v0.5 behaviour. The default
+    ``0.85`` allows minor wording differences ("the answer is 42"
+    vs "answer: 42"). Lower values terminate debate earlier and
+    cut cost; the trade-off is risking premature exit on disputes
+    where debaters technically disagree but use overlapping
+    vocabulary.
     """
     if not round_responses:
         return False
-    normalized = {_normalize(r) for r in round_responses.values()}
-    return len(normalized) == 1
+    if len(round_responses) == 1:
+        return True
+    responses = list(round_responses.values())
+    for i in range(len(responses)):
+        for j in range(i + 1, len(responses)):
+            if _jaccard(responses[i], responses[j]) < threshold:
+                return False
+    return True
 
 
 def _majority_vote(round_responses: dict[str, str]) -> str:

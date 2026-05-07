@@ -387,3 +387,89 @@ async def test_reflexion_via_resolver_string_uses_react_default() -> None:
     agent = Agent("test", model=model, architecture="reflexion")
     result = await agent.run("hi")
     assert "my output" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Selective lesson recall via VectorStore
+# ---------------------------------------------------------------------------
+
+
+async def test_reflexion_persists_lessons_to_vector_store() -> None:
+    """When a ``lesson_store`` is configured, lessons go to the
+    vector store on each failed attempt — not the memory block."""
+    from jeevesagent import HashEmbedder, InMemoryVectorStore
+
+    store = InMemoryVectorStore(embedder=HashEmbedder(dimensions=64))
+    model = ScriptedModel(
+        [
+            ScriptedTurn(text="bad answer 1"),
+            ScriptedTurn(text="score: 0.2"),
+            ScriptedTurn(text="lesson: try harder"),
+            ScriptedTurn(text="bad answer 2"),
+            ScriptedTurn(text="score: 0.3"),
+            ScriptedTurn(text="lesson: try even harder"),
+            ScriptedTurn(text="finally good"),
+            ScriptedTurn(text="score: 0.95"),
+        ]
+    )
+    agent = Agent(
+        "test",
+        model=model,
+        architecture=Reflexion(
+            base=ReAct(),
+            threshold=0.8,
+            max_attempts=3,
+            lesson_store=store,
+        ),
+    )
+    result = await agent.run("a hard question")
+    assert "finally good" in result.output
+    assert await store.count() == 2
+
+
+async def test_reflexion_recalls_top_k_from_store() -> None:
+    """A populated lesson_store rewrites the working memory block
+    on each attempt with at most top_k_lessons retrieved bullets."""
+    from jeevesagent import HashEmbedder, InMemoryVectorStore
+    from jeevesagent.loader.base import Chunk
+
+    store = InMemoryVectorStore(embedder=HashEmbedder(dimensions=64))
+    await store.add(
+        [
+            Chunk(
+                content=f"lesson #{i} about topic {i}", metadata={}
+            )
+            for i in range(5)
+        ]
+    )
+    model = ScriptedModel(
+        [
+            ScriptedTurn(text="ok answer"),
+            ScriptedTurn(text="score: 0.95"),
+        ]
+    )
+    memory = InMemoryMemory()
+    agent = Agent(
+        "test",
+        model=model,
+        memory=memory,
+        architecture=Reflexion(
+            base=ReAct(),
+            threshold=0.9,
+            lesson_store=store,
+            top_k_lessons=2,
+        ),
+    )
+    await agent.run("topic 3 query")
+    blocks = await memory.working()
+    block = next(
+        (b for b in blocks if b.name == "reflexion_lessons"), None
+    )
+    assert block is not None
+    bullet_count = block.content.count("- ")
+    assert bullet_count <= 2
+
+
+def test_reflexion_rejects_invalid_top_k() -> None:
+    with pytest.raises(ValueError, match="top_k_lessons"):
+        Reflexion(top_k_lessons=0)

@@ -30,7 +30,7 @@ from .rewoo import ReWOO, ReWOOPlan, ReWOOStep, ReWOOStepResult
 from .router import Router, RouterRoute
 from .self_refine import SelfRefine
 from .supervisor import Supervisor
-from .swarm import Swarm
+from .swarm import Handoff, Swarm
 from .tree_of_thoughts import ThoughtNode, TreeOfThoughts
 
 __all__ = [
@@ -41,6 +41,7 @@ __all__ = [
     "BlackboardArchitecture",
     "BlackboardEntry",
     "Dependencies",
+    "Handoff",
     "MultiAgentDebate",
     "Plan",
     "PlanAndExecute",
