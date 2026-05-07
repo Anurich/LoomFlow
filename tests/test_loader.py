@@ -110,6 +110,7 @@ def test_load_csv_empty_file(tmp_path: Path) -> None:
 
 def _make_pdf(path: Path, pages: list[str]) -> None:
     """Create a small PDF using pypdf for testing."""
+    pytest.importorskip("pypdf")
     from pypdf import PdfWriter
     from pypdf.generic import (
         ArrayObject,
@@ -172,6 +173,7 @@ def _make_docx(
     path: Path, title: str, sections: list[tuple[int, str]]
 ) -> None:
     """Create a small .docx with a title + headings + paragraphs."""
+    pytest.importorskip("docx")
     import docx
 
     document = docx.Document()
@@ -207,6 +209,7 @@ def test_load_docx_preserves_headings_and_paragraphs(
 
 
 def test_load_docx_handles_tables(tmp_path: Path) -> None:
+    pytest.importorskip("docx")
     import docx
 
     f = tmp_path / "doc.docx"
@@ -232,6 +235,7 @@ def test_load_docx_handles_tables(tmp_path: Path) -> None:
 
 
 def test_load_excel_each_sheet_becomes_section(tmp_path: Path) -> None:
+    pytest.importorskip("openpyxl")
     import openpyxl
 
     f = tmp_path / "data.xlsx"
@@ -257,6 +261,7 @@ def test_load_excel_each_sheet_becomes_section(tmp_path: Path) -> None:
 
 
 def test_load_excel_trims_empty_trailing_rows(tmp_path: Path) -> None:
+    pytest.importorskip("openpyxl")
     import openpyxl
 
     f = tmp_path / "padded.xlsx"
@@ -288,6 +293,7 @@ def test_load_excel_trims_empty_trailing_rows(tmp_path: Path) -> None:
 def test_load_html_extracts_headings_and_paragraphs(
     tmp_path: Path,
 ) -> None:
+    pytest.importorskip("bs4")
     f = tmp_path / "page.html"
     f.write_text(
         "<html><head><title>My Page</title></head>"
@@ -313,6 +319,7 @@ def test_load_html_extracts_headings_and_paragraphs(
 
 
 def test_load_html_extracts_tables(tmp_path: Path) -> None:
+    pytest.importorskip("bs4")
     f = tmp_path / "table.html"
     f.write_text(
         "<table>"
@@ -345,6 +352,7 @@ def test_load_dispatches_csv(tmp_path: Path) -> None:
 
 
 def test_load_dispatches_xlsx(tmp_path: Path) -> None:
+    pytest.importorskip("openpyxl")
     import openpyxl
 
     f = tmp_path / "wb.xlsx"
@@ -363,6 +371,7 @@ def test_load_rejects_unknown_extension(tmp_path: Path) -> None:
 
 
 def test_load_dispatches_html(tmp_path: Path) -> None:
+    pytest.importorskip("bs4")
     f = tmp_path / "page.html"
     f.write_text("<html><body><p>hi</p></body></html>")
     doc = load(f)

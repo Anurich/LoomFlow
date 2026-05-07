@@ -61,7 +61,7 @@ async def fetch_doc(doc_id: str) -> str:
 @tool
 async def lint_markdown(text: str) -> str:
     """Run a markdown linter; returns warnings as JSON."""
-    return "[]"
+    return "[]" if text else "[]"
 
 
 # ---------------------------------------------------------------------------
