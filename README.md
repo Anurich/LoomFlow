@@ -4,10 +4,15 @@
 
 ```python
 from jeevesagent import Agent
+import asyncio
 
-agent = Agent("You are a helpful assistant.", model="claude-opus-4-7")
-result = await agent.run("What's 2 + 2?")
-print(result.output)  # "4"
+async def main():
+  
+  agent = Agent("You are a helpful assistant.", model="claude-opus-4-7")
+  result = await agent.run("What's 2 + 2?")
+  print(result.output)  # "4"
+
+asyncio.run(main())
 ```
 
 That's the whole quickstart. Set `ANTHROPIC_API_KEY` and you're talking
