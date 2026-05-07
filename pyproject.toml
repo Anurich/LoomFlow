@@ -66,6 +66,14 @@ dev = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["jeevesagent"]
+# PEP 561: ``py.typed`` marker tells IDEs and type-checkers
+# (Pylance, Pyright, mypy) that this package ships inline type
+# hints. Without it, autocomplete and go-to-definition for our
+# public APIs don't work in IDEs that consume the installed
+# wheel — even though every public function is fully typed in
+# source. See https://peps.python.org/pep-0561/
+[tool.hatch.build.targets.wheel.force-include]
+"jeevesagent/py.typed" = "jeevesagent/py.typed"
 
 [tool.ruff]
 line-length = 100
