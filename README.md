@@ -607,8 +607,9 @@ agent = Agent(
 )
 ```
 
-See [`examples/28_skills.py`](examples/28_skills.py) for a complete
-walkthrough of all three modes side by side.
+See the [`examples/`](examples/) directory for runnable end-to-end
+samples that exercise the loader, vector store, retriever-as-tool
+pattern, and multi-agent debate.
 
 ---
 
@@ -700,7 +701,7 @@ speed when you don't, with no code changes between modes.
 | [`Subagent.md`](Subagent.md) | Architecture-protocol design rationale; full 14-architecture catalogue (the 5 shipped, the 9 candidates) |
 | [`project.md`](project.md) | The full engineering plan (the design doc) |
 | [`BUILD_LOG.md`](BUILD_LOG.md) | Slice-by-slice changelog |
-| [`examples/`](examples/) | 29 runnable scripts: `00_hello`–`19_rewoo` cover every architecture; `20_rag_supervisor`–`22_rag_with_loader` are RAG patterns; `23_coding_agent`, `24_support_triage`, `25_document_pipeline`, `26_devops_diagnostic` are real-world use cases with permissions / audit / budget wired up; `27_visualize_agents` shows graph generation; `28_skills` walks through all three skill modes |
+| [`examples/`](examples/) | Two runnable end-to-end samples: `01_rag_pdf.py` (single-agent RAG over a folder of PDFs — loader → Chroma → retriever tool → Agent) and `02_specialist_debate.py` (five domain specialists, each with their own per-domain RAG, composed via `Team.debate(...)` with a synthesising judge) |
 
 ---
 
