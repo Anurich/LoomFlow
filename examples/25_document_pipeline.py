@@ -45,10 +45,11 @@ from pydantic import BaseModel, ValidationError
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 if not os.environ.get("OPENAI_API_KEY"):
-    sys.exit(
-        "\n  ✗ OPENAI_API_KEY required. "
-        "Add OPENAI_API_KEY=sk-... to .env at repo root.\n"
+    print(
+        "\n  ⊘ OPENAI_API_KEY not set — skipping this example.\n"
+        "    Add OPENAI_API_KEY=sk-... to .env at repo root to run.\n"
     )
+    sys.exit(0)
 
 from jeevesagent import Agent, Team, Tool, tool  # noqa: E402
 from jeevesagent.loader import load  # noqa: E402

@@ -251,14 +251,10 @@ async def format_brief(
 def _build_agents() -> Agent:
     if not os.environ.get("OPENAI_API_KEY"):
         print(
-            "\n  ✗ OPENAI_API_KEY is not set.\n\n"
-            "  This example requires a real LLM to coordinate the\n"
-            "  three workers + supervisor. Set OPENAI_API_KEY in your\n"
-            "  environment, or add OPENAI_API_KEY=sk-... to a .env\n"
-            "  file at the repo root.\n\n"
-            "  For an API-key-free example, see examples/12_supervisor.py.\n"
+            "\n  ⊘ OPENAI_API_KEY not set — skipping this example.\n"
+            "    Add OPENAI_API_KEY=sk-... to .env at repo root to run.\n"
         )
-        sys.exit(1)
+        sys.exit(0)
 
     model_name = "gpt-4.1-mini"
 
