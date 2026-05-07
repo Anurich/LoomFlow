@@ -575,6 +575,50 @@ async def test_typed_handoff_validates_payload_via_pydantic() -> None:
     assert "target" not in handoff_request
 
 
+def test_legacy_handoff_tool_enumerates_peer_names_in_schema() -> None:
+    """The legacy single-handoff tool must enumerate all peer names
+    in its JSON Schema enum so strict-schema providers reject
+    invalid targets at the API boundary instead of bouncing through
+    our error path."""
+    a = _agent_no_handoff("a")
+    b = _agent_no_handoff("b")
+    c = _agent_no_handoff("c")
+    sw = Swarm(
+        agents={"alpha": a, "bravo": b, "charlie": c},
+        entry_agent="alpha",
+    )
+    assert sw._typed_mode is False
+    tool = sw._build_legacy_tool({})
+    target_schema = tool.input_schema["properties"]["target"]
+    assert "enum" in target_schema
+    assert set(target_schema["enum"]) == {"alpha", "bravo", "charlie"}
+    # Description should also list the names so models that don't
+    # honour enum still see them in plain text.
+    desc = tool.input_schema["properties"]["target"]["description"]
+    for name in ("alpha", "bravo", "charlie"):
+        assert name in desc
+
+
+def test_legacy_handoff_tool_description_lists_each_peers_role() -> None:
+    """The handoff tool's top-level description should include each
+    peer's instructions so the model can reason about who to pick."""
+    triage = Agent(
+        "Triage incoming requests",
+        model=ScriptedModel([ScriptedTurn(text="ok")]),
+    )
+    billing = Agent(
+        "Handle refunds and invoices",
+        model=ScriptedModel([ScriptedTurn(text="ok")]),
+    )
+    sw = Swarm(
+        agents={"triage": triage, "billing": billing},
+        entry_agent="triage",
+    )
+    tool = sw._build_legacy_tool({})
+    assert "Triage incoming" in tool.description
+    assert "Handle refunds" in tool.description
+
+
 def test_input_filter_replaces_history_for_receiving_peer() -> None:
     """When a target peer has an ``input_filter``, the filter is
     invoked on each handoff; the filtered string becomes the only

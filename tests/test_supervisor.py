@@ -506,6 +506,48 @@ async def test_supervisor_forward_message_unknown_worker_returns_error() -> None
     assert result.output == "fallback supervisor response"
 
 
+def test_delegate_tool_enumerates_worker_names_in_schema() -> None:
+    """The delegate tool's `worker` arg must include an enum of the
+    actual worker names so strict-schema providers reject invalid
+    names at the API boundary."""
+    from jeevesagent.architecture.supervisor import _make_delegate_tool
+
+    coder = _worker("c", "Python coder.")
+    writer = _worker("w", "Markdown writer.")
+    tool = _make_delegate_tool(
+        {"coder": coder, "writer": writer},
+        parent_session_id="parent",
+        tool_name="delegate",
+    )
+    worker_schema = tool.input_schema["properties"]["worker"]
+    assert "enum" in worker_schema
+    assert set(worker_schema["enum"]) == {"coder", "writer"}
+    # Description echoes the names too (for non-strict providers).
+    for name in ("coder", "writer"):
+        assert name in worker_schema["description"]
+    # Top-level description includes each worker's role description.
+    assert "Python coder" in tool.description
+    assert "Markdown writer" in tool.description
+
+
+def test_forward_message_tool_enumerates_worker_names_in_schema() -> None:
+    """The forward_message tool's `worker` arg also gets the worker
+    enum — same reason as delegate."""
+    from jeevesagent.architecture.supervisor import (
+        _make_forward_message_tool,
+    )
+
+    tool = _make_forward_message_tool(
+        last_outputs={},
+        forward_request={},
+        tool_name="forward_message",
+        worker_names=["alpha", "beta", "gamma"],
+    )
+    worker_schema = tool.input_schema["properties"]["worker"]
+    assert "enum" in worker_schema
+    assert set(worker_schema["enum"]) == {"alpha", "beta", "gamma"}
+
+
 def test_make_delegate_tool_returns_a_real_tool_instance() -> None:
     """Smoke-test the helper that builds the delegate tool."""
     from jeevesagent.architecture.supervisor import _make_delegate_tool

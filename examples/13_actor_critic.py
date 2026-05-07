@@ -35,7 +35,7 @@ if not os.environ.get("OPENAI_API_KEY"):
         "Add OPENAI_API_KEY=sk-... to .env at repo root.\n"
     )
 
-from jeevesagent import ActorCritic, Agent  # noqa: E402
+from jeevesagent import Agent, Team  # noqa: E402
 
 actor = Agent(
     instructions=(
@@ -64,15 +64,13 @@ critic = Agent(
 
 
 async def main() -> None:
-    agent = Agent(
-        "Code-quality coordinator.",
+    agent = Team.actor_critic(
+        actor=actor,
+        critic=critic,
+        max_rounds=2,
+        approval_threshold=0.85,
+        instructions="Code-quality coordinator.",
         model="gpt-4.1-mini",  # unused; ActorCritic drives sub-agents
-        architecture=ActorCritic(
-            actor=actor,
-            critic=critic,
-            max_rounds=2,
-            approval_threshold=0.85,
-        ),
     )
 
     prompt = (

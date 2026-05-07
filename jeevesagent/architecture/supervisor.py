@@ -202,6 +202,7 @@ class Supervisor:
             last_outputs=last_outputs,
             forward_request=forward_request,
             tool_name=self._forward_name,
+            worker_names=list(self._workers.keys()),
         )
 
         # 3. Wrap the parent's ToolHost so the model sees `delegate`
@@ -357,12 +358,19 @@ def _make_delegate_tool(
             last_outputs[worker] = output
         return output
 
+    worker_names = list(workers.keys())
+    worker_descriptions = "\n".join(
+        f"  - {name}: {(a.instructions or '').strip()[:120]}"
+        for name, a in workers.items()
+    )
+
     return Tool(
         name=tool_name,
         description=(
             "Delegate a subtask to a named specialist worker. "
             "The worker runs independently and returns its final "
-            "answer as a string."
+            "answer as a string.\n\n"
+            f"Available workers:\n{worker_descriptions}"
         ),
         fn=_delegate,
         input_schema={
@@ -370,9 +378,15 @@ def _make_delegate_tool(
             "properties": {
                 "worker": {
                     "type": "string",
+                    # Strict-schema providers (Anthropic, OpenAI
+                    # strict mode) reject calls outside this list,
+                    # so hallucinated worker names never reach our
+                    # tool implementation.
+                    "enum": worker_names,
                     "description": (
-                        "Name of the worker to delegate to. Must be "
-                        "one of the configured workers."
+                        "Name of the worker to delegate to. "
+                        "Must be one of: "
+                        f"{', '.join(worker_names)}."
                     ),
                 },
                 "instructions": {
@@ -394,6 +408,7 @@ def _make_forward_message_tool(
     last_outputs: dict[str, str],
     forward_request: dict[str, str],
     tool_name: str,
+    worker_names: list[str],
 ) -> Tool:
     """Build the ``forward_message`` tool.
 
@@ -436,9 +451,15 @@ def _make_forward_message_tool(
             "properties": {
                 "worker": {
                     "type": "string",
+                    # Constrains to the actual worker pool. The
+                    # tool body still checks ``last_outputs`` so a
+                    # forward before any delegate returns a clear
+                    # error.
+                    "enum": worker_names,
                     "description": (
                         "Name of the worker whose last output "
-                        "should be forwarded as the final answer."
+                        "should be forwarded. Must be one of: "
+                        f"{', '.join(worker_names)}."
                     ),
                 },
             },

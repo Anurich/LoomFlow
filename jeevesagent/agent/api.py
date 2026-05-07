@@ -191,6 +191,47 @@ class Agent:
         """
         return self._architecture
 
+    # ---- graph visualization -------------------------------------------
+
+    async def generate_graph(
+        self,
+        path: str | Path | None = None,
+        *,
+        title: str | None = None,
+    ) -> str:
+        """Render this agent's structure as a Mermaid graph.
+
+        Walks the agent + its architecture + all sub-agents +
+        every agent's tools, producing a graph that captures the
+        full team, tool attachments, and architecture-specific
+        relationships (delegate / handoff / classify / etc.).
+
+        Returns the Mermaid text. If ``path`` is provided, also
+        writes to disk — extension determines the format:
+
+        * ``.mmd`` — raw Mermaid source
+        * ``.md``  — Markdown with the diagram in a ``mermaid``
+          fence (renders on GitHub, IDE markdown previews,
+          Jupyter)
+        * ``.png`` / ``.svg`` — rendered via ``mermaid.ink``;
+          falls back to ``.mmd`` next to the path on network
+          failure
+
+        Example::
+
+            mermaid_text = await agent.generate_graph("graph.md")
+            print(mermaid_text)
+
+        Pass ``title=`` to override the diagram title (defaults to
+        the file's stem, or ``"Agent"`` if no path is given).
+        """
+        from ..graph import build_graph, write_graph
+
+        if path is None:
+            graph = await build_graph(self, title=title or "Agent")
+            return graph.to_mermaid()
+        return await write_graph(self, path, title=title)
+
     # ---- public memory shortcuts ---------------------------------------
 
     async def recall(

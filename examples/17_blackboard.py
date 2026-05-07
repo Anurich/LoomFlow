@@ -35,7 +35,7 @@ if not os.environ.get("OPENAI_API_KEY"):
         "Add OPENAI_API_KEY=sk-... to .env at repo root.\n"
     )
 
-from jeevesagent import Agent, BlackboardArchitecture  # noqa: E402
+from jeevesagent import Agent, Team  # noqa: E402
 
 hypothesis = Agent(
     instructions=(
@@ -95,19 +95,17 @@ decider = Agent(
 
 
 async def main() -> None:
-    agent = Agent(
-        "Root-cause analysis coordinator.",
+    agent = Team.blackboard(
+        agents={
+            "hypothesis": hypothesis,
+            "evidence": evidence,
+            "critic": critic,
+        },
+        coordinator=coordinator,
+        decider=decider,
+        max_rounds=6,
+        instructions="Root-cause analysis coordinator.",
         model="gpt-4.1-mini",
-        architecture=BlackboardArchitecture(
-            agents={
-                "hypothesis": hypothesis,
-                "evidence": evidence,
-                "critic": critic,
-            },
-            coordinator=coordinator,
-            decider=decider,
-            max_rounds=6,
-        ),
     )
 
     prompt = (

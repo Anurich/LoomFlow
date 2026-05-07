@@ -35,7 +35,7 @@ if not os.environ.get("OPENAI_API_KEY"):
         "Add OPENAI_API_KEY=sk-... to .env at repo root.\n"
     )
 
-from jeevesagent import Agent, Swarm, tool  # noqa: E402
+from jeevesagent import Agent, Team, tool  # noqa: E402
 
 
 @tool
@@ -96,19 +96,17 @@ tech = Agent(
 
 
 async def main() -> None:
-    agent = Agent(
-        "Customer support hub.",
+    agent = Team.swarm(
+        agents={
+            "triage": triage,
+            "billing": billing,
+            "tech": tech,
+        },
+        entry_agent="triage",
+        max_handoffs=4,
+        detect_cycles=True,
+        instructions="Customer support hub.",
         model="gpt-4.1-mini",
-        architecture=Swarm(
-            agents={
-                "triage": triage,
-                "billing": billing,
-                "tech": tech,
-            },
-            entry_agent="triage",
-            max_handoffs=4,
-            detect_cycles=True,
-        ),
     )
 
     prompt = (

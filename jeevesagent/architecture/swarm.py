@@ -350,12 +350,22 @@ class Swarm:
             handoff_request["message"] = message
             return f"[handoff requested → {target}]"
 
+        peer_names = list(agents.keys())
+        # Build a per-peer description list so the model sees not
+        # just the names but each peer's role at a glance.
+        peer_descriptions = "\n".join(
+            f"  - {name}: {(a.instructions or '').strip()[:120]}"
+            for name, a in agents.items()
+        )
+
         return Tool(
             name=self._handoff_tool_name,
             description=(
                 "Hand off the conversation to another peer agent. "
-                "Pass `target` (peer name) and an optional `message` "
-                "describing context to carry over."
+                "Pass `target` (one of the configured peer names) "
+                "and an optional `message` describing context to "
+                "carry over.\n\n"
+                f"Available peers:\n{peer_descriptions}"
             ),
             fn=_handoff,
             input_schema={
@@ -363,9 +373,16 @@ class Swarm:
                 "properties": {
                     "target": {
                         "type": "string",
+                        # Enum tells strict-schema providers
+                        # (Anthropic, OpenAI strict mode) the only
+                        # valid values, so a hallucinated peer name
+                        # is rejected at the API boundary instead
+                        # of bouncing through our error path.
+                        "enum": peer_names,
                         "description": (
-                            "Name of the peer to hand off to. Must "
-                            "be one of the configured peers."
+                            "Name of the peer to hand off to. "
+                            "Must be one of: "
+                            f"{', '.join(peer_names)}."
                         ),
                     },
                     "message": {

@@ -34,7 +34,7 @@ if not os.environ.get("OPENAI_API_KEY"):
         "Add OPENAI_API_KEY=sk-... to .env at repo root.\n"
     )
 
-from jeevesagent import Agent, Router, RouterRoute, tool  # noqa: E402
+from jeevesagent import Agent, RouterRoute, Team, tool  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Real-ish tools per specialist. In production these would hit your
@@ -113,30 +113,31 @@ general = Agent(
 
 
 async def main() -> None:
-    agent = Agent(
-        "You route customer support tickets to the right specialist.",
+    # Team.router is the ergonomic builder for the classify-and-
+    # dispatch pattern. Equivalent to ``Agent(architecture=Router(
+    # routes=..., fallback_route=..., require_confidence_above=...))``.
+    agent = Team.router(
+        routes=[
+            RouterRoute(
+                name="billing",
+                agent=billing,
+                description="Refunds, charges, subscription changes",
+            ),
+            RouterRoute(
+                name="tech",
+                agent=tech,
+                description="API errors, integration bugs, downtime",
+            ),
+            RouterRoute(
+                name="general",
+                agent=general,
+                description="Anything that doesn't fit billing or tech",
+            ),
+        ],
+        instructions="You route customer support tickets to the right specialist.",
         model="gpt-4.1-mini",  # cheap classifier
-        architecture=Router(
-            routes=[
-                RouterRoute(
-                    name="billing",
-                    agent=billing,
-                    description="Refunds, charges, subscription changes",
-                ),
-                RouterRoute(
-                    name="tech",
-                    agent=tech,
-                    description="API errors, integration bugs, downtime",
-                ),
-                RouterRoute(
-                    name="general",
-                    agent=general,
-                    description="Anything that doesn't fit billing or tech",
-                ),
-            ],
-            fallback_route="general",
-            require_confidence_above=0.7,
-        ),
+        fallback_route="general",
+        require_confidence_above=0.7,
     )
 
     queries = [

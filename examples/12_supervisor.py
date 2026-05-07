@@ -32,7 +32,7 @@ if not os.environ.get("OPENAI_API_KEY"):
         "Add OPENAI_API_KEY=sk-... to .env at repo root.\n"
     )
 
-from jeevesagent import Agent, Supervisor, tool  # noqa: E402
+from jeevesagent import Agent, Team, tool  # noqa: E402
 
 
 @tool
@@ -106,19 +106,19 @@ reviewer = Agent(
 
 
 async def main() -> None:
-    agent = Agent(
-        "You manage a small dev team. Delegate research first, "
-        "then coding, then review. Combine the outputs into a "
-        "final answer with the reviewed code + a short summary "
-        "of best practices.",
-        model="gpt-4.1-mini",
-        architecture=Supervisor(
-            workers={
-                "researcher": researcher,
-                "coder": coder,
-                "reviewer": reviewer,
-            }
+    agent = Team.supervisor(
+        workers={
+            "researcher": researcher,
+            "coder": coder,
+            "reviewer": reviewer,
+        },
+        instructions=(
+            "You manage a small dev team. Delegate research first, "
+            "then coding, then review. Combine the outputs into a "
+            "final answer with the reviewed code + a short summary "
+            "of best practices."
         ),
+        model="gpt-4.1-mini",
     )
 
     prompt = (

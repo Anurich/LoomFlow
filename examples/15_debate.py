@@ -34,7 +34,7 @@ if not os.environ.get("OPENAI_API_KEY"):
         "Add OPENAI_API_KEY=sk-... to .env at repo root.\n"
     )
 
-from jeevesagent import Agent, MultiAgentDebate  # noqa: E402
+from jeevesagent import Agent, Team  # noqa: E402
 
 optimist = Agent(
     instructions=(
@@ -79,15 +79,13 @@ judge = Agent(
 
 
 async def main() -> None:
-    agent = Agent(
-        "Investment committee moderator.",
+    agent = Team.debate(
+        debaters=[optimist, skeptic, analyst],
+        judge=judge,
+        rounds=1,
+        convergence_check=False,
+        instructions="Investment committee moderator.",
         model="gpt-4.1-mini",
-        architecture=MultiAgentDebate(
-            debaters=[optimist, skeptic, analyst],
-            judge=judge,
-            rounds=1,
-            convergence_check=False,
-        ),
     )
 
     prompt = (

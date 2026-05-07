@@ -78,6 +78,7 @@ from .core import (
     new_id,
 )
 from .data import FreshnessPolicy, LineagePolicy
+from .graph import AgentGraph, build_graph, write_graph
 from .jeeves import JeevesConfig, JeevesGateway
 from .mcp import MCPClient, MCPRegistry, MCPServerSpec
 from .memory import (
@@ -306,4 +307,8 @@ __all__ = [
     # team builders / standalone runner
     "Team",
     "run_architecture",
+    # graph visualization
+    "AgentGraph",
+    "build_graph",
+    "write_graph",
 ]
