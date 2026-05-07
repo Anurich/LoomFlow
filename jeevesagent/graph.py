@@ -165,6 +165,11 @@ class AgentGraph:
             lines.append("  end")
 
         # Edges.
+        # Edge labels are wrapped in double quotes — that's the
+        # Mermaid-canonical form, and it makes mermaid.ink's
+        # stricter parser accept labels containing parens / colons /
+        # arrows / other special characters that the bare-label form
+        # rejects with HTTP 400.
         for edge in self.edges:
             arrow = {
                 "solid": "-->",
@@ -173,7 +178,7 @@ class AgentGraph:
             }.get(edge.style, "-->")
             if edge.label:
                 lines.append(
-                    f"  {edge.source} {arrow}|{_escape(edge.label)}| {edge.target}"
+                    f'  {edge.source} {arrow}|"{_escape(edge.label)}"| {edge.target}'
                 )
             else:
                 lines.append(f"  {edge.source} {arrow} {edge.target}")
@@ -331,13 +336,13 @@ class _Builder:
                 worker, kind="subagent", parent_sg=sg
             )
             self.graph.edges.append(
-                _Edge(source=parent_id, target=worker_id, label=f"delegate({name})")
+                _Edge(source=parent_id, target=worker_id, label=f"delegate: {name}")
             )
             self.graph.edges.append(
                 _Edge(
                     source=parent_id,
                     target=worker_id,
-                    label=f"forward_message({name})",
+                    label=f"forward: {name}",
                     style="dashed",
                 )
             )
@@ -352,7 +357,7 @@ class _Builder:
                 _Edge(
                     source=parent_id,
                     target=route_id,
-                    label=f"classify→{name}",
+                    label=f"classify: {name}",
                 )
             )
 
@@ -411,7 +416,7 @@ class _Builder:
             _Edge(
                 source=critic_id,
                 target=actor_id,
-                label="refine if score<threshold",
+                label="refine if below threshold",
                 style="dashed",
             )
         )
@@ -592,9 +597,9 @@ async def write_graph(
             f"# {graph.title}\n\n```mermaid\n{mermaid}\n```\n"
         )
     elif suffix in {".png", ".svg"}:
-        kind = "img" if suffix == ".png" else "svg"
+        fmt = "png" if suffix == ".png" else "svg"
         try:
-            data = _fetch_mermaid_ink(mermaid, kind=kind)
+            data = _fetch_mermaid_ink(mermaid, fmt=fmt)
             target.write_bytes(data)  # noqa: ASYNC240
         except (URLError, OSError, TimeoutError) as exc:
             # Network unavailable — degrade gracefully by writing
@@ -616,13 +621,25 @@ async def write_graph(
 
 
 def _fetch_mermaid_ink(
-    mermaid: str, *, kind: str, timeout: float = 10.0
+    mermaid: str, *, fmt: str, timeout: float = 10.0
 ) -> bytes:
-    """Render Mermaid via ``mermaid.ink``. Raises on network error."""
+    """Render Mermaid via ``mermaid.ink``. ``fmt`` is ``"png"`` or
+    ``"svg"``. Raises on network error.
+
+    The endpoint shape:
+
+    * ``GET /img/<base64>?type=png`` → returns PNG bytes
+      (the bare ``/img/<base64>`` returns JPEG by default — that's
+      why ``?type=png`` is required for proper PNG output)
+    * ``GET /svg/<base64>``         → returns SVG bytes
+    """
     encoded = base64.urlsafe_b64encode(mermaid.encode("utf-8")).decode(
         "ascii"
     )
-    url = f"https://mermaid.ink/{kind}/{encoded}?type={kind}"
+    if fmt == "svg":
+        url = f"https://mermaid.ink/svg/{encoded}"
+    else:
+        url = f"https://mermaid.ink/img/{encoded}?type=png"
     request = Request(  # noqa: S310 — fixed scheme, user-supplied data is base64
         url,
         headers={"User-Agent": "JeevesAgent/graph"},

@@ -121,11 +121,12 @@ async def test_supervisor_graph_renders_workers_in_subgraph() -> None:
     assert "Research the question" in text
     assert "Write the report" in text
     # Edge labels.
-    assert "delegate(researcher)" in text
-    assert "delegate(writer)" in text
-    # Forward edges (dashed).
-    assert "forward_message(researcher)" in text
-    assert "-.->|forward_message" in text
+    assert "delegate: researcher" in text
+    assert "delegate: writer" in text
+    # Forward edges (dashed). Label wrapped in quotes for mermaid.ink
+    # parser compatibility.
+    assert "forward: researcher" in text
+    assert '-.->|"forward' in text
 
 
 # ---------------------------------------------------------------------------
@@ -146,8 +147,8 @@ async def test_router_graph_renders_routes() -> None:
     )
     graph = await build_graph(team)
     text = graph.to_mermaid()
-    assert "classify→billing" in text
-    assert "classify→technical" in text
+    assert "classify: billing" in text
+    assert "classify: technical" in text
 
 
 # ---------------------------------------------------------------------------
@@ -168,8 +169,8 @@ async def test_swarm_graph_includes_handoff_edges_between_peers() -> None:
     graph = await build_graph(team)
     text = graph.to_mermaid()
     # Handoff edges show up as dashed.
-    assert text.count("|handoff|") >= 6  # 3 peers × 2 directions each
-    assert "|entry|" in text
+    assert text.count('|"handoff"|') >= 6  # 3 peers × 2 directions
+    assert '|"entry"|' in text
 
 
 # ---------------------------------------------------------------------------
@@ -188,8 +189,8 @@ async def test_actor_critic_graph_renders_loop() -> None:
     )
     graph = await build_graph(team)
     text = graph.to_mermaid()
-    assert "|generate|" in text
-    assert "|critique|" in text
+    assert '|"generate"|' in text
+    assert '|"critique"|' in text
     assert "refine" in text
 
 
@@ -213,8 +214,8 @@ async def test_debate_graph_renders_judge_synthesis() -> None:
     assert "Optimist" in text
     assert "Skeptic" in text
     assert "Judge" in text
-    assert "|responses|" in text
-    assert "|round|" in text
+    assert '|"responses"|' in text
+    assert '|"round"|' in text
 
 
 # ---------------------------------------------------------------------------
@@ -241,7 +242,7 @@ async def test_blackboard_graph_renders_central_workspace() -> None:
     # Reads/writes edges from each agent to the workspace.
     assert text.count("reads/writes") >= 2
     # Decider receives synthesized state from the workspace.
-    assert "|synthesizes|" in text
+    assert '|"synthesizes"|' in text
 
 
 # ---------------------------------------------------------------------------
