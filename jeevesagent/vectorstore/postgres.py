@@ -32,7 +32,7 @@ from ..core.protocols import Embedder
 from ..loader.base import Chunk
 from ._filter import COMPARISON_OPERATORS, LOGICAL_OPERATORS, FilterError
 from ._mmr import mmr_select
-from .base import SearchResult, _FactoryMixin
+from .base import SearchResult, _chunks_from_texts
 
 # Map Mongo-style ops to SQL operators that act on the JSONB extracted
 # value. Note: we always extract via ``->>`` (text) and cast on demand
@@ -47,7 +47,7 @@ _SQL_BIN_OPS: dict[str, str] = {
 }
 
 
-class PostgresVectorStore(_FactoryMixin):
+class PostgresVectorStore:
     """Vector store backed by Postgres + ``pgvector``."""
 
     name = "postgres"
@@ -71,6 +71,55 @@ class PostgresVectorStore(_FactoryMixin):
     @property
     def embedder(self) -> Embedder:
         return self._embedder
+
+    # ---------------------------------------------------------------
+    # Factory classmethods — explicit kwargs so IDEs autocomplete
+    # ---------------------------------------------------------------
+
+    @classmethod
+    async def from_chunks(
+        cls,
+        chunks: list[Chunk],
+        *,
+        embedder: Embedder,
+        ids: list[str] | None = None,
+        dsn: str,
+        table: str = "jeeves_vectors",
+        dimension: int | None = None,
+    ) -> PostgresVectorStore:
+        """One-shot: construct a PostgresVectorStore + add ``chunks``."""
+        store = cls(
+            embedder=embedder,
+            dsn=dsn,
+            table=table,
+            dimension=dimension,
+        )
+        await store.add(chunks, ids=ids)
+        return store
+
+    @classmethod
+    async def from_texts(
+        cls,
+        texts: list[str],
+        *,
+        embedder: Embedder,
+        metadatas: list[dict[str, Any]] | None = None,
+        ids: list[str] | None = None,
+        dsn: str,
+        table: str = "jeeves_vectors",
+        dimension: int | None = None,
+    ) -> PostgresVectorStore:
+        """One-shot: construct a PostgresVectorStore from raw text
+        strings (each becomes a :class:`Chunk` with the matching
+        metadata dict, or empty if ``metadatas`` is None)."""
+        return await cls.from_chunks(
+            _chunks_from_texts(texts, metadatas),
+            embedder=embedder,
+            ids=ids,
+            dsn=dsn,
+            table=table,
+            dimension=dimension,
+        )
 
     async def _connect(self) -> Any:
         try:

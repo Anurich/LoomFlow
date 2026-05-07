@@ -37,7 +37,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
-from ..core.protocols import Embedder
 from ..loader.base import Chunk
 from ._filter import evaluate_filter
 
@@ -144,67 +143,28 @@ def matches_filter(
 
 
 # ---------------------------------------------------------------------------
-# Factory mixin — shared classmethods for every backend
+# Helpers shared by per-backend factory methods
 # ---------------------------------------------------------------------------
 
 
-class _FactoryMixin:
-    """Shared :meth:`from_chunks` / :meth:`from_texts` classmethods.
-
-    Concrete backends inherit this so that ``Backend.from_chunks(
-    chunks, embedder=...)`` is a one-liner that constructs +
-    populates the store. Mirrors LangChain's ``from_documents`` /
-    ``from_texts`` ergonomics but stays async-honest (no fake
-    sync wrappers).
-    """
-
-    @classmethod
-    async def from_chunks(
-        cls,
-        chunks: list[Chunk],
-        *,
-        embedder: Embedder,
-        ids: list[str] | None = None,
-        **kwargs: Any,
-    ) -> Any:
-        """Construct a store and add the chunks in one call.
-
-        Extra ``**kwargs`` are forwarded to the constructor (e.g.
-        ``persist_directory`` for Chroma, ``dsn`` for Postgres).
-        """
-        store = cls(embedder=embedder, **kwargs)  # type: ignore[call-arg]
-        await store.add(chunks, ids=ids)  # type: ignore[attr-defined]
-        return store
-
-    @classmethod
-    async def from_texts(
-        cls,
-        texts: list[str],
-        *,
-        embedder: Embedder,
-        metadatas: list[dict[str, Any]] | None = None,
-        ids: list[str] | None = None,
-        **kwargs: Any,
-    ) -> Any:
-        """Construct a store from raw text strings.
-
-        Each text gets its own :class:`Chunk` with the matching
-        metadata dict (or ``{}`` if ``metadatas`` is None).
-        """
-        if metadatas is not None and len(metadatas) != len(texts):
-            raise ValueError(
-                f"metadatas length ({len(metadatas)}) must match "
-                f"texts length ({len(texts)})"
-            )
-        chunks = [
-            Chunk(
-                content=text,
-                metadata=(
-                    dict(metadatas[i]) if metadatas is not None else {}
-                ),
-            )
-            for i, text in enumerate(texts)
-        ]
-        return await cls.from_chunks(
-            chunks, embedder=embedder, ids=ids, **kwargs
+def _chunks_from_texts(
+    texts: list[str],
+    metadatas: list[dict[str, Any]] | None = None,
+) -> list[Chunk]:
+    """Convert a list of raw text strings into :class:`Chunk`
+    instances, validating that ``metadatas`` (when supplied) has
+    matching length. Used by every backend's :meth:`from_texts`."""
+    if metadatas is not None and len(metadatas) != len(texts):
+        raise ValueError(
+            f"metadatas length ({len(metadatas)}) must match "
+            f"texts length ({len(texts)})"
         )
+    return [
+        Chunk(
+            content=text,
+            metadata=(
+                dict(metadatas[i]) if metadatas is not None else {}
+            ),
+        )
+        for i, text in enumerate(texts)
+    ]

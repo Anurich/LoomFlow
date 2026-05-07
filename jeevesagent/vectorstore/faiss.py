@@ -30,10 +30,10 @@ from ..core.protocols import Embedder
 from ..loader.base import Chunk
 from ._filter import evaluate_filter
 from ._mmr import mmr_select
-from .base import SearchResult, _FactoryMixin
+from .base import SearchResult, _chunks_from_texts
 
 
-class FAISSVectorStore(_FactoryMixin):
+class FAISSVectorStore:
     """Vector store backed by ``faiss-cpu``."""
 
     name = "faiss"
@@ -71,6 +71,55 @@ class FAISSVectorStore(_FactoryMixin):
     @property
     def embedder(self) -> Embedder:
         return self._embedder
+
+    # ---------------------------------------------------------------
+    # Factory classmethods — explicit kwargs so IDEs autocomplete
+    # ---------------------------------------------------------------
+
+    @classmethod
+    async def from_chunks(
+        cls,
+        chunks: list[Chunk],
+        *,
+        embedder: Embedder,
+        ids: list[str] | None = None,
+        dimension: int | None = None,
+        index_factory_string: str = "HNSW32",
+        metric: str = "ip",
+    ) -> FAISSVectorStore:
+        """One-shot: construct a FAISSVectorStore + add ``chunks``."""
+        store = cls(
+            embedder=embedder,
+            dimension=dimension,
+            index_factory_string=index_factory_string,
+            metric=metric,
+        )
+        await store.add(chunks, ids=ids)
+        return store
+
+    @classmethod
+    async def from_texts(
+        cls,
+        texts: list[str],
+        *,
+        embedder: Embedder,
+        metadatas: list[dict[str, Any]] | None = None,
+        ids: list[str] | None = None,
+        dimension: int | None = None,
+        index_factory_string: str = "HNSW32",
+        metric: str = "ip",
+    ) -> FAISSVectorStore:
+        """One-shot: construct a FAISSVectorStore from raw text
+        strings (each becomes a :class:`Chunk` with the matching
+        metadata dict, or empty if ``metadatas`` is None)."""
+        return await cls.from_chunks(
+            _chunks_from_texts(texts, metadatas),
+            embedder=embedder,
+            ids=ids,
+            dimension=dimension,
+            index_factory_string=index_factory_string,
+            metric=metric,
+        )
 
     def _ensure_index(self, dim: int) -> None:
         if self._index is not None:

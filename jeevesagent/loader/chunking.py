@@ -40,7 +40,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
-from typing import Any, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 from .base import Chunk
 
@@ -508,23 +508,42 @@ def chunk(
     chunk_size: int = DEFAULT_CHUNK_SIZE,
     chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
     source: str = "",
-    **kwargs: Any,
+    # Strategy-specific options (only used by their named strategy;
+    # exposed explicitly so IDEs surface them in autocomplete instead
+    # of hiding them behind ``**kwargs``).
+    separators: Sequence[str] | None = None,  # recursive
+    encoding: str = "cl100k_base",            # token
 ) -> list[Chunk]:
     """One-liner chunking: pick a strategy by name and split.
 
-    ``strategy`` is one of ``"recursive"`` (default), ``"markdown"``,
-    ``"sentence"``, ``"token"``. ``kwargs`` pass through to the
-    chunker's constructor.
+    * ``strategy="recursive"`` (default) — char-level recursive
+      split. Honours ``separators`` (list of separator strings,
+      tried in order). Default separators: paragraphs, sentences,
+      words, characters.
+    * ``strategy="markdown"`` — splits on heading boundaries;
+      preserves the header trail in each chunk's metadata.
+    * ``strategy="sentence"`` — splits on sentence boundaries.
+    * ``strategy="token"`` — chunks by exact token count via
+      ``tiktoken`` (requires the ``loader-token`` extra). Honours
+      ``encoding`` (default ``"cl100k_base"`` for GPT-4 / 4o / 4.1).
+
+    Strategy-specific kwargs are silently ignored when not
+    applicable (e.g. ``encoding=`` is harmless if you use
+    ``strategy="markdown"``).
     """
     chunker: Chunker
     if strategy == "recursive":
-        chunker = RecursiveChunker(chunk_size, chunk_overlap, **kwargs)
+        chunker = RecursiveChunker(
+            chunk_size,
+            chunk_overlap,
+            separators if separators is not None else _DEFAULT_SEPARATORS,
+        )
     elif strategy == "markdown":
         chunker = MarkdownChunker(chunk_size, chunk_overlap)
     elif strategy == "sentence":
         chunker = SentenceChunker(chunk_size, chunk_overlap)
     elif strategy == "token":
-        chunker = TokenChunker(chunk_size, chunk_overlap, **kwargs)
+        chunker = TokenChunker(chunk_size, chunk_overlap, encoding)
     else:
         raise ValueError(
             f"unknown strategy {strategy!r}; "

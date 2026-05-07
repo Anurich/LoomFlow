@@ -26,7 +26,7 @@ from ..core.protocols import Embedder
 from ..loader.base import Chunk
 from ._filter import COMPARISON_OPERATORS, LOGICAL_OPERATORS, FilterError
 from ._mmr import mmr_select
-from .base import SearchResult, _FactoryMixin
+from .base import SearchResult, _chunks_from_texts
 
 
 def _translate_filter(
@@ -83,7 +83,7 @@ def _xlate_field(condition: Any) -> dict[str, Any]:
     return {"$eq": condition}
 
 
-class ChromaVectorStore(_FactoryMixin):
+class ChromaVectorStore:
     """Vector store backed by ``chromadb``."""
 
     name = "chroma"
@@ -120,6 +120,55 @@ class ChromaVectorStore(_FactoryMixin):
 
         self._collection = self._client.get_or_create_collection(
             name=collection_name
+        )
+
+    # ---------------------------------------------------------------
+    # Factory classmethods — explicit kwargs so IDEs autocomplete
+    # ---------------------------------------------------------------
+
+    @classmethod
+    async def from_chunks(
+        cls,
+        chunks: list[Chunk],
+        *,
+        embedder: Embedder,
+        ids: list[str] | None = None,
+        collection_name: str = "jeeves_vectors",
+        persist_directory: str | None = None,
+        client: Any = None,
+    ) -> ChromaVectorStore:
+        """One-shot: construct a ChromaVectorStore + add ``chunks``."""
+        store = cls(
+            embedder=embedder,
+            collection_name=collection_name,
+            persist_directory=persist_directory,
+            client=client,
+        )
+        await store.add(chunks, ids=ids)
+        return store
+
+    @classmethod
+    async def from_texts(
+        cls,
+        texts: list[str],
+        *,
+        embedder: Embedder,
+        metadatas: list[dict[str, Any]] | None = None,
+        ids: list[str] | None = None,
+        collection_name: str = "jeeves_vectors",
+        persist_directory: str | None = None,
+        client: Any = None,
+    ) -> ChromaVectorStore:
+        """One-shot: construct a ChromaVectorStore from raw text
+        strings (each becomes a :class:`Chunk` with the matching
+        metadata dict, or empty if ``metadatas`` is None)."""
+        return await cls.from_chunks(
+            _chunks_from_texts(texts, metadatas),
+            embedder=embedder,
+            ids=ids,
+            collection_name=collection_name,
+            persist_directory=persist_directory,
+            client=client,
         )
 
     @property

@@ -30,7 +30,7 @@ from ..loader.base import Chunk
 from ._bm25 import BM25Index, reciprocal_rank_fusion
 from ._filter import evaluate_filter
 from ._mmr import mmr_select
-from .base import SearchResult, _FactoryMixin
+from .base import SearchResult, _chunks_from_texts
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
@@ -45,7 +45,7 @@ def _cosine(a: list[float], b: list[float]) -> float:
 _PERSIST_VERSION = 1
 
 
-class InMemoryVectorStore(_FactoryMixin):
+class InMemoryVectorStore:
     """In-process vector store backed by a Python list."""
 
     name = "in-memory"
@@ -64,6 +64,41 @@ class InMemoryVectorStore(_FactoryMixin):
     @property
     def embedder(self) -> Embedder:
         return self._embedder
+
+    # ---------------------------------------------------------------
+    # Factory classmethods — explicit kwargs so IDEs autocomplete
+    # ---------------------------------------------------------------
+
+    @classmethod
+    async def from_chunks(
+        cls,
+        chunks: list[Chunk],
+        *,
+        embedder: Embedder,
+        ids: list[str] | None = None,
+    ) -> InMemoryVectorStore:
+        """One-shot: construct an InMemoryVectorStore + add ``chunks``."""
+        store = cls(embedder=embedder)
+        await store.add(chunks, ids=ids)
+        return store
+
+    @classmethod
+    async def from_texts(
+        cls,
+        texts: list[str],
+        *,
+        embedder: Embedder,
+        metadatas: list[dict[str, Any]] | None = None,
+        ids: list[str] | None = None,
+    ) -> InMemoryVectorStore:
+        """One-shot: construct an InMemoryVectorStore from raw text
+        strings (each becomes a :class:`Chunk` with the matching
+        metadata dict, or empty if ``metadatas`` is None)."""
+        return await cls.from_chunks(
+            _chunks_from_texts(texts, metadatas),
+            embedder=embedder,
+            ids=ids,
+        )
 
     # ---------------------------------------------------------------
     # Lifecycle

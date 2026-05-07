@@ -32,10 +32,10 @@ Provided builders
 * :meth:`Team.actor_critic` — actor + critic pair
 * :meth:`Team.blackboard` — shared workspace + coordinator
 
-Each method takes the architecture-specific arguments by name plus
-``**agent_kwargs`` for any :class:`Agent` config (``memory``,
-``permissions``, ``budget``, ``audit_log``, ``hooks``, ``tools``,
-``runtime``, ``telemetry``, ``max_turns``, ``auto_consolidate``).
+Each method exposes **every** :class:`Agent` constructor kwarg
+explicitly (rather than forwarding through ``**kwargs``) so that
+IDEs and type-checkers surface the full parameter list with proper
+types, defaults, and docstrings on hover.
 
 Standalone-run helper
 ---------------------
@@ -51,9 +51,10 @@ yourself::
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from .agent.api import Agent
+from .agent.api import DEFAULT_MAX_TURNS, Agent
 from .architecture import (
     ActorCritic,
     Architecture,
@@ -68,7 +69,26 @@ from .architecture.swarm import Handoff
 from .core.types import RunResult
 
 if TYPE_CHECKING:
-    from .core.protocols import Model
+    from .core.protocols import (
+        Budget,
+        Memory,
+        Model,
+        Permissions,
+        Runtime,
+        Telemetry,
+        ToolHost,
+    )
+    from .security.audit import AuditLog
+    from .security.hooks import HookRegistry
+    from .tools.registry import Tool
+
+
+# Type alias for the same ``tools=`` argument :class:`Agent` accepts —
+# spelled out once so each builder can reference it cleanly.
+_ToolsArg = (
+    "list[Tool | Callable[..., object]] | ToolHost | Tool | "
+    "Callable[..., object] | None"
+)
 
 
 class Team:
@@ -81,15 +101,37 @@ class Team:
     team agents.
     """
 
+    # -----------------------------------------------------------------
+    # Supervisor
+    # -----------------------------------------------------------------
+
     @staticmethod
     def supervisor(
         workers: dict[str, Agent],
         *,
         instructions: str = "",
+        # --- forwarded Agent kwargs (explicit so IDEs autocomplete) ---
+        model: Model | str | None = None,
+        memory: Memory | None = None,
+        runtime: Runtime | None = None,
+        budget: Budget | None = None,
+        permissions: Permissions | None = None,
+        hooks: HookRegistry | None = None,
+        tools: (
+            list[Tool | Callable[..., object]]
+            | ToolHost
+            | Tool
+            | Callable[..., object]
+            | None
+        ) = None,
+        telemetry: Telemetry | None = None,
+        audit_log: AuditLog | None = None,
+        max_turns: int = DEFAULT_MAX_TURNS,
+        auto_consolidate: bool = False,
+        # --- supervisor-specific options ---
         instructions_template: str | None = None,
         delegate_tool_name: str = "delegate",
         forward_tool_name: str = "forward_message",
-        **agent_kwargs: Any,
     ) -> Agent:
         """Build a coordinator Agent that delegates to ``workers``.
 
@@ -97,30 +139,31 @@ class Team:
         to dispatch a subtask, or ``forward_message(worker)`` to
         return a worker's output verbatim. Multiple delegations in
         one turn run in parallel.
-
-        Equivalent to::
-
-            Agent(
-                instructions=instructions,
-                architecture=Supervisor(
-                    workers=workers,
-                    instructions_template=instructions_template,
-                    delegate_tool_name=delegate_tool_name,
-                    forward_tool_name=forward_tool_name,
-                ),
-                **agent_kwargs,
-            )
         """
         return Agent(
             instructions=instructions,
+            model=model,
+            memory=memory,
+            runtime=runtime,
+            budget=budget,
+            permissions=permissions,
+            hooks=hooks,
+            tools=tools,
+            telemetry=telemetry,
+            audit_log=audit_log,
+            max_turns=max_turns,
+            auto_consolidate=auto_consolidate,
             architecture=Supervisor(
                 workers=workers,
                 instructions_template=instructions_template,
                 delegate_tool_name=delegate_tool_name,
                 forward_tool_name=forward_tool_name,
             ),
-            **agent_kwargs,
         )
+
+    # -----------------------------------------------------------------
+    # Swarm
+    # -----------------------------------------------------------------
 
     @staticmethod
     def swarm(
@@ -128,11 +171,28 @@ class Team:
         entry_agent: str,
         *,
         instructions: str = "",
+        model: Model | str | None = None,
+        memory: Memory | None = None,
+        runtime: Runtime | None = None,
+        budget: Budget | None = None,
+        permissions: Permissions | None = None,
+        hooks: HookRegistry | None = None,
+        tools: (
+            list[Tool | Callable[..., object]]
+            | ToolHost
+            | Tool
+            | Callable[..., object]
+            | None
+        ) = None,
+        telemetry: Telemetry | None = None,
+        audit_log: AuditLog | None = None,
+        max_turns: int = DEFAULT_MAX_TURNS,
+        auto_consolidate: bool = False,
+        # --- swarm-specific options ---
         max_handoffs: int = 8,
         detect_cycles: bool = True,
         pass_full_history: bool = True,
         handoff_tool_name: str = "handoff",
-        **agent_kwargs: Any,
     ) -> Agent:
         """Build a peer-swarm of agents that hand off control via a
         ``handoff`` tool (or per-target ``transfer_to_<name>`` tools
@@ -143,6 +203,17 @@ class Team:
         """
         return Agent(
             instructions=instructions,
+            model=model,
+            memory=memory,
+            runtime=runtime,
+            budget=budget,
+            permissions=permissions,
+            hooks=hooks,
+            tools=tools,
+            telemetry=telemetry,
+            audit_log=audit_log,
+            max_turns=max_turns,
+            auto_consolidate=auto_consolidate,
             architecture=Swarm(
                 agents=agents,
                 entry_agent=entry_agent,
@@ -151,18 +222,38 @@ class Team:
                 pass_full_history=pass_full_history,
                 handoff_tool_name=handoff_tool_name,
             ),
-            **agent_kwargs,
         )
+
+    # -----------------------------------------------------------------
+    # Router
+    # -----------------------------------------------------------------
 
     @staticmethod
     def router(
         routes: list[RouterRoute],
         *,
         instructions: str = "",
+        model: Model | str | None = None,
+        memory: Memory | None = None,
+        runtime: Runtime | None = None,
+        budget: Budget | None = None,
+        permissions: Permissions | None = None,
+        hooks: HookRegistry | None = None,
+        tools: (
+            list[Tool | Callable[..., object]]
+            | ToolHost
+            | Tool
+            | Callable[..., object]
+            | None
+        ) = None,
+        telemetry: Telemetry | None = None,
+        audit_log: AuditLog | None = None,
+        max_turns: int = DEFAULT_MAX_TURNS,
+        auto_consolidate: bool = False,
+        # --- router-specific options ---
         fallback_route: str | None = None,
         require_confidence_above: float = 0.0,
         classifier_prompt: str | None = None,
-        **agent_kwargs: Any,
     ) -> Agent:
         """Build a router that classifies once and dispatches to
         ONE specialist :class:`Agent`. Cheaper than Supervisor for
@@ -170,14 +261,28 @@ class Team:
         + one specialist run, no synthesis pass)."""
         return Agent(
             instructions=instructions,
+            model=model,
+            memory=memory,
+            runtime=runtime,
+            budget=budget,
+            permissions=permissions,
+            hooks=hooks,
+            tools=tools,
+            telemetry=telemetry,
+            audit_log=audit_log,
+            max_turns=max_turns,
+            auto_consolidate=auto_consolidate,
             architecture=Router(
                 routes=routes,
                 fallback_route=fallback_route,
                 require_confidence_above=require_confidence_above,
                 classifier_prompt=classifier_prompt,
             ),
-            **agent_kwargs,
         )
+
+    # -----------------------------------------------------------------
+    # Debate
+    # -----------------------------------------------------------------
 
     @staticmethod
     def debate(
@@ -185,12 +290,29 @@ class Team:
         *,
         judge: Agent | None = None,
         instructions: str = "",
+        model: Model | str | None = None,
+        memory: Memory | None = None,
+        runtime: Runtime | None = None,
+        budget: Budget | None = None,
+        permissions: Permissions | None = None,
+        hooks: HookRegistry | None = None,
+        tools: (
+            list[Tool | Callable[..., object]]
+            | ToolHost
+            | Tool
+            | Callable[..., object]
+            | None
+        ) = None,
+        telemetry: Telemetry | None = None,
+        audit_log: AuditLog | None = None,
+        max_turns: int = DEFAULT_MAX_TURNS,
+        auto_consolidate: bool = False,
+        # --- debate-specific options ---
         rounds: int = 2,
         convergence_check: bool = True,
         convergence_similarity: float = 0.85,
         debater_instructions: str | None = None,
         judge_instructions: str | None = None,
-        **agent_kwargs: Any,
     ) -> Agent:
         """Build a multi-agent debate where ``debaters`` argue for
         ``rounds`` (with optional convergence early-exit). If
@@ -198,6 +320,17 @@ class Team:
         answer; otherwise majority vote wins."""
         return Agent(
             instructions=instructions,
+            model=model,
+            memory=memory,
+            runtime=runtime,
+            budget=budget,
+            permissions=permissions,
+            hooks=hooks,
+            tools=tools,
+            telemetry=telemetry,
+            audit_log=audit_log,
+            max_turns=max_turns,
+            auto_consolidate=auto_consolidate,
             architecture=MultiAgentDebate(
                 debaters=debaters,
                 judge=judge,
@@ -207,8 +340,11 @@ class Team:
                 debater_instructions=debater_instructions,
                 judge_instructions=judge_instructions,
             ),
-            **agent_kwargs,
         )
+
+    # -----------------------------------------------------------------
+    # Actor-Critic
+    # -----------------------------------------------------------------
 
     @staticmethod
     def actor_critic(
@@ -216,17 +352,45 @@ class Team:
         critic: Agent,
         *,
         instructions: str = "",
+        model: Model | str | None = None,
+        memory: Memory | None = None,
+        runtime: Runtime | None = None,
+        budget: Budget | None = None,
+        permissions: Permissions | None = None,
+        hooks: HookRegistry | None = None,
+        tools: (
+            list[Tool | Callable[..., object]]
+            | ToolHost
+            | Tool
+            | Callable[..., object]
+            | None
+        ) = None,
+        telemetry: Telemetry | None = None,
+        audit_log: AuditLog | None = None,
+        max_turns: int = DEFAULT_MAX_TURNS,
+        auto_consolidate: bool = False,
+        # --- actor-critic-specific options ---
         max_rounds: int = 3,
         approval_threshold: float = 0.9,
         critique_template: str | None = None,
         refine_template: str | None = None,
-        **agent_kwargs: Any,
     ) -> Agent:
         """Build an actor-critic pair where the critic reviews the
         actor's output (with structured JSON scoring + rubric) and
         the actor refines below ``approval_threshold``."""
         return Agent(
             instructions=instructions,
+            model=model,
+            memory=memory,
+            runtime=runtime,
+            budget=budget,
+            permissions=permissions,
+            hooks=hooks,
+            tools=tools,
+            telemetry=telemetry,
+            audit_log=audit_log,
+            max_turns=max_turns,
+            auto_consolidate=auto_consolidate,
             architecture=ActorCritic(
                 actor=actor,
                 critic=critic,
@@ -235,8 +399,11 @@ class Team:
                 critique_template=critique_template,
                 refine_template=refine_template,
             ),
-            **agent_kwargs,
         )
+
+    # -----------------------------------------------------------------
+    # Blackboard
+    # -----------------------------------------------------------------
 
     @staticmethod
     def blackboard(
@@ -245,10 +412,27 @@ class Team:
         coordinator: Agent | None = None,
         decider: Agent | None = None,
         instructions: str = "",
+        model: Model | str | None = None,
+        memory: Memory | None = None,
+        runtime: Runtime | None = None,
+        budget: Budget | None = None,
+        permissions: Permissions | None = None,
+        hooks: HookRegistry | None = None,
+        tools: (
+            list[Tool | Callable[..., object]]
+            | ToolHost
+            | Tool
+            | Callable[..., object]
+            | None
+        ) = None,
+        telemetry: Telemetry | None = None,
+        audit_log: AuditLog | None = None,
+        max_turns: int = DEFAULT_MAX_TURNS,
+        auto_consolidate: bool = False,
+        # --- blackboard-specific options ---
         max_rounds: int = 10,
         coordinator_instructions: str | None = None,
         decider_instructions: str | None = None,
-        **agent_kwargs: Any,
     ) -> Agent:
         """Build a blackboard team where ``agents`` collaborate via
         a shared workspace; an optional ``coordinator`` selects who
@@ -256,6 +440,17 @@ class Team:
         the work is done."""
         return Agent(
             instructions=instructions,
+            model=model,
+            memory=memory,
+            runtime=runtime,
+            budget=budget,
+            permissions=permissions,
+            hooks=hooks,
+            tools=tools,
+            telemetry=telemetry,
+            audit_log=audit_log,
+            max_turns=max_turns,
+            auto_consolidate=auto_consolidate,
             architecture=BlackboardArchitecture(
                 agents=agents,
                 coordinator=coordinator,
@@ -264,7 +459,6 @@ class Team:
                 coordinator_instructions=coordinator_instructions,
                 decider_instructions=decider_instructions,
             ),
-            **agent_kwargs,
         )
 
 
@@ -279,8 +473,22 @@ async def run_architecture(
     *,
     instructions: str = "",
     model: Model | str | None = None,
-    tools: list[Any] | None = None,
-    **agent_kwargs: Any,
+    memory: Memory | None = None,
+    runtime: Runtime | None = None,
+    budget: Budget | None = None,
+    permissions: Permissions | None = None,
+    hooks: HookRegistry | None = None,
+    tools: (
+        list[Tool | Callable[..., object]]
+        | ToolHost
+        | Tool
+        | Callable[..., object]
+        | None
+    ) = None,
+    telemetry: Telemetry | None = None,
+    audit_log: AuditLog | None = None,
+    max_turns: int = DEFAULT_MAX_TURNS,
+    auto_consolidate: bool = False,
 ) -> RunResult:
     """Run an :class:`Architecture` once with a minimal Agent shell.
 
@@ -301,8 +509,22 @@ async def run_architecture(
     agent = Agent(
         instructions=instructions,
         model=model,
+        memory=memory,
+        runtime=runtime,
+        budget=budget,
+        permissions=permissions,
+        hooks=hooks,
         tools=tools,
+        telemetry=telemetry,
+        audit_log=audit_log,
+        max_turns=max_turns,
+        auto_consolidate=auto_consolidate,
         architecture=architecture,
-        **agent_kwargs,
     )
     return await agent.run(prompt)
+
+
+# Silence unused-import lints — these names appear only in type
+# hints behind ``TYPE_CHECKING`` but the runtime alias above
+# (``_ToolsArg``) keeps the imports honest at static-analysis time.
+_ = (Any, _ToolsArg)
