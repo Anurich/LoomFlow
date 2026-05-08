@@ -55,7 +55,7 @@ Classes
 Module Contents
 ---------------
 
-.. py:class:: LiteLLMModel(model: str, *, api_key: str | None = None, client: Any | None = None, **litellm_kwargs: Any)
+.. py:class:: LiteLLMModel(model: str, *, api_key: str | None = None, client: Any | None = None, secrets: Any | None = None, **litellm_kwargs: Any)
 
    Bases: :py:obj:`jeevesagent.model.openai.OpenAIModel`
 

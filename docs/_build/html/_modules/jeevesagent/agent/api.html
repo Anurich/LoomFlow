@@ -196,6 +196,10 @@
 <li class="toctree-l1"><a class="reference internal" href="../../../recipes.html">Recipes</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../architecture.html">Architecture</a></li>
 </ul>
+<p class="caption" role="heading"><span class="caption-text">Production</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../production_hardening.html">Production hardening</a></li>
+</ul>
 <p class="caption" role="heading"><span class="caption-text">Migrating from</span></p>
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="../../../migrations/from-langgraph.html">Migrating from LangGraph</a></li>
@@ -318,6 +322,7 @@
 <li class="toctree-l4"><a class="reference internal" href="../../../api/jeevesagent/security/sandbox/subprocess_/index.html">jeevesagent.security.sandbox.subprocess</a></li>
 </ul>
 </li>
+<li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/security/secrets/index.html">jeevesagent.security.secrets</a></li>
 </ul>
 </li>
 <li class="toctree-l2 has-children"><a class="reference internal" href="../../../api/jeevesagent/skills/index.html">jeevesagent.skills</a><input aria-label="Toggle navigation of jeevesagent.skills" class="toctree-checkbox" id="toctree-checkbox-16" name="toctree-checkbox-16" role="switch" type="checkbox"/><label for="toctree-checkbox-16"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
@@ -494,6 +499,8 @@
         <span class="n">skills</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">Any</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
         <span class="n">retry_policy</span><span class="p">:</span> <span class="n">RetryPolicy</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
         <span class="n">auto_extract</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">approval_handler</span><span class="p">:</span> <span class="n">Any</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">secrets</span><span class="p">:</span> <span class="n">Any</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
     <span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
         <span class="c1"># Skills — packaged on-disk playbooks loaded on demand.</span>
         <span class="c1"># Build the registry first so frontmatter validation fires</span>
@@ -529,7 +536,15 @@
         <span class="c1"># tests / dev fakes (no retry needed); real network-backed</span>
         <span class="c1"># models (OpenAI, Anthropic, LiteLLM) get the sensible</span>
         <span class="c1"># default unless the caller passed ``RetryPolicy.disabled()``.</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">_model</span><span class="p">:</span> <span class="n">Model</span> <span class="o">=</span> <span class="n">_resolve_model</span><span class="p">(</span><span class="n">model</span><span class="p">)</span>
+        <span class="c1"># Default to ``EnvSecrets`` so today&#39;s behaviour is</span>
+        <span class="c1"># preserved (API keys come from ``os.environ``); callers</span>
+        <span class="c1"># who want a vault / dict-backed lookup pass an explicit</span>
+        <span class="c1"># ``secrets=`` instance.</span>
+        <span class="k">if</span> <span class="n">secrets</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="kn">from</span><span class="w"> </span><span class="nn">..security.secrets</span><span class="w"> </span><span class="kn">import</span> <span class="n">EnvSecrets</span>
+            <span class="n">secrets</span> <span class="o">=</span> <span class="n">EnvSecrets</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_secrets</span> <span class="o">=</span> <span class="n">secrets</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_model</span><span class="p">:</span> <span class="n">Model</span> <span class="o">=</span> <span class="n">_resolve_model</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">secrets</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">_secrets</span><span class="p">)</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_retry_policy</span><span class="p">:</span> <span class="n">RetryPolicy</span> <span class="o">=</span> <span class="p">(</span>
             <span class="n">retry_policy</span>
             <span class="k">if</span> <span class="n">retry_policy</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
@@ -542,6 +557,12 @@
             <span class="p">)</span>
         <span class="k">else</span><span class="p">:</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">_wrapped_model</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_model</span>
+        <span class="c1"># Telemetry is initialised *before* the memory wrapping so</span>
+        <span class="c1"># the AutoExtractMemory wrapper (below) can take a reference</span>
+        <span class="c1"># and emit duration / extraction-count metrics.</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_telemetry</span><span class="p">:</span> <span class="n">Telemetry</span> <span class="o">=</span> <span class="p">(</span>
+            <span class="n">telemetry</span> <span class="k">if</span> <span class="n">telemetry</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">NoTelemetry</span><span class="p">()</span>
+        <span class="p">)</span>
         <span class="c1"># Resolve ``memory=`` into a concrete :class:`Memory`.</span>
         <span class="c1"># The resolver handles None (default in-memory), strings</span>
         <span class="c1"># (&quot;sqlite:./bot.db&quot;, &quot;postgres://...&quot;), config dicts</span>
@@ -569,6 +590,12 @@
         <span class="c1"># produce canned output that confuses the Consolidator</span>
         <span class="c1"># and make tests non-deterministic. Pass ``auto_extract=</span>
         <span class="c1"># True/False`` to override.</span>
+        <span class="c1"># Track whether auto_extract was explicitly chosen by the</span>
+        <span class="c1"># caller or default-picked from the model class — the</span>
+        <span class="c1"># AutoExtractMemory wrapper uses this to decide whether to</span>
+        <span class="c1"># emit a one-time-per-process startup notice (ops visibility</span>
+        <span class="c1"># for the default-on path).</span>
+        <span class="n">auto_extract_was_default</span> <span class="o">=</span> <span class="n">auto_extract</span> <span class="ow">is</span> <span class="kc">None</span>
         <span class="k">if</span> <span class="n">auto_extract</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
             <span class="n">auto_extract</span> <span class="o">=</span> <span class="n">_default_auto_extract_for</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_model</span><span class="p">)</span>
         <span class="k">if</span> <span class="n">auto_extract</span><span class="p">:</span>
@@ -576,7 +603,10 @@
             <span class="kn">from</span><span class="w"> </span><span class="nn">..memory.consolidator</span><span class="w"> </span><span class="kn">import</span> <span class="n">Consolidator</span>
             <span class="n">consolidator</span> <span class="o">=</span> <span class="n">Consolidator</span><span class="p">(</span><span class="n">model</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">_model</span><span class="p">)</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">_wrapped_memory</span><span class="p">:</span> <span class="n">Memory</span> <span class="o">=</span> <span class="n">AutoExtractMemory</span><span class="p">(</span>
-                <span class="bp">self</span><span class="o">.</span><span class="n">_memory</span><span class="p">,</span> <span class="n">consolidator</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_memory</span><span class="p">,</span>
+                <span class="n">consolidator</span><span class="p">,</span>
+                <span class="n">telemetry</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">_telemetry</span><span class="p">,</span>
+                <span class="n">auto_picked</span><span class="o">=</span><span class="n">auto_extract_was_default</span><span class="p">,</span>
             <span class="p">)</span>
         <span class="k">else</span><span class="p">:</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">_wrapped_memory</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_memory</span>
@@ -604,12 +634,16 @@
             <span class="n">host</span><span class="o">.</span><span class="n">register</span><span class="p">(</span><span class="n">load_tool</span><span class="p">)</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_tool_host</span><span class="p">:</span> <span class="n">ToolHost</span> <span class="o">=</span> <span class="n">host</span>
 
-        <span class="bp">self</span><span class="o">.</span><span class="n">_telemetry</span><span class="p">:</span> <span class="n">Telemetry</span> <span class="o">=</span> <span class="p">(</span>
-            <span class="n">telemetry</span> <span class="k">if</span> <span class="n">telemetry</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">NoTelemetry</span><span class="p">()</span>
-        <span class="p">)</span>
+        <span class="c1"># ``self._telemetry`` already initialised above (before the</span>
+        <span class="c1"># memory-wrap step so AutoExtractMemory can take a reference).</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_audit_log</span><span class="p">:</span> <span class="n">AuditLog</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="n">audit_log</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_max_turns</span> <span class="o">=</span> <span class="n">max_turns</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_auto_consolidate</span> <span class="o">=</span> <span class="n">auto_consolidate</span>
+        <span class="c1"># Approval handler resolves :class:`Decision.ask_` outcomes</span>
+        <span class="c1"># from the permissions layer. Without one, ``ask`` falls</span>
+        <span class="c1"># back to deny — see ``_resolve_ask_decision`` in</span>
+        <span class="c1"># ``architecture/react.py``.</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_approval_handler</span> <span class="o">=</span> <span class="n">approval_handler</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_architecture</span><span class="p">:</span> <span class="n">Architecture</span> <span class="o">=</span> <span class="n">resolve_architecture</span><span class="p">(</span><span class="n">architecture</span><span class="p">)</span>
 
     <span class="c1"># ---- hook decorators (user-facing sugar) ----------------------------</span>
@@ -893,6 +927,8 @@
                 <span class="n">user_id</span><span class="o">=</span><span class="n">user_id</span><span class="p">,</span>
             <span class="p">)</span>
         <span class="k">except</span> <span class="ne">TypeError</span><span class="p">:</span>
+            <span class="kn">from</span><span class="w"> </span><span class="nn">..core._deprecation</span><span class="w"> </span><span class="kn">import</span> <span class="n">warn_legacy_protocol</span>
+            <span class="n">warn_legacy_protocol</span><span class="p">(</span><span class="s2">&quot;AuditLog&quot;</span><span class="p">,</span> <span class="s2">&quot;append&quot;</span><span class="p">)</span>
             <span class="k">await</span> <span class="bp">self</span><span class="o">.</span><span class="n">_audit_log</span><span class="o">.</span><span class="n">append</span><span class="p">(</span>
                 <span class="n">session_id</span><span class="o">=</span><span class="n">session_id</span><span class="p">,</span>
                 <span class="n">actor</span><span class="o">=</span><span class="n">actor</span><span class="p">,</span>
@@ -1485,6 +1521,7 @@
                 <span class="n">telemetry</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">_telemetry</span><span class="p">,</span>
                 <span class="n">audit_log</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">_audit_log</span><span class="p">,</span>
                 <span class="n">max_turns</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">_max_turns</span><span class="p">,</span>
+                <span class="n">approval_handler</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">_approval_handler</span><span class="p">,</span>
                 <span class="c1"># Architectures consult this to pick fast (buffered)</span>
                 <span class="c1"># vs streaming (channel) paths for parallel work.</span>
                 <span class="n">streaming</span><span class="o">=</span><span class="n">emit</span> <span class="ow">is</span> <span class="ow">not</span> <span class="n">_noop_emit</span><span class="p">,</span>
@@ -1725,7 +1762,9 @@
 <span class="p">)</span>
 
 
-<span class="k">def</span><span class="w"> </span><span class="nf">_resolve_model</span><span class="p">(</span><span class="n">spec</span><span class="p">:</span> <span class="n">Model</span> <span class="o">|</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Model</span><span class="p">:</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">_resolve_model</span><span class="p">(</span>
+    <span class="n">spec</span><span class="p">:</span> <span class="n">Model</span> <span class="o">|</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">secrets</span><span class="p">:</span> <span class="n">Any</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Model</span><span class="p">:</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;Resolve a string spec or instance to a concrete :class:`Model`.</span>
 
 <span class="sd">    Strings dispatch by prefix:</span>
@@ -1766,10 +1805,10 @@
         <span class="k">return</span> <span class="n">spec</span>
     <span class="k">if</span> <span class="n">spec</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s2">&quot;claude-&quot;</span><span class="p">):</span>
         <span class="kn">from</span><span class="w"> </span><span class="nn">..model.anthropic</span><span class="w"> </span><span class="kn">import</span> <span class="n">AnthropicModel</span>
-        <span class="k">return</span> <span class="n">AnthropicModel</span><span class="p">(</span><span class="n">spec</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">AnthropicModel</span><span class="p">(</span><span class="n">spec</span><span class="p">,</span> <span class="n">secrets</span><span class="o">=</span><span class="n">secrets</span><span class="p">)</span>
     <span class="k">if</span> <span class="n">spec</span><span class="o">.</span><span class="n">startswith</span><span class="p">((</span><span class="s2">&quot;gpt-&quot;</span><span class="p">,</span> <span class="s2">&quot;o1-&quot;</span><span class="p">,</span> <span class="s2">&quot;o3-&quot;</span><span class="p">)):</span>
         <span class="kn">from</span><span class="w"> </span><span class="nn">..model.openai</span><span class="w"> </span><span class="kn">import</span> <span class="n">OpenAIModel</span>
-        <span class="k">return</span> <span class="n">OpenAIModel</span><span class="p">(</span><span class="n">spec</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">OpenAIModel</span><span class="p">(</span><span class="n">spec</span><span class="p">,</span> <span class="n">secrets</span><span class="o">=</span><span class="n">secrets</span><span class="p">)</span>
     <span class="k">if</span> <span class="n">spec</span> <span class="o">==</span> <span class="s2">&quot;echo&quot;</span><span class="p">:</span>
         <span class="k">return</span> <span class="n">EchoModel</span><span class="p">()</span>
     <span class="k">if</span> <span class="n">spec</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="n">_LITELLM_PREFIXES</span><span class="p">):</span>
@@ -1777,7 +1816,7 @@
 
         <span class="c1"># ``litellm/&lt;inner&gt;`` strips the explicit-opt-in prefix.</span>
         <span class="n">inner</span> <span class="o">=</span> <span class="n">spec</span><span class="p">[</span><span class="nb">len</span><span class="p">(</span><span class="s2">&quot;litellm/&quot;</span><span class="p">):]</span> <span class="k">if</span> <span class="n">spec</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s2">&quot;litellm/&quot;</span><span class="p">)</span> <span class="k">else</span> <span class="n">spec</span>
-        <span class="k">return</span> <span class="n">LiteLLMModel</span><span class="p">(</span><span class="n">inner</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">LiteLLMModel</span><span class="p">(</span><span class="n">inner</span><span class="p">,</span> <span class="n">secrets</span><span class="o">=</span><span class="n">secrets</span><span class="p">)</span>
     <span class="k">raise</span> <span class="n">ConfigError</span><span class="p">(</span>
         <span class="sa">f</span><span class="s2">&quot;unknown model spec: </span><span class="si">{</span><span class="n">spec</span><span class="si">!r}</span><span class="s2">. Recognised prefixes:</span><span class="se">\n</span><span class="s2">&quot;</span>
         <span class="s2">&quot;  claude-*, gpt-*, o1-*, o3-* (direct adapters)</span><span class="se">\n</span><span class="s2">&quot;</span>

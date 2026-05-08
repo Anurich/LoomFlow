@@ -197,6 +197,10 @@
 <li class="toctree-l1"><a class="reference internal" href="recipes.html">Recipes</a></li>
 <li class="toctree-l1"><a class="reference internal" href="architecture.html">Architecture</a></li>
 </ul>
+<p class="caption" role="heading"><span class="caption-text">Production</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="production_hardening.html">Production hardening</a></li>
+</ul>
 <p class="caption" role="heading"><span class="caption-text">Migrating from</span></p>
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="migrations/from-langgraph.html">Migrating from LangGraph</a></li>
@@ -319,6 +323,7 @@
 <li class="toctree-l4"><a class="reference internal" href="api/jeevesagent/security/sandbox/subprocess_/index.html">jeevesagent.security.sandbox.subprocess</a></li>
 </ul>
 </li>
+<li class="toctree-l3"><a class="reference internal" href="api/jeevesagent/security/secrets/index.html">jeevesagent.security.secrets</a></li>
 </ul>
 </li>
 <li class="toctree-l2 has-children"><a class="reference internal" href="api/jeevesagent/skills/index.html">jeevesagent.skills</a><input aria-label="Toggle navigation of jeevesagent.skills" class="toctree-checkbox" id="toctree-checkbox-16" name="toctree-checkbox-16" role="switch" type="checkbox"/><label for="toctree-checkbox-16"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
@@ -365,12 +370,12 @@
         </a>
         <div class="content-icon-container">
           <div class="view-this-page">
-  <a class="muted-link" href="https://github.com/anthropics/jeevesagent/blob/main/docs/index.md?plain=true" title="View this page">
+  <a class="muted-link" href="https://github.com/Anurich/JeevesHarness/blob/main/docs/index.md?plain=true" title="View this page">
     <svg><use href="#svg-eye"></use></svg>
     <span class="visually-hidden">View this page</span>
   </a>
 </div><div class="edit-this-page">
-  <a class="muted-link" href="https://github.com/anthropics/jeevesagent/edit/main/docs/index.md" rel="edit" title="Edit this page">
+  <a class="muted-link" href="https://github.com/Anurich/JeevesHarness/edit/main/docs/index.md" rel="edit" title="Edit this page">
     <svg><use href="#svg-pencil"></use></svg>
     <span class="visually-hidden">Edit this page</span>
   </a>
@@ -487,6 +492,24 @@ constructor. <strong>One kwarg flips the iteration pattern.</strong></p></li>
 </ul>
 </div>
 <div class="toctree-wrapper compound">
+<p class="caption" role="heading"><span class="caption-text">Production</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="production_hardening.html">Production hardening</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="production_hardening.html#per-user-budget-caps">Per-user budget caps</a></li>
+<li class="toctree-l2"><a class="reference internal" href="production_hardening.html#per-user-permission-policies">Per-user permission policies</a></li>
+<li class="toctree-l2"><a class="reference internal" href="production_hardening.html#approval-handler-for-decision-ask">Approval handler for <code class="docutils literal notranslate"><span class="pre">Decision.ask_</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="production_hardening.html#bounded-per-user-state">Bounded per-user state</a></li>
+<li class="toctree-l2"><a class="reference internal" href="production_hardening.html#auto-extract-observability">Auto-extract observability</a></li>
+<li class="toctree-l2"><a class="reference internal" href="production_hardening.html#secrets-resolution">Secrets resolution</a></li>
+<li class="toctree-l2"><a class="reference internal" href="production_hardening.html#audit-log-with-per-user-attribution">Audit log with per-user attribution</a></li>
+<li class="toctree-l2"><a class="reference internal" href="production_hardening.html#verifying-isolation-under-load">Verifying isolation under load</a></li>
+<li class="toctree-l2"><a class="reference internal" href="production_hardening.html#migrating-from-0-9-x-to-0-10">Migrating from 0.9.x to 0.10</a></li>
+<li class="toctree-l2"><a class="reference internal" href="production_hardening.html#what-you-turn-on-listed">What you turn on, listed</a></li>
+</ul>
+</li>
+</ul>
+</div>
+<div class="toctree-wrapper compound">
 <p class="caption" role="heading"><span class="caption-text">Migrating from</span></p>
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="migrations/from-langgraph.html">Migrating from LangGraph</a><ul>
@@ -517,14 +540,6 @@ constructor. <strong>One kwarg flips the iteration pattern.</strong></p></li>
 <li class="toctree-l1"><a class="reference internal" href="migration_0.1_to_0.2.html">Migrating from 0.1 → 0.2</a></li>
 </ul>
 </div>
-<blockquote>
-<div><p><strong>Hosting note</strong> — this site renders correctly when built
-locally (<code class="docutils literal notranslate"><span class="pre">sphinx-build</span> <span class="pre">-b</span> <span class="pre">html</span> <span class="pre">docs</span> <span class="pre">docs/_build/html</span></code>) and is
-wired up for ReadTheDocs via <code class="docutils literal notranslate"><span class="pre">.readthedocs.yaml</span></code>. To make it
-publicly accessible, import the repo at
-<a class="reference external" href="https://readthedocs.org/">https://readthedocs.org/</a> (one-time setup; subsequent pushes
-auto-rebuild).</p>
-</div></blockquote>
 </section>
 <section id="indices">
 <h2>Indices<a class="headerlink" href="#indices" title="Link to this heading">¶</a></h2>

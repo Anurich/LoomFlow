@@ -82,7 +82,7 @@ html_static_path = ["_static"]
 html_theme_options = {
     "sidebar_hide_name": False,
     "navigation_with_keys": True,
-    "source_repository": "https://github.com/anthropics/jeevesagent",
+    "source_repository": "https://github.com/Anurich/JeevesHarness",
     "source_branch": "main",
     "source_directory": "docs/",
 }

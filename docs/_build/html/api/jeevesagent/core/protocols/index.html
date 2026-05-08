@@ -197,6 +197,10 @@
 <li class="toctree-l1"><a class="reference internal" href="../../../../recipes.html">Recipes</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../../architecture.html">Architecture</a></li>
 </ul>
+<p class="caption" role="heading"><span class="caption-text">Production</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../../production_hardening.html">Production hardening</a></li>
+</ul>
 <p class="caption" role="heading"><span class="caption-text">Migrating from</span></p>
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="../../../../migrations/from-langgraph.html">Migrating from LangGraph</a></li>
@@ -319,6 +323,7 @@
 <li class="toctree-l4"><a class="reference internal" href="../../security/sandbox/subprocess_/index.html">jeevesagent.security.sandbox.subprocess</a></li>
 </ul>
 </li>
+<li class="toctree-l3"><a class="reference internal" href="../../security/secrets/index.html">jeevesagent.security.secrets</a></li>
 </ul>
 </li>
 <li class="toctree-l2 has-children"><a class="reference internal" href="../../skills/index.html">jeevesagent.skills</a><input aria-label="Toggle navigation of jeevesagent.skills" class="toctree-checkbox" id="toctree-checkbox-16" name="toctree-checkbox-16" role="switch" type="checkbox"/><label for="toctree-checkbox-16"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
@@ -365,12 +370,12 @@
         </a>
         <div class="content-icon-container">
           <div class="view-this-page">
-  <a class="muted-link" href="https://github.com/anthropics/jeevesagent/blob/main/docs/api/jeevesagent/core/protocols/index.rst?plain=true" title="View this page">
+  <a class="muted-link" href="https://github.com/Anurich/JeevesHarness/blob/main/docs/api/jeevesagent/core/protocols/index.rst?plain=true" title="View this page">
     <svg><use href="#svg-eye"></use></svg>
     <span class="visually-hidden">View this page</span>
   </a>
 </div><div class="edit-this-page">
-  <a class="muted-link" href="https://github.com/anthropics/jeevesagent/edit/main/docs/api/jeevesagent/core/protocols/index.rst" rel="edit" title="Edit this page">
+  <a class="muted-link" href="https://github.com/Anurich/JeevesHarness/edit/main/docs/api/jeevesagent/core/protocols/index.rst" rel="edit" title="Edit this page">
     <svg><use href="#svg-pencil"></use></svg>
     <span class="visually-hidden">Edit this page</span>
   </a>
@@ -775,6 +780,26 @@ fallback <code class="docutils literal notranslate"><span class="pre">except</sp
 <span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-prename descclassname"><span class="pre">jeevesagent.core.protocols.</span></span><span class="sig-name descname"><span class="pre">Secrets</span></span><a class="reference internal" href="../../../../_modules/jeevesagent/core/protocols.html#Secrets"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#jeevesagent.core.protocols.Secrets" title="Link to this definition">¶</a></dt>
 <dd><p>Bases: <code class="xref py py-obj docutils literal notranslate"><span class="pre">Protocol</span></code></p>
 <p>Resolution and redaction of named secrets.</p>
+<p><code class="docutils literal notranslate"><span class="pre">resolve</span></code> / <code class="docutils literal notranslate"><span class="pre">store</span></code> are async because most production secrets
+backends (Vault, AWS Secrets Manager, GCP Secret Manager) talk
+over the network. <code class="docutils literal notranslate"><span class="pre">lookup_sync</span></code> exists for the
+<em>constructor-time</em> path: when the framework needs to wire an
+API key into a model adapter before any event loop is running
+(e.g. <code class="docutils literal notranslate"><span class="pre">OpenAIModel(...)</span></code> from inside <code class="docutils literal notranslate"><span class="pre">Agent.__init__</span></code>).
+Concrete impls returning <code class="docutils literal notranslate"><span class="pre">None</span></code> from <code class="docutils literal notranslate"><span class="pre">lookup_sync</span></code> for refs
+that can’t be resolved synchronously are fine — callers should
+fall back to <code class="docutils literal notranslate"><span class="pre">os.environ</span></code> or to the explicit <code class="docutils literal notranslate"><span class="pre">api_key=</span></code>
+argument.</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="jeevesagent.core.protocols.Secrets.lookup_sync">
+<span class="sig-name descname"><span class="pre">lookup_sync</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">ref</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><span class="pre">str</span></a></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><span class="pre">str</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/constants.html#None" title="(in Python v3.14)"><span class="pre">None</span></a></span></span><a class="reference internal" href="../../../../_modules/jeevesagent/core/protocols.html#Secrets.lookup_sync"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#jeevesagent.core.protocols.Secrets.lookup_sync" title="Link to this definition">¶</a></dt>
+<dd><p>Synchronous best-effort lookup, for constructor-time
+callers that can’t await. Returns <code class="docutils literal notranslate"><span class="pre">None</span></code> when the ref
+isn’t available synchronously (e.g. the impl needs a
+network round-trip). Default impls in <code class="xref py py-mod docutils literal notranslate"><span class="pre">jeevesagent.</span>
+<span class="pre">security.secrets</span></code> cover env-var and in-memory lookups.</p>
+</dd></dl>
+
 <dl class="py method">
 <dt class="sig sig-object py" id="jeevesagent.core.protocols.Secrets.redact">
 <span class="sig-name descname"><span class="pre">redact</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">text</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><span class="pre">str</span></a></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><span class="pre">str</span></a></span></span><a class="reference internal" href="../../../../_modules/jeevesagent/core/protocols.html#Secrets.redact"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#jeevesagent.core.protocols.Secrets.redact" title="Link to this definition">¶</a></dt>
@@ -956,6 +981,7 @@ results with the originating model-emitted call.</p>
 </ul>
 </li>
 <li><a class="reference internal" href="#jeevesagent.core.protocols.Secrets"><code class="docutils literal notranslate"><span class="pre">Secrets</span></code></a><ul>
+<li><a class="reference internal" href="#jeevesagent.core.protocols.Secrets.lookup_sync"><code class="docutils literal notranslate"><span class="pre">Secrets.lookup_sync()</span></code></a></li>
 <li><a class="reference internal" href="#jeevesagent.core.protocols.Secrets.redact"><code class="docutils literal notranslate"><span class="pre">Secrets.redact()</span></code></a></li>
 <li><a class="reference internal" href="#jeevesagent.core.protocols.Secrets.resolve"><code class="docutils literal notranslate"><span class="pre">Secrets.resolve()</span></code></a></li>
 <li><a class="reference internal" href="#jeevesagent.core.protocols.Secrets.store"><code class="docutils literal notranslate"><span class="pre">Secrets.store()</span></code></a></li>

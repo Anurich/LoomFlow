@@ -159,7 +159,7 @@ Package Contents
       each time; ``1.0`` makes the policy linear (fixed-interval).
 
 
-.. py:class:: StandardBudget(cfg: BudgetConfig | None = None)
+.. py:class:: StandardBudget(cfg: BudgetConfig | None = None, *, max_users: int | None = _DEFAULT_MAX_USERS, user_idle_ttl_seconds: float | None = _DEFAULT_USER_TTL_SECONDS)
 
    Hard-limited, thread-safe budget tracker with per-user
    accounting.

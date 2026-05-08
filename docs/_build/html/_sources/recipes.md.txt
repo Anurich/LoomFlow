@@ -327,6 +327,13 @@ Before shipping an agent to production, verify each of these:
 - [ ] **Multi-tenancy**: pass ``user_id=`` and ``session_id=`` to
   every ``agent.run``. Memory partitions automatically; no app-side
   namespace plumbing.
+- [ ] **Per-user budget caps**: ``BudgetConfig(per_user_max_tokens=,
+  per_user_max_cost_usd=)`` so one tenant can't exhaust another's
+  quota. See [Production hardening](production_hardening.md#per-user-budget-caps).
+- [ ] **Bounded in-process state**: `StandardBudget` and
+  `InMemoryMemory` default to 100k users + 24h idle TTL. For known
+  smaller tenant pools, lower ``max_users`` to reclaim memory
+  faster.
 - [ ] **Auto fact extraction**: on by default for real models;
   facts the user tells the bot persist as structured triples for
   future runs to recall. Pass ``auto_extract=False`` to opt out.
@@ -339,23 +346,38 @@ Before shipping an agent to production, verify each of these:
 - [ ] **Telemetry**: ``OTelTelemetry`` wired to your existing
   TracerProvider. At minimum, surface ``jeeves.session.duration_ms``,
   ``jeeves.tokens.input/output``, ``jeeves.cost.usd``,
-  ``jeeves.budget.exceeded``.
+  ``jeeves.budget.exceeded``, ``jeeves.auto_extract.duration_ms``,
+  ``jeeves.auto_extract.invocations`` (last two appear when
+  ``auto_extract`` is on; tagged by ``user_id``).
 - [ ] **Audit log**: ``FileAuditLog`` (or Postgres-backed when
   available) with a real HMAC secret. Every tool call and run-lifecycle
-  transition lands here.
+  transition lands here, attributed by ``user_id`` (top-level
+  field; HMAC includes it).
 - [ ] **Streaming**: expose ``stream()`` so a UI / log pipeline can
   follow the loop in real time.
+- [ ] **Multi-tenant load test**: run ``bench/multi_tenant.py``
+  before any release that touches the agent loop, memory, or
+  budget. Catches isolation regressions that unit tests miss.
 
 ### Security
 
 - [ ] **Permission policy**: ``StandardPermissions(mode=Mode.DEFAULT)``
-  for interactive use; ``BYPASS`` only in CI / sandbox.
+  for interactive use; ``BYPASS`` only in CI / sandbox. For
+  per-tenant policy routing, use ``PerUserPermissions(policies=,
+  default=)``.
+- [ ] **Approval handler**: when destructive tools live behind
+  ``Decision.ask_(...)``, wire ``Agent(approval_handler=callable)``
+  so the gate routes to a human / Slack / ticket queue. Without one,
+  ``ask`` falls back to deny — never silently allowed.
 - [ ] **Filesystem sandbox**: wrap any tool that touches the FS.
   Declare the allowed roots explicitly.
 - [ ] **Pre-tool hooks**: ``@agent.before_tool`` for any tool that
   sends external messages (email, Slack, etc.).
-- [ ] **Secrets**: no API keys in tool args. Use the ``Secrets``
-  protocol when wiring real secret resolution (follow-up slice).
+- [ ] **Secrets**: ``Agent(secrets=EnvSecrets())`` is the default;
+  for vault-backed lookup pass a custom ``Secrets`` adapter (see
+  [Production hardening](production_hardening.md#secrets-resolution)).
+  Use ``secrets.redact(text)`` before logging tool args / payloads
+  so API keys don't leak into the audit log.
 
 ### Memory
 

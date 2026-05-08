@@ -93,8 +93,10 @@ Classes
    jeevesagent.ConsolidationWorker
    jeevesagent.Consolidator
    jeevesagent.Dependencies
+   jeevesagent.DictSecrets
    jeevesagent.EchoModel
    jeevesagent.Embedder
+   jeevesagent.EnvSecrets
    jeevesagent.Episode
    jeevesagent.Event
    jeevesagent.EventKind
@@ -586,7 +588,7 @@ Package Contents
 
 
 
-.. py:class:: Agent(instructions: str, *, model: jeevesagent.core.protocols.Model | str | None = None, memory: jeevesagent.core.protocols.Memory | str | collections.abc.Mapping[str, Any] | None = None, runtime: jeevesagent.core.protocols.Runtime | None = None, budget: jeevesagent.core.protocols.Budget | None = None, permissions: jeevesagent.core.protocols.Permissions | None = None, hooks: jeevesagent.security.hooks.HookRegistry | None = None, tools: list[jeevesagent.tools.registry.Tool | collections.abc.Callable[Ellipsis, object]] | jeevesagent.core.protocols.ToolHost | jeevesagent.tools.registry.Tool | collections.abc.Callable[Ellipsis, object] | None = None, telemetry: jeevesagent.core.protocols.Telemetry | None = None, audit_log: jeevesagent.security.audit.AuditLog | None = None, max_turns: int = DEFAULT_MAX_TURNS, auto_consolidate: bool = False, architecture: jeevesagent.architecture.Architecture | str | None = None, skills: list[Any] | None = None, retry_policy: jeevesagent.governance.retry.RetryPolicy | None = None, auto_extract: bool | None = None)
+.. py:class:: Agent(instructions: str, *, model: jeevesagent.core.protocols.Model | str | None = None, memory: jeevesagent.core.protocols.Memory | str | collections.abc.Mapping[str, Any] | None = None, runtime: jeevesagent.core.protocols.Runtime | None = None, budget: jeevesagent.core.protocols.Budget | None = None, permissions: jeevesagent.core.protocols.Permissions | None = None, hooks: jeevesagent.security.hooks.HookRegistry | None = None, tools: list[jeevesagent.tools.registry.Tool | collections.abc.Callable[Ellipsis, object]] | jeevesagent.core.protocols.ToolHost | jeevesagent.tools.registry.Tool | collections.abc.Callable[Ellipsis, object] | None = None, telemetry: jeevesagent.core.protocols.Telemetry | None = None, audit_log: jeevesagent.security.audit.AuditLog | None = None, max_turns: int = DEFAULT_MAX_TURNS, auto_consolidate: bool = False, architecture: jeevesagent.architecture.Architecture | str | None = None, skills: list[Any] | None = None, retry_policy: jeevesagent.governance.retry.RetryPolicy | None = None, auto_extract: bool | None = None, approval_handler: Any | None = None, secrets: Any | None = None)
 
    A fully-async, MCP-native, model-agnostic agent harness.
 
@@ -1057,7 +1059,7 @@ Package Contents
 
 
 
-.. py:class:: AnthropicModel(model: str = 'claude-opus-4-7', *, client: Any = None, api_key: str | None = None, max_tokens: int = DEFAULT_MAX_TOKENS)
+.. py:class:: AnthropicModel(model: str = 'claude-opus-4-7', *, client: Any = None, api_key: str | None = None, max_tokens: int = DEFAULT_MAX_TOKENS, secrets: Any | None = None)
 
    Talks to Claude via :class:`anthropic.AsyncAnthropic`.
 
@@ -1221,7 +1223,7 @@ Package Contents
 
 
 
-.. py:class:: AutoExtractMemory(inner: jeevesagent.core.protocols.Memory, consolidator: jeevesagent.memory.consolidator.Consolidator, *, on_extract_error: collections.abc.Callable[[BaseException], collections.abc.Awaitable[None]] | None = None)
+.. py:class:: AutoExtractMemory(inner: jeevesagent.core.protocols.Memory, consolidator: jeevesagent.memory.consolidator.Consolidator, *, on_extract_error: collections.abc.Callable[[BaseException], collections.abc.Awaitable[None]] | None = None, telemetry: jeevesagent.core.protocols.Telemetry | None = None, auto_picked: bool = False)
 
    Wraps a :class:`Memory` and runs auto fact extraction on every
    ``remember`` call.
@@ -1829,6 +1831,18 @@ Package Contents
    they land in v0.5+. v0.3 keeps it as a passive struct.
 
 
+   .. py:attribute:: approval_handler
+      :type:  ApprovalHandler | None
+      :value: None
+
+
+      Resolves :class:`Decision.ask_` outcomes from the permissions
+      layer. When unset, an ``ask`` decision is treated as a deny —
+      historical behaviour preserved so single-tenant code without an
+      approval flow still works. When set, the architecture calls
+      this handler and uses the returned bool as the decision.
+
+
    .. py:attribute:: audit_log
       :type:  jeevesagent.security.audit.AuditLog | None
 
@@ -1946,6 +1960,35 @@ Package Contents
       :type:  jeevesagent.core.protocols.ToolHost
 
 
+.. py:class:: DictSecrets(initial: dict[str, str] | None = None)
+
+   In-process :class:`Secrets` backed by an explicit dict.
+
+   Useful in tests and for callers that fetch secrets once at
+   startup (from a config file, a one-shot Vault read, etc.) and
+   want to make them available to the framework without leaking
+   them into ``os.environ``.
+
+   Mutable: ``store()`` updates the in-process map. Not durable
+   across process restarts.
+
+
+   .. py:method:: lookup_sync(ref: str) -> str | None
+
+
+   .. py:method:: redact(text: str) -> str
+
+
+   .. py:method:: resolve(ref: str) -> str
+      :async:
+
+
+
+   .. py:method:: store(ref: str, value: str) -> None
+      :async:
+
+
+
 .. py:class:: EchoModel(*, prefix: str = 'Echo: ', chunk_delay_s: float = 0.0, cost_per_token: float = 0.0)
 
    Echo-style model for tests and demos.
@@ -1996,6 +2039,35 @@ Package Contents
 
    .. py:attribute:: name
       :type:  str
+
+
+.. py:class:: EnvSecrets
+
+   Reads secrets from ``os.environ``.
+
+   The default :class:`Secrets` impl wired by :class:`Agent` when
+   the caller doesn't pass an explicit one. Behaviour matches the
+   pre-M10 framework: API keys are looked up as the corresponding
+   environment variable name (``OPENAI_API_KEY``,
+   ``ANTHROPIC_API_KEY``, etc.).
+
+
+   .. py:method:: lookup_sync(ref: str) -> str | None
+
+
+   .. py:method:: redact(text: str) -> str
+
+
+   .. py:method:: resolve(ref: str) -> str
+      :async:
+
+
+
+   .. py:method:: store(ref: str, value: str) -> None
+      :abstractmethod:
+
+      :async:
+
 
 
 .. py:class:: Episode(/, **data: Any)
@@ -2825,9 +2897,19 @@ Package Contents
    .. py:method:: stream_keys() -> list[tuple[str, str]]
 
 
-.. py:class:: InMemoryMemory(*, consolidator: jeevesagent.memory.consolidator.Consolidator | None = None, fact_store: jeevesagent.memory.facts.FactStore | None = None)
+.. py:class:: InMemoryMemory(*, consolidator: jeevesagent.memory.consolidator.Consolidator | None = None, fact_store: jeevesagent.memory.facts.FactStore | None = None, max_users: int | None = _DEFAULT_MAX_USERS, user_idle_ttl_seconds: float | None = _DEFAULT_USER_TTL_SECONDS)
 
    Dict-backed implementation of :class:`Memory`.
+
+   Multi-tenant accounting (M10): per-user working-block state is
+   held in a bounded LRU + TTL container so a runaway tenant or
+   one-shot user_id explosion can't grow the in-process dict
+   without limit. Defaults: ``max_users=100_000`` and
+   ``user_idle_ttl_seconds=86_400`` (24h). Pass ``None`` to
+   disable bounding for single-tenant or fixed-tenant deployments.
+   Eviction *drops* a user's working blocks; callers needing
+   durable spill-to-disk should use :class:`SqliteMemory` or a
+   SQL-backed memory instead.
 
 
    .. py:method:: append_block(name: str, content: str, *, user_id: str | None = None) -> None
@@ -3352,7 +3434,7 @@ Package Contents
       :type:  frozenset[str]
 
 
-.. py:class:: LiteLLMModel(model: str, *, api_key: str | None = None, client: Any | None = None, **litellm_kwargs: Any)
+.. py:class:: LiteLLMModel(model: str, *, api_key: str | None = None, client: Any | None = None, secrets: Any | None = None, **litellm_kwargs: Any)
 
    Bases: :py:obj:`jeevesagent.model.openai.OpenAIModel`
 
@@ -4109,7 +4191,7 @@ Package Contents
 
 
 
-.. py:class:: OpenAIModel(model: str = 'gpt-4o', *, client: Any = None, api_key: str | None = None, base_url: str | None = None)
+.. py:class:: OpenAIModel(model: str = 'gpt-4o', *, client: Any = None, api_key: str | None = None, base_url: str | None = None, secrets: Any | None = None)
 
    Talks to OpenAI via :class:`openai.AsyncOpenAI`.
 
@@ -5614,6 +5696,27 @@ Package Contents
 
 
    Resolution and redaction of named secrets.
+
+   ``resolve`` / ``store`` are async because most production secrets
+   backends (Vault, AWS Secrets Manager, GCP Secret Manager) talk
+   over the network. ``lookup_sync`` exists for the
+   *constructor-time* path: when the framework needs to wire an
+   API key into a model adapter before any event loop is running
+   (e.g. ``OpenAIModel(...)`` from inside ``Agent.__init__``).
+   Concrete impls returning ``None`` from ``lookup_sync`` for refs
+   that can't be resolved synchronously are fine — callers should
+   fall back to ``os.environ`` or to the explicit ``api_key=``
+   argument.
+
+
+   .. py:method:: lookup_sync(ref: str) -> str | None
+
+      Synchronous best-effort lookup, for constructor-time
+      callers that can't await. Returns ``None`` when the ref
+      isn't available synchronously (e.g. the impl needs a
+      network round-trip). Default impls in :mod:`jeevesagent.
+      security.secrets` cover env-var and in-memory lookups.
+
 
 
    .. py:method:: redact(text: str) -> str

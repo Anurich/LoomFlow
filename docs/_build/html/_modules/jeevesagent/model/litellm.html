@@ -196,6 +196,10 @@
 <li class="toctree-l1"><a class="reference internal" href="../../../recipes.html">Recipes</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../architecture.html">Architecture</a></li>
 </ul>
+<p class="caption" role="heading"><span class="caption-text">Production</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../production_hardening.html">Production hardening</a></li>
+</ul>
 <p class="caption" role="heading"><span class="caption-text">Migrating from</span></p>
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="../../../migrations/from-langgraph.html">Migrating from LangGraph</a></li>
@@ -318,6 +322,7 @@
 <li class="toctree-l4"><a class="reference internal" href="../../../api/jeevesagent/security/sandbox/subprocess_/index.html">jeevesagent.security.sandbox.subprocess</a></li>
 </ul>
 </li>
+<li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/security/secrets/index.html">jeevesagent.security.secrets</a></li>
 </ul>
 </li>
 <li class="toctree-l2 has-children"><a class="reference internal" href="../../../api/jeevesagent/skills/index.html">jeevesagent.skills</a><input aria-label="Toggle navigation of jeevesagent.skills" class="toctree-checkbox" id="toctree-checkbox-16" name="toctree-checkbox-16" role="switch" type="checkbox"/><label for="toctree-checkbox-16"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
@@ -467,6 +472,7 @@
         <span class="o">*</span><span class="p">,</span>
         <span class="n">api_key</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
         <span class="n">client</span><span class="p">:</span> <span class="n">Any</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">secrets</span><span class="p">:</span> <span class="n">Any</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
         <span class="o">**</span><span class="n">litellm_kwargs</span><span class="p">:</span> <span class="n">Any</span><span class="p">,</span>
     <span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
         <span class="k">if</span> <span class="n">client</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
@@ -479,8 +485,19 @@
                 <span class="p">)</span> <span class="kn">from</span><span class="w"> </span><span class="nn">exc</span>
 
             <span class="n">defaults</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">(</span><span class="n">litellm_kwargs</span><span class="p">)</span>
-            <span class="k">if</span> <span class="n">api_key</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
-                <span class="n">defaults</span><span class="p">[</span><span class="s2">&quot;api_key&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">api_key</span>
+            <span class="c1"># Try the Secrets backend before letting LiteLLM fall</span>
+            <span class="c1"># back to its own ``os.environ`` lookup. We try the</span>
+            <span class="c1"># provider-prefixed env var first (Mistral, Cohere,</span>
+            <span class="c1"># Bedrock, ...) and stop at the first match.</span>
+            <span class="n">resolved_key</span> <span class="o">=</span> <span class="n">api_key</span>
+            <span class="k">if</span> <span class="n">resolved_key</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">secrets</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="k">for</span> <span class="n">env_var</span> <span class="ow">in</span> <span class="n">_candidate_env_vars</span><span class="p">(</span><span class="n">model</span><span class="p">):</span>
+                    <span class="n">candidate</span> <span class="o">=</span> <span class="n">secrets</span><span class="o">.</span><span class="n">lookup_sync</span><span class="p">(</span><span class="n">env_var</span><span class="p">)</span>
+                    <span class="k">if</span> <span class="n">candidate</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                        <span class="n">resolved_key</span> <span class="o">=</span> <span class="n">candidate</span>
+                        <span class="k">break</span>
+            <span class="k">if</span> <span class="n">resolved_key</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="n">defaults</span><span class="p">[</span><span class="s2">&quot;api_key&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">resolved_key</span>
             <span class="n">client</span> <span class="o">=</span> <span class="n">_LiteLLMClient</span><span class="p">(</span><span class="o">**</span><span class="n">defaults</span><span class="p">)</span>
 
         <span class="c1"># Skip OpenAIModel&#39;s openai-SDK import path by passing the</span>
@@ -490,6 +507,33 @@
         <span class="c1"># or the ``api_key=`` we shoved into the defaults above.</span>
         <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">client</span><span class="o">=</span><span class="n">client</span><span class="p">,</span> <span class="n">api_key</span><span class="o">=</span><span class="n">api_key</span><span class="p">)</span></div>
 
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_candidate_env_vars</span><span class="p">(</span><span class="n">model_spec</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Map a LiteLLM model spec to the env-var names it would</span>
+<span class="sd">    look up by default. Returned in priority order — caller stops</span>
+<span class="sd">    at first hit. Conservative: when in doubt we just return</span>
+<span class="sd">    ``[]`` and let LiteLLM&#39;s own resolution kick in.&quot;&quot;&quot;</span>
+    <span class="n">spec_lower</span> <span class="o">=</span> <span class="n">model_spec</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span>
+    <span class="k">if</span> <span class="n">spec_lower</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s2">&quot;mistral-&quot;</span><span class="p">):</span>
+        <span class="k">return</span> <span class="p">[</span><span class="s2">&quot;MISTRAL_API_KEY&quot;</span><span class="p">]</span>
+    <span class="k">if</span> <span class="n">spec_lower</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s2">&quot;command-&quot;</span><span class="p">):</span>
+        <span class="k">return</span> <span class="p">[</span><span class="s2">&quot;COHERE_API_KEY&quot;</span><span class="p">]</span>
+    <span class="k">if</span> <span class="n">spec_lower</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s2">&quot;bedrock/&quot;</span><span class="p">):</span>
+        <span class="k">return</span> <span class="p">[</span><span class="s2">&quot;AWS_ACCESS_KEY_ID&quot;</span><span class="p">]</span>
+    <span class="k">if</span> <span class="n">spec_lower</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s2">&quot;vertex_ai/&quot;</span><span class="p">):</span>
+        <span class="k">return</span> <span class="p">[</span><span class="s2">&quot;GOOGLE_APPLICATION_CREDENTIALS&quot;</span><span class="p">]</span>
+    <span class="k">if</span> <span class="n">spec_lower</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s2">&quot;gemini/&quot;</span><span class="p">):</span>
+        <span class="k">return</span> <span class="p">[</span><span class="s2">&quot;GEMINI_API_KEY&quot;</span><span class="p">,</span> <span class="s2">&quot;GOOGLE_API_KEY&quot;</span><span class="p">]</span>
+    <span class="k">if</span> <span class="n">spec_lower</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s2">&quot;groq/&quot;</span><span class="p">):</span>
+        <span class="k">return</span> <span class="p">[</span><span class="s2">&quot;GROQ_API_KEY&quot;</span><span class="p">]</span>
+    <span class="k">if</span> <span class="n">spec_lower</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s2">&quot;together_ai/&quot;</span><span class="p">):</span>
+        <span class="k">return</span> <span class="p">[</span><span class="s2">&quot;TOGETHER_API_KEY&quot;</span><span class="p">,</span> <span class="s2">&quot;TOGETHERAI_API_KEY&quot;</span><span class="p">]</span>
+    <span class="k">if</span> <span class="n">spec_lower</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s2">&quot;replicate/&quot;</span><span class="p">):</span>
+        <span class="k">return</span> <span class="p">[</span><span class="s2">&quot;REPLICATE_API_KEY&quot;</span><span class="p">,</span> <span class="s2">&quot;REPLICATE_API_TOKEN&quot;</span><span class="p">]</span>
+    <span class="k">if</span> <span class="n">spec_lower</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s2">&quot;azure/&quot;</span><span class="p">):</span>
+        <span class="k">return</span> <span class="p">[</span><span class="s2">&quot;AZURE_OPENAI_API_KEY&quot;</span><span class="p">,</span> <span class="s2">&quot;AZURE_API_KEY&quot;</span><span class="p">]</span>
+    <span class="k">return</span> <span class="p">[]</span>
 </pre></div>
         </article>
       </div>

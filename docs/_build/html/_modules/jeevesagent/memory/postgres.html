@@ -196,6 +196,10 @@
 <li class="toctree-l1"><a class="reference internal" href="../../../recipes.html">Recipes</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../architecture.html">Architecture</a></li>
 </ul>
+<p class="caption" role="heading"><span class="caption-text">Production</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../production_hardening.html">Production hardening</a></li>
+</ul>
 <p class="caption" role="heading"><span class="caption-text">Migrating from</span></p>
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="../../../migrations/from-langgraph.html">Migrating from LangGraph</a></li>
@@ -318,6 +322,7 @@
 <li class="toctree-l4"><a class="reference internal" href="../../../api/jeevesagent/security/sandbox/subprocess_/index.html">jeevesagent.security.sandbox.subprocess</a></li>
 </ul>
 </li>
+<li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/security/secrets/index.html">jeevesagent.security.secrets</a></li>
 </ul>
 </li>
 <li class="toctree-l2 has-children"><a class="reference internal" href="../../../api/jeevesagent/skills/index.html">jeevesagent.skills</a><input aria-label="Toggle navigation of jeevesagent.skills" class="toctree-checkbox" id="toctree-checkbox-16" name="toctree-checkbox-16" role="switch" type="checkbox"/><label for="toctree-checkbox-16"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
@@ -416,6 +421,35 @@
 <span class="kn">from</span><span class="w"> </span><span class="nn">.embedder</span><span class="w"> </span><span class="kn">import</span> <span class="n">HashEmbedder</span>
 
 <span class="n">DEFAULT_NAMESPACE</span> <span class="o">=</span> <span class="s2">&quot;default&quot;</span>
+
+<span class="c1"># Postgres can&#39;t carry NULL inside a primary key column, so the</span>
+<span class="c1"># anonymous bucket needs a non-NULL representation on the wire.</span>
+<span class="c1"># Earlier versions used the empty string ``&#39;&#39;`` for this — that</span>
+<span class="c1"># silently conflicts with anyone who passes ``&quot;&quot;`` as a real</span>
+<span class="c1"># user_id and looks like a hack in the schema. M10 replaces it</span>
+<span class="c1"># with this reserved sentinel that&#39;s guaranteed not to collide</span>
+<span class="c1"># with any sane real user_id (the double-underscore-jeeves prefix</span>
+<span class="c1"># is a hard rule callers must not violate; we raise if they try).</span>
+<span class="n">_ANON_USER_ID</span> <span class="o">=</span> <span class="s2">&quot;__jeeves_anon_user__&quot;</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_encode_user_id</span><span class="p">(</span><span class="n">user_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Map Python ``user_id`` (``None`` for anonymous) to the</span>
+<span class="sd">    on-wire representation. Rejects callers who try to use the</span>
+<span class="sd">    sentinel value as a real user_id — that would let one user</span>
+<span class="sd">    silently impersonate the anonymous bucket.&quot;&quot;&quot;</span>
+    <span class="k">if</span> <span class="n">user_id</span> <span class="o">==</span> <span class="n">_ANON_USER_ID</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+            <span class="sa">f</span><span class="s2">&quot;user_id </span><span class="si">{</span><span class="n">_ANON_USER_ID</span><span class="si">!r}</span><span class="s2"> is reserved by JeevesAgent for &quot;</span>
+            <span class="s2">&quot;the anonymous bucket; choose a different identifier.&quot;</span>
+        <span class="p">)</span>
+    <span class="k">return</span> <span class="n">user_id</span> <span class="k">if</span> <span class="n">user_id</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">_ANON_USER_ID</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_decode_user_id</span><span class="p">(</span><span class="n">wire_value</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Inverse of :func:`_encode_user_id`: reverse the sentinel</span>
+<span class="sd">    back to ``None`` for the in-memory model.&quot;&quot;&quot;</span>
+    <span class="k">return</span> <span class="kc">None</span> <span class="k">if</span> <span class="n">wire_value</span> <span class="o">==</span> <span class="n">_ANON_USER_ID</span> <span class="k">else</span> <span class="n">wire_value</span>
 
 
 <div class="viewcode-block" id="PostgresMemory">
@@ -532,10 +566,13 @@
                 <span class="s2">&quot;CREATE TABLE IF NOT EXISTS memory_blocks (&quot;</span>
                 <span class="s2">&quot;  namespace TEXT NOT NULL,&quot;</span>
                 <span class="c1"># ``user_id`` cannot be NULL inside a PK in Postgres,</span>
-                <span class="c1"># so the anonymous bucket is the empty string on the</span>
-                <span class="c1"># wire; the application layer round-trips it back to</span>
-                <span class="c1"># ``None`` on reads.</span>
-                <span class="s2">&quot;  user_id TEXT NOT NULL DEFAULT &#39;&#39;,&quot;</span>
+                <span class="c1"># so the anonymous bucket gets a reserved sentinel</span>
+                <span class="c1"># on the wire (round-tripped to ``None`` in code).</span>
+                <span class="c1"># The default also uses the sentinel so legacy</span>
+                <span class="c1"># callers that don&#39;t set the column land in the</span>
+                <span class="c1"># anonymous bucket — same behaviour as Python&#39;s</span>
+                <span class="c1"># ``user_id=None`` default elsewhere.</span>
+                <span class="sa">f</span><span class="s2">&quot;  user_id TEXT NOT NULL DEFAULT &#39;</span><span class="si">{</span><span class="n">_ANON_USER_ID</span><span class="si">}</span><span class="s2">&#39;,&quot;</span>
                 <span class="s2">&quot;  name TEXT NOT NULL,&quot;</span>
                 <span class="s2">&quot;  content TEXT NOT NULL,&quot;</span>
                 <span class="s2">&quot;  pinned_order INT NOT NULL DEFAULT 0,&quot;</span>
@@ -544,11 +581,20 @@
                 <span class="s2">&quot;);&quot;</span>
             <span class="p">),</span>
             <span class="c1"># Idempotent ALTER for upgrades from pre-M9 schemas. The</span>
-            <span class="c1"># default &#39;&#39; ensures existing rows migrate cleanly into</span>
-            <span class="c1"># the anonymous bucket, and the new PK constraint can</span>
-            <span class="c1"># then be enforced.</span>
+            <span class="c1"># default &#39;&#39; was used by 0.9.x; 0.10+ uses the sentinel.</span>
+            <span class="c1"># Both ALTERs are no-ops if the column already exists at</span>
+            <span class="c1"># the right shape.</span>
             <span class="s2">&quot;ALTER TABLE memory_blocks ADD COLUMN IF NOT EXISTS &quot;</span>
-            <span class="s2">&quot;user_id TEXT NOT NULL DEFAULT &#39;&#39;;&quot;</span><span class="p">,</span>
+            <span class="sa">f</span><span class="s2">&quot;user_id TEXT NOT NULL DEFAULT &#39;</span><span class="si">{</span><span class="n">_ANON_USER_ID</span><span class="si">}</span><span class="s2">&#39;;&quot;</span><span class="p">,</span>
+            <span class="c1"># Migrate 0.9.x-era empty-string rows to the sentinel.</span>
+            <span class="c1"># No-op once already migrated.</span>
+            <span class="s2">&quot;UPDATE memory_blocks SET user_id = &quot;</span>
+            <span class="sa">f</span><span class="s2">&quot;&#39;</span><span class="si">{</span><span class="n">_ANON_USER_ID</span><span class="si">}</span><span class="s2">&#39; WHERE user_id = &#39;&#39;;&quot;</span><span class="p">,</span>
+            <span class="c1"># Update the column default so freshly-inserted rows</span>
+            <span class="c1"># without an explicit user_id (legacy callers) land in</span>
+            <span class="c1"># the sentinel bucket too.</span>
+            <span class="s2">&quot;ALTER TABLE memory_blocks ALTER COLUMN user_id &quot;</span>
+            <span class="sa">f</span><span class="s2">&quot;SET DEFAULT &#39;</span><span class="si">{</span><span class="n">_ANON_USER_ID</span><span class="si">}</span><span class="s2">&#39;;&quot;</span><span class="p">,</span>
             <span class="p">(</span>
                 <span class="sa">f</span><span class="s2">&quot;CREATE TABLE IF NOT EXISTS episodes (&quot;</span>
                 <span class="sa">f</span><span class="s2">&quot;  id TEXT PRIMARY KEY,&quot;</span>
@@ -600,8 +646,9 @@
     <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">working</span><span class="p">(</span>
         <span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">user_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
     <span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="n">MemoryBlock</span><span class="p">]:</span>
-        <span class="c1"># Empty string is the anonymous bucket on the wire (Postgres</span>
-        <span class="c1"># PK can&#39;t carry NULL); round-trip back to ``None`` here.</span>
+        <span class="c1"># Encode None → sentinel for the wire (Postgres PK can&#39;t</span>
+        <span class="c1"># carry NULL); the row&#39;s user_id never appears in the</span>
+        <span class="c1"># returned MemoryBlock so no decode needed here.</span>
         <span class="k">async</span> <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">_pool</span><span class="o">.</span><span class="n">acquire</span><span class="p">()</span> <span class="k">as</span> <span class="n">conn</span><span class="p">:</span>
             <span class="n">rows</span> <span class="o">=</span> <span class="k">await</span> <span class="n">conn</span><span class="o">.</span><span class="n">fetch</span><span class="p">(</span>
                 <span class="s2">&quot;SELECT name, content, updated_at, pinned_order &quot;</span>
@@ -609,7 +656,7 @@
                 <span class="s2">&quot;AND user_id = $2 &quot;</span>
                 <span class="s2">&quot;ORDER BY pinned_order ASC&quot;</span><span class="p">,</span>
                 <span class="bp">self</span><span class="o">.</span><span class="n">_namespace</span><span class="p">,</span>
-                <span class="n">user_id</span> <span class="ow">or</span> <span class="s2">&quot;&quot;</span><span class="p">,</span>
+                <span class="n">_encode_user_id</span><span class="p">(</span><span class="n">user_id</span><span class="p">),</span>
             <span class="p">)</span>
         <span class="k">return</span> <span class="p">[</span>
             <span class="n">MemoryBlock</span><span class="p">(</span>
@@ -634,7 +681,7 @@
                 <span class="s2">&quot;ON CONFLICT (namespace, user_id, name) DO UPDATE &quot;</span>
                 <span class="s2">&quot;SET content = EXCLUDED.content, updated_at = NOW();&quot;</span><span class="p">,</span>
                 <span class="bp">self</span><span class="o">.</span><span class="n">_namespace</span><span class="p">,</span>
-                <span class="n">user_id</span> <span class="ow">or</span> <span class="s2">&quot;&quot;</span><span class="p">,</span>
+                <span class="n">_encode_user_id</span><span class="p">(</span><span class="n">user_id</span><span class="p">),</span>
                 <span class="n">name</span><span class="p">,</span>
                 <span class="n">content</span><span class="p">,</span>
             <span class="p">)</span></div>
@@ -653,7 +700,7 @@
                 <span class="s2">&quot;SET content = memory_blocks.content || EXCLUDED.content, &quot;</span>
                 <span class="s2">&quot;    updated_at = NOW();&quot;</span><span class="p">,</span>
                 <span class="bp">self</span><span class="o">.</span><span class="n">_namespace</span><span class="p">,</span>
-                <span class="n">user_id</span> <span class="ow">or</span> <span class="s2">&quot;&quot;</span><span class="p">,</span>
+                <span class="n">_encode_user_id</span><span class="p">(</span><span class="n">user_id</span><span class="p">),</span>
                 <span class="n">name</span><span class="p">,</span>
                 <span class="n">content</span><span class="p">,</span>
             <span class="p">)</span></div>

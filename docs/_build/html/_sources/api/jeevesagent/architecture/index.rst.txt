@@ -318,6 +318,18 @@ Package Contents
    they land in v0.5+. v0.3 keeps it as a passive struct.
 
 
+   .. py:attribute:: approval_handler
+      :type:  ApprovalHandler | None
+      :value: None
+
+
+      Resolves :class:`Decision.ask_` outcomes from the permissions
+      layer. When unset, an ``ask`` decision is treated as a deny —
+      historical behaviour preserved so single-tenant code without an
+      approval flow still works. When set, the architecture calls
+      this handler and uses the returned bool as the decision.
+
+
    .. py:attribute:: audit_log
       :type:  jeevesagent.security.audit.AuditLog | None
 

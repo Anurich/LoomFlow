@@ -32,7 +32,7 @@ Classes
 Module Contents
 ---------------
 
-.. py:class:: OpenAIModel(model: str = 'gpt-4o', *, client: Any = None, api_key: str | None = None, base_url: str | None = None)
+.. py:class:: OpenAIModel(model: str = 'gpt-4o', *, client: Any = None, api_key: str | None = None, base_url: str | None = None, secrets: Any | None = None)
 
    Talks to OpenAI via :class:`openai.AsyncOpenAI`.
 

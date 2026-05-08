@@ -44,7 +44,7 @@ Classes
 Module Contents
 ---------------
 
-.. py:class:: AnthropicModel(model: str = 'claude-opus-4-7', *, client: Any = None, api_key: str | None = None, max_tokens: int = DEFAULT_MAX_TOKENS)
+.. py:class:: AnthropicModel(model: str = 'claude-opus-4-7', *, client: Any = None, api_key: str | None = None, max_tokens: int = DEFAULT_MAX_TOKENS, secrets: Any | None = None)
 
    Talks to Claude via :class:`anthropic.AsyncAnthropic`.
 

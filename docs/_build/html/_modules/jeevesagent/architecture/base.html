@@ -196,6 +196,10 @@
 <li class="toctree-l1"><a class="reference internal" href="../../../recipes.html">Recipes</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../architecture.html">Architecture</a></li>
 </ul>
+<p class="caption" role="heading"><span class="caption-text">Production</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../production_hardening.html">Production hardening</a></li>
+</ul>
 <p class="caption" role="heading"><span class="caption-text">Migrating from</span></p>
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="../../../migrations/from-langgraph.html">Migrating from LangGraph</a></li>
@@ -318,6 +322,7 @@
 <li class="toctree-l4"><a class="reference internal" href="../../../api/jeevesagent/security/sandbox/subprocess_/index.html">jeevesagent.security.sandbox.subprocess</a></li>
 </ul>
 </li>
+<li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/security/secrets/index.html">jeevesagent.security.secrets</a></li>
 </ul>
 </li>
 <li class="toctree-l2 has-children"><a class="reference internal" href="../../../api/jeevesagent/skills/index.html">jeevesagent.skills</a><input aria-label="Toggle navigation of jeevesagent.skills" class="toctree-checkbox" id="toctree-checkbox-16" name="toctree-checkbox-16" role="switch" type="checkbox"/><label for="toctree-checkbox-16"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
@@ -409,7 +414,7 @@
 
 <span class="kn">from</span><span class="w"> </span><span class="nn">__future__</span><span class="w"> </span><span class="kn">import</span> <span class="n">annotations</span>
 
-<span class="kn">from</span><span class="w"> </span><span class="nn">collections.abc</span><span class="w"> </span><span class="kn">import</span> <span class="n">AsyncIterator</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">collections.abc</span><span class="w"> </span><span class="kn">import</span> <span class="n">AsyncIterator</span><span class="p">,</span> <span class="n">Awaitable</span><span class="p">,</span> <span class="n">Callable</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">dataclasses</span><span class="w"> </span><span class="kn">import</span> <span class="n">dataclass</span><span class="p">,</span> <span class="n">field</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">TYPE_CHECKING</span><span class="p">,</span> <span class="n">Any</span><span class="p">,</span> <span class="n">Protocol</span><span class="p">,</span> <span class="n">runtime_checkable</span>
 
@@ -423,12 +428,21 @@
     <span class="n">Telemetry</span><span class="p">,</span>
     <span class="n">ToolHost</span><span class="p">,</span>
 <span class="p">)</span>
-<span class="kn">from</span><span class="w"> </span><span class="nn">..core.types</span><span class="w"> </span><span class="kn">import</span> <span class="n">Event</span><span class="p">,</span> <span class="n">Message</span><span class="p">,</span> <span class="n">Usage</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">..core.types</span><span class="w"> </span><span class="kn">import</span> <span class="n">Event</span><span class="p">,</span> <span class="n">Message</span><span class="p">,</span> <span class="n">ToolCall</span><span class="p">,</span> <span class="n">Usage</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">..security.audit</span><span class="w"> </span><span class="kn">import</span> <span class="n">AuditLog</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">..security.hooks</span><span class="w"> </span><span class="kn">import</span> <span class="n">HookRegistry</span>
 
 <span class="k">if</span> <span class="n">TYPE_CHECKING</span><span class="p">:</span>
     <span class="kn">from</span><span class="w"> </span><span class="nn">..agent.api</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span>
+
+<span class="c1"># An approval handler is the bridge between a permissions policy</span>
+<span class="c1"># returning ``Decision.ask_(...)`` and an actual decision. The</span>
+<span class="c1"># framework calls the handler with the pending tool call and the</span>
+<span class="c1"># resolved ``user_id`` for the run; the handler returns ``True``</span>
+<span class="c1"># to allow the call or ``False`` to deny. Handlers are async so</span>
+<span class="c1"># they can await UI prompts, Slack approvals, ticketing systems,</span>
+<span class="c1"># etc. without blocking the agent loop.</span>
+<span class="n">ApprovalHandler</span> <span class="o">=</span> <span class="n">Callable</span><span class="p">[[</span><span class="n">ToolCall</span><span class="p">,</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span><span class="p">],</span> <span class="n">Awaitable</span><span class="p">[</span><span class="nb">bool</span><span class="p">]]</span>
 
 
 <div class="viewcode-block" id="AgentSession">
@@ -486,6 +500,12 @@
     <span class="n">telemetry</span><span class="p">:</span> <span class="n">Telemetry</span>
     <span class="n">audit_log</span><span class="p">:</span> <span class="n">AuditLog</span> <span class="o">|</span> <span class="kc">None</span>
     <span class="n">max_turns</span><span class="p">:</span> <span class="nb">int</span>
+    <span class="n">approval_handler</span><span class="p">:</span> <span class="n">ApprovalHandler</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Resolves :class:`Decision.ask_` outcomes from the permissions</span>
+<span class="sd">    layer. When unset, an ``ask`` decision is treated as a deny —</span>
+<span class="sd">    historical behaviour preserved so single-tenant code without an</span>
+<span class="sd">    approval flow still works. When set, the architecture calls</span>
+<span class="sd">    this handler and uses the returned bool as the decision.&quot;&quot;&quot;</span>
     <span class="n">streaming</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;Whether a downstream consumer is reading from</span>
 <span class="sd">    ``agent.stream()``. When True, architectures should preserve</span>

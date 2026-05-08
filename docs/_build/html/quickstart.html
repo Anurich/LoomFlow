@@ -197,6 +197,10 @@
 <li class="toctree-l1"><a class="reference internal" href="recipes.html">Recipes</a></li>
 <li class="toctree-l1"><a class="reference internal" href="architecture.html">Architecture</a></li>
 </ul>
+<p class="caption" role="heading"><span class="caption-text">Production</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="production_hardening.html">Production hardening</a></li>
+</ul>
 <p class="caption" role="heading"><span class="caption-text">Migrating from</span></p>
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="migrations/from-langgraph.html">Migrating from LangGraph</a></li>
@@ -319,6 +323,7 @@
 <li class="toctree-l4"><a class="reference internal" href="api/jeevesagent/security/sandbox/subprocess_/index.html">jeevesagent.security.sandbox.subprocess</a></li>
 </ul>
 </li>
+<li class="toctree-l3"><a class="reference internal" href="api/jeevesagent/security/secrets/index.html">jeevesagent.security.secrets</a></li>
 </ul>
 </li>
 <li class="toctree-l2 has-children"><a class="reference internal" href="api/jeevesagent/skills/index.html">jeevesagent.skills</a><input aria-label="Toggle navigation of jeevesagent.skills" class="toctree-checkbox" id="toctree-checkbox-16" name="toctree-checkbox-16" role="switch" type="checkbox"/><label for="toctree-checkbox-16"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
@@ -365,12 +370,12 @@
         </a>
         <div class="content-icon-container">
           <div class="view-this-page">
-  <a class="muted-link" href="https://github.com/anthropics/jeevesagent/blob/main/docs/quickstart.md?plain=true" title="View this page">
+  <a class="muted-link" href="https://github.com/Anurich/JeevesHarness/blob/main/docs/quickstart.md?plain=true" title="View this page">
     <svg><use href="#svg-eye"></use></svg>
     <span class="visually-hidden">View this page</span>
   </a>
 </div><div class="edit-this-page">
-  <a class="muted-link" href="https://github.com/anthropics/jeevesagent/edit/main/docs/quickstart.md" rel="edit" title="Edit this page">
+  <a class="muted-link" href="https://github.com/Anurich/JeevesHarness/edit/main/docs/quickstart.md" rel="edit" title="Edit this page">
     <svg><use href="#svg-pencil"></use></svg>
     <span class="visually-hidden">Edit this page</span>
   </a>
@@ -778,6 +783,25 @@ without re-executing anything.</p>
     <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">call</span><span class="o">.</span><span class="n">tool</span><span class="si">}</span><span class="s2"> → ok=</span><span class="si">{</span><span class="n">result</span><span class="o">.</span><span class="n">ok</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
 </pre></div>
 </div>
+<p>For destructive tools (<code class="docutils literal notranslate"><span class="pre">&#64;tool(destructive=True)</span></code>) the default
+permissions policy returns <code class="docutils literal notranslate"><span class="pre">Decision.ask_(...)</span></code>. Wire an approval
+handler to route the decision through a human / Slack / ticket
+queue — without one, <code class="docutils literal notranslate"><span class="pre">ask</span></code> falls back to <strong>deny</strong> so the agent
+never silently bypasses the gate:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">approve</span><span class="p">(</span><span class="n">call</span><span class="p">,</span> <span class="n">user_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Return True to allow, False to deny.&quot;&quot;&quot;</span>
+    <span class="k">return</span> <span class="k">await</span> <span class="n">my_slack_app</span><span class="o">.</span><span class="n">request_approval</span><span class="p">(</span><span class="n">call</span><span class="o">.</span><span class="n">tool</span><span class="p">,</span> <span class="n">user_id</span><span class="p">)</span>
+
+<span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
+    <span class="s2">&quot;...&quot;</span><span class="p">,</span>
+    <span class="n">permissions</span><span class="o">=</span><span class="n">StandardPermissions</span><span class="p">(</span><span class="n">mode</span><span class="o">=</span><span class="n">Mode</span><span class="o">.</span><span class="n">DEFAULT</span><span class="p">),</span>
+    <span class="n">approval_handler</span><span class="o">=</span><span class="n">approve</span><span class="p">,</span>
+<span class="p">)</span>
+</pre></div>
+</div>
+<p>A handler that raises is treated as deny + logged. See
+<a class="reference internal" href="production_hardening.html#approval-handler-for-decision-ask"><span class="std std-ref">Production hardening</span></a>
+for the full failure-mode contract.</p>
 </section>
 <section id="sandbox-filesystem">
 <h2>13. Sandbox (filesystem)<a class="headerlink" href="#sandbox-filesystem" title="Link to this heading">¶</a></h2>

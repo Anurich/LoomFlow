@@ -196,6 +196,10 @@
 <li class="toctree-l1"><a class="reference internal" href="../../../recipes.html">Recipes</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../architecture.html">Architecture</a></li>
 </ul>
+<p class="caption" role="heading"><span class="caption-text">Production</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../production_hardening.html">Production hardening</a></li>
+</ul>
 <p class="caption" role="heading"><span class="caption-text">Migrating from</span></p>
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="../../../migrations/from-langgraph.html">Migrating from LangGraph</a></li>
@@ -318,6 +322,7 @@
 <li class="toctree-l4"><a class="reference internal" href="../../../api/jeevesagent/security/sandbox/subprocess_/index.html">jeevesagent.security.sandbox.subprocess</a></li>
 </ul>
 </li>
+<li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/security/secrets/index.html">jeevesagent.security.secrets</a></li>
 </ul>
 </li>
 <li class="toctree-l2 has-children"><a class="reference internal" href="../../../api/jeevesagent/skills/index.html">jeevesagent.skills</a><input aria-label="Toggle navigation of jeevesagent.skills" class="toctree-checkbox" id="toctree-checkbox-16" name="toctree-checkbox-16" role="switch" type="checkbox"/><label for="toctree-checkbox-16"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
@@ -397,11 +402,13 @@
 <span class="kn">from</span><span class="w"> </span><span class="nn">__future__</span><span class="w"> </span><span class="kn">import</span> <span class="n">annotations</span>
 
 <span class="kn">import</span><span class="w"> </span><span class="nn">contextlib</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">logging</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">collections.abc</span><span class="w"> </span><span class="kn">import</span> <span class="n">AsyncIterator</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">TYPE_CHECKING</span><span class="p">,</span> <span class="n">Any</span>
 
 <span class="kn">import</span><span class="w"> </span><span class="nn">anyio</span>
 
+<span class="kn">from</span><span class="w"> </span><span class="nn">..core._deprecation</span><span class="w"> </span><span class="kn">import</span> <span class="n">warn_legacy_protocol</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">..core.types</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
     <span class="n">Event</span><span class="p">,</span>
     <span class="n">Message</span><span class="p">,</span>
@@ -989,7 +996,9 @@
                     <span class="n">call</span><span class="p">,</span> <span class="n">user_id</span><span class="o">=</span><span class="n">run_user_id</span>
                 <span class="p">)</span>
             <span class="k">except</span> <span class="ne">TypeError</span><span class="p">:</span>
-                <span class="c1"># Legacy HookHost without the kwarg.</span>
+                <span class="c1"># Legacy HookHost without the kwarg. Warn once</span>
+                <span class="c1"># per-process so callers know to add it.</span>
+                <span class="n">warn_legacy_protocol</span><span class="p">(</span><span class="s2">&quot;HookHost&quot;</span><span class="p">,</span> <span class="s2">&quot;pre_tool&quot;</span><span class="p">)</span>
                 <span class="n">hook_decision</span> <span class="o">=</span> <span class="k">await</span> <span class="n">deps</span><span class="o">.</span><span class="n">hooks</span><span class="o">.</span><span class="n">pre_tool</span><span class="p">(</span><span class="n">call</span><span class="p">)</span>
 
         <span class="k">if</span> <span class="n">hook_decision</span><span class="o">.</span><span class="n">deny</span><span class="p">:</span>
@@ -1006,18 +1015,49 @@
                         <span class="n">call</span><span class="p">,</span> <span class="n">context</span><span class="o">=</span><span class="p">{},</span> <span class="n">user_id</span><span class="o">=</span><span class="n">run_user_id</span>
                     <span class="p">)</span>
                 <span class="k">except</span> <span class="ne">TypeError</span><span class="p">:</span>
-                    <span class="c1"># Legacy Permissions without the kwarg.</span>
+                    <span class="c1"># Legacy Permissions without the kwarg. Warn</span>
+                    <span class="c1"># once per-process so callers know to add it.</span>
+                    <span class="n">warn_legacy_protocol</span><span class="p">(</span><span class="s2">&quot;Permissions&quot;</span><span class="p">,</span> <span class="s2">&quot;check&quot;</span><span class="p">)</span>
                     <span class="n">perm</span> <span class="o">=</span> <span class="k">await</span> <span class="n">deps</span><span class="o">.</span><span class="n">permissions</span><span class="o">.</span><span class="n">check</span><span class="p">(</span><span class="n">call</span><span class="p">,</span> <span class="n">context</span><span class="o">=</span><span class="p">{})</span>
+            <span class="c1"># Decide whether to execute, then either set a deny</span>
+            <span class="c1"># result here or fall into the execute-and-post-hook</span>
+            <span class="c1"># block below. ``execute_call`` stays True only when</span>
+            <span class="c1"># every gate (deny / ask) approved.</span>
+            <span class="n">execute_call</span> <span class="o">=</span> <span class="kc">True</span>
+            <span class="c1"># When ``deps.fast_hooks`` is True we never actually</span>
+            <span class="c1"># ran a hook — the ``allow_()`` we pre-set above is a</span>
+            <span class="c1"># default, not an explicit approval. Distinguish so an</span>
+            <span class="c1"># ``ask`` from permissions doesn&#39;t get silently bypassed</span>
+            <span class="c1"># by the absence of a hook layer.</span>
+            <span class="n">hook_explicitly_allowed</span> <span class="o">=</span> <span class="p">(</span>
+                <span class="p">(</span><span class="ow">not</span> <span class="n">deps</span><span class="o">.</span><span class="n">fast_hooks</span><span class="p">)</span> <span class="ow">and</span> <span class="n">hook_decision</span><span class="o">.</span><span class="n">allow</span>
+            <span class="p">)</span>
             <span class="k">if</span> <span class="n">perm</span><span class="o">.</span><span class="n">deny</span><span class="p">:</span>
                 <span class="n">result</span> <span class="o">=</span> <span class="n">ToolResult</span><span class="o">.</span><span class="n">denied_</span><span class="p">(</span>
                     <span class="n">call</span><span class="o">.</span><span class="n">id</span><span class="p">,</span> <span class="n">perm</span><span class="o">.</span><span class="n">reason</span> <span class="ow">or</span> <span class="s2">&quot;denied by policy&quot;</span>
                 <span class="p">)</span>
-            <span class="k">elif</span> <span class="n">perm</span><span class="o">.</span><span class="n">ask</span> <span class="ow">and</span> <span class="ow">not</span> <span class="n">hook_decision</span><span class="o">.</span><span class="n">allow</span><span class="p">:</span>
-                <span class="n">result</span> <span class="o">=</span> <span class="n">ToolResult</span><span class="o">.</span><span class="n">denied_</span><span class="p">(</span>
-                    <span class="n">call</span><span class="o">.</span><span class="n">id</span><span class="p">,</span>
-                    <span class="n">perm</span><span class="o">.</span><span class="n">reason</span> <span class="ow">or</span> <span class="s2">&quot;approval required; no approver&quot;</span><span class="p">,</span>
+                <span class="n">execute_call</span> <span class="o">=</span> <span class="kc">False</span>
+            <span class="k">elif</span> <span class="n">perm</span><span class="o">.</span><span class="n">ask</span> <span class="ow">and</span> <span class="ow">not</span> <span class="n">hook_explicitly_allowed</span><span class="p">:</span>
+                <span class="c1"># Permissions returned ``ask`` — route the decision</span>
+                <span class="c1"># through the configured approval handler. When no</span>
+                <span class="c1"># handler is wired, fall back to a deny so the agent</span>
+                <span class="c1"># never silently bypasses the approval gate.</span>
+                <span class="n">approved</span> <span class="o">=</span> <span class="k">await</span> <span class="n">_resolve_ask_decision</span><span class="p">(</span>
+                    <span class="n">call</span><span class="p">,</span>
+                    <span class="n">deps</span><span class="o">.</span><span class="n">approval_handler</span><span class="p">,</span>
+                    <span class="n">run_user_id</span><span class="p">,</span>
                 <span class="p">)</span>
-            <span class="k">else</span><span class="p">:</span>
+                <span class="k">if</span> <span class="ow">not</span> <span class="n">approved</span><span class="p">:</span>
+                    <span class="n">result</span> <span class="o">=</span> <span class="n">ToolResult</span><span class="o">.</span><span class="n">denied_</span><span class="p">(</span>
+                        <span class="n">call</span><span class="o">.</span><span class="n">id</span><span class="p">,</span>
+                        <span class="n">perm</span><span class="o">.</span><span class="n">reason</span> <span class="ow">or</span> <span class="p">(</span>
+                            <span class="s2">&quot;approval required; no approver&quot;</span>
+                            <span class="k">if</span> <span class="n">deps</span><span class="o">.</span><span class="n">approval_handler</span> <span class="ow">is</span> <span class="kc">None</span>
+                            <span class="k">else</span> <span class="s2">&quot;approval declined&quot;</span>
+                        <span class="p">),</span>
+                    <span class="p">)</span>
+                    <span class="n">execute_call</span> <span class="o">=</span> <span class="kc">False</span>
+            <span class="k">if</span> <span class="n">execute_call</span><span class="p">:</span>
                 <span class="k">try</span><span class="p">:</span>
                     <span class="k">if</span> <span class="n">deps</span><span class="o">.</span><span class="n">fast_runtime</span><span class="p">:</span>
                         <span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">deps</span><span class="o">.</span><span class="n">tools</span><span class="o">.</span><span class="n">call</span><span class="p">(</span>
@@ -1043,6 +1083,7 @@
                             <span class="n">call</span><span class="p">,</span> <span class="n">result</span><span class="p">,</span> <span class="n">user_id</span><span class="o">=</span><span class="n">run_user_id</span>
                         <span class="p">)</span>
                     <span class="k">except</span> <span class="ne">TypeError</span><span class="p">:</span>
+                        <span class="n">warn_legacy_protocol</span><span class="p">(</span><span class="s2">&quot;HookHost&quot;</span><span class="p">,</span> <span class="s2">&quot;post_tool&quot;</span><span class="p">)</span>
                         <span class="k">await</span> <span class="n">deps</span><span class="o">.</span><span class="n">hooks</span><span class="o">.</span><span class="n">post_tool</span><span class="p">(</span><span class="n">call</span><span class="p">,</span> <span class="n">result</span><span class="p">)</span>
 
     <span class="k">if</span> <span class="ow">not</span> <span class="n">deps</span><span class="o">.</span><span class="n">fast_telemetry</span><span class="p">:</span>
@@ -1055,6 +1096,35 @@
             <span class="n">denied</span><span class="o">=</span><span class="n">result</span><span class="o">.</span><span class="n">denied</span><span class="p">,</span>
         <span class="p">)</span>
     <span class="k">return</span> <span class="n">result</span>
+
+
+<span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">_resolve_ask_decision</span><span class="p">(</span>
+    <span class="n">call</span><span class="p">:</span> <span class="n">ToolCall</span><span class="p">,</span>
+    <span class="n">handler</span><span class="p">:</span> <span class="n">Any</span><span class="p">,</span>  <span class="c1"># ApprovalHandler | None — Any keeps the import flat</span>
+    <span class="n">user_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Translate a ``Decision.ask_`` permissions outcome into an</span>
+<span class="sd">    allow/deny by invoking the registered approval handler.</span>
+
+<span class="sd">    Returns ``True`` when the handler approves the call, ``False``</span>
+<span class="sd">    when it declines, when no handler is wired, or when the handler</span>
+<span class="sd">    raises. A raising handler is treated as a deny (and logged) so</span>
+<span class="sd">    a buggy approval flow never silently green-lights a tool the</span>
+<span class="sd">    policy explicitly wanted gated.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="k">if</span> <span class="n">handler</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="k">return</span> <span class="kc">False</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="k">return</span> <span class="nb">bool</span><span class="p">(</span><span class="k">await</span> <span class="n">handler</span><span class="p">(</span><span class="n">call</span><span class="p">,</span> <span class="n">user_id</span><span class="p">))</span>
+    <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">exc</span><span class="p">:</span>  <span class="c1"># noqa: BLE001 — defensive: handlers</span>
+        <span class="c1"># may raise from UI plumbing / network failures. We must</span>
+        <span class="c1"># not turn a buggy approval flow into a permissive one.</span>
+        <span class="n">logging</span><span class="o">.</span><span class="n">getLogger</span><span class="p">(</span><span class="s2">&quot;jeevesagent.architecture.react&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">warning</span><span class="p">(</span>
+            <span class="s2">&quot;approval_handler raised for tool=</span><span class="si">%s</span><span class="s2">; treating as deny: </span><span class="si">%s</span><span class="s2">&quot;</span><span class="p">,</span>
+            <span class="n">call</span><span class="o">.</span><span class="n">tool</span><span class="p">,</span>
+            <span class="n">exc</span><span class="p">,</span>
+        <span class="p">)</span>
+        <span class="k">return</span> <span class="kc">False</span>
 
 
 <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">_audit</span><span class="p">(</span>
@@ -1078,6 +1148,7 @@
         <span class="p">)</span>
     <span class="k">except</span> <span class="ne">TypeError</span><span class="p">:</span>
         <span class="c1"># Legacy AuditLog impls without the user_id kwarg.</span>
+        <span class="n">warn_legacy_protocol</span><span class="p">(</span><span class="s2">&quot;AuditLog&quot;</span><span class="p">,</span> <span class="s2">&quot;append&quot;</span><span class="p">)</span>
         <span class="k">await</span> <span class="n">audit_log</span><span class="o">.</span><span class="n">append</span><span class="p">(</span>
             <span class="n">session_id</span><span class="o">=</span><span class="n">session_id</span><span class="p">,</span>
             <span class="n">actor</span><span class="o">=</span><span class="n">actor</span><span class="p">,</span>

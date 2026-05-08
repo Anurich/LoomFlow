@@ -196,6 +196,10 @@
 <li class="toctree-l1"><a class="reference internal" href="../../../recipes.html">Recipes</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../architecture.html">Architecture</a></li>
 </ul>
+<p class="caption" role="heading"><span class="caption-text">Production</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../production_hardening.html">Production hardening</a></li>
+</ul>
 <p class="caption" role="heading"><span class="caption-text">Migrating from</span></p>
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="../../../migrations/from-langgraph.html">Migrating from LangGraph</a></li>
@@ -318,6 +322,7 @@
 <li class="toctree-l4"><a class="reference internal" href="../../../api/jeevesagent/security/sandbox/subprocess_/index.html">jeevesagent.security.sandbox.subprocess</a></li>
 </ul>
 </li>
+<li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/security/secrets/index.html">jeevesagent.security.secrets</a></li>
 </ul>
 </li>
 <li class="toctree-l2 has-children"><a class="reference internal" href="../../../api/jeevesagent/skills/index.html">jeevesagent.skills</a><input aria-label="Toggle navigation of jeevesagent.skills" class="toctree-checkbox" id="toctree-checkbox-16" name="toctree-checkbox-16" role="switch" type="checkbox"/><label for="toctree-checkbox-16"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
@@ -922,7 +927,19 @@
 <div class="viewcode-block" id="Secrets">
 <a class="viewcode-back" href="../../../api/jeevesagent/index.html#jeevesagent.core.Secrets">[docs]</a>
 <span class="k">class</span><span class="w"> </span><span class="nc">Secrets</span><span class="p">(</span><span class="n">Protocol</span><span class="p">):</span>
-<span class="w">    </span><span class="sd">&quot;&quot;&quot;Resolution and redaction of named secrets.&quot;&quot;&quot;</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Resolution and redaction of named secrets.</span>
+
+<span class="sd">    ``resolve`` / ``store`` are async because most production secrets</span>
+<span class="sd">    backends (Vault, AWS Secrets Manager, GCP Secret Manager) talk</span>
+<span class="sd">    over the network. ``lookup_sync`` exists for the</span>
+<span class="sd">    *constructor-time* path: when the framework needs to wire an</span>
+<span class="sd">    API key into a model adapter before any event loop is running</span>
+<span class="sd">    (e.g. ``OpenAIModel(...)`` from inside ``Agent.__init__``).</span>
+<span class="sd">    Concrete impls returning ``None`` from ``lookup_sync`` for refs</span>
+<span class="sd">    that can&#39;t be resolved synchronously are fine — callers should</span>
+<span class="sd">    fall back to ``os.environ`` or to the explicit ``api_key=``</span>
+<span class="sd">    argument.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
 
 <div class="viewcode-block" id="Secrets.resolve">
 <a class="viewcode-back" href="../../../api/jeevesagent/index.html#jeevesagent.core.Secrets.resolve">[docs]</a>
@@ -939,6 +956,17 @@
 <div class="viewcode-block" id="Secrets.redact">
 <a class="viewcode-back" href="../../../api/jeevesagent/index.html#jeevesagent.core.Secrets.redact">[docs]</a>
     <span class="k">def</span><span class="w"> </span><span class="nf">redact</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">text</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+        <span class="o">...</span></div>
+
+
+<div class="viewcode-block" id="Secrets.lookup_sync">
+<a class="viewcode-back" href="../../../api/jeevesagent/index.html#jeevesagent.core.Secrets.lookup_sync">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">lookup_sync</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">ref</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Synchronous best-effort lookup, for constructor-time</span>
+<span class="sd">        callers that can&#39;t await. Returns ``None`` when the ref</span>
+<span class="sd">        isn&#39;t available synchronously (e.g. the impl needs a</span>
+<span class="sd">        network round-trip). Default impls in :mod:`jeevesagent.</span>
+<span class="sd">        security.secrets` cover env-var and in-memory lookups.&quot;&quot;&quot;</span>
         <span class="o">...</span></div>
 </div>
 

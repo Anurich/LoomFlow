@@ -195,6 +195,10 @@
 <li class="toctree-l1"><a class="reference internal" href="recipes.html">Recipes</a></li>
 <li class="toctree-l1"><a class="reference internal" href="architecture.html">Architecture</a></li>
 </ul>
+<p class="caption" role="heading"><span class="caption-text">Production</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="production_hardening.html">Production hardening</a></li>
+</ul>
 <p class="caption" role="heading"><span class="caption-text">Migrating from</span></p>
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="migrations/from-langgraph.html">Migrating from LangGraph</a></li>
@@ -317,6 +321,7 @@
 <li class="toctree-l4"><a class="reference internal" href="api/jeevesagent/security/sandbox/subprocess_/index.html">jeevesagent.security.sandbox.subprocess</a></li>
 </ul>
 </li>
+<li class="toctree-l3"><a class="reference internal" href="api/jeevesagent/security/secrets/index.html">jeevesagent.security.secrets</a></li>
 </ul>
 </li>
 <li class="toctree-l2 has-children"><a class="reference internal" href="api/jeevesagent/skills/index.html">jeevesagent.skills</a><input aria-label="Toggle navigation of jeevesagent.skills" class="toctree-checkbox" id="toctree-checkbox-16" name="toctree-checkbox-16" role="switch" type="checkbox"/><label for="toctree-checkbox-16"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
@@ -864,8 +869,6 @@
           <li><a href="api/jeevesagent/security/permissions/index.html#jeevesagent.security.permissions.AllowAll">(class in jeevesagent.security.permissions)</a>
 </li>
         </ul></li>
-    </ul></td>
-    <td style="width: 33%; vertical-align: top;"><ul>
         <li><a href="api/jeevesagent/data/lineage/index.html#jeevesagent.data.lineage.LineagePolicy.allowed_sources">allowed_sources (jeevesagent.data.lineage.LineagePolicy attribute)</a>
 
         <ul>
@@ -874,6 +877,8 @@
           <li><a href="api/jeevesagent/index.html#jeevesagent.LineagePolicy.allowed_sources">(jeevesagent.LineagePolicy attribute)</a>
 </li>
         </ul></li>
+    </ul></td>
+    <td style="width: 33%; vertical-align: top;"><ul>
         <li><a href="api/jeevesagent/index.html#jeevesagent.SkillMetadata.allowed_tools">allowed_tools (jeevesagent.SkillMetadata attribute)</a>
 
         <ul>
@@ -1040,6 +1045,16 @@
           <li><a href="api/jeevesagent/index.html#jeevesagent.PostgresFactStore.append_many">(jeevesagent.PostgresFactStore method)</a>
 </li>
         </ul></li>
+        <li><a href="api/jeevesagent/architecture/base/index.html#jeevesagent.architecture.base.Dependencies.approval_handler">approval_handler (jeevesagent.architecture.base.Dependencies attribute)</a>
+
+        <ul>
+          <li><a href="api/jeevesagent/architecture/index.html#jeevesagent.architecture.Dependencies.approval_handler">(jeevesagent.architecture.Dependencies attribute)</a>
+</li>
+          <li><a href="api/jeevesagent/index.html#jeevesagent.Dependencies.approval_handler">(jeevesagent.Dependencies attribute)</a>
+</li>
+        </ul></li>
+        <li><a href="api/jeevesagent/architecture/base/index.html#jeevesagent.architecture.base.ApprovalHandler">ApprovalHandler (in module jeevesagent.architecture.base)</a>
+</li>
         <li><a href="api/jeevesagent/index.html#jeevesagent.Architecture">Architecture (class in jeevesagent)</a>
 
         <ul>
@@ -2350,6 +2365,14 @@
           <li><a href="api/jeevesagent/core/ids/index.html#jeevesagent.core.ids.deterministic_hash">(in module jeevesagent.core.ids)</a>
 </li>
         </ul></li>
+        <li><a href="api/jeevesagent/index.html#jeevesagent.DictSecrets">DictSecrets (class in jeevesagent)</a>
+
+        <ul>
+          <li><a href="api/jeevesagent/security/index.html#jeevesagent.security.DictSecrets">(class in jeevesagent.security)</a>
+</li>
+          <li><a href="api/jeevesagent/security/secrets/index.html#jeevesagent.security.secrets.DictSecrets">(class in jeevesagent.security.secrets)</a>
+</li>
+        </ul></li>
         <li><a href="api/jeevesagent/index.html#jeevesagent.CohereEmbedder.dimensions">dimensions (jeevesagent.CohereEmbedder attribute)</a>
 
         <ul>
@@ -2628,14 +2651,14 @@
           <li><a href="api/jeevesagent/index.html#jeevesagent.Telemetry.emit_metric">(jeevesagent.Telemetry method)</a>
 </li>
         </ul></li>
-    </ul></td>
-    <td style="width: 33%; vertical-align: top;"><ul>
         <li><a href="api/jeevesagent/loader/chunking/index.html#jeevesagent.loader.chunking.TokenChunker.encoding_name">encoding_name (jeevesagent.loader.chunking.TokenChunker attribute)</a>
 
         <ul>
           <li><a href="api/jeevesagent/loader/index.html#jeevesagent.loader.TokenChunker.encoding_name">(jeevesagent.loader.TokenChunker attribute)</a>
 </li>
         </ul></li>
+    </ul></td>
+    <td style="width: 33%; vertical-align: top;"><ul>
         <li><a href="api/jeevesagent/memory/redis/index.html#jeevesagent.memory.redis.RedisMemory.ensure_index">ensure_index() (jeevesagent.memory.redis.RedisMemory method)</a>
 
         <ul>
@@ -2650,6 +2673,14 @@
           <li><a href="api/jeevesagent/mcp/spec/index.html#jeevesagent.mcp.spec.MCPServerSpec.env">(jeevesagent.mcp.spec.MCPServerSpec attribute)</a>
 </li>
           <li><a href="api/jeevesagent/index.html#jeevesagent.MCPServerSpec.env">(jeevesagent.MCPServerSpec attribute)</a>
+</li>
+        </ul></li>
+        <li><a href="api/jeevesagent/index.html#jeevesagent.EnvSecrets">EnvSecrets (class in jeevesagent)</a>
+
+        <ul>
+          <li><a href="api/jeevesagent/security/index.html#jeevesagent.security.EnvSecrets">(class in jeevesagent.security)</a>
+</li>
+          <li><a href="api/jeevesagent/security/secrets/index.html#jeevesagent.security.secrets.EnvSecrets">(class in jeevesagent.security.secrets)</a>
 </li>
         </ul></li>
         <li><a href="api/jeevesagent/index.html#jeevesagent.ChromaFactStore.ephemeral">ephemeral() (jeevesagent.ChromaFactStore class method)</a>
@@ -4219,8 +4250,6 @@
           <li><a href="api/jeevesagent/memory/facts/index.html#module-jeevesagent.memory.facts">module</a>
 </li>
         </ul></li>
-    </ul></td>
-    <td style="width: 33%; vertical-align: top;"><ul>
         <li>
     jeevesagent.memory.inmemory
 
@@ -4228,6 +4257,8 @@
           <li><a href="api/jeevesagent/memory/inmemory/index.html#module-jeevesagent.memory.inmemory">module</a>
 </li>
         </ul></li>
+    </ul></td>
+    <td style="width: 33%; vertical-align: top;"><ul>
         <li>
     jeevesagent.memory.lazy
 
@@ -4457,6 +4488,13 @@
 
         <ul>
           <li><a href="api/jeevesagent/security/sandbox/subprocess_/index.html#module-jeevesagent.security.sandbox.subprocess_">module</a>
+</li>
+        </ul></li>
+        <li>
+    jeevesagent.security.secrets
+
+        <ul>
+          <li><a href="api/jeevesagent/security/secrets/index.html#module-jeevesagent.security.secrets">module</a>
 </li>
         </ul></li>
         <li>
@@ -4890,6 +4928,26 @@
 
         <ul>
           <li><a href="api/jeevesagent/jeeves/client/index.html#jeevesagent.jeeves.client.looks_like_jeeves_key">(in module jeevesagent.jeeves.client)</a>
+</li>
+        </ul></li>
+        <li><a href="api/jeevesagent/core/protocols/index.html#jeevesagent.core.protocols.Secrets.lookup_sync">lookup_sync() (jeevesagent.core.protocols.Secrets method)</a>
+
+        <ul>
+          <li><a href="api/jeevesagent/core/index.html#jeevesagent.core.Secrets.lookup_sync">(jeevesagent.core.Secrets method)</a>
+</li>
+          <li><a href="api/jeevesagent/index.html#jeevesagent.DictSecrets.lookup_sync">(jeevesagent.DictSecrets method)</a>
+</li>
+          <li><a href="api/jeevesagent/index.html#jeevesagent.EnvSecrets.lookup_sync">(jeevesagent.EnvSecrets method)</a>
+</li>
+          <li><a href="api/jeevesagent/index.html#jeevesagent.Secrets.lookup_sync">(jeevesagent.Secrets method)</a>
+</li>
+          <li><a href="api/jeevesagent/security/index.html#jeevesagent.security.DictSecrets.lookup_sync">(jeevesagent.security.DictSecrets method)</a>
+</li>
+          <li><a href="api/jeevesagent/security/index.html#jeevesagent.security.EnvSecrets.lookup_sync">(jeevesagent.security.EnvSecrets method)</a>
+</li>
+          <li><a href="api/jeevesagent/security/secrets/index.html#jeevesagent.security.secrets.DictSecrets.lookup_sync">(jeevesagent.security.secrets.DictSecrets method)</a>
+</li>
+          <li><a href="api/jeevesagent/security/secrets/index.html#jeevesagent.security.secrets.EnvSecrets.lookup_sync">(jeevesagent.security.secrets.EnvSecrets method)</a>
 </li>
         </ul></li>
     </ul></td>
@@ -5387,6 +5445,8 @@
           <li><a href="api/jeevesagent/security/sandbox/filesystem/index.html#module-jeevesagent.security.sandbox.filesystem">jeevesagent.security.sandbox.filesystem</a>
 </li>
           <li><a href="api/jeevesagent/security/sandbox/subprocess_/index.html#module-jeevesagent.security.sandbox.subprocess_">jeevesagent.security.sandbox.subprocess_</a>
+</li>
+          <li><a href="api/jeevesagent/security/secrets/index.html#module-jeevesagent.security.secrets">jeevesagent.security.secrets</a>
 </li>
           <li><a href="api/jeevesagent/skills/index.html#module-jeevesagent.skills">jeevesagent.skills</a>
 </li>
@@ -6644,7 +6704,19 @@
         <ul>
           <li><a href="api/jeevesagent/core/index.html#jeevesagent.core.Secrets.redact">(jeevesagent.core.Secrets method)</a>
 </li>
+          <li><a href="api/jeevesagent/index.html#jeevesagent.DictSecrets.redact">(jeevesagent.DictSecrets method)</a>
+</li>
+          <li><a href="api/jeevesagent/index.html#jeevesagent.EnvSecrets.redact">(jeevesagent.EnvSecrets method)</a>
+</li>
           <li><a href="api/jeevesagent/index.html#jeevesagent.Secrets.redact">(jeevesagent.Secrets method)</a>
+</li>
+          <li><a href="api/jeevesagent/security/index.html#jeevesagent.security.DictSecrets.redact">(jeevesagent.security.DictSecrets method)</a>
+</li>
+          <li><a href="api/jeevesagent/security/index.html#jeevesagent.security.EnvSecrets.redact">(jeevesagent.security.EnvSecrets method)</a>
+</li>
+          <li><a href="api/jeevesagent/security/secrets/index.html#jeevesagent.security.secrets.DictSecrets.redact">(jeevesagent.security.secrets.DictSecrets method)</a>
+</li>
+          <li><a href="api/jeevesagent/security/secrets/index.html#jeevesagent.security.secrets.EnvSecrets.redact">(jeevesagent.security.secrets.EnvSecrets method)</a>
 </li>
         </ul></li>
         <li><a href="api/jeevesagent/index.html#jeevesagent.RedisFactStore">RedisFactStore (class in jeevesagent)</a>
@@ -6828,7 +6900,19 @@
         <ul>
           <li><a href="api/jeevesagent/core/index.html#jeevesagent.core.Secrets.resolve">(jeevesagent.core.Secrets method)</a>
 </li>
+          <li><a href="api/jeevesagent/index.html#jeevesagent.DictSecrets.resolve">(jeevesagent.DictSecrets method)</a>
+</li>
+          <li><a href="api/jeevesagent/index.html#jeevesagent.EnvSecrets.resolve">(jeevesagent.EnvSecrets method)</a>
+</li>
           <li><a href="api/jeevesagent/index.html#jeevesagent.Secrets.resolve">(jeevesagent.Secrets method)</a>
+</li>
+          <li><a href="api/jeevesagent/security/index.html#jeevesagent.security.DictSecrets.resolve">(jeevesagent.security.DictSecrets method)</a>
+</li>
+          <li><a href="api/jeevesagent/security/index.html#jeevesagent.security.EnvSecrets.resolve">(jeevesagent.security.EnvSecrets method)</a>
+</li>
+          <li><a href="api/jeevesagent/security/secrets/index.html#jeevesagent.security.secrets.DictSecrets.resolve">(jeevesagent.security.secrets.DictSecrets method)</a>
+</li>
+          <li><a href="api/jeevesagent/security/secrets/index.html#jeevesagent.security.secrets.EnvSecrets.resolve">(jeevesagent.security.secrets.EnvSecrets method)</a>
 </li>
         </ul></li>
         <li><a href="api/jeevesagent/index.html#jeevesagent.resolve_architecture">resolve_architecture() (in module jeevesagent)</a>
@@ -7553,8 +7637,6 @@
           <li><a href="api/jeevesagent/agent/api/index.html#jeevesagent.agent.api.Agent.skills">(jeevesagent.agent.api.Agent property)</a>
 </li>
         </ul></li>
-    </ul></td>
-    <td style="width: 33%; vertical-align: top;"><ul>
         <li><a href="api/jeevesagent/index.html#jeevesagent.SkillSource">SkillSource (class in jeevesagent)</a>
 
         <ul>
@@ -7563,6 +7645,8 @@
           <li><a href="api/jeevesagent/skills/source/index.html#jeevesagent.skills.source.SkillSource">(class in jeevesagent.skills.source)</a>
 </li>
         </ul></li>
+    </ul></td>
+    <td style="width: 33%; vertical-align: top;"><ul>
         <li><a href="api/jeevesagent/skills/index.html#jeevesagent.skills.SkillSpec">SkillSpec (in module jeevesagent.skills)</a>
 
         <ul>
@@ -7834,7 +7918,19 @@
         <ul>
           <li><a href="api/jeevesagent/core/index.html#jeevesagent.core.Secrets.store">(jeevesagent.core.Secrets method)</a>
 </li>
+          <li><a href="api/jeevesagent/index.html#jeevesagent.DictSecrets.store">(jeevesagent.DictSecrets method)</a>
+</li>
+          <li><a href="api/jeevesagent/index.html#jeevesagent.EnvSecrets.store">(jeevesagent.EnvSecrets method)</a>
+</li>
           <li><a href="api/jeevesagent/index.html#jeevesagent.Secrets.store">(jeevesagent.Secrets method)</a>
+</li>
+          <li><a href="api/jeevesagent/security/index.html#jeevesagent.security.DictSecrets.store">(jeevesagent.security.DictSecrets method)</a>
+</li>
+          <li><a href="api/jeevesagent/security/index.html#jeevesagent.security.EnvSecrets.store">(jeevesagent.security.EnvSecrets method)</a>
+</li>
+          <li><a href="api/jeevesagent/security/secrets/index.html#jeevesagent.security.secrets.DictSecrets.store">(jeevesagent.security.secrets.DictSecrets method)</a>
+</li>
+          <li><a href="api/jeevesagent/security/secrets/index.html#jeevesagent.security.secrets.EnvSecrets.store">(jeevesagent.security.secrets.EnvSecrets method)</a>
 </li>
         </ul></li>
         <li><a href="api/jeevesagent/index.html#jeevesagent.Agent.stream">stream() (jeevesagent.Agent method)</a>

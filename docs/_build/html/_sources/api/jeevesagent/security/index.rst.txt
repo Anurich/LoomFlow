@@ -19,6 +19,7 @@ Submodules
    /api/jeevesagent/security/hooks/index
    /api/jeevesagent/security/permissions/index
    /api/jeevesagent/security/sandbox/index
+   /api/jeevesagent/security/secrets/index
 
 
 Attributes
@@ -37,6 +38,8 @@ Classes
 
    jeevesagent.security.AllowAll
    jeevesagent.security.AuditLog
+   jeevesagent.security.DictSecrets
+   jeevesagent.security.EnvSecrets
    jeevesagent.security.FileAuditLog
    jeevesagent.security.FilesystemSandbox
    jeevesagent.security.HookRegistry
@@ -90,6 +93,64 @@ Package Contents
 
 
    .. py:method:: query(*, session_id: str | None = None, action: str | None = None, user_id: str | None = None) -> list[jeevesagent.core.types.AuditEntry]
+      :async:
+
+
+
+.. py:class:: DictSecrets(initial: dict[str, str] | None = None)
+
+   In-process :class:`Secrets` backed by an explicit dict.
+
+   Useful in tests and for callers that fetch secrets once at
+   startup (from a config file, a one-shot Vault read, etc.) and
+   want to make them available to the framework without leaking
+   them into ``os.environ``.
+
+   Mutable: ``store()`` updates the in-process map. Not durable
+   across process restarts.
+
+
+   .. py:method:: lookup_sync(ref: str) -> str | None
+
+
+   .. py:method:: redact(text: str) -> str
+
+
+   .. py:method:: resolve(ref: str) -> str
+      :async:
+
+
+
+   .. py:method:: store(ref: str, value: str) -> None
+      :async:
+
+
+
+.. py:class:: EnvSecrets
+
+   Reads secrets from ``os.environ``.
+
+   The default :class:`Secrets` impl wired by :class:`Agent` when
+   the caller doesn't pass an explicit one. Behaviour matches the
+   pre-M10 framework: API keys are looked up as the corresponding
+   environment variable name (``OPENAI_API_KEY``,
+   ``ANTHROPIC_API_KEY``, etc.).
+
+
+   .. py:method:: lookup_sync(ref: str) -> str | None
+
+
+   .. py:method:: redact(text: str) -> str
+
+
+   .. py:method:: resolve(ref: str) -> str
+      :async:
+
+
+
+   .. py:method:: store(ref: str, value: str) -> None
+      :abstractmethod:
+
       :async:
 
 

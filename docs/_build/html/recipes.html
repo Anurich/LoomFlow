@@ -197,6 +197,10 @@
 <li class="toctree-l1 current current-page"><a class="current reference internal" href="#">Recipes</a></li>
 <li class="toctree-l1"><a class="reference internal" href="architecture.html">Architecture</a></li>
 </ul>
+<p class="caption" role="heading"><span class="caption-text">Production</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="production_hardening.html">Production hardening</a></li>
+</ul>
 <p class="caption" role="heading"><span class="caption-text">Migrating from</span></p>
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="migrations/from-langgraph.html">Migrating from LangGraph</a></li>
@@ -319,6 +323,7 @@
 <li class="toctree-l4"><a class="reference internal" href="api/jeevesagent/security/sandbox/subprocess_/index.html">jeevesagent.security.sandbox.subprocess</a></li>
 </ul>
 </li>
+<li class="toctree-l3"><a class="reference internal" href="api/jeevesagent/security/secrets/index.html">jeevesagent.security.secrets</a></li>
 </ul>
 </li>
 <li class="toctree-l2 has-children"><a class="reference internal" href="api/jeevesagent/skills/index.html">jeevesagent.skills</a><input aria-label="Toggle navigation of jeevesagent.skills" class="toctree-checkbox" id="toctree-checkbox-16" name="toctree-checkbox-16" role="switch" type="checkbox"/><label for="toctree-checkbox-16"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
@@ -365,12 +370,12 @@
         </a>
         <div class="content-icon-container">
           <div class="view-this-page">
-  <a class="muted-link" href="https://github.com/anthropics/jeevesagent/blob/main/docs/recipes.md?plain=true" title="View this page">
+  <a class="muted-link" href="https://github.com/Anurich/JeevesHarness/blob/main/docs/recipes.md?plain=true" title="View this page">
     <svg><use href="#svg-eye"></use></svg>
     <span class="visually-hidden">View this page</span>
   </a>
 </div><div class="edit-this-page">
-  <a class="muted-link" href="https://github.com/anthropics/jeevesagent/edit/main/docs/recipes.md" rel="edit" title="Edit this page">
+  <a class="muted-link" href="https://github.com/Anurich/JeevesHarness/edit/main/docs/recipes.md" rel="edit" title="Edit this page">
     <svg><use href="#svg-pencil"></use></svg>
     <span class="visually-hidden">Edit this page</span>
   </a>
@@ -696,6 +701,12 @@ for single-instance, <code class="docutils literal notranslate"><span class="pre
 <li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox"> <strong>Multi-tenancy</strong>: pass <code class="docutils literal notranslate"><span class="pre">user_id=</span></code> and <code class="docutils literal notranslate"><span class="pre">session_id=</span></code> to
 every <code class="docutils literal notranslate"><span class="pre">agent.run</span></code>. Memory partitions automatically; no app-side
 namespace plumbing.</p></li>
+<li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox"> <strong>Per-user budget caps</strong>: <code class="docutils literal notranslate"><span class="pre">BudgetConfig(per_user_max_tokens=,</span> <span class="pre">per_user_max_cost_usd=)</span></code> so one tenant can’t exhaust another’s
+quota. See <a class="reference internal" href="production_hardening.html#per-user-budget-caps"><span class="std std-ref">Production hardening</span></a>.</p></li>
+<li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox"> <strong>Bounded in-process state</strong>: <code class="docutils literal notranslate"><span class="pre">StandardBudget</span></code> and
+<code class="docutils literal notranslate"><span class="pre">InMemoryMemory</span></code> default to 100k users + 24h idle TTL. For known
+smaller tenant pools, lower <code class="docutils literal notranslate"><span class="pre">max_users</span></code> to reclaim memory
+faster.</p></li>
 <li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox"> <strong>Auto fact extraction</strong>: on by default for real models;
 facts the user tells the bot persist as structured triples for
 future runs to recall. Pass <code class="docutils literal notranslate"><span class="pre">auto_extract=False</span></code> to opt out.</p></li>
@@ -710,25 +721,39 @@ future runs to recall. Pass <code class="docutils literal notranslate"><span cla
 <li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox"> <strong>Telemetry</strong>: <code class="docutils literal notranslate"><span class="pre">OTelTelemetry</span></code> wired to your existing
 TracerProvider. At minimum, surface <code class="docutils literal notranslate"><span class="pre">jeeves.session.duration_ms</span></code>,
 <code class="docutils literal notranslate"><span class="pre">jeeves.tokens.input/output</span></code>, <code class="docutils literal notranslate"><span class="pre">jeeves.cost.usd</span></code>,
-<code class="docutils literal notranslate"><span class="pre">jeeves.budget.exceeded</span></code>.</p></li>
+<code class="docutils literal notranslate"><span class="pre">jeeves.budget.exceeded</span></code>, <code class="docutils literal notranslate"><span class="pre">jeeves.auto_extract.duration_ms</span></code>,
+<code class="docutils literal notranslate"><span class="pre">jeeves.auto_extract.invocations</span></code> (last two appear when
+<code class="docutils literal notranslate"><span class="pre">auto_extract</span></code> is on; tagged by <code class="docutils literal notranslate"><span class="pre">user_id</span></code>).</p></li>
 <li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox"> <strong>Audit log</strong>: <code class="docutils literal notranslate"><span class="pre">FileAuditLog</span></code> (or Postgres-backed when
 available) with a real HMAC secret. Every tool call and run-lifecycle
-transition lands here.</p></li>
+transition lands here, attributed by <code class="docutils literal notranslate"><span class="pre">user_id</span></code> (top-level
+field; HMAC includes it).</p></li>
 <li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox"> <strong>Streaming</strong>: expose <code class="docutils literal notranslate"><span class="pre">stream()</span></code> so a UI / log pipeline can
 follow the loop in real time.</p></li>
+<li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox"> <strong>Multi-tenant load test</strong>: run <code class="docutils literal notranslate"><span class="pre">bench/multi_tenant.py</span></code>
+before any release that touches the agent loop, memory, or
+budget. Catches isolation regressions that unit tests miss.</p></li>
 </ul>
 </section>
 <section id="security">
 <h3>Security<a class="headerlink" href="#security" title="Link to this heading">¶</a></h3>
 <ul class="contains-task-list simple">
 <li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox"> <strong>Permission policy</strong>: <code class="docutils literal notranslate"><span class="pre">StandardPermissions(mode=Mode.DEFAULT)</span></code>
-for interactive use; <code class="docutils literal notranslate"><span class="pre">BYPASS</span></code> only in CI / sandbox.</p></li>
+for interactive use; <code class="docutils literal notranslate"><span class="pre">BYPASS</span></code> only in CI / sandbox. For
+per-tenant policy routing, use <code class="docutils literal notranslate"><span class="pre">PerUserPermissions(policies=,</span> <span class="pre">default=)</span></code>.</p></li>
+<li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox"> <strong>Approval handler</strong>: when destructive tools live behind
+<code class="docutils literal notranslate"><span class="pre">Decision.ask_(...)</span></code>, wire <code class="docutils literal notranslate"><span class="pre">Agent(approval_handler=callable)</span></code>
+so the gate routes to a human / Slack / ticket queue. Without one,
+<code class="docutils literal notranslate"><span class="pre">ask</span></code> falls back to deny — never silently allowed.</p></li>
 <li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox"> <strong>Filesystem sandbox</strong>: wrap any tool that touches the FS.
 Declare the allowed roots explicitly.</p></li>
 <li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox"> <strong>Pre-tool hooks</strong>: <code class="docutils literal notranslate"><span class="pre">&#64;agent.before_tool</span></code> for any tool that
 sends external messages (email, Slack, etc.).</p></li>
-<li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox"> <strong>Secrets</strong>: no API keys in tool args. Use the <code class="docutils literal notranslate"><span class="pre">Secrets</span></code>
-protocol when wiring real secret resolution (follow-up slice).</p></li>
+<li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox"> <strong>Secrets</strong>: <code class="docutils literal notranslate"><span class="pre">Agent(secrets=EnvSecrets())</span></code> is the default;
+for vault-backed lookup pass a custom <code class="docutils literal notranslate"><span class="pre">Secrets</span></code> adapter (see
+<a class="reference internal" href="production_hardening.html#secrets-resolution"><span class="std std-ref">Production hardening</span></a>).
+Use <code class="docutils literal notranslate"><span class="pre">secrets.redact(text)</span></code> before logging tool args / payloads
+so API keys don’t leak into the audit log.</p></li>
 </ul>
 </section>
 <section id="memory">

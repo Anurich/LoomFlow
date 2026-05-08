@@ -424,6 +424,28 @@ async def log(call, result):
     print(f"{call.tool} → ok={result.ok}")
 ```
 
+For destructive tools (`@tool(destructive=True)`) the default
+permissions policy returns `Decision.ask_(...)`. Wire an approval
+handler to route the decision through a human / Slack / ticket
+queue — without one, `ask` falls back to **deny** so the agent
+never silently bypasses the gate:
+
+```python
+async def approve(call, user_id: str | None) -> bool:
+    """Return True to allow, False to deny."""
+    return await my_slack_app.request_approval(call.tool, user_id)
+
+agent = Agent(
+    "...",
+    permissions=StandardPermissions(mode=Mode.DEFAULT),
+    approval_handler=approve,
+)
+```
+
+A handler that raises is treated as deny + logged. See
+[Production hardening](production_hardening.md#approval-handler-for-decisionask_)
+for the full failure-mode contract.
+
 ## 13. Sandbox (filesystem)
 
 ```python

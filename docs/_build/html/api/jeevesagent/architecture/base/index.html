@@ -197,6 +197,10 @@
 <li class="toctree-l1"><a class="reference internal" href="../../../../recipes.html">Recipes</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../../architecture.html">Architecture</a></li>
 </ul>
+<p class="caption" role="heading"><span class="caption-text">Production</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../../production_hardening.html">Production hardening</a></li>
+</ul>
 <p class="caption" role="heading"><span class="caption-text">Migrating from</span></p>
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="../../../../migrations/from-langgraph.html">Migrating from LangGraph</a></li>
@@ -319,6 +323,7 @@
 <li class="toctree-l4"><a class="reference internal" href="../../security/sandbox/subprocess_/index.html">jeevesagent.security.sandbox.subprocess</a></li>
 </ul>
 </li>
+<li class="toctree-l3"><a class="reference internal" href="../../security/secrets/index.html">jeevesagent.security.secrets</a></li>
 </ul>
 </li>
 <li class="toctree-l2 has-children"><a class="reference internal" href="../../skills/index.html">jeevesagent.skills</a><input aria-label="Toggle navigation of jeevesagent.skills" class="toctree-checkbox" id="toctree-checkbox-16" name="toctree-checkbox-16" role="switch" type="checkbox"/><label for="toctree-checkbox-16"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
@@ -365,12 +370,12 @@
         </a>
         <div class="content-icon-container">
           <div class="view-this-page">
-  <a class="muted-link" href="https://github.com/anthropics/jeevesagent/blob/main/docs/api/jeevesagent/architecture/base/index.rst?plain=true" title="View this page">
+  <a class="muted-link" href="https://github.com/Anurich/JeevesHarness/blob/main/docs/api/jeevesagent/architecture/base/index.rst?plain=true" title="View this page">
     <svg><use href="#svg-eye"></use></svg>
     <span class="visually-hidden">View this page</span>
   </a>
 </div><div class="edit-this-page">
-  <a class="muted-link" href="https://github.com/anthropics/jeevesagent/edit/main/docs/api/jeevesagent/architecture/base/index.rst" rel="edit" title="Edit this page">
+  <a class="muted-link" href="https://github.com/Anurich/JeevesHarness/edit/main/docs/api/jeevesagent/architecture/base/index.rst" rel="edit" title="Edit this page">
     <svg><use href="#svg-pencil"></use></svg>
     <span class="visually-hidden">Edit this page</span>
   </a>
@@ -413,6 +418,18 @@ architecture. Architectures yield the events that happen <em>during</em>
 iteration: per-turn, per-tool, per-step, budget warnings, errors.</p>
 <p>This keeps every architecture’s <code class="docutils literal notranslate"><span class="pre">run()</span></code> focused on its own
 strategy without re-implementing setup/teardown plumbing.</p>
+<section id="attributes">
+<h2>Attributes<a class="headerlink" href="#attributes" title="Link to this heading">¶</a></h2>
+<div class="table-wrapper autosummary longtable docutils container">
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#jeevesagent.architecture.base.ApprovalHandler" title="jeevesagent.architecture.base.ApprovalHandler"><code class="xref py py-obj docutils literal notranslate"><span class="pre">ApprovalHandler</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
 <section id="classes">
 <h2>Classes<a class="headerlink" href="#classes" title="Link to this heading">¶</a></h2>
 <div class="table-wrapper autosummary longtable docutils container">
@@ -545,6 +562,16 @@ helper methods on this class — <code class="docutils literal notranslate"><spa
 <code class="docutils literal notranslate"><span class="pre">scope_for_worker</span></code>, <code class="docutils literal notranslate"><span class="pre">with_extra_tools</span></code>, <code class="docutils literal notranslate"><span class="pre">spawn_child</span></code> — as
 they land in v0.5+. v0.3 keeps it as a passive struct.</p>
 <dl class="py attribute">
+<dt class="sig sig-object py" id="jeevesagent.architecture.base.Dependencies.approval_handler">
+<span class="sig-name descname"><span class="pre">approval_handler</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="#jeevesagent.architecture.base.ApprovalHandler" title="jeevesagent.architecture.base.ApprovalHandler"><span class="pre">ApprovalHandler</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/constants.html#None" title="(in Python v3.14)"><span class="pre">None</span></a></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#jeevesagent.architecture.base.Dependencies.approval_handler" title="Link to this definition">¶</a></dt>
+<dd><p>Resolves <code class="xref py py-class docutils literal notranslate"><span class="pre">Decision.ask_</span></code> outcomes from the permissions
+layer. When unset, an <code class="docutils literal notranslate"><span class="pre">ask</span></code> decision is treated as a deny —
+historical behaviour preserved so single-tenant code without an
+approval flow still works. When set, the architecture calls
+this handler and uses the returned bool as the decision.</p>
+</dd></dl>
+
+<dl class="py attribute">
 <dt class="sig sig-object py" id="jeevesagent.architecture.base.Dependencies.audit_log">
 <span class="sig-name descname"><span class="pre">audit_log</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="../../security/audit/index.html#jeevesagent.security.audit.AuditLog" title="jeevesagent.security.audit.AuditLog"><span class="pre">jeevesagent.security.audit.AuditLog</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/constants.html#None" title="(in Python v3.14)"><span class="pre">None</span></a></span><a class="headerlink" href="#jeevesagent.architecture.base.Dependencies.audit_log" title="Link to this definition">¶</a></dt>
 <dd></dd></dl>
@@ -659,6 +686,11 @@ hot path.</p>
 
 </dd></dl>
 
+<dl class="py data">
+<dt class="sig sig-object py" id="jeevesagent.architecture.base.ApprovalHandler">
+<span class="sig-prename descclassname"><span class="pre">jeevesagent.architecture.base.</span></span><span class="sig-name descname"><span class="pre">ApprovalHandler</span></span><a class="headerlink" href="#jeevesagent.architecture.base.ApprovalHandler" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
 </section>
 </section>
 
@@ -718,6 +750,7 @@ hot path.</p>
           <div class="toc-tree">
             <ul>
 <li><a class="reference internal" href="#">jeevesagent.architecture.base</a><ul>
+<li><a class="reference internal" href="#attributes">Attributes</a></li>
 <li><a class="reference internal" href="#classes">Classes</a></li>
 <li><a class="reference internal" href="#module-contents">Module Contents</a><ul>
 <li><a class="reference internal" href="#jeevesagent.architecture.base.AgentSession"><code class="docutils literal notranslate"><span class="pre">AgentSession</span></code></a><ul>
@@ -739,6 +772,7 @@ hot path.</p>
 </ul>
 </li>
 <li><a class="reference internal" href="#jeevesagent.architecture.base.Dependencies"><code class="docutils literal notranslate"><span class="pre">Dependencies</span></code></a><ul>
+<li><a class="reference internal" href="#jeevesagent.architecture.base.Dependencies.approval_handler"><code class="docutils literal notranslate"><span class="pre">Dependencies.approval_handler</span></code></a></li>
 <li><a class="reference internal" href="#jeevesagent.architecture.base.Dependencies.audit_log"><code class="docutils literal notranslate"><span class="pre">Dependencies.audit_log</span></code></a></li>
 <li><a class="reference internal" href="#jeevesagent.architecture.base.Dependencies.budget"><code class="docutils literal notranslate"><span class="pre">Dependencies.budget</span></code></a></li>
 <li><a class="reference internal" href="#jeevesagent.architecture.base.Dependencies.context"><code class="docutils literal notranslate"><span class="pre">Dependencies.context</span></code></a></li>
@@ -759,6 +793,7 @@ hot path.</p>
 <li><a class="reference internal" href="#jeevesagent.architecture.base.Dependencies.tools"><code class="docutils literal notranslate"><span class="pre">Dependencies.tools</span></code></a></li>
 </ul>
 </li>
+<li><a class="reference internal" href="#jeevesagent.architecture.base.ApprovalHandler"><code class="docutils literal notranslate"><span class="pre">ApprovalHandler</span></code></a></li>
 </ul>
 </li>
 </ul>

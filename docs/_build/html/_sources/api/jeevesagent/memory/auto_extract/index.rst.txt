@@ -49,7 +49,7 @@ Classes
 Module Contents
 ---------------
 
-.. py:class:: AutoExtractMemory(inner: jeevesagent.core.protocols.Memory, consolidator: jeevesagent.memory.consolidator.Consolidator, *, on_extract_error: collections.abc.Callable[[BaseException], collections.abc.Awaitable[None]] | None = None)
+.. py:class:: AutoExtractMemory(inner: jeevesagent.core.protocols.Memory, consolidator: jeevesagent.memory.consolidator.Consolidator, *, on_extract_error: collections.abc.Callable[[BaseException], collections.abc.Awaitable[None]] | None = None, telemetry: jeevesagent.core.protocols.Telemetry | None = None, auto_picked: bool = False)
 
    Wraps a :class:`Memory` and runs auto fact extraction on every
    ``remember`` call.

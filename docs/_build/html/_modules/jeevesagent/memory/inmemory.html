@@ -196,6 +196,10 @@
 <li class="toctree-l1"><a class="reference internal" href="../../../recipes.html">Recipes</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../architecture.html">Architecture</a></li>
 </ul>
+<p class="caption" role="heading"><span class="caption-text">Production</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../production_hardening.html">Production hardening</a></li>
+</ul>
 <p class="caption" role="heading"><span class="caption-text">Migrating from</span></p>
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="../../../migrations/from-langgraph.html">Migrating from LangGraph</a></li>
@@ -318,6 +322,7 @@
 <li class="toctree-l4"><a class="reference internal" href="../../../api/jeevesagent/security/sandbox/subprocess_/index.html">jeevesagent.security.sandbox.subprocess</a></li>
 </ul>
 </li>
+<li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/security/secrets/index.html">jeevesagent.security.secrets</a></li>
 </ul>
 </li>
 <li class="toctree-l2 has-children"><a class="reference internal" href="../../../api/jeevesagent/skills/index.html">jeevesagent.skills</a><input aria-label="Toggle navigation of jeevesagent.skills" class="toctree-checkbox" id="toctree-checkbox-16" name="toctree-checkbox-16" role="switch" type="checkbox"/><label for="toctree-checkbox-16"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
@@ -393,6 +398,7 @@
 
 <span class="kn">import</span><span class="w"> </span><span class="nn">anyio</span>
 
+<span class="kn">from</span><span class="w"> </span><span class="nn">..core._eviction</span><span class="w"> </span><span class="kn">import</span> <span class="n">BoundedDict</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">..core.context</span><span class="w"> </span><span class="kn">import</span> <span class="n">IsolationWarning</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">..core.types</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
     <span class="n">Episode</span><span class="p">,</span>
@@ -406,23 +412,47 @@
 <span class="kn">from</span><span class="w"> </span><span class="nn">.consolidator</span><span class="w"> </span><span class="kn">import</span> <span class="n">Consolidator</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">.facts</span><span class="w"> </span><span class="kn">import</span> <span class="n">FactStore</span><span class="p">,</span> <span class="n">InMemoryFactStore</span>
 
+<span class="n">_DEFAULT_MAX_USERS</span> <span class="o">=</span> <span class="mi">100_000</span>
+<span class="n">_DEFAULT_USER_TTL_SECONDS</span> <span class="o">=</span> <span class="mi">24</span> <span class="o">*</span> <span class="mi">3600</span>  <span class="c1"># 24h idle</span>
+
 
 <div class="viewcode-block" id="InMemoryMemory">
 <a class="viewcode-back" href="../../../api/jeevesagent/memory/inmemory/index.html#jeevesagent.InMemoryMemory">[docs]</a>
 <span class="k">class</span><span class="w"> </span><span class="nc">InMemoryMemory</span><span class="p">:</span>
-<span class="w">    </span><span class="sd">&quot;&quot;&quot;Dict-backed implementation of :class:`Memory`.&quot;&quot;&quot;</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Dict-backed implementation of :class:`Memory`.</span>
+
+<span class="sd">    Multi-tenant accounting (M10): per-user working-block state is</span>
+<span class="sd">    held in a bounded LRU + TTL container so a runaway tenant or</span>
+<span class="sd">    one-shot user_id explosion can&#39;t grow the in-process dict</span>
+<span class="sd">    without limit. Defaults: ``max_users=100_000`` and</span>
+<span class="sd">    ``user_idle_ttl_seconds=86_400`` (24h). Pass ``None`` to</span>
+<span class="sd">    disable bounding for single-tenant or fixed-tenant deployments.</span>
+<span class="sd">    Eviction *drops* a user&#39;s working blocks; callers needing</span>
+<span class="sd">    durable spill-to-disk should use :class:`SqliteMemory` or a</span>
+<span class="sd">    SQL-backed memory instead.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
 
     <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span>
         <span class="bp">self</span><span class="p">,</span>
         <span class="o">*</span><span class="p">,</span>
         <span class="n">consolidator</span><span class="p">:</span> <span class="n">Consolidator</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
         <span class="n">fact_store</span><span class="p">:</span> <span class="n">FactStore</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">max_users</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="n">_DEFAULT_MAX_USERS</span><span class="p">,</span>
+        <span class="n">user_idle_ttl_seconds</span><span class="p">:</span> <span class="nb">float</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="n">_DEFAULT_USER_TTL_SECONDS</span><span class="p">,</span>
     <span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
         <span class="c1"># Working blocks are partitioned by ``user_id`` to keep one</span>
-        <span class="c1"># tenant&#39;s pinned context invisible to another. Storage key</span>
-        <span class="c1"># is ``(user_id, name)``; ``user_id=None`` is its own bucket</span>
-        <span class="c1"># (anonymous / single-tenant).</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">_blocks</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">tuple</span><span class="p">[</span><span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span><span class="p">,</span> <span class="nb">str</span><span class="p">],</span> <span class="n">MemoryBlock</span><span class="p">]</span> <span class="o">=</span> <span class="p">{}</span>
+        <span class="c1"># tenant&#39;s pinned context invisible to another. Outer key is</span>
+        <span class="c1"># the user_id (so eviction drops ALL of a user&#39;s blocks</span>
+        <span class="c1"># together — the right unit). Inner dict is name -&gt; block.</span>
+        <span class="c1"># ``user_id=None`` is its own bucket (anonymous /</span>
+        <span class="c1"># single-tenant) and isn&#39;t subject to TTL eviction unless it</span>
+        <span class="c1"># also goes idle.</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_blocks</span><span class="p">:</span> <span class="n">BoundedDict</span><span class="p">[</span><span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span><span class="p">,</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">MemoryBlock</span><span class="p">]]</span> <span class="o">=</span> <span class="p">(</span>
+            <span class="n">BoundedDict</span><span class="p">(</span>
+                <span class="n">max_keys</span><span class="o">=</span><span class="n">max_users</span><span class="p">,</span>
+                <span class="n">ttl_seconds</span><span class="o">=</span><span class="n">user_idle_ttl_seconds</span><span class="p">,</span>
+            <span class="p">)</span>
+        <span class="p">)</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_episodes</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Episode</span><span class="p">]</span> <span class="o">=</span> <span class="p">{}</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_consolidator</span> <span class="o">=</span> <span class="n">consolidator</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">facts</span><span class="p">:</span> <span class="n">FactStore</span> <span class="o">=</span> <span class="p">(</span>
@@ -444,9 +474,8 @@
         <span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">user_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
     <span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="n">MemoryBlock</span><span class="p">]:</span>
         <span class="k">async</span> <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">_lock</span><span class="p">:</span>
-            <span class="n">scoped</span> <span class="o">=</span> <span class="p">[</span>
-                <span class="n">b</span> <span class="k">for</span> <span class="p">(</span><span class="n">uid</span><span class="p">,</span> <span class="n">_name</span><span class="p">),</span> <span class="n">b</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_blocks</span><span class="o">.</span><span class="n">items</span><span class="p">()</span> <span class="k">if</span> <span class="n">uid</span> <span class="o">==</span> <span class="n">user_id</span>
-            <span class="p">]</span>
+            <span class="n">user_blocks</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_blocks</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">user_id</span><span class="p">,</span> <span class="p">{})</span>
+            <span class="n">scoped</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="n">user_blocks</span><span class="o">.</span><span class="n">values</span><span class="p">())</span>
         <span class="k">return</span> <span class="nb">sorted</span><span class="p">(</span><span class="n">scoped</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="k">lambda</span> <span class="n">b</span><span class="p">:</span> <span class="n">b</span><span class="o">.</span><span class="n">pinned_order</span><span class="p">)</span></div>
 
 
@@ -455,18 +484,19 @@
     <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">update_block</span><span class="p">(</span>
         <span class="bp">self</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">content</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">user_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
     <span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
-        <span class="n">key</span> <span class="o">=</span> <span class="p">(</span><span class="n">user_id</span><span class="p">,</span> <span class="n">name</span><span class="p">)</span>
         <span class="k">async</span> <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">_lock</span><span class="p">:</span>
-            <span class="n">existing</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_blocks</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">key</span><span class="p">)</span>
-            <span class="c1"># Pinned-order is per-user: count blocks already in this</span>
-            <span class="c1"># user&#39;s bucket when assigning a slot to a new block.</span>
-            <span class="n">user_count</span> <span class="o">=</span> <span class="nb">sum</span><span class="p">(</span>
-                <span class="mi">1</span> <span class="k">for</span> <span class="p">(</span><span class="n">uid</span><span class="p">,</span> <span class="n">_</span><span class="p">)</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_blocks</span> <span class="k">if</span> <span class="n">uid</span> <span class="o">==</span> <span class="n">user_id</span>
+            <span class="n">user_blocks</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_blocks</span><span class="o">.</span><span class="n">setdefault</span><span class="p">(</span><span class="n">user_id</span><span class="p">,</span> <span class="p">{})</span>
+            <span class="n">existing</span> <span class="o">=</span> <span class="n">user_blocks</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">name</span><span class="p">)</span>
+            <span class="c1"># New block&#39;s slot is the count BEFORE insertion;</span>
+            <span class="c1"># update keeps the existing slot so order is stable.</span>
+            <span class="n">new_order</span> <span class="o">=</span> <span class="p">(</span>
+                <span class="n">existing</span><span class="o">.</span><span class="n">pinned_order</span> <span class="k">if</span> <span class="n">existing</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
+                <span class="k">else</span> <span class="nb">len</span><span class="p">(</span><span class="n">user_blocks</span><span class="p">)</span>
             <span class="p">)</span>
-            <span class="bp">self</span><span class="o">.</span><span class="n">_blocks</span><span class="p">[</span><span class="n">key</span><span class="p">]</span> <span class="o">=</span> <span class="n">MemoryBlock</span><span class="p">(</span>
+            <span class="n">user_blocks</span><span class="p">[</span><span class="n">name</span><span class="p">]</span> <span class="o">=</span> <span class="n">MemoryBlock</span><span class="p">(</span>
                 <span class="n">name</span><span class="o">=</span><span class="n">name</span><span class="p">,</span>
                 <span class="n">content</span><span class="o">=</span><span class="n">content</span><span class="p">,</span>
-                <span class="n">pinned_order</span><span class="o">=</span><span class="n">existing</span><span class="o">.</span><span class="n">pinned_order</span> <span class="k">if</span> <span class="n">existing</span> <span class="k">else</span> <span class="n">user_count</span><span class="p">,</span>
+                <span class="n">pinned_order</span><span class="o">=</span><span class="n">new_order</span><span class="p">,</span>
             <span class="p">)</span></div>
 
 
@@ -475,18 +505,15 @@
     <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">append_block</span><span class="p">(</span>
         <span class="bp">self</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">content</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">user_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
     <span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
-        <span class="n">key</span> <span class="o">=</span> <span class="p">(</span><span class="n">user_id</span><span class="p">,</span> <span class="n">name</span><span class="p">)</span>
         <span class="k">async</span> <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">_lock</span><span class="p">:</span>
-            <span class="n">existing</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_blocks</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">key</span><span class="p">)</span>
+            <span class="n">user_blocks</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_blocks</span><span class="o">.</span><span class="n">setdefault</span><span class="p">(</span><span class="n">user_id</span><span class="p">,</span> <span class="p">{})</span>
+            <span class="n">existing</span> <span class="o">=</span> <span class="n">user_blocks</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">name</span><span class="p">)</span>
             <span class="k">if</span> <span class="n">existing</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
-                <span class="n">user_count</span> <span class="o">=</span> <span class="nb">sum</span><span class="p">(</span>
-                    <span class="mi">1</span> <span class="k">for</span> <span class="p">(</span><span class="n">uid</span><span class="p">,</span> <span class="n">_</span><span class="p">)</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_blocks</span> <span class="k">if</span> <span class="n">uid</span> <span class="o">==</span> <span class="n">user_id</span>
-                <span class="p">)</span>
-                <span class="bp">self</span><span class="o">.</span><span class="n">_blocks</span><span class="p">[</span><span class="n">key</span><span class="p">]</span> <span class="o">=</span> <span class="n">MemoryBlock</span><span class="p">(</span>
-                    <span class="n">name</span><span class="o">=</span><span class="n">name</span><span class="p">,</span> <span class="n">content</span><span class="o">=</span><span class="n">content</span><span class="p">,</span> <span class="n">pinned_order</span><span class="o">=</span><span class="n">user_count</span>
+                <span class="n">user_blocks</span><span class="p">[</span><span class="n">name</span><span class="p">]</span> <span class="o">=</span> <span class="n">MemoryBlock</span><span class="p">(</span>
+                    <span class="n">name</span><span class="o">=</span><span class="n">name</span><span class="p">,</span> <span class="n">content</span><span class="o">=</span><span class="n">content</span><span class="p">,</span> <span class="n">pinned_order</span><span class="o">=</span><span class="nb">len</span><span class="p">(</span><span class="n">user_blocks</span><span class="p">)</span>
                 <span class="p">)</span>
             <span class="k">else</span><span class="p">:</span>
-                <span class="bp">self</span><span class="o">.</span><span class="n">_blocks</span><span class="p">[</span><span class="n">key</span><span class="p">]</span> <span class="o">=</span> <span class="n">MemoryBlock</span><span class="p">(</span>
+                <span class="n">user_blocks</span><span class="p">[</span><span class="n">name</span><span class="p">]</span> <span class="o">=</span> <span class="n">MemoryBlock</span><span class="p">(</span>
                     <span class="n">name</span><span class="o">=</span><span class="n">name</span><span class="p">,</span>
                     <span class="n">content</span><span class="o">=</span><span class="n">existing</span><span class="o">.</span><span class="n">content</span> <span class="o">+</span> <span class="n">content</span><span class="p">,</span>
                     <span class="n">pinned_order</span><span class="o">=</span><span class="n">existing</span><span class="o">.</span><span class="n">pinned_order</span><span class="p">,</span>
@@ -753,14 +780,15 @@
 <div class="viewcode-block" id="InMemoryMemory.snapshot">
 <a class="viewcode-back" href="../../../api/jeevesagent/memory/inmemory/index.html#jeevesagent.InMemoryMemory.snapshot">[docs]</a>
     <span class="k">def</span><span class="w"> </span><span class="nf">snapshot</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]:</span>
-        <span class="c1"># Block keys are now ``(user_id, name)`` tuples; flatten to</span>
-        <span class="c1"># a string key for JSON-friendly snapshots so test</span>
-        <span class="c1"># introspection keeps working without per-tuple keys.</span>
+        <span class="c1"># Flatten the nested ``user_id -&gt; name -&gt; block`` shape into</span>
+        <span class="c1"># JSON-friendly ``&quot;&lt;user_id&gt;::&lt;name&gt;&quot;`` keys for test</span>
+        <span class="c1"># introspection.</span>
+        <span class="n">flat</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]</span> <span class="o">=</span> <span class="p">{}</span>
+        <span class="k">for</span> <span class="n">uid</span><span class="p">,</span> <span class="n">user_blocks</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_blocks</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+            <span class="k">for</span> <span class="n">name</span><span class="p">,</span> <span class="n">v</span> <span class="ow">in</span> <span class="n">user_blocks</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+                <span class="n">flat</span><span class="p">[</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">uid</span><span class="w"> </span><span class="ow">or</span><span class="w"> </span><span class="s1">&#39;&#39;</span><span class="si">}</span><span class="s2">::</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">v</span><span class="o">.</span><span class="n">model_dump</span><span class="p">()</span>
         <span class="k">return</span> <span class="p">{</span>
-            <span class="s2">&quot;blocks&quot;</span><span class="p">:</span> <span class="p">{</span>
-                <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">uid</span><span class="w"> </span><span class="ow">or</span><span class="w"> </span><span class="s1">&#39;&#39;</span><span class="si">}</span><span class="s2">::</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">:</span> <span class="n">v</span><span class="o">.</span><span class="n">model_dump</span><span class="p">()</span>
-                <span class="k">for</span> <span class="p">(</span><span class="n">uid</span><span class="p">,</span> <span class="n">name</span><span class="p">),</span> <span class="n">v</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_blocks</span><span class="o">.</span><span class="n">items</span><span class="p">()</span>
-            <span class="p">},</span>
+            <span class="s2">&quot;blocks&quot;</span><span class="p">:</span> <span class="n">flat</span><span class="p">,</span>
             <span class="s2">&quot;episodes&quot;</span><span class="p">:</span> <span class="p">{</span><span class="n">k</span><span class="p">:</span> <span class="n">v</span><span class="o">.</span><span class="n">model_dump</span><span class="p">()</span> <span class="k">for</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_episodes</span><span class="o">.</span><span class="n">items</span><span class="p">()},</span>
         <span class="p">}</span></div>
 </div>

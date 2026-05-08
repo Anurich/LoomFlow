@@ -196,6 +196,10 @@
 <li class="toctree-l1"><a class="reference internal" href="../../../recipes.html">Recipes</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../architecture.html">Architecture</a></li>
 </ul>
+<p class="caption" role="heading"><span class="caption-text">Production</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../production_hardening.html">Production hardening</a></li>
+</ul>
 <p class="caption" role="heading"><span class="caption-text">Migrating from</span></p>
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="../../../migrations/from-langgraph.html">Migrating from LangGraph</a></li>
@@ -318,6 +322,7 @@
 <li class="toctree-l4"><a class="reference internal" href="../../../api/jeevesagent/security/sandbox/subprocess_/index.html">jeevesagent.security.sandbox.subprocess</a></li>
 </ul>
 </li>
+<li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/security/secrets/index.html">jeevesagent.security.secrets</a></li>
 </ul>
 </li>
 <li class="toctree-l2 has-children"><a class="reference internal" href="../../../api/jeevesagent/skills/index.html">jeevesagent.skills</a><input aria-label="Toggle navigation of jeevesagent.skills" class="toctree-checkbox" id="toctree-checkbox-16" name="toctree-checkbox-16" role="switch" type="checkbox"/><label for="toctree-checkbox-16"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
@@ -412,11 +417,12 @@
 <span class="kn">from</span><span class="w"> </span><span class="nn">__future__</span><span class="w"> </span><span class="kn">import</span> <span class="n">annotations</span>
 
 <span class="kn">import</span><span class="w"> </span><span class="nn">logging</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">time</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">collections.abc</span><span class="w"> </span><span class="kn">import</span> <span class="n">Awaitable</span><span class="p">,</span> <span class="n">Callable</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">datetime</span><span class="w"> </span><span class="kn">import</span> <span class="n">datetime</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Any</span>
 
-<span class="kn">from</span><span class="w"> </span><span class="nn">..core.protocols</span><span class="w"> </span><span class="kn">import</span> <span class="n">Memory</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">..core.protocols</span><span class="w"> </span><span class="kn">import</span> <span class="n">Memory</span><span class="p">,</span> <span class="n">Telemetry</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">..core.types</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
     <span class="n">Episode</span><span class="p">,</span>
     <span class="n">Fact</span><span class="p">,</span>
@@ -431,6 +437,33 @@
 
 
 <span class="n">_log</span> <span class="o">=</span> <span class="n">logging</span><span class="o">.</span><span class="n">getLogger</span><span class="p">(</span><span class="s2">&quot;jeevesagent.memory.auto_extract&quot;</span><span class="p">)</span>
+
+<span class="c1"># Process-wide flag — the &quot;default-on&quot; startup notice only fires</span>
+<span class="c1"># once no matter how many AutoExtractMemory instances are created</span>
+<span class="c1"># (multi-Agent processes don&#39;t spam the log).</span>
+<span class="n">_DEFAULT_ON_NOTICE_EMITTED</span> <span class="o">=</span> <span class="kc">False</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_maybe_emit_default_on_notice</span><span class="p">()</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Log a one-shot info-level notice when auto-extract gets</span>
+<span class="sd">    turned on by default. Production-deployment readers needed</span>
+<span class="sd">    this — it was happening silently before and ops only noticed</span>
+<span class="sd">    when fact extraction calls showed up in their LLM bills.</span>
+
+<span class="sd">    Idempotent across the whole process; safe to call from every</span>
+<span class="sd">    AutoExtractMemory constructor on the default-picked path.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="k">global</span> <span class="n">_DEFAULT_ON_NOTICE_EMITTED</span>
+    <span class="k">if</span> <span class="n">_DEFAULT_ON_NOTICE_EMITTED</span><span class="p">:</span>
+        <span class="k">return</span>
+    <span class="n">_DEFAULT_ON_NOTICE_EMITTED</span> <span class="o">=</span> <span class="kc">True</span>
+    <span class="n">_log</span><span class="o">.</span><span class="n">info</span><span class="p">(</span>
+        <span class="s2">&quot;AutoExtractMemory enabled by default for this model class. &quot;</span>
+        <span class="s2">&quot;Each remembered episode triggers a small extraction call &quot;</span>
+        <span class="s2">&quot;to pull (subject, predicate, object) facts. Pass &quot;</span>
+        <span class="s2">&quot;Agent(auto_extract=False) to disable, or &quot;</span>
+        <span class="s2">&quot;Agent(auto_extract=True) to silence this notice.&quot;</span>
+    <span class="p">)</span>
 
 
 <div class="viewcode-block" id="AutoExtractMemory">
@@ -453,10 +486,15 @@
         <span class="n">consolidator</span><span class="p">:</span> <span class="n">Consolidator</span><span class="p">,</span>
         <span class="o">*</span><span class="p">,</span>
         <span class="n">on_extract_error</span><span class="p">:</span> <span class="n">Callable</span><span class="p">[[</span><span class="ne">BaseException</span><span class="p">],</span> <span class="n">Awaitable</span><span class="p">[</span><span class="kc">None</span><span class="p">]]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">telemetry</span><span class="p">:</span> <span class="n">Telemetry</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">auto_picked</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
     <span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_inner</span> <span class="o">=</span> <span class="n">inner</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_consolidator</span> <span class="o">=</span> <span class="n">consolidator</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_on_extract_error</span> <span class="o">=</span> <span class="n">on_extract_error</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_telemetry</span> <span class="o">=</span> <span class="n">telemetry</span>
+        <span class="k">if</span> <span class="n">auto_picked</span><span class="p">:</span>
+            <span class="n">_maybe_emit_default_on_notice</span><span class="p">()</span>
 
     <span class="nd">@property</span>
     <span class="k">def</span><span class="w"> </span><span class="nf">inner</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Memory</span><span class="p">:</span>
@@ -516,13 +554,26 @@
     <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">_maybe_extract</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">episode</span><span class="p">:</span> <span class="n">Episode</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;Run the consolidator on a single episode. Catches every</span>
 <span class="sd">        exception — auto-extract is a best-effort enhancement, never</span>
-<span class="sd">        a critical-path dependency.&quot;&quot;&quot;</span>
+<span class="sd">        a critical-path dependency.</span>
+
+<span class="sd">        Emits two telemetry signals when telemetry is configured:</span>
+
+<span class="sd">        * ``jeeves.auto_extract.duration_ms`` (histogram) — wall time</span>
+<span class="sd">          spent inside the consolidator, in milliseconds. Tagged with</span>
+<span class="sd">          ``user_id`` and ``status`` (ok / error) so dashboards can</span>
+<span class="sd">          slice by tenant or by failure rate.</span>
+<span class="sd">        * ``jeeves.auto_extract.invocations`` (counter) — incremented</span>
+<span class="sd">          once per extraction attempt, with the same tags.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
         <span class="n">store</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">facts</span>
         <span class="k">if</span> <span class="n">store</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
             <span class="k">return</span>
+        <span class="n">started</span> <span class="o">=</span> <span class="n">time</span><span class="o">.</span><span class="n">perf_counter</span><span class="p">()</span>
+        <span class="n">status</span> <span class="o">=</span> <span class="s2">&quot;ok&quot;</span>
         <span class="k">try</span><span class="p">:</span>
             <span class="k">await</span> <span class="bp">self</span><span class="o">.</span><span class="n">_consolidator</span><span class="o">.</span><span class="n">consolidate</span><span class="p">([</span><span class="n">episode</span><span class="p">],</span> <span class="n">store</span><span class="o">=</span><span class="n">store</span><span class="p">)</span>
         <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">exc</span><span class="p">:</span>  <span class="c1"># noqa: BLE001 — best-effort by design</span>
+            <span class="n">status</span> <span class="o">=</span> <span class="s2">&quot;error&quot;</span>
             <span class="n">_log</span><span class="o">.</span><span class="n">warning</span><span class="p">(</span>
                 <span class="s2">&quot;auto-extract failed for episode </span><span class="si">%s</span><span class="s2"> (user_id=</span><span class="si">%s</span><span class="s2">): </span><span class="si">%s</span><span class="s2">&quot;</span><span class="p">,</span>
                 <span class="n">episode</span><span class="o">.</span><span class="n">id</span><span class="p">,</span>
@@ -535,6 +586,27 @@
                 <span class="k">except</span> <span class="ne">Exception</span><span class="p">:</span>  <span class="c1"># noqa: BLE001</span>
                     <span class="c1"># Even the error-callback is best-effort. We</span>
                     <span class="c1"># already logged; don&#39;t cascade.</span>
+                    <span class="k">pass</span>
+        <span class="k">finally</span><span class="p">:</span>
+            <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_telemetry</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="n">duration_ms</span> <span class="o">=</span> <span class="p">(</span><span class="n">time</span><span class="o">.</span><span class="n">perf_counter</span><span class="p">()</span> <span class="o">-</span> <span class="n">started</span><span class="p">)</span> <span class="o">*</span> <span class="mf">1000.0</span>
+                <span class="c1"># Telemetry emit is best-effort too — a broken</span>
+                <span class="c1"># exporter must not turn a successful extract into a</span>
+                <span class="c1"># failed remember(). Swallow and log instead.</span>
+                <span class="k">try</span><span class="p">:</span>
+                    <span class="k">await</span> <span class="bp">self</span><span class="o">.</span><span class="n">_telemetry</span><span class="o">.</span><span class="n">emit_metric</span><span class="p">(</span>
+                        <span class="s2">&quot;jeeves.auto_extract.duration_ms&quot;</span><span class="p">,</span>
+                        <span class="n">duration_ms</span><span class="p">,</span>
+                        <span class="n">user_id</span><span class="o">=</span><span class="n">episode</span><span class="o">.</span><span class="n">user_id</span><span class="p">,</span>
+                        <span class="n">status</span><span class="o">=</span><span class="n">status</span><span class="p">,</span>
+                    <span class="p">)</span>
+                    <span class="k">await</span> <span class="bp">self</span><span class="o">.</span><span class="n">_telemetry</span><span class="o">.</span><span class="n">emit_metric</span><span class="p">(</span>
+                        <span class="s2">&quot;jeeves.auto_extract.invocations&quot;</span><span class="p">,</span>
+                        <span class="mi">1</span><span class="p">,</span>
+                        <span class="n">user_id</span><span class="o">=</span><span class="n">episode</span><span class="o">.</span><span class="n">user_id</span><span class="p">,</span>
+                        <span class="n">status</span><span class="o">=</span><span class="n">status</span><span class="p">,</span>
+                    <span class="p">)</span>
+                <span class="k">except</span> <span class="ne">Exception</span><span class="p">:</span>  <span class="c1"># noqa: BLE001</span>
                     <span class="k">pass</span>
 
 <div class="viewcode-block" id="AutoExtractMemory.recall">

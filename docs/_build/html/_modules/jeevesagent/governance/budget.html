@@ -196,6 +196,10 @@
 <li class="toctree-l1"><a class="reference internal" href="../../../recipes.html">Recipes</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../architecture.html">Architecture</a></li>
 </ul>
+<p class="caption" role="heading"><span class="caption-text">Production</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../production_hardening.html">Production hardening</a></li>
+</ul>
 <p class="caption" role="heading"><span class="caption-text">Migrating from</span></p>
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="../../../migrations/from-langgraph.html">Migrating from LangGraph</a></li>
@@ -318,6 +322,7 @@
 <li class="toctree-l4"><a class="reference internal" href="../../../api/jeevesagent/security/sandbox/subprocess_/index.html">jeevesagent.security.sandbox.subprocess</a></li>
 </ul>
 </li>
+<li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/security/secrets/index.html">jeevesagent.security.secrets</a></li>
 </ul>
 </li>
 <li class="toctree-l2 has-children"><a class="reference internal" href="../../../api/jeevesagent/skills/index.html">jeevesagent.skills</a><input aria-label="Toggle navigation of jeevesagent.skills" class="toctree-checkbox" id="toctree-checkbox-16" name="toctree-checkbox-16" role="switch" type="checkbox"/><label for="toctree-checkbox-16"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
@@ -396,13 +401,16 @@
 
 <span class="kn">from</span><span class="w"> </span><span class="nn">__future__</span><span class="w"> </span><span class="kn">import</span> <span class="n">annotations</span>
 
-<span class="kn">from</span><span class="w"> </span><span class="nn">collections</span><span class="w"> </span><span class="kn">import</span> <span class="n">defaultdict</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">dataclasses</span><span class="w"> </span><span class="kn">import</span> <span class="n">dataclass</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">datetime</span><span class="w"> </span><span class="kn">import</span> <span class="n">UTC</span><span class="p">,</span> <span class="n">datetime</span><span class="p">,</span> <span class="n">timedelta</span>
 
 <span class="kn">import</span><span class="w"> </span><span class="nn">anyio</span>
 
+<span class="kn">from</span><span class="w"> </span><span class="nn">..core._eviction</span><span class="w"> </span><span class="kn">import</span> <span class="n">BoundedDict</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">..core.types</span><span class="w"> </span><span class="kn">import</span> <span class="n">BudgetStatus</span>
+
+<span class="n">_DEFAULT_MAX_USERS</span> <span class="o">=</span> <span class="mi">100_000</span>
+<span class="n">_DEFAULT_USER_TTL_SECONDS</span> <span class="o">=</span> <span class="mi">24</span> <span class="o">*</span> <span class="mi">3600</span>  <span class="c1"># 24h idle</span>
 
 
 <div class="viewcode-block" id="NoBudget">
@@ -502,18 +510,34 @@
 <span class="sd">    user_id as the anonymous bucket.</span>
 <span class="sd">    &quot;&quot;&quot;</span>
 
-    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">cfg</span><span class="p">:</span> <span class="n">BudgetConfig</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="n">cfg</span><span class="p">:</span> <span class="n">BudgetConfig</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="o">*</span><span class="p">,</span>
+        <span class="n">max_users</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="n">_DEFAULT_MAX_USERS</span><span class="p">,</span>
+        <span class="n">user_idle_ttl_seconds</span><span class="p">:</span> <span class="nb">float</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="n">_DEFAULT_USER_TTL_SECONDS</span><span class="p">,</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_cfg</span> <span class="o">=</span> <span class="n">cfg</span> <span class="ow">or</span> <span class="n">BudgetConfig</span><span class="p">()</span>
         <span class="c1"># Global counters.</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_tokens_in</span> <span class="o">=</span> <span class="mi">0</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_tokens_out</span> <span class="o">=</span> <span class="mi">0</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_cost</span> <span class="o">=</span> <span class="mf">0.0</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_started_at</span> <span class="o">=</span> <span class="n">datetime</span><span class="o">.</span><span class="n">now</span><span class="p">(</span><span class="n">UTC</span><span class="p">)</span>
-        <span class="c1"># Per-user counters. ``defaultdict`` lazy-initialises a fresh</span>
-        <span class="c1"># bucket on first reference; ``started_at`` is set on first</span>
-        <span class="c1"># consume() so a user&#39;s wall-clock cap measures from their</span>
-        <span class="c1"># first activity, not the Agent&#39;s birth.</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">_by_user</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span><span class="p">,</span> <span class="n">_UserUsage</span><span class="p">]</span> <span class="o">=</span> <span class="n">defaultdict</span><span class="p">(</span><span class="n">_UserUsage</span><span class="p">)</span>
+        <span class="c1"># Per-user counters. Bounded so a runaway tenant or</span>
+        <span class="c1"># adversarial caller can&#39;t grow this dict without limit</span>
+        <span class="c1"># (process OOM is the only ceiling otherwise). LRU evicts</span>
+        <span class="c1"># the least-recently-touched user when ``max_users`` is</span>
+        <span class="c1"># exceeded; idle TTL drops users who haven&#39;t consumed in</span>
+        <span class="c1"># ``user_idle_ttl_seconds`` (default 24h). Evicting a</span>
+        <span class="c1"># bucket *resets* that user&#39;s running totals — appropriate</span>
+        <span class="c1"># for in-process accounting where the alternative is</span>
+        <span class="c1"># unbounded growth. Pass ``max_users=None`` /</span>
+        <span class="c1"># ``user_idle_ttl_seconds=None`` to disable bounding for</span>
+        <span class="c1"># single-tenant or small fixed-tenant deployments.</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_by_user</span><span class="p">:</span> <span class="n">BoundedDict</span><span class="p">[</span><span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span><span class="p">,</span> <span class="n">_UserUsage</span><span class="p">]</span> <span class="o">=</span> <span class="n">BoundedDict</span><span class="p">(</span>
+            <span class="n">max_keys</span><span class="o">=</span><span class="n">max_users</span><span class="p">,</span>
+            <span class="n">ttl_seconds</span><span class="o">=</span><span class="n">user_idle_ttl_seconds</span><span class="p">,</span>
+        <span class="p">)</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_lock</span> <span class="o">=</span> <span class="n">anyio</span><span class="o">.</span><span class="n">Lock</span><span class="p">()</span>
 
 <div class="viewcode-block" id="StandardBudget.allows_step">
@@ -545,7 +569,7 @@
             <span class="bp">self</span><span class="o">.</span><span class="n">_tokens_in</span> <span class="o">+=</span> <span class="n">tokens_in</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">_tokens_out</span> <span class="o">+=</span> <span class="n">tokens_out</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">_cost</span> <span class="o">+=</span> <span class="n">cost_usd</span>
-            <span class="n">bucket</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_by_user</span><span class="p">[</span><span class="n">user_id</span><span class="p">]</span>
+            <span class="n">bucket</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_by_user</span><span class="o">.</span><span class="n">setdefault</span><span class="p">(</span><span class="n">user_id</span><span class="p">,</span> <span class="n">_UserUsage</span><span class="p">())</span>
             <span class="k">if</span> <span class="n">bucket</span><span class="o">.</span><span class="n">started_at</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
                 <span class="n">bucket</span><span class="o">.</span><span class="n">started_at</span> <span class="o">=</span> <span class="n">datetime</span><span class="o">.</span><span class="n">now</span><span class="p">(</span><span class="n">UTC</span><span class="p">)</span>
             <span class="n">bucket</span><span class="o">.</span><span class="n">tokens_in</span> <span class="o">+=</span> <span class="n">tokens_in</span>

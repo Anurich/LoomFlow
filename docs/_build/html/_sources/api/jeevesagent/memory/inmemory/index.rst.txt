@@ -24,9 +24,19 @@ Classes
 Module Contents
 ---------------
 
-.. py:class:: InMemoryMemory(*, consolidator: jeevesagent.memory.consolidator.Consolidator | None = None, fact_store: jeevesagent.memory.facts.FactStore | None = None)
+.. py:class:: InMemoryMemory(*, consolidator: jeevesagent.memory.consolidator.Consolidator | None = None, fact_store: jeevesagent.memory.facts.FactStore | None = None, max_users: int | None = _DEFAULT_MAX_USERS, user_idle_ttl_seconds: float | None = _DEFAULT_USER_TTL_SECONDS)
 
    Dict-backed implementation of :class:`Memory`.
+
+   Multi-tenant accounting (M10): per-user working-block state is
+   held in a bounded LRU + TTL container so a runaway tenant or
+   one-shot user_id explosion can't grow the in-process dict
+   without limit. Defaults: ``max_users=100_000`` and
+   ``user_idle_ttl_seconds=86_400`` (24h). Pass ``None`` to
+   disable bounding for single-tenant or fixed-tenant deployments.
+   Eviction *drops* a user's working blocks; callers needing
+   durable spill-to-disk should use :class:`SqliteMemory` or a
+   SQL-backed memory instead.
 
 
    .. py:method:: append_block(name: str, content: str, *, user_id: str | None = None) -> None
