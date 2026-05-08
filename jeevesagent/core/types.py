@@ -207,6 +207,49 @@ class Fact(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Memory inspection / GDPR
+# ---------------------------------------------------------------------------
+
+
+class MemoryProfile(BaseModel):
+    """Summary of what a :class:`Memory` knows about a single user.
+
+    Returned by :meth:`Memory.profile`. Cheap aggregate counts +
+    last-seen timestamp + the most-recent facts; suitable for
+    rendering a "what does the bot know about me?" view to the
+    end user, or a tenant dashboard for ops.
+
+    Backends that don't track full episode counts (e.g. Redis without
+    `FT.SEARCH` aggregations available) report what they can; the
+    counts are best-effort, never wildly wrong.
+    """
+
+    user_id: str | None
+    episode_count: int = 0
+    fact_count: int = 0
+    last_seen: datetime | None = None
+    recent_sessions: list[str] = Field(default_factory=list)
+    """Up to the 10 most-recent ``session_id``s touched, newest first."""
+    sample_facts: list[Fact] = Field(default_factory=list)
+    """Up to 10 of the most-recently-recorded facts about the user."""
+
+
+class MemoryExport(BaseModel):
+    """Full data dump for a single user — GDPR / data-portability use.
+
+    Returned by :meth:`Memory.export`. Carries the complete record of
+    everything the memory holds for ``user_id``: all episodes, all
+    facts, working blocks the user touched. Serialise with
+    ``.model_dump_json()`` for download or downstream processing.
+    """
+
+    user_id: str | None
+    episodes: list[Episode] = Field(default_factory=list)
+    facts: list[Fact] = Field(default_factory=list)
+    exported_at: datetime = Field(default_factory=_utcnow)
+
+
+# ---------------------------------------------------------------------------
 # Decisions and control signals
 # ---------------------------------------------------------------------------
 
@@ -461,13 +504,21 @@ class CertifiedValue(BaseModel):
 
 
 class AuditEntry(BaseModel):
-    """An immutable, signed entry in the audit log."""
+    """An immutable, signed entry in the audit log.
+
+    ``user_id`` (M9) is a top-level field for multi-tenant audit
+    queries — `query(user_id="alice")` returns Alice's entries
+    cleanly, no JSON-payload digging. Optional for back-compat
+    with single-tenant deployments; populated automatically by the
+    agent loop from the live :class:`~jeevesagent.RunContext`.
+    """
 
     model_config = ConfigDict(frozen=True)
 
     seq: int
     timestamp: datetime
     session_id: str
+    user_id: str | None = None
     actor: str
     action: str
     payload: dict[str, Any]

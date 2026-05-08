@@ -35,7 +35,13 @@ from ..core.types import AuditEntry
 
 @runtime_checkable
 class AuditLog(Protocol):
-    """The append-only signed log surface."""
+    """The append-only signed log surface.
+
+    ``user_id`` (M9) is a top-level field on every entry, populated
+    from the live :class:`~jeevesagent.RunContext`. Backends MUST
+    accept the kwarg on ``append`` and the ``query`` filter so
+    multi-tenant audit queries work without payload-digging.
+    """
 
     async def append(
         self,
@@ -44,6 +50,7 @@ class AuditLog(Protocol):
         actor: str,
         action: str,
         payload: dict[str, Any],
+        user_id: str | None = None,
     ) -> AuditEntry: ...
 
     async def query(
@@ -51,6 +58,7 @@ class AuditLog(Protocol):
         *,
         session_id: str | None = None,
         action: str | None = None,
+        user_id: str | None = None,
     ) -> list[AuditEntry]: ...
 
 
@@ -67,16 +75,19 @@ def _canonical_payload(
     actor: str,
     action: str,
     payload: dict[str, Any],
+    user_id: str | None = None,
 ) -> bytes:
     """Stable byte representation used for HMAC signing.
 
     Sorted-keys JSON keeps the signature stable across processes and
-    Python releases.
+    Python releases. ``user_id`` is included so a tampered entry
+    that swaps the user_id alongside the payload won't verify.
     """
     blob = {
         "seq": seq,
         "timestamp": timestamp.isoformat(),
         "session_id": session_id,
+        "user_id": user_id,
         "actor": actor,
         "action": action,
         "payload": payload,
@@ -100,6 +111,7 @@ def verify_signature(entry: AuditEntry, secret: str) -> bool:
             seq=entry.seq,
             timestamp=entry.timestamp,
             session_id=entry.session_id,
+            user_id=entry.user_id,
             actor=entry.actor,
             action=entry.action,
             payload=entry.payload,
@@ -129,6 +141,7 @@ class InMemoryAuditLog:
         actor: str,
         action: str,
         payload: dict[str, Any],
+        user_id: str | None = None,
     ) -> AuditEntry:
         async with self._lock:
             self._seq += 1
@@ -137,6 +150,7 @@ class InMemoryAuditLog:
                 seq=self._seq,
                 timestamp=timestamp,
                 session_id=session_id,
+                user_id=user_id,
                 actor=actor,
                 action=action,
                 payload=payload,
@@ -145,6 +159,7 @@ class InMemoryAuditLog:
                 seq=self._seq,
                 timestamp=timestamp,
                 session_id=session_id,
+                user_id=user_id,
                 actor=actor,
                 action=action,
                 payload=payload,
@@ -158,10 +173,16 @@ class InMemoryAuditLog:
         *,
         session_id: str | None = None,
         action: str | None = None,
+        user_id: str | None = None,
     ) -> list[AuditEntry]:
         async with self._lock:
             entries = list(self._entries)
-        return _filter_entries(entries, session_id=session_id, action=action)
+        return _filter_entries(
+            entries,
+            session_id=session_id,
+            action=action,
+            user_id=user_id,
+        )
 
     async def all_entries(self) -> list[AuditEntry]:
         async with self._lock:
@@ -216,6 +237,7 @@ class FileAuditLog:
         actor: str,
         action: str,
         payload: dict[str, Any],
+        user_id: str | None = None,
     ) -> AuditEntry:
         async with self._lock:
             self._seq += 1
@@ -224,6 +246,7 @@ class FileAuditLog:
                 seq=self._seq,
                 timestamp=timestamp,
                 session_id=session_id,
+                user_id=user_id,
                 actor=actor,
                 action=action,
                 payload=payload,
@@ -232,6 +255,7 @@ class FileAuditLog:
                 seq=self._seq,
                 timestamp=timestamp,
                 session_id=session_id,
+                user_id=user_id,
                 actor=actor,
                 action=action,
                 payload=payload,
@@ -250,9 +274,15 @@ class FileAuditLog:
         *,
         session_id: str | None = None,
         action: str | None = None,
+        user_id: str | None = None,
     ) -> list[AuditEntry]:
         entries = await anyio.to_thread.run_sync(self._read_entries)
-        return _filter_entries(entries, session_id=session_id, action=action)
+        return _filter_entries(
+            entries,
+            session_id=session_id,
+            action=action,
+            user_id=user_id,
+        )
 
     def _read_entries(self) -> list[AuditEntry]:
         if not self._path.exists():
@@ -283,11 +313,14 @@ def _filter_entries(
     *,
     session_id: str | None,
     action: str | None,
+    user_id: str | None = None,
 ) -> list[AuditEntry]:
     if session_id is not None:
         entries = [e for e in entries if e.session_id == session_id]
     if action is not None:
         entries = [e for e in entries if e.action == action]
+    if user_id is not None:
+        entries = [e for e in entries if e.user_id == user_id]
     return entries
 
 

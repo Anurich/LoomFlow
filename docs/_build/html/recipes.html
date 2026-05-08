@@ -6,7 +6,7 @@
 <link rel="index" title="Index" href="genindex.html"><link rel="search" title="Search" href="search.html"><link rel="next" title="Architecture" href="architecture.html"><link rel="prev" title="Quickstart" href="quickstart.html">
 
     <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
-        <title>Recipes - JeevesAgent 0.9.2</title>
+        <title>Recipes - JeevesAgent 0.9.3</title>
       <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=d111a655" />
     <link rel="stylesheet" type="text/css" href="_static/styles/furo.css?v=7bdb33bb" />
     <link rel="stylesheet" type="text/css" href="_static/graphviz.css?v=4ae1632d" />
@@ -162,7 +162,7 @@
       </label>
     </div>
     <div class="header-center">
-      <a href="index.html"><div class="brand">JeevesAgent 0.9.2</div></a>
+      <a href="index.html"><div class="brand">JeevesAgent 0.9.3</div></a>
     </div>
     <div class="header-right">
       <div class="theme-toggle-container theme-toggle-header">
@@ -183,7 +183,7 @@
       
       <div class="sidebar-sticky"><a class="sidebar-brand" href="index.html">
   
-  <span class="sidebar-brand-text">JeevesAgent 0.9.2</span>
+  <span class="sidebar-brand-text">JeevesAgent 0.9.3</span>
   
 </a><form class="sidebar-search-container" method="get" action="search.html" role="search">
   <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
@@ -269,16 +269,20 @@
 </ul>
 </li>
 <li class="toctree-l2 has-children"><a class="reference internal" href="api/jeevesagent/memory/index.html">jeevesagent.memory</a><input aria-label="Toggle navigation of jeevesagent.memory" class="toctree-checkbox" id="toctree-checkbox-10" name="toctree-checkbox-10" role="switch" type="checkbox"/><label for="toctree-checkbox-10"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l3"><a class="reference internal" href="api/jeevesagent/memory/auto_extract/index.html">jeevesagent.memory.auto_extract</a></li>
 <li class="toctree-l3"><a class="reference internal" href="api/jeevesagent/memory/chroma/index.html">jeevesagent.memory.chroma</a></li>
 <li class="toctree-l3"><a class="reference internal" href="api/jeevesagent/memory/chroma_facts/index.html">jeevesagent.memory.chroma_facts</a></li>
 <li class="toctree-l3"><a class="reference internal" href="api/jeevesagent/memory/consolidator/index.html">jeevesagent.memory.consolidator</a></li>
 <li class="toctree-l3"><a class="reference internal" href="api/jeevesagent/memory/embedder/index.html">jeevesagent.memory.embedder</a></li>
 <li class="toctree-l3"><a class="reference internal" href="api/jeevesagent/memory/facts/index.html">jeevesagent.memory.facts</a></li>
 <li class="toctree-l3"><a class="reference internal" href="api/jeevesagent/memory/inmemory/index.html">jeevesagent.memory.inmemory</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api/jeevesagent/memory/lazy/index.html">jeevesagent.memory.lazy</a></li>
 <li class="toctree-l3"><a class="reference internal" href="api/jeevesagent/memory/postgres/index.html">jeevesagent.memory.postgres</a></li>
 <li class="toctree-l3"><a class="reference internal" href="api/jeevesagent/memory/postgres_facts/index.html">jeevesagent.memory.postgres_facts</a></li>
 <li class="toctree-l3"><a class="reference internal" href="api/jeevesagent/memory/redis/index.html">jeevesagent.memory.redis</a></li>
 <li class="toctree-l3"><a class="reference internal" href="api/jeevesagent/memory/redis_facts/index.html">jeevesagent.memory.redis_facts</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api/jeevesagent/memory/resolver/index.html">jeevesagent.memory.resolver</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api/jeevesagent/memory/sqlite/index.html">jeevesagent.memory.sqlite</a></li>
 <li class="toctree-l3"><a class="reference internal" href="api/jeevesagent/memory/sqlite_facts/index.html">jeevesagent.memory.sqlite_facts</a></li>
 <li class="toctree-l3"><a class="reference internal" href="api/jeevesagent/memory/vector/index.html">jeevesagent.memory.vector</a></li>
 <li class="toctree-l3"><a class="reference internal" href="api/jeevesagent/memory/worker/index.html">jeevesagent.memory.worker</a></li>
@@ -408,37 +412,32 @@ restarts. Facts (<code class="docutils literal notranslate"><span class="pre">us
 <code class="docutils literal notranslate"><span class="pre">account</span> <span class="pre">Y</span> <span class="pre">is</span> <span class="pre">on</span> <span class="pre">the</span> <span class="pre">enterprise</span> <span class="pre">plan</span></code>) get extracted automatically
 after every conversation.</p>
 <div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">asyncio</span>
-<span class="kn">from</span><span class="w"> </span><span class="nn">jeevesagent</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
-    <span class="n">Agent</span><span class="p">,</span> <span class="n">AnthropicModel</span><span class="p">,</span> <span class="n">Consolidator</span><span class="p">,</span> <span class="n">OpenAIEmbedder</span><span class="p">,</span>
-    <span class="n">PostgresMemory</span><span class="p">,</span> <span class="n">SqliteRuntime</span><span class="p">,</span>
-<span class="p">)</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">jeevesagent</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">SqliteRuntime</span>
 
 <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">main</span><span class="p">():</span>
-    <span class="n">embedder</span> <span class="o">=</span> <span class="n">OpenAIEmbedder</span><span class="p">(</span><span class="s2">&quot;text-embedding-3-small&quot;</span><span class="p">)</span>
-    <span class="n">memory</span> <span class="o">=</span> <span class="k">await</span> <span class="n">PostgresMemory</span><span class="o">.</span><span class="n">connect</span><span class="p">(</span>
-        <span class="n">dsn</span><span class="o">=</span><span class="s2">&quot;postgres://localhost/support_bot&quot;</span><span class="p">,</span>
-        <span class="n">embedder</span><span class="o">=</span><span class="n">embedder</span><span class="p">,</span>
-        <span class="n">with_facts</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
-    <span class="p">)</span>
-    <span class="k">await</span> <span class="n">memory</span><span class="o">.</span><span class="n">init_schema</span><span class="p">()</span>
-
+    <span class="c1"># Postgres URL → resolver builds PostgresMemory + pgvector</span>
+    <span class="c1"># facts table on first agent.run. Schema migrations are</span>
+    <span class="c1"># idempotent; nothing to remember.</span>
     <span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
         <span class="n">instructions</span><span class="o">=</span><span class="p">(</span>
             <span class="s2">&quot;You are a customer-support agent for Acme. &quot;</span>
             <span class="s2">&quot;Use any known facts about the user to personalize replies. &quot;</span>
             <span class="s2">&quot;Cite the fact&#39;s source when you rely on it.&quot;</span>
         <span class="p">),</span>
-        <span class="n">model</span><span class="o">=</span><span class="n">AnthropicModel</span><span class="p">(</span><span class="s2">&quot;claude-opus-4-7&quot;</span><span class="p">),</span>
-        <span class="n">memory</span><span class="o">=</span><span class="n">memory</span><span class="p">,</span>
+        <span class="n">model</span><span class="o">=</span><span class="s2">&quot;claude-opus-4-7&quot;</span><span class="p">,</span>
+        <span class="n">memory</span><span class="o">=</span><span class="s2">&quot;postgres://localhost/support_bot&quot;</span><span class="p">,</span>
         <span class="n">runtime</span><span class="o">=</span><span class="n">SqliteRuntime</span><span class="p">(</span><span class="s2">&quot;./support_journal.db&quot;</span><span class="p">),</span>
-        <span class="n">auto_consolidate</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>  <span class="c1"># extract facts after every run</span>
+        <span class="c1"># auto_extract=True is the default — every run auto-pulls</span>
+        <span class="c1"># structured facts from the conversation into the bi-temporal</span>
+        <span class="c1"># store, partitioned by user_id.</span>
     <span class="p">)</span>
 
     <span class="k">while</span> <span class="kc">True</span><span class="p">:</span>
         <span class="n">prompt</span> <span class="o">=</span> <span class="nb">input</span><span class="p">(</span><span class="s2">&quot;User&gt; &quot;</span><span class="p">)</span>
         <span class="k">if</span> <span class="ow">not</span> <span class="n">prompt</span><span class="p">:</span>
             <span class="k">break</span>
-        <span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">agent</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">prompt</span><span class="p">)</span>
+        <span class="c1"># In a real bot, ``user_id`` comes from your auth layer.</span>
+        <span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">agent</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">prompt</span><span class="p">,</span> <span class="n">user_id</span><span class="o">=</span><span class="s2">&quot;user_42&quot;</span><span class="p">)</span>
         <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Bot&gt; </span><span class="si">{</span><span class="n">result</span><span class="o">.</span><span class="n">output</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
 
 <span class="n">asyncio</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">main</span><span class="p">())</span>
@@ -690,8 +689,16 @@ a tool call is mid-flight, it’ll be cancelled within the cancel scope.</p>
 <ul class="contains-task-list simple">
 <li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox"> <strong>Durable runtime</strong>: <code class="docutils literal notranslate"><span class="pre">runtime=SqliteRuntime(...)</span></code> (or DBOS /
 Temporal when those land) so crashes don’t lose work.</p></li>
-<li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox"> <strong>Persistent memory</strong>: <code class="docutils literal notranslate"><span class="pre">PostgresMemory</span></code> or <code class="docutils literal notranslate"><span class="pre">ChromaMemory.local</span></code>
-— not the default <code class="docutils literal notranslate"><span class="pre">InMemoryMemory</span></code> which loses everything on exit.</p></li>
+<li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox"> <strong>Persistent memory</strong>: pass a URL — <code class="docutils literal notranslate"><span class="pre">memory=&quot;sqlite:./bot.db&quot;</span></code>
+for single-instance, <code class="docutils literal notranslate"><span class="pre">memory=&quot;postgres://...&quot;</span></code> /
+<code class="docutils literal notranslate"><span class="pre">memory=&quot;redis://...&quot;</span></code> for multi-instance. Not the default
+<code class="docutils literal notranslate"><span class="pre">&quot;inmemory&quot;</span></code> which loses everything on exit.</p></li>
+<li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox"> <strong>Multi-tenancy</strong>: pass <code class="docutils literal notranslate"><span class="pre">user_id=</span></code> and <code class="docutils literal notranslate"><span class="pre">session_id=</span></code> to
+every <code class="docutils literal notranslate"><span class="pre">agent.run</span></code>. Memory partitions automatically; no app-side
+namespace plumbing.</p></li>
+<li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox"> <strong>Auto fact extraction</strong>: on by default for real models;
+facts the user tells the bot persist as structured triples for
+future runs to recall. Pass <code class="docutils literal notranslate"><span class="pre">auto_extract=False</span></code> to opt out.</p></li>
 <li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox"> <strong>Budget</strong>: <code class="docutils literal notranslate"><span class="pre">StandardBudget</span></code> with <code class="docutils literal notranslate"><span class="pre">max_tokens</span></code>,
 <code class="docutils literal notranslate"><span class="pre">max_cost_usd</span></code>, <code class="docutils literal notranslate"><span class="pre">max_wall_clock</span></code>. Soft warnings at 80%.</p></li>
 <li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox"> <strong>Max turns cap</strong>: default 50; lower if your tools are expensive.</p></li>
@@ -837,7 +844,7 @@ texts to specific vectors when you need to assert on ranking.</p></li>
       
     </aside>
   </div>
-</div><script src="_static/documentation_options.js?v=21db0d57"></script>
+</div><script src="_static/documentation_options.js?v=889b7931"></script>
     <script src="_static/doctools.js?v=fd6eb6e6"></script>
     <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
     <script src="_static/scripts/furo.js?v=46bd48cc"></script>

@@ -6,7 +6,7 @@
 <link rel="index" title="Index" href="genindex.html"><link rel="search" title="Search" href="search.html"><link rel="next" title="Recipes" href="recipes.html"><link rel="prev" title="JeevesAgent" href="index.html">
 
     <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
-        <title>Quickstart - JeevesAgent 0.9.2</title>
+        <title>Quickstart - JeevesAgent 0.9.3</title>
       <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=d111a655" />
     <link rel="stylesheet" type="text/css" href="_static/styles/furo.css?v=7bdb33bb" />
     <link rel="stylesheet" type="text/css" href="_static/graphviz.css?v=4ae1632d" />
@@ -162,7 +162,7 @@
       </label>
     </div>
     <div class="header-center">
-      <a href="index.html"><div class="brand">JeevesAgent 0.9.2</div></a>
+      <a href="index.html"><div class="brand">JeevesAgent 0.9.3</div></a>
     </div>
     <div class="header-right">
       <div class="theme-toggle-container theme-toggle-header">
@@ -183,7 +183,7 @@
       
       <div class="sidebar-sticky"><a class="sidebar-brand" href="index.html">
   
-  <span class="sidebar-brand-text">JeevesAgent 0.9.2</span>
+  <span class="sidebar-brand-text">JeevesAgent 0.9.3</span>
   
 </a><form class="sidebar-search-container" method="get" action="search.html" role="search">
   <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
@@ -269,16 +269,20 @@
 </ul>
 </li>
 <li class="toctree-l2 has-children"><a class="reference internal" href="api/jeevesagent/memory/index.html">jeevesagent.memory</a><input aria-label="Toggle navigation of jeevesagent.memory" class="toctree-checkbox" id="toctree-checkbox-10" name="toctree-checkbox-10" role="switch" type="checkbox"/><label for="toctree-checkbox-10"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l3"><a class="reference internal" href="api/jeevesagent/memory/auto_extract/index.html">jeevesagent.memory.auto_extract</a></li>
 <li class="toctree-l3"><a class="reference internal" href="api/jeevesagent/memory/chroma/index.html">jeevesagent.memory.chroma</a></li>
 <li class="toctree-l3"><a class="reference internal" href="api/jeevesagent/memory/chroma_facts/index.html">jeevesagent.memory.chroma_facts</a></li>
 <li class="toctree-l3"><a class="reference internal" href="api/jeevesagent/memory/consolidator/index.html">jeevesagent.memory.consolidator</a></li>
 <li class="toctree-l3"><a class="reference internal" href="api/jeevesagent/memory/embedder/index.html">jeevesagent.memory.embedder</a></li>
 <li class="toctree-l3"><a class="reference internal" href="api/jeevesagent/memory/facts/index.html">jeevesagent.memory.facts</a></li>
 <li class="toctree-l3"><a class="reference internal" href="api/jeevesagent/memory/inmemory/index.html">jeevesagent.memory.inmemory</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api/jeevesagent/memory/lazy/index.html">jeevesagent.memory.lazy</a></li>
 <li class="toctree-l3"><a class="reference internal" href="api/jeevesagent/memory/postgres/index.html">jeevesagent.memory.postgres</a></li>
 <li class="toctree-l3"><a class="reference internal" href="api/jeevesagent/memory/postgres_facts/index.html">jeevesagent.memory.postgres_facts</a></li>
 <li class="toctree-l3"><a class="reference internal" href="api/jeevesagent/memory/redis/index.html">jeevesagent.memory.redis</a></li>
 <li class="toctree-l3"><a class="reference internal" href="api/jeevesagent/memory/redis_facts/index.html">jeevesagent.memory.redis_facts</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api/jeevesagent/memory/resolver/index.html">jeevesagent.memory.resolver</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api/jeevesagent/memory/sqlite/index.html">jeevesagent.memory.sqlite</a></li>
 <li class="toctree-l3"><a class="reference internal" href="api/jeevesagent/memory/sqlite_facts/index.html">jeevesagent.memory.sqlite_facts</a></li>
 <li class="toctree-l3"><a class="reference internal" href="api/jeevesagent/memory/vector/index.html">jeevesagent.memory.vector</a></li>
 <li class="toctree-l3"><a class="reference internal" href="api/jeevesagent/memory/worker/index.html">jeevesagent.memory.worker</a></li>
@@ -551,102 +555,119 @@ just <code class="docutils literal notranslate"><span class="pre">commit</span><
 </section>
 <section id="memory-pick-a-backend">
 <h2>7. Memory: pick a backend<a class="headerlink" href="#memory-pick-a-backend" title="Link to this heading">¶</a></h2>
-<section id="in-memory-default">
-<h3>In-memory (default)<a class="headerlink" href="#in-memory-default" title="Link to this heading">¶</a></h3>
-<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">jeevesagent</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">InMemoryMemory</span>
+<p>The simplest way is the <strong><code class="docutils literal notranslate"><span class="pre">memory=</span></code> resolver</strong> — pass a URL and the
+framework picks the backend:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">jeevesagent</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span>
 
-<span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span><span class="s2">&quot;...&quot;</span><span class="p">,</span> <span class="n">memory</span><span class="o">=</span><span class="n">InMemoryMemory</span><span class="p">())</span>
+<span class="c1"># In-memory (default; lost on restart)</span>
+<span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span><span class="s2">&quot;...&quot;</span><span class="p">,</span> <span class="n">memory</span><span class="o">=</span><span class="s2">&quot;inmemory&quot;</span><span class="p">)</span>
+
+<span class="c1"># Single-file SQLite (persistent, no server)</span>
+<span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span><span class="s2">&quot;...&quot;</span><span class="p">,</span> <span class="n">memory</span><span class="o">=</span><span class="s2">&quot;sqlite:./bot.db&quot;</span><span class="p">)</span>
+
+<span class="c1"># Chroma (ephemeral / persistent)</span>
+<span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span><span class="s2">&quot;...&quot;</span><span class="p">,</span> <span class="n">memory</span><span class="o">=</span><span class="s2">&quot;chroma&quot;</span><span class="p">)</span>
+<span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span><span class="s2">&quot;...&quot;</span><span class="p">,</span> <span class="n">memory</span><span class="o">=</span><span class="s2">&quot;chroma:./chroma-db&quot;</span><span class="p">)</span>
+
+<span class="c1"># Postgres + pgvector</span>
+<span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span><span class="s2">&quot;...&quot;</span><span class="p">,</span> <span class="n">memory</span><span class="o">=</span><span class="s2">&quot;postgres://user:pw@localhost/jeeves&quot;</span><span class="p">)</span>
+
+<span class="c1"># Redis (with optional RediSearch HNSW vector index)</span>
+<span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span><span class="s2">&quot;...&quot;</span><span class="p">,</span> <span class="n">memory</span><span class="o">=</span><span class="s2">&quot;redis://localhost:6379/0&quot;</span><span class="p">)</span>
 </pre></div>
 </div>
-</section>
-<section id="vector-in-memory-embedding-based-recall">
-<h3>Vector (in-memory, embedding-based recall)<a class="headerlink" href="#vector-in-memory-embedding-based-recall" title="Link to this heading">¶</a></h3>
-<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">jeevesagent</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">VectorMemory</span><span class="p">,</span> <span class="n">OpenAIEmbedder</span>
+<p>What you get out of the box:</p>
+<ul class="simple">
+<li><p><strong>Auto fact extraction</strong> — every <code class="docutils literal notranslate"><span class="pre">agent.run()</span></code> runs a small
+Consolidator pass that pulls structured <code class="docutils literal notranslate"><span class="pre">(subject,</span> <span class="pre">predicate,</span> <span class="pre">object)</span></code> claims from the conversation into the fact store. Default
+ON for OpenAI / Anthropic / LiteLLM models. See <strong>Auto fact
+extraction</strong> below.</p></li>
+<li><p><strong>Auto-attached fact store</strong> — the resolver wires the
+bi-temporal fact store automatically (pass <code class="docutils literal notranslate"><span class="pre">with_facts=False</span></code> in
+the dict form to skip).</p></li>
+<li><p><strong>Auto-picked embedder</strong> — <code class="docutils literal notranslate"><span class="pre">OpenAIEmbedder(&quot;text-embedding-3-small&quot;)</span></code>
+if <code class="docutils literal notranslate"><span class="pre">OPENAI_API_KEY</span></code> is set, <code class="docutils literal notranslate"><span class="pre">HashEmbedder()</span></code> otherwise.</p></li>
+<li><p><strong><code class="docutils literal notranslate"><span class="pre">user_id</span></code> partition</strong> — every backend honours the multi-tenant
+contract. One shared memory file or pool serves N users.</p></li>
+<li><p><strong>Lazy connect for async backends</strong> — Postgres / Redis URLs return
+a <code class="docutils literal notranslate"><span class="pre">LazyMemory</span></code> proxy; the connection opens on the first
+<code class="docutils literal notranslate"><span class="pre">agent.run</span></code>, so <code class="docutils literal notranslate"><span class="pre">Agent(...)</span></code> stays synchronous.</p></li>
+</ul>
+<p>For non-default tweaks, use the dict form:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span><span class="s2">&quot;...&quot;</span><span class="p">,</span> <span class="n">memory</span><span class="o">=</span><span class="p">{</span>
+    <span class="s2">&quot;backend&quot;</span><span class="p">:</span> <span class="s2">&quot;chroma&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;path&quot;</span><span class="p">:</span> <span class="s2">&quot;./chroma-db&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;namespace&quot;</span><span class="p">:</span> <span class="s2">&quot;tenant_a&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;embedder&quot;</span><span class="p">:</span> <span class="s2">&quot;openai-large&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;with_facts&quot;</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span>
+<span class="p">})</span>
+</pre></div>
+</div>
+<p>For full control, pass an explicit instance (today’s API,
+unchanged):</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">jeevesagent</span><span class="w"> </span><span class="kn">import</span> <span class="n">ChromaMemory</span><span class="p">,</span> <span class="n">OpenAIEmbedder</span>
 
-<span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
-    <span class="s2">&quot;...&quot;</span><span class="p">,</span>
-    <span class="n">memory</span><span class="o">=</span><span class="n">VectorMemory</span><span class="p">(</span><span class="n">embedder</span><span class="o">=</span><span class="n">OpenAIEmbedder</span><span class="p">(</span><span class="s2">&quot;text-embedding-3-small&quot;</span><span class="p">)),</span>
+<span class="n">memory</span> <span class="o">=</span> <span class="n">ChromaMemory</span><span class="o">.</span><span class="n">local</span><span class="p">(</span>
+    <span class="s2">&quot;./chroma-db&quot;</span><span class="p">,</span> <span class="n">with_facts</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">embedder</span><span class="o">=</span><span class="n">OpenAIEmbedder</span><span class="p">()</span>
 <span class="p">)</span>
-</pre></div>
-</div>
-</section>
-<section id="chroma-local-persistent">
-<h3>Chroma (local persistent)<a class="headerlink" href="#chroma-local-persistent" title="Link to this heading">¶</a></h3>
-<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">jeevesagent</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">ChromaMemory</span>
-
-<span class="c1"># Persistent on-disk:</span>
-<span class="n">memory</span> <span class="o">=</span> <span class="n">ChromaMemory</span><span class="o">.</span><span class="n">local</span><span class="p">(</span><span class="s2">&quot;./chroma-db&quot;</span><span class="p">,</span> <span class="n">with_facts</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
-<span class="c1"># Or in-memory for tests:</span>
-<span class="n">memory</span> <span class="o">=</span> <span class="n">ChromaMemory</span><span class="o">.</span><span class="n">ephemeral</span><span class="p">()</span>
-
 <span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span><span class="s2">&quot;...&quot;</span><span class="p">,</span> <span class="n">memory</span><span class="o">=</span><span class="n">memory</span><span class="p">)</span>
 </pre></div>
 </div>
 </section>
-<section id="postgres-pgvector">
-<h3>Postgres + pgvector<a class="headerlink" href="#postgres-pgvector" title="Link to this heading">¶</a></h3>
-<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">jeevesagent</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">PostgresMemory</span><span class="p">,</span> <span class="n">OpenAIEmbedder</span>
+<section id="auto-fact-extraction-default-on">
+<h2>8. Auto fact extraction (default ON)<a class="headerlink" href="#auto-fact-extraction-default-on" title="Link to this heading">¶</a></h2>
+<p>Every <code class="docutils literal notranslate"><span class="pre">agent.run()</span></code> against a real model auto-extracts structured
+<code class="docutils literal notranslate"><span class="pre">(subject,</span> <span class="pre">predicate,</span> <span class="pre">object)</span></code> facts from the conversation into the
+bi-temporal fact store, partitioned by <code class="docutils literal notranslate"><span class="pre">user_id</span></code>. No <code class="docutils literal notranslate"><span class="pre">Consolidator</span></code>
+construction; no manual <code class="docutils literal notranslate"><span class="pre">consolidate()</span></code> call.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">jeevesagent</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span>
 
-<span class="n">memory</span> <span class="o">=</span> <span class="k">await</span> <span class="n">PostgresMemory</span><span class="o">.</span><span class="n">connect</span><span class="p">(</span>
-    <span class="n">dsn</span><span class="o">=</span><span class="s2">&quot;postgres://user:pass@localhost/jeeves&quot;</span><span class="p">,</span>
-    <span class="n">embedder</span><span class="o">=</span><span class="n">OpenAIEmbedder</span><span class="p">(</span><span class="s2">&quot;text-embedding-3-small&quot;</span><span class="p">),</span>
-    <span class="n">with_facts</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>  <span class="c1"># enable bi-temporal fact store on the same pool</span>
-<span class="p">)</span>
-<span class="k">await</span> <span class="n">memory</span><span class="o">.</span><span class="n">init_schema</span><span class="p">()</span>  <span class="c1"># creates episodes + facts tables, HNSW indexes</span>
-
-<span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span><span class="s2">&quot;...&quot;</span><span class="p">,</span> <span class="n">memory</span><span class="o">=</span><span class="n">memory</span><span class="p">)</span>
-</pre></div>
-</div>
-</section>
-<section id="redis">
-<h3>Redis<a class="headerlink" href="#redis" title="Link to this heading">¶</a></h3>
-<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">jeevesagent</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">RedisMemory</span>
-
-<span class="n">memory</span> <span class="o">=</span> <span class="k">await</span> <span class="n">RedisMemory</span><span class="o">.</span><span class="n">connect</span><span class="p">(</span>
-    <span class="s2">&quot;redis://localhost:6379/0&quot;</span><span class="p">,</span>
-    <span class="n">with_facts</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
-<span class="p">)</span>
-<span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span><span class="s2">&quot;...&quot;</span><span class="p">,</span> <span class="n">memory</span><span class="o">=</span><span class="n">memory</span><span class="p">)</span>
-</pre></div>
-</div>
-</section>
-</section>
-<section id="bi-temporal-facts">
-<h2>8. Bi-temporal facts<a class="headerlink" href="#bi-temporal-facts" title="Link to this heading">¶</a></h2>
-<p>Facts are semantic claims <code class="docutils literal notranslate"><span class="pre">(subject,</span> <span class="pre">predicate,</span> <span class="pre">object)</span></code> with
-bi-temporal validity:</p>
-<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">datetime</span><span class="w"> </span><span class="kn">import</span> <span class="n">datetime</span><span class="p">,</span> <span class="n">UTC</span>
-<span class="kn">from</span><span class="w"> </span><span class="nn">jeevesagent</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">VectorMemory</span><span class="p">,</span> <span class="n">Consolidator</span><span class="p">,</span> <span class="n">AnthropicModel</span>
-<span class="kn">from</span><span class="w"> </span><span class="nn">jeevesagent.core.types</span><span class="w"> </span><span class="kn">import</span> <span class="n">Fact</span>
-
-<span class="n">memory</span> <span class="o">=</span> <span class="n">VectorMemory</span><span class="p">(</span>
-    <span class="n">consolidator</span><span class="o">=</span><span class="n">Consolidator</span><span class="p">(</span><span class="n">model</span><span class="o">=</span><span class="n">AnthropicModel</span><span class="p">(</span><span class="s2">&quot;claude-opus-4-7&quot;</span><span class="p">)),</span>
-<span class="p">)</span>
-
-<span class="c1"># Manually:</span>
-<span class="k">await</span> <span class="n">memory</span><span class="o">.</span><span class="n">facts</span><span class="o">.</span><span class="n">append</span><span class="p">(</span>
-    <span class="n">Fact</span><span class="p">(</span>
-        <span class="n">subject</span><span class="o">=</span><span class="s2">&quot;user&quot;</span><span class="p">,</span>
-        <span class="n">predicate</span><span class="o">=</span><span class="s2">&quot;lives_in&quot;</span><span class="p">,</span>
-        <span class="nb">object</span><span class="o">=</span><span class="s2">&quot;Tokyo&quot;</span><span class="p">,</span>
-        <span class="n">valid_from</span><span class="o">=</span><span class="n">datetime</span><span class="o">.</span><span class="n">now</span><span class="p">(</span><span class="n">UTC</span><span class="p">),</span>
-        <span class="n">recorded_at</span><span class="o">=</span><span class="n">datetime</span><span class="o">.</span><span class="n">now</span><span class="p">(</span><span class="n">UTC</span><span class="p">),</span>
-    <span class="p">)</span>
-<span class="p">)</span>
-
-<span class="c1"># Or let the agent do it automatically:</span>
 <span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
     <span class="s2">&quot;You are a personal assistant.&quot;</span><span class="p">,</span>
-    <span class="n">model</span><span class="o">=</span><span class="n">AnthropicModel</span><span class="p">(</span><span class="s2">&quot;claude-opus-4-7&quot;</span><span class="p">),</span>
-    <span class="n">memory</span><span class="o">=</span><span class="n">memory</span><span class="p">,</span>
-    <span class="n">auto_consolidate</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>  <span class="c1"># extracts facts after every run</span>
+    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;claude-opus-4-7&quot;</span><span class="p">,</span>
+    <span class="n">memory</span><span class="o">=</span><span class="s2">&quot;sqlite:./bot.db&quot;</span><span class="p">,</span>
 <span class="p">)</span>
 
-<span class="k">await</span> <span class="n">agent</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="s2">&quot;Hi, I&#39;m Alice and I live in Tokyo.&quot;</span><span class="p">)</span>
-<span class="c1"># Facts are now in memory.facts; the next run sees them.</span>
-<span class="k">await</span> <span class="n">agent</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="s2">&quot;Where do I live?&quot;</span><span class="p">)</span>  <span class="c1"># model gets &quot;user lives_in Tokyo&quot; in context</span>
+<span class="k">await</span> <span class="n">agent</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>
+    <span class="s2">&quot;Hi, I&#39;m Alice and I live in Tokyo.&quot;</span><span class="p">,</span>
+    <span class="n">user_id</span><span class="o">=</span><span class="s2">&quot;alice&quot;</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="c1"># A Fact(user_id=&quot;alice&quot;, subject=&quot;alice&quot;, predicate=&quot;lives_in&quot;,</span>
+<span class="c1">#        object=&quot;Tokyo&quot;) is now in memory.facts — the framework</span>
+<span class="c1"># extracted it automatically.</span>
+
+<span class="c1"># Inspect:</span>
+<span class="n">profile</span> <span class="o">=</span> <span class="k">await</span> <span class="n">agent</span><span class="o">.</span><span class="n">memory</span><span class="o">.</span><span class="n">profile</span><span class="p">(</span><span class="n">user_id</span><span class="o">=</span><span class="s2">&quot;alice&quot;</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">profile</span><span class="o">.</span><span class="n">fact_count</span><span class="p">)</span>        <span class="c1"># &gt; 0</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">profile</span><span class="o">.</span><span class="n">sample_facts</span><span class="p">)</span>      <span class="c1"># includes the lives_in fact</span>
+
+<span class="c1"># Days later, fresh process, same db:</span>
+<span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">agent</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>
+    <span class="s2">&quot;Where do I live?&quot;</span><span class="p">,</span>
+    <span class="n">user_id</span><span class="o">=</span><span class="s2">&quot;alice&quot;</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="c1"># → &quot;Tokyo&quot; — the fact gets recalled into the seed messages.</span>
 </pre></div>
 </div>
+<p>Defaults: ON for <code class="docutils literal notranslate"><span class="pre">OpenAIModel</span></code> / <code class="docutils literal notranslate"><span class="pre">AnthropicModel</span></code> / <code class="docutils literal notranslate"><span class="pre">LiteLLMModel</span></code>;
+OFF for <code class="docutils literal notranslate"><span class="pre">ScriptedModel</span></code> / <code class="docutils literal notranslate"><span class="pre">EchoModel</span></code> / unrecognised custom Models.
+Override with <code class="docutils literal notranslate"><span class="pre">Agent(...,</span> <span class="pre">auto_extract=True/False)</span></code>.</p>
+<p>Facts use <strong>bi-temporal validity</strong> — when a new claim contradicts
+an existing one (same subject + predicate, different object), the
+old fact’s <code class="docutils literal notranslate"><span class="pre">valid_until</span></code> is set to the new fact’s <code class="docutils literal notranslate"><span class="pre">valid_from</span></code>.
+Historical facts aren’t deleted, just <em>closed off</em>. Query a moment
+in the past:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">datetime</span><span class="w"> </span><span class="kn">import</span> <span class="n">datetime</span><span class="p">,</span> <span class="n">UTC</span>
+
+<span class="n">facts_at_jan_2026</span> <span class="o">=</span> <span class="k">await</span> <span class="n">agent</span><span class="o">.</span><span class="n">memory</span><span class="o">.</span><span class="n">facts</span><span class="o">.</span><span class="n">query</span><span class="p">(</span>
+    <span class="n">user_id</span><span class="o">=</span><span class="s2">&quot;alice&quot;</span><span class="p">,</span>
+    <span class="n">subject</span><span class="o">=</span><span class="s2">&quot;alice&quot;</span><span class="p">,</span>
+    <span class="n">valid_at</span><span class="o">=</span><span class="n">datetime</span><span class="p">(</span><span class="mi">2026</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="n">tzinfo</span><span class="o">=</span><span class="n">UTC</span><span class="p">),</span>
+<span class="p">)</span>
+</pre></div>
+</div>
+<p>You can also write facts manually (skip auto-extraction for
+specific cases) via <code class="docutils literal notranslate"><span class="pre">agent.memory.facts.append(Fact(...))</span></code>.</p>
 <p>When a new fact contradicts an existing one (same subject + predicate,
 different object), the old fact’s <code class="docutils literal notranslate"><span class="pre">valid_until</span></code> is set to the new
 fact’s <code class="docutils literal notranslate"><span class="pre">valid_from</span></code> — historical facts aren’t deleted, just <em>closed
@@ -804,27 +825,22 @@ without re-executing anything.</p>
 
 <span class="kn">from</span><span class="w"> </span><span class="nn">jeevesagent</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
     <span class="n">Agent</span><span class="p">,</span>
-    <span class="n">AnthropicModel</span><span class="p">,</span>
-    <span class="n">Consolidator</span><span class="p">,</span>
     <span class="n">FileAuditLog</span><span class="p">,</span>
     <span class="n">JeevesGateway</span><span class="p">,</span>
+    <span class="n">Mode</span><span class="p">,</span>
     <span class="n">OTelTelemetry</span><span class="p">,</span>
     <span class="n">SqliteRuntime</span><span class="p">,</span>
     <span class="n">StandardPermissions</span><span class="p">,</span>
-    <span class="n">VectorMemory</span><span class="p">,</span>
-    <span class="n">OpenAIEmbedder</span><span class="p">,</span>
-    <span class="n">Mode</span><span class="p">,</span>
 <span class="p">)</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">jeevesagent.governance.budget</span><span class="w"> </span><span class="kn">import</span> <span class="n">BudgetConfig</span><span class="p">,</span> <span class="n">StandardBudget</span>
 
 <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">main</span><span class="p">():</span>
-    <span class="n">embedder</span> <span class="o">=</span> <span class="n">OpenAIEmbedder</span><span class="p">(</span><span class="s2">&quot;text-embedding-3-small&quot;</span><span class="p">)</span>
-    <span class="n">consolidator</span> <span class="o">=</span> <span class="n">Consolidator</span><span class="p">(</span><span class="n">model</span><span class="o">=</span><span class="n">AnthropicModel</span><span class="p">(</span><span class="s2">&quot;claude-opus-4-7&quot;</span><span class="p">))</span>
-
     <span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
         <span class="s2">&quot;You are a research assistant. Cite your sources.&quot;</span><span class="p">,</span>
         <span class="n">model</span><span class="o">=</span><span class="s2">&quot;claude-opus-4-7&quot;</span><span class="p">,</span>
-        <span class="n">memory</span><span class="o">=</span><span class="n">VectorMemory</span><span class="p">(</span><span class="n">embedder</span><span class="o">=</span><span class="n">embedder</span><span class="p">,</span> <span class="n">consolidator</span><span class="o">=</span><span class="n">consolidator</span><span class="p">),</span>
+        <span class="c1"># One string picks the backend; the resolver wires up the</span>
+        <span class="c1"># bi-temporal fact store + auto-picks an embedder.</span>
+        <span class="n">memory</span><span class="o">=</span><span class="s2">&quot;postgres://user:pw@db.internal/jeeves&quot;</span><span class="p">,</span>
         <span class="n">runtime</span><span class="o">=</span><span class="n">SqliteRuntime</span><span class="p">(</span><span class="s2">&quot;./journal.db&quot;</span><span class="p">),</span>
         <span class="n">tools</span><span class="o">=</span><span class="n">JeevesGateway</span><span class="o">.</span><span class="n">from_env</span><span class="p">(),</span>
         <span class="n">permissions</span><span class="o">=</span><span class="n">StandardPermissions</span><span class="p">(</span><span class="n">mode</span><span class="o">=</span><span class="n">Mode</span><span class="o">.</span><span class="n">DEFAULT</span><span class="p">),</span>
@@ -835,19 +851,27 @@ without re-executing anything.</p>
         <span class="p">)),</span>
         <span class="n">audit_log</span><span class="o">=</span><span class="n">FileAuditLog</span><span class="p">(</span><span class="s2">&quot;./audit.jsonl&quot;</span><span class="p">,</span> <span class="n">secret</span><span class="o">=</span><span class="s2">&quot;prod-secret&quot;</span><span class="p">),</span>
         <span class="n">telemetry</span><span class="o">=</span><span class="n">OTelTelemetry</span><span class="p">(),</span>
-        <span class="n">auto_consolidate</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+        <span class="c1"># auto_extract=True is the default for real network adapters —</span>
+        <span class="c1"># pinning explicitly so the production-shape is unambiguous.</span>
+        <span class="n">auto_extract</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
     <span class="p">)</span>
 
-    <span class="k">async</span> <span class="k">for</span> <span class="n">event</span> <span class="ow">in</span> <span class="n">agent</span><span class="o">.</span><span class="n">stream</span><span class="p">(</span><span class="s2">&quot;research recent advances in agent harnesses&quot;</span><span class="p">):</span>
+    <span class="k">async</span> <span class="k">for</span> <span class="n">event</span> <span class="ow">in</span> <span class="n">agent</span><span class="o">.</span><span class="n">stream</span><span class="p">(</span>
+        <span class="s2">&quot;research recent advances in agent harnesses&quot;</span><span class="p">,</span>
+        <span class="n">user_id</span><span class="o">=</span><span class="s2">&quot;user_42&quot;</span><span class="p">,</span>
+        <span class="n">session_id</span><span class="o">=</span><span class="s2">&quot;research_2026_05_08&quot;</span><span class="p">,</span>
+    <span class="p">):</span>
         <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;[</span><span class="si">{</span><span class="n">event</span><span class="o">.</span><span class="n">kind</span><span class="si">}</span><span class="s2">]&quot;</span><span class="p">,</span> <span class="n">event</span><span class="o">.</span><span class="n">payload</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;chunk&quot;</span><span class="p">,</span> <span class="p">{})</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;text&quot;</span><span class="p">,</span> <span class="s2">&quot;&quot;</span><span class="p">),</span> <span class="n">end</span><span class="o">=</span><span class="s2">&quot;&quot;</span><span class="p">)</span>
 
 <span class="n">asyncio</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">main</span><span class="p">())</span>
 </pre></div>
 </div>
-<p>That’s a production-shaped agent in ~30 lines. Memory persists facts
-across runs, the runtime can recover from crashes, every step lands
-in the audit log, every span shows up in your OTel exporter, and the
-budget enforces hard limits.</p>
+<p>That’s a production-shaped agent in ~25 lines. Memory persists
+facts across runs (auto-extracted from each conversation), the
+runtime can recover from crashes, every step lands in the audit
+log, every span shows up in your OTel exporter, and the budget
+enforces hard limits. Multi-tenancy is built in via the <code class="docutils literal notranslate"><span class="pre">user_id</span></code>
+kwarg — the same agent serves N users with hard partition.</p>
 </section>
 </section>
 
@@ -914,15 +938,8 @@ budget enforces hard limits.</p>
 <li><a class="reference internal" href="#streaming-events">4. Streaming events</a></li>
 <li><a class="reference internal" href="#mcp-servers">5. MCP servers</a></li>
 <li><a class="reference internal" href="#jeeves-gateway-one-line">6. Jeeves Gateway (one line)</a></li>
-<li><a class="reference internal" href="#memory-pick-a-backend">7. Memory: pick a backend</a><ul>
-<li><a class="reference internal" href="#in-memory-default">In-memory (default)</a></li>
-<li><a class="reference internal" href="#vector-in-memory-embedding-based-recall">Vector (in-memory, embedding-based recall)</a></li>
-<li><a class="reference internal" href="#chroma-local-persistent">Chroma (local persistent)</a></li>
-<li><a class="reference internal" href="#postgres-pgvector">Postgres + pgvector</a></li>
-<li><a class="reference internal" href="#redis">Redis</a></li>
-</ul>
-</li>
-<li><a class="reference internal" href="#bi-temporal-facts">8. Bi-temporal facts</a></li>
+<li><a class="reference internal" href="#memory-pick-a-backend">7. Memory: pick a backend</a></li>
+<li><a class="reference internal" href="#auto-fact-extraction-default-on">8. Auto fact extraction (default ON)</a></li>
 <li><a class="reference internal" href="#durable-replay">9. Durable replay</a></li>
 <li><a class="reference internal" href="#telemetry-opentelemetry">10. Telemetry (OpenTelemetry)</a></li>
 <li><a class="reference internal" href="#audit-log">11. Audit log</a></li>
@@ -941,7 +958,7 @@ budget enforces hard limits.</p>
       
     </aside>
   </div>
-</div><script src="_static/documentation_options.js?v=21db0d57"></script>
+</div><script src="_static/documentation_options.js?v=889b7931"></script>
     <script src="_static/doctools.js?v=fd6eb6e6"></script>
     <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
     <script src="_static/scripts/furo.js?v=46bd48cc"></script>

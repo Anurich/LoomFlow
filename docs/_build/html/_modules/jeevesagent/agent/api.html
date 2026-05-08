@@ -5,7 +5,7 @@
     <meta name="color-scheme" content="light dark"><link rel="index" title="Index" href="../../../genindex.html"><link rel="search" title="Search" href="../../../search.html">
 
     <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
-        <title>jeevesagent.agent.api - JeevesAgent 0.9.2</title>
+        <title>jeevesagent.agent.api - JeevesAgent 0.9.3</title>
       <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=d111a655" />
     <link rel="stylesheet" type="text/css" href="../../../_static/styles/furo.css?v=7bdb33bb" />
     <link rel="stylesheet" type="text/css" href="../../../_static/graphviz.css?v=4ae1632d" />
@@ -161,7 +161,7 @@
       </label>
     </div>
     <div class="header-center">
-      <a href="../../../index.html"><div class="brand">JeevesAgent 0.9.2</div></a>
+      <a href="../../../index.html"><div class="brand">JeevesAgent 0.9.3</div></a>
     </div>
     <div class="header-right">
       <div class="theme-toggle-container theme-toggle-header">
@@ -182,7 +182,7 @@
       
       <div class="sidebar-sticky"><a class="sidebar-brand" href="../../../index.html">
   
-  <span class="sidebar-brand-text">JeevesAgent 0.9.2</span>
+  <span class="sidebar-brand-text">JeevesAgent 0.9.3</span>
   
 </a><form class="sidebar-search-container" method="get" action="../../../search.html" role="search">
   <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
@@ -268,16 +268,20 @@
 </ul>
 </li>
 <li class="toctree-l2 has-children"><a class="reference internal" href="../../../api/jeevesagent/memory/index.html">jeevesagent.memory</a><input aria-label="Toggle navigation of jeevesagent.memory" class="toctree-checkbox" id="toctree-checkbox-10" name="toctree-checkbox-10" role="switch" type="checkbox"/><label for="toctree-checkbox-10"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/memory/auto_extract/index.html">jeevesagent.memory.auto_extract</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/memory/chroma/index.html">jeevesagent.memory.chroma</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/memory/chroma_facts/index.html">jeevesagent.memory.chroma_facts</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/memory/consolidator/index.html">jeevesagent.memory.consolidator</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/memory/embedder/index.html">jeevesagent.memory.embedder</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/memory/facts/index.html">jeevesagent.memory.facts</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/memory/inmemory/index.html">jeevesagent.memory.inmemory</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/memory/lazy/index.html">jeevesagent.memory.lazy</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/memory/postgres/index.html">jeevesagent.memory.postgres</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/memory/postgres_facts/index.html">jeevesagent.memory.postgres_facts</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/memory/redis/index.html">jeevesagent.memory.redis</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/memory/redis_facts/index.html">jeevesagent.memory.redis_facts</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/memory/resolver/index.html">jeevesagent.memory.resolver</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/memory/sqlite/index.html">jeevesagent.memory.sqlite</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/memory/sqlite_facts/index.html">jeevesagent.memory.sqlite_facts</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/memory/vector/index.html">jeevesagent.memory.vector</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/memory/worker/index.html">jeevesagent.memory.worker</a></li>
@@ -442,7 +446,6 @@
 <span class="p">)</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">..governance.budget</span><span class="w"> </span><span class="kn">import</span> <span class="n">NoBudget</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">..governance.retry</span><span class="w"> </span><span class="kn">import</span> <span class="n">RetryPolicy</span>
-<span class="kn">from</span><span class="w"> </span><span class="nn">..memory.inmemory</span><span class="w"> </span><span class="kn">import</span> <span class="n">InMemoryMemory</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">..model.echo</span><span class="w"> </span><span class="kn">import</span> <span class="n">EchoModel</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">..observability.tracing</span><span class="w"> </span><span class="kn">import</span> <span class="n">NoTelemetry</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">..runtime.inproc</span><span class="w"> </span><span class="kn">import</span> <span class="n">InProcRuntime</span>
@@ -473,7 +476,7 @@
         <span class="n">instructions</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
         <span class="o">*</span><span class="p">,</span>
         <span class="n">model</span><span class="p">:</span> <span class="n">Model</span> <span class="o">|</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
-        <span class="n">memory</span><span class="p">:</span> <span class="n">Memory</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">memory</span><span class="p">:</span> <span class="n">Memory</span> <span class="o">|</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
         <span class="n">runtime</span><span class="p">:</span> <span class="n">Runtime</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
         <span class="n">budget</span><span class="p">:</span> <span class="n">Budget</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
         <span class="n">permissions</span><span class="p">:</span> <span class="n">Permissions</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
@@ -490,6 +493,7 @@
         <span class="n">architecture</span><span class="p">:</span> <span class="n">Architecture</span> <span class="o">|</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
         <span class="n">skills</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">Any</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
         <span class="n">retry_policy</span><span class="p">:</span> <span class="n">RetryPolicy</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">auto_extract</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
     <span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
         <span class="c1"># Skills — packaged on-disk playbooks loaded on demand.</span>
         <span class="c1"># Build the registry first so frontmatter validation fires</span>
@@ -538,7 +542,44 @@
             <span class="p">)</span>
         <span class="k">else</span><span class="p">:</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">_wrapped_model</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_model</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">_memory</span><span class="p">:</span> <span class="n">Memory</span> <span class="o">=</span> <span class="n">memory</span> <span class="k">if</span> <span class="n">memory</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">InMemoryMemory</span><span class="p">()</span>
+        <span class="c1"># Resolve ``memory=`` into a concrete :class:`Memory`.</span>
+        <span class="c1"># The resolver handles None (default in-memory), strings</span>
+        <span class="c1"># (&quot;sqlite:./bot.db&quot;, &quot;postgres://...&quot;), config dicts</span>
+        <span class="c1"># ({&quot;backend&quot;: ..., ...}), and explicit Memory instances.</span>
+        <span class="kn">from</span><span class="w"> </span><span class="nn">..memory.resolver</span><span class="w"> </span><span class="kn">import</span> <span class="n">resolve_memory</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_memory</span><span class="p">:</span> <span class="n">Memory</span> <span class="o">=</span> <span class="n">resolve_memory</span><span class="p">(</span><span class="n">memory</span><span class="p">)</span>
+
+        <span class="c1"># Auto fact extraction. When enabled, the agent loop&#39;s</span>
+        <span class="c1"># ``remember(episode)`` calls go through an</span>
+        <span class="c1"># :class:`AutoExtractMemory` wrapper that runs a small</span>
+        <span class="c1"># Consolidator pass after each write, pulling structured</span>
+        <span class="c1"># (subject, predicate, object) claims out of the</span>
+        <span class="c1"># conversation into the bi-temporal fact store.</span>
+        <span class="c1"># ``_wrapped_memory`` is the loop-facing view; ``_memory``</span>
+        <span class="c1"># stays as the user-supplied inner so introspection +</span>
+        <span class="c1"># tests see the real backend type. Same dual-attribute</span>
+        <span class="c1"># pattern as ``_model`` / ``_wrapped_model`` for retries.</span>
+        <span class="c1"># Extraction is best-effort — failures (model errors,</span>
+        <span class="c1"># malformed JSON) never break the run.</span>
+        <span class="c1">#</span>
+        <span class="c1"># Default is auto-picked: ON for real network adapters</span>
+        <span class="c1"># (OpenAI / Anthropic / LiteLLM) where extraction is the</span>
+        <span class="c1"># whole point of &quot;your bot just remembers&quot;; OFF for in-</span>
+        <span class="c1"># process fakes (ScriptedModel / EchoModel) since those</span>
+        <span class="c1"># produce canned output that confuses the Consolidator</span>
+        <span class="c1"># and make tests non-deterministic. Pass ``auto_extract=</span>
+        <span class="c1"># True/False`` to override.</span>
+        <span class="k">if</span> <span class="n">auto_extract</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">auto_extract</span> <span class="o">=</span> <span class="n">_default_auto_extract_for</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_model</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">auto_extract</span><span class="p">:</span>
+            <span class="kn">from</span><span class="w"> </span><span class="nn">..memory.auto_extract</span><span class="w"> </span><span class="kn">import</span> <span class="n">AutoExtractMemory</span>
+            <span class="kn">from</span><span class="w"> </span><span class="nn">..memory.consolidator</span><span class="w"> </span><span class="kn">import</span> <span class="n">Consolidator</span>
+            <span class="n">consolidator</span> <span class="o">=</span> <span class="n">Consolidator</span><span class="p">(</span><span class="n">model</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">_model</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_wrapped_memory</span><span class="p">:</span> <span class="n">Memory</span> <span class="o">=</span> <span class="n">AutoExtractMemory</span><span class="p">(</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_memory</span><span class="p">,</span> <span class="n">consolidator</span>
+            <span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_wrapped_memory</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_memory</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_runtime</span><span class="p">:</span> <span class="n">Runtime</span> <span class="o">=</span> <span class="n">runtime</span> <span class="k">if</span> <span class="n">runtime</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">InProcRuntime</span><span class="p">()</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_budget</span><span class="p">:</span> <span class="n">Budget</span> <span class="o">=</span> <span class="n">budget</span> <span class="k">if</span> <span class="n">budget</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">NoBudget</span><span class="p">()</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_permissions</span><span class="p">:</span> <span class="n">Permissions</span> <span class="o">=</span> <span class="p">(</span>
@@ -1418,7 +1459,10 @@
                 <span class="c1"># disabled, so the architecture loop never sees a</span>
                 <span class="c1"># raw SDK exception when retries could have helped.</span>
                 <span class="n">model</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">_wrapped_model</span><span class="p">,</span>
-                <span class="n">memory</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">_memory</span><span class="p">,</span>
+                <span class="c1"># ``_wrapped_memory`` runs auto-extract on every</span>
+                <span class="c1"># remember() when enabled; falls through to</span>
+                <span class="c1"># ``_memory`` when ``auto_extract=False``.</span>
+                <span class="n">memory</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">_wrapped_memory</span><span class="p">,</span>
                 <span class="n">runtime</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">_runtime</span><span class="p">,</span>
                 <span class="n">tools</span><span class="o">=</span><span class="n">effective_tools</span><span class="p">,</span>
                 <span class="n">budget</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">_budget</span><span class="p">,</span>
@@ -1466,11 +1510,11 @@
                 <span class="n">output</span><span class="o">=</span><span class="n">session</span><span class="o">.</span><span class="n">output</span><span class="p">,</span>
             <span class="p">)</span>
             <span class="k">if</span> <span class="n">fast_runtime</span><span class="p">:</span>
-                <span class="k">await</span> <span class="bp">self</span><span class="o">.</span><span class="n">_memory</span><span class="o">.</span><span class="n">remember</span><span class="p">(</span><span class="n">episode</span><span class="p">)</span>
+                <span class="k">await</span> <span class="bp">self</span><span class="o">.</span><span class="n">_wrapped_memory</span><span class="o">.</span><span class="n">remember</span><span class="p">(</span><span class="n">episode</span><span class="p">)</span>
             <span class="k">else</span><span class="p">:</span>
                 <span class="k">await</span> <span class="bp">self</span><span class="o">.</span><span class="n">_runtime</span><span class="o">.</span><span class="n">step</span><span class="p">(</span>
                     <span class="sa">f</span><span class="s2">&quot;persist_episode_</span><span class="si">{</span><span class="n">session</span><span class="o">.</span><span class="n">turns</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>
-                    <span class="bp">self</span><span class="o">.</span><span class="n">_memory</span><span class="o">.</span><span class="n">remember</span><span class="p">,</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">_wrapped_memory</span><span class="o">.</span><span class="n">remember</span><span class="p">,</span>
                     <span class="n">episode</span><span class="p">,</span>
                 <span class="p">)</span>
 
@@ -1540,6 +1584,19 @@
 <span class="n">_NETWORK_MODEL_CLASS_NAMES</span> <span class="o">=</span> <span class="nb">frozenset</span><span class="p">(</span>
     <span class="p">{</span><span class="s2">&quot;OpenAIModel&quot;</span><span class="p">,</span> <span class="s2">&quot;AnthropicModel&quot;</span><span class="p">,</span> <span class="s2">&quot;LiteLLMModel&quot;</span><span class="p">}</span>
 <span class="p">)</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_default_auto_extract_for</span><span class="p">(</span><span class="n">model</span><span class="p">:</span> <span class="n">Model</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Auto-pick the default for ``auto_extract`` based on the model.</span>
+
+<span class="sd">    On for in-tree network adapters (OpenAI / Anthropic / LiteLLM):</span>
+<span class="sd">    extraction is what makes &quot;your bot just remembers&quot; work. Off</span>
+<span class="sd">    for in-process fakes (ScriptedModel / EchoModel) and unrecognised</span>
+<span class="sd">    custom Models: their canned responses confuse the Consolidator</span>
+<span class="sd">    and would make tests non-deterministic. Custom-model users opt</span>
+<span class="sd">    in by passing ``auto_extract=True`` explicitly.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="k">return</span> <span class="nb">type</span><span class="p">(</span><span class="n">model</span><span class="p">)</span><span class="o">.</span><span class="vm">__name__</span> <span class="ow">in</span> <span class="n">_NETWORK_MODEL_CLASS_NAMES</span>
 
 
 <span class="k">def</span><span class="w"> </span><span class="nf">_default_retry_policy_for</span><span class="p">(</span><span class="n">model</span><span class="p">:</span> <span class="n">Model</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">RetryPolicy</span><span class="p">:</span>
@@ -1785,7 +1842,7 @@
       
     </aside>
   </div>
-</div><script src="../../../_static/documentation_options.js?v=21db0d57"></script>
+</div><script src="../../../_static/documentation_options.js?v=889b7931"></script>
     <script src="../../../_static/doctools.js?v=fd6eb6e6"></script>
     <script src="../../../_static/sphinx_highlight.js?v=6ffebe34"></script>
     <script src="../../../_static/scripts/furo.js?v=46bd48cc"></script>

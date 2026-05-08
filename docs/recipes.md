@@ -25,37 +25,32 @@ after every conversation.
 
 ```python
 import asyncio
-from jeevesagent import (
-    Agent, AnthropicModel, Consolidator, OpenAIEmbedder,
-    PostgresMemory, SqliteRuntime,
-)
+from jeevesagent import Agent, SqliteRuntime
 
 async def main():
-    embedder = OpenAIEmbedder("text-embedding-3-small")
-    memory = await PostgresMemory.connect(
-        dsn="postgres://localhost/support_bot",
-        embedder=embedder,
-        with_facts=True,
-    )
-    await memory.init_schema()
-
+    # Postgres URL → resolver builds PostgresMemory + pgvector
+    # facts table on first agent.run. Schema migrations are
+    # idempotent; nothing to remember.
     agent = Agent(
         instructions=(
             "You are a customer-support agent for Acme. "
             "Use any known facts about the user to personalize replies. "
             "Cite the fact's source when you rely on it."
         ),
-        model=AnthropicModel("claude-opus-4-7"),
-        memory=memory,
+        model="claude-opus-4-7",
+        memory="postgres://localhost/support_bot",
         runtime=SqliteRuntime("./support_journal.db"),
-        auto_consolidate=True,  # extract facts after every run
+        # auto_extract=True is the default — every run auto-pulls
+        # structured facts from the conversation into the bi-temporal
+        # store, partitioned by user_id.
     )
 
     while True:
         prompt = input("User> ")
         if not prompt:
             break
-        result = await agent.run(prompt)
+        # In a real bot, ``user_id`` comes from your auth layer.
+        result = await agent.run(prompt, user_id="user_42")
         print(f"Bot> {result.output}")
 
 asyncio.run(main())
@@ -325,8 +320,16 @@ Before shipping an agent to production, verify each of these:
 
 - [ ] **Durable runtime**: ``runtime=SqliteRuntime(...)`` (or DBOS /
   Temporal when those land) so crashes don't lose work.
-- [ ] **Persistent memory**: ``PostgresMemory`` or ``ChromaMemory.local``
-  — not the default ``InMemoryMemory`` which loses everything on exit.
+- [ ] **Persistent memory**: pass a URL — ``memory="sqlite:./bot.db"``
+  for single-instance, ``memory="postgres://..."`` /
+  ``memory="redis://..."`` for multi-instance. Not the default
+  ``"inmemory"`` which loses everything on exit.
+- [ ] **Multi-tenancy**: pass ``user_id=`` and ``session_id=`` to
+  every ``agent.run``. Memory partitions automatically; no app-side
+  namespace plumbing.
+- [ ] **Auto fact extraction**: on by default for real models;
+  facts the user tells the bot persist as structured triples for
+  future runs to recall. Pass ``auto_extract=False`` to opt out.
 - [ ] **Budget**: ``StandardBudget`` with ``max_tokens``,
   ``max_cost_usd``, ``max_wall_clock``. Soft warnings at 80%.
 - [ ] **Max turns cap**: default 50; lower if your tools are expensive.

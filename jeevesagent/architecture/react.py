@@ -95,7 +95,15 @@ class ReAct:
             # time — when ``fast_budget`` is True we skip the call
             # entirely.
             if not deps.fast_budget:
-                status = await deps.budget.allows_step()
+                # Pass user_id so per-user budget caps fire
+                # correctly. Older budget impls without the kwarg
+                # fall back via the ``except TypeError``.
+                try:
+                    status = await deps.budget.allows_step(
+                        user_id=deps.context.user_id
+                    )
+                except TypeError:
+                    status = await deps.budget.allows_step()
                 if status.blocked:
                     session.interrupted = True
                     session.interruption_reason = f"budget:{status.reason}"
@@ -215,11 +223,21 @@ class ReAct:
 
                 # 2b. Update budget + telemetry + cumulative usage.
                 if not deps.fast_budget:
-                    await deps.budget.consume(
-                        tokens_in=usage.input_tokens,
-                        tokens_out=usage.output_tokens,
-                        cost_usd=usage.cost_usd,
-                    )
+                    try:
+                        await deps.budget.consume(
+                            tokens_in=usage.input_tokens,
+                            tokens_out=usage.output_tokens,
+                            cost_usd=usage.cost_usd,
+                            user_id=deps.context.user_id,
+                        )
+                    except TypeError:
+                        # Legacy budget impls without the user_id
+                        # kwarg — keep working.
+                        await deps.budget.consume(
+                            tokens_in=usage.input_tokens,
+                            tokens_out=usage.output_tokens,
+                            cost_usd=usage.cost_usd,
+                        )
                 if not deps.fast_telemetry:
                     await deps.telemetry.emit_metric(
                         "jeeves.tokens.input",
@@ -353,7 +371,14 @@ async def _build_seed_messages(
         Message(role=Role.SYSTEM, content=instructions),
     ]
 
-    blocks = await deps.memory.working()
+    # Working blocks are user-partitioned (M9) — pass the run's
+    # user_id so alice's pinned context never bleeds into bob's
+    # seed prompt. Fall back gracefully for legacy custom Memory
+    # implementations whose ``working()`` predates the kwarg.
+    try:
+        blocks = await deps.memory.working(user_id=user_id)
+    except TypeError:
+        blocks = await deps.memory.working()
     if blocks:
         block_text = "\n\n".join(b.format() for b in blocks)
         messages.append(Message(role=Role.SYSTEM, content=block_text))
@@ -455,6 +480,7 @@ async def _dispatch_streaming(
                         "destructive": call.destructive,
                         "turn": session.turns,
                     },
+                    user_id=deps.context.user_id,
                 )
             result = await _run_single_tool(
                 deps, call, turn=session.turns, slot=slot
@@ -475,6 +501,7 @@ async def _dispatch_streaming(
                         "reason": result.reason,
                         "turn": session.turns,
                     },
+                    user_id=deps.context.user_id,
                 )
             await sender.send(Event.tool_result(session.id, result))
 
@@ -514,6 +541,7 @@ async def _run_one_tool(
                 "destructive": call.destructive,
                 "turn": session.turns,
             },
+            user_id=deps.context.user_id,
         )
     result = await _run_single_tool(deps, call, turn=session.turns, slot=slot)
     results[slot] = result
@@ -532,6 +560,7 @@ async def _run_one_tool(
                 "reason": result.reason,
                 "turn": session.turns,
             },
+            user_id=deps.context.user_id,
         )
     event_buffer.append(Event.tool_result(session.id, result))
 
@@ -563,10 +592,17 @@ async def _run_single_tool(
     )
 
     async with tool_trace:
+        run_user_id = deps.context.user_id
         if deps.fast_hooks:
             hook_decision: PermissionDecision = PermissionDecision.allow_()
         else:
-            hook_decision = await deps.hooks.pre_tool(call)
+            try:
+                hook_decision = await deps.hooks.pre_tool(
+                    call, user_id=run_user_id
+                )
+            except TypeError:
+                # Legacy HookHost without the kwarg.
+                hook_decision = await deps.hooks.pre_tool(call)
 
         if hook_decision.deny:
             result = ToolResult.denied_(
@@ -577,7 +613,13 @@ async def _run_single_tool(
                 # AllowAll always allows — skip the dataclass round-trip.
                 perm: PermissionDecision = PermissionDecision.allow_()
             else:
-                perm = await deps.permissions.check(call, context={})
+                try:
+                    perm = await deps.permissions.check(
+                        call, context={}, user_id=run_user_id
+                    )
+                except TypeError:
+                    # Legacy Permissions without the kwarg.
+                    perm = await deps.permissions.check(call, context={})
             if perm.deny:
                 result = ToolResult.denied_(
                     call.id, perm.reason or "denied by policy"
@@ -608,7 +650,12 @@ async def _run_single_tool(
                     result = ToolResult.error_(call.id, str(exc))
 
                 if not deps.fast_hooks:
-                    await deps.hooks.post_tool(call, result)
+                    try:
+                        await deps.hooks.post_tool(
+                            call, result, user_id=run_user_id
+                        )
+                    except TypeError:
+                        await deps.hooks.post_tool(call, result)
 
     if not deps.fast_telemetry:
         elapsed_ms = (anyio.current_time() - started) * 1000
@@ -628,15 +675,27 @@ async def _audit(
     actor: str,
     action: str,
     payload: dict[str, Any],
+    *,
+    user_id: str | None = None,
 ) -> None:
     if audit_log is None:
         return
-    await audit_log.append(
-        session_id=session_id,
-        actor=actor,
-        action=action,
-        payload=payload,
-    )
+    try:
+        await audit_log.append(
+            session_id=session_id,
+            actor=actor,
+            action=action,
+            payload=payload,
+            user_id=user_id,
+        )
+    except TypeError:
+        # Legacy AuditLog impls without the user_id kwarg.
+        await audit_log.append(
+            session_id=session_id,
+            actor=actor,
+            action=action,
+            payload=payload,
+        )
 
 
 def _format_tool_message(result: ToolResult) -> str:

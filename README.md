@@ -3,7 +3,7 @@
 **Production-ready async agent harness. Multi-tenant by default,
 typed outputs, retries on transient errors, model-agnostic, MCP-native.**
 
-📖 **Docs** — <https://jeevesagent.readthedocs.io>
+📖 **Docs** — build locally with `pip install -e ".[docs]" && sphinx-build -b html docs docs/_build/html` (RTD hosting pending — set up the project at https://readthedocs.org once you have an account, then this link goes live)
 &nbsp;&nbsp;·&nbsp;&nbsp;
 **Migrating?** — [from LangGraph](docs/migrations/from-langgraph.md)
 &nbsp;·&nbsp;
@@ -836,6 +836,224 @@ lists, ISO dates, and a sentiment enum) from a raw meeting transcript.
 
 ---
 
+## Memory — one parameter, six backends
+
+Pick a memory backend by passing a string. The framework parses the
+URL scheme, builds the right backend, and (for async-connect
+backends) defers the connection until first use so the `Agent(...)`
+call stays synchronous.
+
+```python
+Agent(...)                                   # in-memory default; lost on restart
+Agent(..., memory="inmemory")                # explicit default
+Agent(..., memory="sqlite:./bot.db")         # single-file persistent — no infra
+Agent(..., memory="chroma")                  # ephemeral Chroma client
+Agent(..., memory="chroma:./vectors")        # persistent Chroma at path
+Agent(..., memory="postgres://user:pw@host/db")    # Postgres + pgvector
+Agent(..., memory="redis://localhost:6379/0")      # Redis + RediSearch
+```
+
+For non-default tweaks, pass a config dict:
+
+```python
+Agent(..., memory={
+    "backend": "chroma",
+    "path": "./vectors",
+    "namespace": "tenant_a",
+    "embedder": "openai",       # "hash" / "openai" / "openai-large" / Embedder
+    "with_facts": True,
+})
+```
+
+Or pass a fully-constructed Memory instance the way you do today —
+power users keep every escape hatch:
+
+```python
+from jeevesagent import ChromaMemory, OpenAIEmbedder
+
+memory = ChromaMemory.local("./vectors", with_facts=True, embedder=OpenAIEmbedder())
+agent = Agent(..., memory=memory)
+```
+
+What you get out of the box:
+
+* **Auto-attached fact store** — string and dict specs default to
+  `with_facts=True`, so semantic-recall just works. Pass
+  `with_facts=False` to skip it.
+* **Auto-picked embedder** — `OpenAIEmbedder("text-embedding-3-small")`
+  when `OPENAI_API_KEY` is set, `HashEmbedder()` (deterministic,
+  zero-key) otherwise.
+* **`user_id` partition** — every backend honours the M1 multi-tenant
+  contract, so one shared memory file or pool serves N users with
+  no cross-contamination.
+* **Lazy connection for async backends** — `Agent("...",
+  memory="postgres://...")` returns immediately; the pool opens on
+  first `agent.run`, errors surface there as `MemoryStoreError`.
+
+The new `SqliteMemory` backend (`memory="sqlite:./bot.db"`) fills the
+"persistent but no infra" gap — episodes, working blocks, session
+messages, and bi-temporal facts all live in one `.db` file. Survives
+restarts, no server, no schema migrations to think about.
+
+### Inspect, forget, export — GDPR by default
+
+Every backend implements the same three high-level ops, scoped by
+`user_id`:
+
+```python
+# What does the agent know about Alice?
+profile = await agent.memory.profile(user_id="alice")
+# MemoryProfile(user_id='alice', episode_count=12, fact_count=5,
+#               last_seen=..., recent_sessions=['conv_42', ...],
+#               sample_facts=[Fact(subject='alice', predicate='works_at', ...), ...])
+
+# Right-to-be-forgotten — full erasure of one user's data.
+deleted = await agent.memory.forget(user_id="alice")
+
+# Or scoped: just one conversation, or just data older than a date.
+await agent.memory.forget(user_id="alice", session_id="conv_42")
+await agent.memory.forget(user_id="alice", before=datetime(2026, 1, 1))
+
+# Data-portability dump (DSAR).
+export = await agent.memory.export(user_id="alice")
+blob = export.model_dump_json()  # serialise for download
+```
+
+These work identically across `InMemoryMemory`, `SqliteMemory`,
+`VectorMemory`, `ChromaMemory`, `PostgresMemory`, and `RedisMemory`.
+Hard `user_id` partition is enforced — `profile("alice")` never
+returns counts derived from bob's data, `export("alice")` never
+includes bob's episodes, `forget("alice")` never touches bob.
+
+### Auto-extract facts (default ON for real models)
+
+The thing that turns memory into "your bot just remembers": when
+`auto_extract=True` (the default for in-tree network adapters —
+OpenAI, Anthropic, LiteLLM), the framework runs the bundled
+`Consolidator` on every persisted episode. Structured
+`(subject, predicate, object)` facts get pulled from the
+conversation and stored in the bi-temporal fact store, partitioned
+by `user_id`, ready to surface in future runs via `recall_facts`.
+
+```python
+agent = Agent("...", model="gpt-4.1-mini", memory="sqlite:./bot.db")
+
+# One run; the framework auto-extracts facts in the background.
+await agent.run(
+    "Hi, I'm Alice and my favourite programming language is Python.",
+    user_id="alice",
+)
+
+# Facts are already there — no manual Consolidator call needed.
+profile = await agent.memory.profile(user_id="alice")
+# profile.fact_count > 0
+# profile.sample_facts contains e.g.
+#   Fact(user_id="alice", subject="alice", predicate="prefers",
+#        object="Python", ...)
+
+# Days later, a different conversation:
+result = await agent.run(
+    "What's my favourite programming language?",
+    user_id="alice",
+)
+# → "Your favourite is Python." (recalled from the auto-extracted fact)
+```
+
+Defaults:
+
+* **ON** for `OpenAIModel` / `AnthropicModel` / `LiteLLMModel` — real
+  network models where extraction is the whole point.
+* **OFF** for `ScriptedModel` / `EchoModel` / unrecognised custom
+  Models — test fakes shouldn't make extra LLM calls.
+
+Override with `Agent(..., auto_extract=True)` (force on for a
+custom model) or `auto_extract=False` (turn off for cost control,
+or when wiring a different extraction model manually).
+
+Extraction is **best-effort**: the run returns successfully even
+when extraction fails (model error, malformed JSON, rate limit) —
+the agent's primary contract (return a result, persist the
+episode) is never blocked by this enhancement.
+
+### Memory inspection demo
+
+[`examples/05_memory_showcase.py`](examples/05_memory_showcase.py)
+walks through every backend, the URL/dict/instance resolver, the
+`profile`/`forget`/`export` GDPR ops, and runs the bundled
+`Consolidator` to extract structured facts from raw chat episodes —
+all in one runnable file.
+
+---
+
+## Multi-tenant by default — every primitive
+
+Every stateful primitive in the framework partitions by `user_id`.
+One `Agent` + one `Memory` + one `Budget` + one `AuditLog` serves N
+tenants with hard isolation across **all** layers:
+
+| Primitive | Partitioned by `user_id`? |
+|---|---|
+| Memory recall + facts + sessions + episodes + working blocks | ✅ |
+| Auto fact extraction (extracts inherit episode's user_id) | ✅ |
+| Sub-agent context inheritance | ✅ |
+| Tools (read via `get_run_context().user_id`) | ✅ |
+| Telemetry span attributes | ✅ |
+| **Working memory blocks** (`update_block` / `working`) | ✅ M9 |
+| **Budget accounting** (`StandardBudget` per-user totals) | ✅ M9 |
+| **Audit log** (`AuditEntry.user_id` top-level field) | ✅ M9 |
+| **Permissions** (route to per-user policy via `PerUserPermissions`) | ✅ M9 |
+| **Hooks** (`pre_tool` / `post_tool` see user_id) | ✅ M9 |
+
+Concrete examples of what M9 enables:
+
+```python
+from jeevesagent import (
+    Agent, PerUserPermissions, StandardPermissions, Mode,
+)
+from jeevesagent.governance.budget import BudgetConfig, StandardBudget
+
+# Per-user permission policies — admins get more, free users get less.
+permissions = PerUserPermissions(
+    policies={
+        "admin_alice": StandardPermissions(mode=Mode.BYPASS),
+        "paid_user_42": StandardPermissions(mode=Mode.ACCEPT_EDITS),
+    },
+    default=StandardPermissions(
+        mode=Mode.DEFAULT, denied_tools=["bash", "delete_account"]
+    ),
+)
+
+# Per-user budget caps — alice can't exhaust bob's tokens.
+budget = StandardBudget(BudgetConfig(
+    max_tokens=1_000_000,        # global cap (whole tenant)
+    per_user_max_tokens=10_000,  # per-user cap (each tenant)
+    per_user_max_cost_usd=1.0,
+))
+
+agent = Agent(
+    "...",
+    model="gpt-4.1-mini",
+    memory="postgres://prod-db/agent",
+    permissions=permissions,
+    budget=budget,
+    audit_log=FileAuditLog("./audit.jsonl", secret="prod-secret"),
+)
+
+# Per-user audit queries — clean SIEM integration, no payload digging.
+alice_entries = await agent._audit_log.query(user_id="alice")
+
+# Per-user budget snapshot — for ops dashboards.
+print(budget.usage_for("alice"))  # {tokens_in, tokens_out, cost_usd, ...}
+```
+
+The principle: **`user_id` is the partition key for everything
+stateful**. The framework forwards it from the live `RunContext`
+into every primitive automatically; protocol implementations that
+don't care can ignore the kwarg, and legacy impls without it fall
+back gracefully.
+
+---
+
 ## Multi-tenancy by default
 
 JeevesAgent treats `user_id` and `session_id` as **first-class typed
@@ -913,6 +1131,9 @@ End-to-end demo: [`examples/03_multi_user_sessions.py`](examples/03_multi_user_s
 | Capability | What you get | Where |
 |---|---|---|
 | **Multi-tenant memory** | First-class `user_id` partition + `session_id` continuity. One shared `Memory` instance backs N users with no cross-contamination; sub-agents inherit context automatically | `RunContext`, `get_run_context`, `set_run_context`, `IsolationWarning`, `Agent.run(user_id=, session_id=, metadata=)` |
+| **Memory string resolver** | Pick backend by URL scheme: `"sqlite:./bot.db"`, `"chroma:./vec"`, `"postgres://..."`, `"redis://..."`, `"inmemory"`. Async-connect backends return a lazy proxy — `Agent(...)` stays synchronous. Config-dict form for tweaks; instance pass-through for power users. | `resolve_memory`, `SqliteMemory`, `LazyMemory`, `Agent(memory=)` |
+| **Memory inspection / GDPR** | `profile(user_id)` summarises what the bot knows about a user; `forget(user_id, session_id=, before=)` erases (right-to-be-forgotten); `export(user_id)` dumps everything for portability / DSAR. Implemented across all six backends; hard user_id partition. | `Memory.profile`, `Memory.forget`, `Memory.export`, `MemoryProfile`, `MemoryExport` |
+| **Auto fact extraction** | Default ON for real network models. Each `agent.run()` finishes by extracting structured `(subject, predicate, object)` facts from the conversation and writing them to the user-partitioned bi-temporal fact store. "Your bot just remembers" with no manual `Consolidator` calls. Best-effort: failures don't break the run. | `AutoExtractMemory`, `Agent(auto_extract=)`, `Consolidator` |
 | **Structured outputs** | Pass `output_schema=` to get a typed, validated Pydantic instance back. Framework augments the system prompt with the schema, parses + validates, retries with feedback on failure | `Agent.run(output_schema=)`, `RunResult.parsed`, `OutputValidationError` |
 | **Resilient model calls** | Network adapters auto-wrapped with retry-on-transient (rate limit, 5xx, network blip). Typed error taxonomy. Provider `Retry-After` honoured. | `RetryPolicy`, `RetryPolicy.disabled/aggressive`, `ModelError`, `TransientModelError`, `RateLimitError`, `PermanentModelError`, `AuthenticationError`, `InvalidRequestError`, `ContentFilterError`, `classify_model_error` |
 | **Architecture protocol** | Pluggable agent-loop strategy: 12 architectures shipped | `Architecture`, `ReAct`, `SelfRefine`, `Reflexion`, `TreeOfThoughts`, `PlanAndExecute`, `ReWOO`, `Router`, `Supervisor`, `ActorCritic`, `MultiAgentDebate`, `Swarm`, `BlackboardArchitecture` |
@@ -944,12 +1165,16 @@ End-to-end demo: [`examples/03_multi_user_sessions.py`](examples/03_multi_user_s
 
 ## Documentation
 
-The full Sphinx-built documentation site lives at
-<https://jeevesagent.readthedocs.io> — every public symbol is
-auto-documented from its docstring, and the migration / quickstart
-guides are mounted alongside the API reference.
+The full Sphinx-built documentation site is configured but not yet
+deployed. To go live:
 
-Build it locally with:
+1. Sign in to <https://readthedocs.org/> with the repo's GitHub
+   account
+2. Click *Import Project* → pick the JeevesAgent repo
+3. RTD reads `.readthedocs.yaml`, builds, and the site comes up at
+   `https://<your-project-slug>.readthedocs.io/`
+
+Until then, build locally with:
 
 ```bash
 pip install -e ".[docs]"
@@ -983,10 +1208,10 @@ adopters know what they can pin against today.
 
 | Tier | API | What it covers |
 |---|---|---|
-| **Stable** | `Agent`, `Agent.run` / `stream` / `resume`, `RunResult`, `RunContext`, `get_run_context`, `set_run_context`, `Memory` protocol, `Episode`, `Fact`, `Message`, `Role`, `Event`, `Tool`, `@tool`, `Model` protocol, the error hierarchy under `JeevesAgentError`, `RetryPolicy`, `OutputValidationError`, `IsolationWarning` | Will not break in 0.x without a migration note + deprecation cycle. Pin against these in production code. |
-| **Stable backends** | `InMemoryMemory`, `ChromaMemory`, `PostgresMemory`, `RedisMemory`, `VectorMemory`, `OpenAIModel`, `AnthropicModel`, `LiteLLMModel`, `EchoModel`, `ScriptedModel`, `InProcRuntime`, `SqliteRuntime`, `PostgresRuntime`, `StandardBudget`, `NoBudget`, `AllowAll`, `StandardPermissions`, `HookRegistry`, `OTelTelemetry`, `NoTelemetry`, `FileAuditLog`, `InMemoryAuditLog` | Concrete implementations; constructor signatures stable, behaviour locked. |
+| **Stable** | `Agent`, `Agent.run` / `stream` / `resume`, `RunResult`, `RunContext`, `get_run_context`, `set_run_context`, `Memory` protocol (including `profile` / `forget` / `export` / `session_messages`), `Episode`, `Fact`, `MemoryProfile`, `MemoryExport`, `Message`, `Role`, `Event`, `Tool`, `@tool`, `Model` protocol, the error hierarchy under `JeevesAgentError`, `RetryPolicy`, `OutputValidationError`, `IsolationWarning`, `resolve_memory` | Will not break in 0.x without a migration note + deprecation cycle. Pin against these in production code. |
+| **Stable backends** | `InMemoryMemory`, `SqliteMemory`, `ChromaMemory`, `PostgresMemory`, `RedisMemory`, `VectorMemory`, `LazyMemory`, `AutoExtractMemory`, `OpenAIModel`, `AnthropicModel`, `LiteLLMModel`, `EchoModel`, `ScriptedModel`, `InProcRuntime`, `SqliteRuntime`, `PostgresRuntime`, `StandardBudget`, `NoBudget`, `AllowAll`, `StandardPermissions`, `HookRegistry`, `OTelTelemetry`, `NoTelemetry`, `FileAuditLog`, `InMemoryAuditLog` | Concrete implementations; constructor signatures stable, behaviour locked. |
 | **Experimental** | `MultiAgentDebate` / `Swarm` / `Blackboard` / `ReWOO` / `TreeOfThoughts` (the newer architectures), `Skills` and `SkillRegistry`, `JeevesGateway`, `agent.generate_graph()`, the `Team.*` builders | Useful, tested, but newer — internal details may change as we collect production feedback. Wrap with your own thin layer if you depend on them. |
-| **Internal** | `_loop`, `_wrapped_model`, `Dependencies`, `AgentSession`, the architecture protocol's exact shape, anything starting with `_` | No stability promise. Subject to change without notice. |
+| **Internal** | `_loop`, `_wrapped_model`, `_wrapped_memory`, `Dependencies`, `AgentSession`, the architecture protocol's exact shape, anything starting with `_` | No stability promise. Subject to change without notice. |
 
 If a symbol isn't listed, it's experimental by default. Open an
 issue if you depend on something not yet in the Stable tier and
@@ -996,9 +1221,10 @@ need it promoted.
 
 ## Status
 
-* **866 tests pass** in ~6 seconds (5 env-gated integrations skip
-  without `JEEVES_TEST_PG_DSN` / `JEEVES_TEST_REDIS_URL`)
-* **mypy `--strict`** clean across 105 production source files
+* **919 tests pass** offline in ~6 seconds; **10 live tests pass**
+  against real OpenAI in ~30 seconds (5 env-gated integrations
+  skip without `JEEVES_TEST_PG_DSN` / `JEEVES_TEST_REDIS_URL`)
+* **mypy `--strict`** clean across 109 production source files
 * **ruff** clean including `flake8-async` lints
 * v0.10 ships **multi-tenancy by default**, **structured outputs**,
   **retry-on-transient by default**, and the **fast path by

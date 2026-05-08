@@ -6,7 +6,7 @@
 <link rel="index" title="Index" href="../../../genindex.html"><link rel="search" title="Search" href="../../../search.html"><link rel="next" title="jeevesagent.core.context" href="context/index.html"><link rel="prev" title="jeevesagent.architecture.tree_of_thoughts" href="../architecture/tree_of_thoughts/index.html">
 
     <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
-        <title>jeevesagent.core - JeevesAgent 0.9.2</title>
+        <title>jeevesagent.core - JeevesAgent 0.9.3</title>
       <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=d111a655" />
     <link rel="stylesheet" type="text/css" href="../../../_static/styles/furo.css?v=7bdb33bb" />
     <link rel="stylesheet" type="text/css" href="../../../_static/graphviz.css?v=4ae1632d" />
@@ -162,7 +162,7 @@
       </label>
     </div>
     <div class="header-center">
-      <a href="../../../index.html"><div class="brand">JeevesAgent 0.9.2</div></a>
+      <a href="../../../index.html"><div class="brand">JeevesAgent 0.9.3</div></a>
     </div>
     <div class="header-right">
       <div class="theme-toggle-container theme-toggle-header">
@@ -183,7 +183,7 @@
       
       <div class="sidebar-sticky"><a class="sidebar-brand" href="../../../index.html">
   
-  <span class="sidebar-brand-text">JeevesAgent 0.9.2</span>
+  <span class="sidebar-brand-text">JeevesAgent 0.9.3</span>
   
 </a><form class="sidebar-search-container" method="get" action="../../../search.html" role="search">
   <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
@@ -269,16 +269,20 @@
 </ul>
 </li>
 <li class="toctree-l2 has-children"><a class="reference internal" href="../memory/index.html">jeevesagent.memory</a><input aria-label="Toggle navigation of jeevesagent.memory" class="toctree-checkbox" id="toctree-checkbox-10" name="toctree-checkbox-10" role="switch" type="checkbox"/><label for="toctree-checkbox-10"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l3"><a class="reference internal" href="../memory/auto_extract/index.html">jeevesagent.memory.auto_extract</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../memory/chroma/index.html">jeevesagent.memory.chroma</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../memory/chroma_facts/index.html">jeevesagent.memory.chroma_facts</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../memory/consolidator/index.html">jeevesagent.memory.consolidator</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../memory/embedder/index.html">jeevesagent.memory.embedder</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../memory/facts/index.html">jeevesagent.memory.facts</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../memory/inmemory/index.html">jeevesagent.memory.inmemory</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../memory/lazy/index.html">jeevesagent.memory.lazy</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../memory/postgres/index.html">jeevesagent.memory.postgres</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../memory/postgres_facts/index.html">jeevesagent.memory.postgres_facts</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../memory/redis/index.html">jeevesagent.memory.redis</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../memory/redis_facts/index.html">jeevesagent.memory.redis_facts</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../memory/resolver/index.html">jeevesagent.memory.resolver</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../memory/sqlite/index.html">jeevesagent.memory.sqlite</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../memory/sqlite_facts/index.html">jeevesagent.memory.sqlite_facts</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../memory/vector/index.html">jeevesagent.memory.vector</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../memory/worker/index.html">jeevesagent.memory.worker</a></li>
@@ -510,6 +514,12 @@
 </tr>
 <tr class="row-even"><td><p><a class="reference internal" href="#jeevesagent.core.MemoryBlock" title="jeevesagent.core.MemoryBlock"><code class="xref py py-obj docutils literal notranslate"><span class="pre">MemoryBlock</span></code></a></p></td>
 <td><p>An in-context memory block, pinned to every prompt.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#jeevesagent.core.MemoryExport" title="jeevesagent.core.MemoryExport"><code class="xref py py-obj docutils literal notranslate"><span class="pre">MemoryExport</span></code></a></p></td>
+<td><p>Full data dump for a single user — GDPR / data-portability use.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#jeevesagent.core.MemoryProfile" title="jeevesagent.core.MemoryProfile"><code class="xref py py-obj docutils literal notranslate"><span class="pre">MemoryProfile</span></code></a></p></td>
+<td><p>Summary of what a <a class="reference internal" href="#jeevesagent.core.Memory" title="jeevesagent.core.Memory"><code class="xref py py-class docutils literal notranslate"><span class="pre">Memory</span></code></a> knows about a single user.</p></td>
 </tr>
 <tr class="row-odd"><td><p><a class="reference internal" href="#jeevesagent.core.Message" title="jeevesagent.core.Message"><code class="xref py py-obj docutils literal notranslate"><span class="pre">Message</span></code></a></p></td>
 <td><p>A single chat message in the model's conversation.</p></td>
@@ -1396,6 +1406,52 @@ validated to form a valid model.</p>
 </dd></dl>
 
 <dl class="py method">
+<dt class="sig sig-object py" id="jeevesagent.core.Memory.export">
+<span class="property"><span class="k"><span class="pre">async</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">export</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">user_id</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><span class="pre">str</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/constants.html#None" title="(in Python v3.14)"><span class="pre">None</span></a></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><a class="reference internal" href="types/index.html#jeevesagent.core.types.MemoryExport" title="jeevesagent.core.types.MemoryExport"><span class="pre">jeevesagent.core.types.MemoryExport</span></a></span></span><a class="reference internal" href="../../../_modules/jeevesagent/core/protocols.html#Memory.export"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#jeevesagent.core.Memory.export" title="Link to this definition">¶</a></dt>
+<dd><p>Full data dump for <code class="docutils literal notranslate"><span class="pre">user_id</span></code> — GDPR / data portability.</p>
+<p>Returns every episode, every fact, and the export
+timestamp. Serialise with <code class="docutils literal notranslate"><span class="pre">MemoryExport.model_dump_json()</span></code>
+for download or downstream processing. Honours the
+<code class="docutils literal notranslate"><span class="pre">user_id</span></code> partition: never includes data belonging to a
+different user.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="jeevesagent.core.Memory.forget">
+<span class="property"><span class="k"><span class="pre">async</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">forget</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">user_id</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><span class="pre">str</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/constants.html#None" title="(in Python v3.14)"><span class="pre">None</span></a></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">session_id</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><span class="pre">str</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/constants.html#None" title="(in Python v3.14)"><span class="pre">None</span></a></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">before</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference external" href="https://docs.python.org/3/library/datetime.html#datetime.datetime" title="(in Python v3.14)"><span class="pre">datetime.datetime</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/constants.html#None" title="(in Python v3.14)"><span class="pre">None</span></a></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.14)"><span class="pre">int</span></a></span></span><a class="reference internal" href="../../../_modules/jeevesagent/core/protocols.html#Memory.forget"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#jeevesagent.core.Memory.forget" title="Link to this definition">¶</a></dt>
+<dd><p>Erase memory for a user — GDPR / “right to be forgotten”.</p>
+<p>With <code class="docutils literal notranslate"><span class="pre">user_id</span></code> only: erase EVERYTHING (episodes + facts +
+session messages + working blocks) belonging to that user.
+With <code class="docutils literal notranslate"><span class="pre">session_id</span></code>: erase only that conversation thread for
+that user. With <code class="docutils literal notranslate"><span class="pre">before</span></code>: erase only data older than the
+timestamp (other args still scope it). All filters AND
+together.</p>
+<p>Returns the total number of records deleted (episodes +
+facts; backends without precise counts may return their
+best estimate).</p>
+<p><code class="docutils literal notranslate"><span class="pre">user_id=None</span></code> erases the anonymous bucket only — same
+partition rule as <a class="reference internal" href="#jeevesagent.core.Memory.recall" title="jeevesagent.core.Memory.recall"><code class="xref py py-meth docutils literal notranslate"><span class="pre">recall()</span></code></a>. To erase everything
+across all users, callers must enumerate users and call
+<code class="docutils literal notranslate"><span class="pre">forget</span></code> per-user; the framework deliberately makes the
+“delete every user” path explicit so it’s not done by
+accident.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="jeevesagent.core.Memory.profile">
+<span class="property"><span class="k"><span class="pre">async</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">profile</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">user_id</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><span class="pre">str</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/constants.html#None" title="(in Python v3.14)"><span class="pre">None</span></a></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><a class="reference internal" href="types/index.html#jeevesagent.core.types.MemoryProfile" title="jeevesagent.core.types.MemoryProfile"><span class="pre">jeevesagent.core.types.MemoryProfile</span></a></span></span><a class="reference internal" href="../../../_modules/jeevesagent/core/protocols.html#Memory.profile"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#jeevesagent.core.Memory.profile" title="Link to this definition">¶</a></dt>
+<dd><p>Summary of what this memory knows about <code class="docutils literal notranslate"><span class="pre">user_id</span></code>.</p>
+<p>Returns counts (episodes, facts), the most-recent sessions
+the user touched, the last-seen timestamp, and a sample of
+the most-recently-recorded facts. Suitable for rendering a
+“what does the bot know about me?” view to the end user, or
+for an ops dashboard.</p>
+<p>Backends MUST honour <code class="docutils literal notranslate"><span class="pre">user_id</span></code> as a hard partition —
+passing one user’s id never returns counts derived from
+another user’s data.</p>
+</dd></dl>
+
+<dl class="py method">
 <dt class="sig sig-object py" id="jeevesagent.core.Memory.recall">
 <span class="property"><span class="k"><span class="pre">async</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">recall</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">query</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><span class="pre">str</span></a></span></em>, <em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">kind</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><span class="pre">str</span></a></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">'episodic'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">limit</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.14)"><span class="pre">int</span></a></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">5</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">time_range</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#tuple" title="(in Python v3.14)"><span class="pre">tuple</span></a><span class="p"><span class="pre">[</span></span><a class="reference external" href="https://docs.python.org/3/library/datetime.html#datetime.datetime" title="(in Python v3.14)"><span class="pre">datetime.datetime</span></a><span class="p"><span class="pre">,</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/datetime.html#datetime.datetime" title="(in Python v3.14)"><span class="pre">datetime.datetime</span></a><span class="p"><span class="pre">]</span></span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/constants.html#None" title="(in Python v3.14)"><span class="pre">None</span></a></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">user_id</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><span class="pre">str</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/constants.html#None" title="(in Python v3.14)"><span class="pre">None</span></a></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#list" title="(in Python v3.14)"><span class="pre">list</span></a><span class="p"><span class="pre">[</span></span><a class="reference internal" href="types/index.html#jeevesagent.core.types.Episode" title="jeevesagent.core.types.Episode"><span class="pre">jeevesagent.core.types.Episode</span></a><span class="p"><span class="pre">]</span></span></span></span><a class="reference internal" href="../../../_modules/jeevesagent/core/protocols.html#Memory.recall"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#jeevesagent.core.Memory.recall" title="Link to this definition">¶</a></dt>
 <dd><p>Retrieve episodes (or facts, when <code class="docutils literal notranslate"><span class="pre">kind='semantic'</span></code>).</p>
@@ -1492,6 +1548,91 @@ validated to form a valid model.</p>
 <dl class="py attribute">
 <dt class="sig sig-object py" id="jeevesagent.core.MemoryBlock.updated_at">
 <span class="sig-name descname"><span class="pre">updated_at</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/datetime.html#datetime.datetime" title="(in Python v3.14)"><span class="pre">datetime.datetime</span></a></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#jeevesagent.core.MemoryBlock.updated_at" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="jeevesagent.core.MemoryExport">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-prename descclassname"><span class="pre">jeevesagent.core.</span></span><span class="sig-name descname"><span class="pre">MemoryExport</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">/</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">**data</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">Any</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../_modules/jeevesagent/core/types.html#MemoryExport"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#jeevesagent.core.MemoryExport" title="Link to this definition">¶</a></dt>
+<dd><p>Bases: <a class="reference external" href="https://pydantic.dev/docs/validation/latest/api/pydantic/base_model/#pydantic.BaseModel" title="(in Pydantic v0.0.0)"><code class="xref py py-obj docutils literal notranslate"><span class="pre">pydantic.BaseModel</span></code></a></p>
+<p>Full data dump for a single user — GDPR / data-portability use.</p>
+<p>Returned by <a class="reference internal" href="#jeevesagent.core.Memory.export" title="jeevesagent.core.Memory.export"><code class="xref py py-meth docutils literal notranslate"><span class="pre">Memory.export()</span></code></a>. Carries the complete record of
+everything the memory holds for <code class="docutils literal notranslate"><span class="pre">user_id</span></code>: all episodes, all
+facts, working blocks the user touched. Serialise with
+<code class="docutils literal notranslate"><span class="pre">.model_dump_json()</span></code> for download or downstream processing.</p>
+<p>Create a new model by parsing and validating input data from keyword arguments.</p>
+<p>Raises [<cite>ValidationError</cite>][pydantic_core.ValidationError] if the input data cannot be
+validated to form a valid model.</p>
+<p><cite>self</cite> is explicitly positional-only to allow <cite>self</cite> as a field name.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="jeevesagent.core.MemoryExport.episodes">
+<span class="sig-name descname"><span class="pre">episodes</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#list" title="(in Python v3.14)"><span class="pre">list</span></a><span class="p"><span class="pre">[</span></span><a class="reference internal" href="#jeevesagent.core.Episode" title="jeevesagent.core.Episode"><span class="pre">Episode</span></a><span class="p"><span class="pre">]</span></span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#jeevesagent.core.MemoryExport.episodes" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="jeevesagent.core.MemoryExport.exported_at">
+<span class="sig-name descname"><span class="pre">exported_at</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/datetime.html#datetime.datetime" title="(in Python v3.14)"><span class="pre">datetime.datetime</span></a></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#jeevesagent.core.MemoryExport.exported_at" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="jeevesagent.core.MemoryExport.facts">
+<span class="sig-name descname"><span class="pre">facts</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#list" title="(in Python v3.14)"><span class="pre">list</span></a><span class="p"><span class="pre">[</span></span><a class="reference internal" href="#jeevesagent.core.Fact" title="jeevesagent.core.Fact"><span class="pre">Fact</span></a><span class="p"><span class="pre">]</span></span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#jeevesagent.core.MemoryExport.facts" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="jeevesagent.core.MemoryExport.user_id">
+<span class="sig-name descname"><span class="pre">user_id</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><span class="pre">str</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/constants.html#None" title="(in Python v3.14)"><span class="pre">None</span></a></span><a class="headerlink" href="#jeevesagent.core.MemoryExport.user_id" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="jeevesagent.core.MemoryProfile">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-prename descclassname"><span class="pre">jeevesagent.core.</span></span><span class="sig-name descname"><span class="pre">MemoryProfile</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">/</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">**data</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">Any</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../_modules/jeevesagent/core/types.html#MemoryProfile"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#jeevesagent.core.MemoryProfile" title="Link to this definition">¶</a></dt>
+<dd><p>Bases: <a class="reference external" href="https://pydantic.dev/docs/validation/latest/api/pydantic/base_model/#pydantic.BaseModel" title="(in Pydantic v0.0.0)"><code class="xref py py-obj docutils literal notranslate"><span class="pre">pydantic.BaseModel</span></code></a></p>
+<p>Summary of what a <a class="reference internal" href="#jeevesagent.core.Memory" title="jeevesagent.core.Memory"><code class="xref py py-class docutils literal notranslate"><span class="pre">Memory</span></code></a> knows about a single user.</p>
+<p>Returned by <a class="reference internal" href="#jeevesagent.core.Memory.profile" title="jeevesagent.core.Memory.profile"><code class="xref py py-meth docutils literal notranslate"><span class="pre">Memory.profile()</span></code></a>. Cheap aggregate counts +
+last-seen timestamp + the most-recent facts; suitable for
+rendering a “what does the bot know about me?” view to the
+end user, or a tenant dashboard for ops.</p>
+<p>Backends that don’t track full episode counts (e.g. Redis without
+<cite>FT.SEARCH</cite> aggregations available) report what they can; the
+counts are best-effort, never wildly wrong.</p>
+<p>Create a new model by parsing and validating input data from keyword arguments.</p>
+<p>Raises [<cite>ValidationError</cite>][pydantic_core.ValidationError] if the input data cannot be
+validated to form a valid model.</p>
+<p><cite>self</cite> is explicitly positional-only to allow <cite>self</cite> as a field name.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="jeevesagent.core.MemoryProfile.episode_count">
+<span class="sig-name descname"><span class="pre">episode_count</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.14)"><span class="pre">int</span></a></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">0</span></span><a class="headerlink" href="#jeevesagent.core.MemoryProfile.episode_count" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="jeevesagent.core.MemoryProfile.fact_count">
+<span class="sig-name descname"><span class="pre">fact_count</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.14)"><span class="pre">int</span></a></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">0</span></span><a class="headerlink" href="#jeevesagent.core.MemoryProfile.fact_count" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="jeevesagent.core.MemoryProfile.last_seen">
+<span class="sig-name descname"><span class="pre">last_seen</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/datetime.html#datetime.datetime" title="(in Python v3.14)"><span class="pre">datetime.datetime</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/constants.html#None" title="(in Python v3.14)"><span class="pre">None</span></a></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#jeevesagent.core.MemoryProfile.last_seen" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="jeevesagent.core.MemoryProfile.recent_sessions">
+<span class="sig-name descname"><span class="pre">recent_sessions</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#list" title="(in Python v3.14)"><span class="pre">list</span></a><span class="p"><span class="pre">[</span></span><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><span class="pre">str</span></a><span class="p"><span class="pre">]</span></span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#jeevesagent.core.MemoryProfile.recent_sessions" title="Link to this definition">¶</a></dt>
+<dd><p>Up to the 10 most-recent <a href="#id1"><span class="problematic" id="id2">``</span></a>session_id``s touched, newest first.</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="jeevesagent.core.MemoryProfile.sample_facts">
+<span class="sig-name descname"><span class="pre">sample_facts</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#list" title="(in Python v3.14)"><span class="pre">list</span></a><span class="p"><span class="pre">[</span></span><a class="reference internal" href="#jeevesagent.core.Fact" title="jeevesagent.core.Fact"><span class="pre">Fact</span></a><span class="p"><span class="pre">]</span></span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#jeevesagent.core.MemoryProfile.sample_facts" title="Link to this definition">¶</a></dt>
+<dd><p>Up to 10 of the most-recently-recorded facts about the user.</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="jeevesagent.core.MemoryProfile.user_id">
+<span class="sig-name descname"><span class="pre">user_id</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><span class="pre">str</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/constants.html#None" title="(in Python v3.14)"><span class="pre">None</span></a></span><a class="headerlink" href="#jeevesagent.core.MemoryProfile.user_id" title="Link to this definition">¶</a></dt>
 <dd></dd></dl>
 
 </dd></dl>
@@ -2547,6 +2688,9 @@ extra parameters:</p>
 <li><a class="reference internal" href="#jeevesagent.core.Memory"><code class="docutils literal notranslate"><span class="pre">Memory</span></code></a><ul>
 <li><a class="reference internal" href="#jeevesagent.core.Memory.append_block"><code class="docutils literal notranslate"><span class="pre">Memory.append_block()</span></code></a></li>
 <li><a class="reference internal" href="#jeevesagent.core.Memory.consolidate"><code class="docutils literal notranslate"><span class="pre">Memory.consolidate()</span></code></a></li>
+<li><a class="reference internal" href="#jeevesagent.core.Memory.export"><code class="docutils literal notranslate"><span class="pre">Memory.export()</span></code></a></li>
+<li><a class="reference internal" href="#jeevesagent.core.Memory.forget"><code class="docutils literal notranslate"><span class="pre">Memory.forget()</span></code></a></li>
+<li><a class="reference internal" href="#jeevesagent.core.Memory.profile"><code class="docutils literal notranslate"><span class="pre">Memory.profile()</span></code></a></li>
 <li><a class="reference internal" href="#jeevesagent.core.Memory.recall"><code class="docutils literal notranslate"><span class="pre">Memory.recall()</span></code></a></li>
 <li><a class="reference internal" href="#jeevesagent.core.Memory.recall_facts"><code class="docutils literal notranslate"><span class="pre">Memory.recall_facts()</span></code></a></li>
 <li><a class="reference internal" href="#jeevesagent.core.Memory.remember"><code class="docutils literal notranslate"><span class="pre">Memory.remember()</span></code></a></li>
@@ -2561,6 +2705,22 @@ extra parameters:</p>
 <li><a class="reference internal" href="#jeevesagent.core.MemoryBlock.name"><code class="docutils literal notranslate"><span class="pre">MemoryBlock.name</span></code></a></li>
 <li><a class="reference internal" href="#jeevesagent.core.MemoryBlock.pinned_order"><code class="docutils literal notranslate"><span class="pre">MemoryBlock.pinned_order</span></code></a></li>
 <li><a class="reference internal" href="#jeevesagent.core.MemoryBlock.updated_at"><code class="docutils literal notranslate"><span class="pre">MemoryBlock.updated_at</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#jeevesagent.core.MemoryExport"><code class="docutils literal notranslate"><span class="pre">MemoryExport</span></code></a><ul>
+<li><a class="reference internal" href="#jeevesagent.core.MemoryExport.episodes"><code class="docutils literal notranslate"><span class="pre">MemoryExport.episodes</span></code></a></li>
+<li><a class="reference internal" href="#jeevesagent.core.MemoryExport.exported_at"><code class="docutils literal notranslate"><span class="pre">MemoryExport.exported_at</span></code></a></li>
+<li><a class="reference internal" href="#jeevesagent.core.MemoryExport.facts"><code class="docutils literal notranslate"><span class="pre">MemoryExport.facts</span></code></a></li>
+<li><a class="reference internal" href="#jeevesagent.core.MemoryExport.user_id"><code class="docutils literal notranslate"><span class="pre">MemoryExport.user_id</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#jeevesagent.core.MemoryProfile"><code class="docutils literal notranslate"><span class="pre">MemoryProfile</span></code></a><ul>
+<li><a class="reference internal" href="#jeevesagent.core.MemoryProfile.episode_count"><code class="docutils literal notranslate"><span class="pre">MemoryProfile.episode_count</span></code></a></li>
+<li><a class="reference internal" href="#jeevesagent.core.MemoryProfile.fact_count"><code class="docutils literal notranslate"><span class="pre">MemoryProfile.fact_count</span></code></a></li>
+<li><a class="reference internal" href="#jeevesagent.core.MemoryProfile.last_seen"><code class="docutils literal notranslate"><span class="pre">MemoryProfile.last_seen</span></code></a></li>
+<li><a class="reference internal" href="#jeevesagent.core.MemoryProfile.recent_sessions"><code class="docutils literal notranslate"><span class="pre">MemoryProfile.recent_sessions</span></code></a></li>
+<li><a class="reference internal" href="#jeevesagent.core.MemoryProfile.sample_facts"><code class="docutils literal notranslate"><span class="pre">MemoryProfile.sample_facts</span></code></a></li>
+<li><a class="reference internal" href="#jeevesagent.core.MemoryProfile.user_id"><code class="docutils literal notranslate"><span class="pre">MemoryProfile.user_id</span></code></a></li>
 </ul>
 </li>
 <li><a class="reference internal" href="#jeevesagent.core.Message"><code class="docutils literal notranslate"><span class="pre">Message</span></code></a><ul>
@@ -2740,7 +2900,7 @@ extra parameters:</p>
       
     </aside>
   </div>
-</div><script src="../../../_static/documentation_options.js?v=21db0d57"></script>
+</div><script src="../../../_static/documentation_options.js?v=889b7931"></script>
     <script src="../../../_static/doctools.js?v=fd6eb6e6"></script>
     <script src="../../../_static/sphinx_highlight.js?v=6ffebe34"></script>
     <script src="../../../_static/scripts/furo.js?v=46bd48cc"></script>

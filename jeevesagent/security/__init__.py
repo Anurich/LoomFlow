@@ -2,7 +2,7 @@
 
 from .audit import AuditLog, FileAuditLog, InMemoryAuditLog, verify_signature
 from .hooks import HookRegistry, PostToolHook, PreToolHook
-from .permissions import AllowAll, Mode, StandardPermissions
+from .permissions import AllowAll, Mode, PerUserPermissions, StandardPermissions
 from .sandbox import FilesystemSandbox, NoSandbox, SubprocessSandbox
 
 __all__ = [
@@ -14,6 +14,7 @@ __all__ = [
     "InMemoryAuditLog",
     "Mode",
     "NoSandbox",
+    "PerUserPermissions",
     "PostToolHook",
     "PreToolHook",
     "StandardPermissions",

@@ -1,0 +1,147 @@
+jeevesagent.memory.sqlite
+=========================
+
+.. py:module:: jeevesagent.memory.sqlite
+
+.. autoapi-nested-parse::
+
+   SQLite-backed :class:`Memory` — persistent, single-file, no server.
+
+   Fills the gap between :class:`InMemoryMemory` (lost on restart) and
+   network-backed backends (Chroma / Postgres / Redis — real infra). One
+   ``.db`` file holds every memory layer:
+
+   * ``working_blocks(name, content, pinned_order, updated_at)`` — the
+     in-context blocks
+   * ``episodes(id, session_id, user_id, occurred_at, input, output,
+     embedding)`` — episodic record + optional vector
+   * ``facts(...)`` via the existing :class:`SqliteFactStore` rooted at
+     the same file (separate table; same DB)
+
+   What this is good for:
+
+   * Single-instance production apps that want persistence without
+     running Postgres / Redis.
+   * Local dev where you want runs to survive ``ctrl-c``.
+   * CI / integration tests that need real durability without spinning
+     up containers.
+
+   What this is NOT for:
+
+   * Concurrent writers from multiple processes — sqlite serialises
+     writes, throughput suffers under contention. Use ``PostgresMemory``
+     if you have multiple workers writing to the same memory.
+   * Vector search at million-row scale — we do brute-force cosine
+     ranking in Python because sqlite has no native vector type. Fine
+     for tens of thousands of episodes; if you have more, switch to
+     Chroma or Postgres+pgvector.
+
+   Sync sqlite3 calls are dispatched through ``anyio.to_thread.run_sync``
+   so the agent loop's structured concurrency stays clean.
+
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   jeevesagent.memory.sqlite.SqliteMemory
+
+
+Module Contents
+---------------
+
+.. py:class:: SqliteMemory(path: str | pathlib.Path, *, embedder: jeevesagent.core.protocols.Embedder | None = None, with_facts: bool = True, fact_store: jeevesagent.memory.facts.FactStore | None = None)
+
+   Durable :class:`Memory` rooted at a single sqlite file.
+
+   Construct directly from a path::
+
+       memory = SqliteMemory("./bot.db")
+       agent = Agent("...", model="gpt-4.1-mini", memory=memory)
+
+   Or via the resolver::
+
+       agent = Agent("...", model="gpt-4.1-mini", memory="sqlite:./bot.db")
+
+   Pass ``path=":memory:"`` for an ephemeral in-process database
+   (lost on close — useful for tests).
+
+   The fact store is auto-attached: the same ``.db`` file holds a
+   ``facts`` table managed by :class:`SqliteFactStore`. Pass
+   ``with_facts=False`` to skip it; pass an explicit
+   ``fact_store=`` to override (e.g. point facts at a different
+   sqlite file).
+
+
+   .. py:method:: aclose() -> None
+      :async:
+
+
+
+   .. py:method:: append_block(name: str, content: str) -> None
+      :async:
+
+
+
+   .. py:method:: consolidate() -> None
+      :async:
+
+
+
+   .. py:method:: export(*, user_id: str | None = None) -> jeevesagent.core.types.MemoryExport
+      :async:
+
+
+
+   .. py:method:: forget(*, user_id: str | None = None, session_id: str | None = None, before: datetime.datetime | None = None) -> int
+      :async:
+
+
+
+   .. py:method:: profile(*, user_id: str | None = None) -> jeevesagent.core.types.MemoryProfile
+      :async:
+
+
+
+   .. py:method:: recall(query: str, *, kind: str = 'episodic', limit: int = 5, time_range: tuple[datetime.datetime, datetime.datetime] | None = None, user_id: str | None = None) -> list[jeevesagent.core.types.Episode]
+      :async:
+
+
+
+   .. py:method:: recall_facts(query: str, *, limit: int = 5, valid_at: datetime.datetime | None = None, user_id: str | None = None) -> list[jeevesagent.core.types.Fact]
+      :async:
+
+
+
+   .. py:method:: remember(episode: jeevesagent.core.types.Episode) -> str
+      :async:
+
+
+
+   .. py:method:: session_messages(session_id: str, *, user_id: str | None = None, limit: int = 20) -> list[jeevesagent.core.types.Message]
+      :async:
+
+
+
+   .. py:method:: update_block(name: str, content: str) -> None
+      :async:
+
+
+
+   .. py:method:: working() -> list[jeevesagent.core.types.MemoryBlock]
+      :async:
+
+
+
+   .. py:property:: embedder
+      :type: jeevesagent.core.protocols.Embedder
+
+
+
+   .. py:property:: path
+      :type: pathlib.Path
+
+
+

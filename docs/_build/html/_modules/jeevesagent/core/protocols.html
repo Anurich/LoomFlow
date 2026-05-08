@@ -5,7 +5,7 @@
     <meta name="color-scheme" content="light dark"><link rel="index" title="Index" href="../../../genindex.html"><link rel="search" title="Search" href="../../../search.html">
 
     <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
-        <title>jeevesagent.core.protocols - JeevesAgent 0.9.2</title>
+        <title>jeevesagent.core.protocols - JeevesAgent 0.9.3</title>
       <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=d111a655" />
     <link rel="stylesheet" type="text/css" href="../../../_static/styles/furo.css?v=7bdb33bb" />
     <link rel="stylesheet" type="text/css" href="../../../_static/graphviz.css?v=4ae1632d" />
@@ -161,7 +161,7 @@
       </label>
     </div>
     <div class="header-center">
-      <a href="../../../index.html"><div class="brand">JeevesAgent 0.9.2</div></a>
+      <a href="../../../index.html"><div class="brand">JeevesAgent 0.9.3</div></a>
     </div>
     <div class="header-right">
       <div class="theme-toggle-container theme-toggle-header">
@@ -182,7 +182,7 @@
       
       <div class="sidebar-sticky"><a class="sidebar-brand" href="../../../index.html">
   
-  <span class="sidebar-brand-text">JeevesAgent 0.9.2</span>
+  <span class="sidebar-brand-text">JeevesAgent 0.9.3</span>
   
 </a><form class="sidebar-search-container" method="get" action="../../../search.html" role="search">
   <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
@@ -268,16 +268,20 @@
 </ul>
 </li>
 <li class="toctree-l2 has-children"><a class="reference internal" href="../../../api/jeevesagent/memory/index.html">jeevesagent.memory</a><input aria-label="Toggle navigation of jeevesagent.memory" class="toctree-checkbox" id="toctree-checkbox-10" name="toctree-checkbox-10" role="switch" type="checkbox"/><label for="toctree-checkbox-10"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/memory/auto_extract/index.html">jeevesagent.memory.auto_extract</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/memory/chroma/index.html">jeevesagent.memory.chroma</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/memory/chroma_facts/index.html">jeevesagent.memory.chroma_facts</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/memory/consolidator/index.html">jeevesagent.memory.consolidator</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/memory/embedder/index.html">jeevesagent.memory.embedder</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/memory/facts/index.html">jeevesagent.memory.facts</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/memory/inmemory/index.html">jeevesagent.memory.inmemory</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/memory/lazy/index.html">jeevesagent.memory.lazy</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/memory/postgres/index.html">jeevesagent.memory.postgres</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/memory/postgres_facts/index.html">jeevesagent.memory.postgres_facts</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/memory/redis/index.html">jeevesagent.memory.redis</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/memory/redis_facts/index.html">jeevesagent.memory.redis_facts</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/memory/resolver/index.html">jeevesagent.memory.resolver</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/memory/sqlite/index.html">jeevesagent.memory.sqlite</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/memory/sqlite_facts/index.html">jeevesagent.memory.sqlite_facts</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/memory/vector/index.html">jeevesagent.memory.vector</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/memory/worker/index.html">jeevesagent.memory.worker</a></li>
@@ -398,6 +402,8 @@
     <span class="n">Event</span><span class="p">,</span>
     <span class="n">Fact</span><span class="p">,</span>
     <span class="n">MemoryBlock</span><span class="p">,</span>
+    <span class="n">MemoryExport</span><span class="p">,</span>
+    <span class="n">MemoryProfile</span><span class="p">,</span>
     <span class="n">Message</span><span class="p">,</span>
     <span class="n">ModelChunk</span><span class="p">,</span>
     <span class="n">PermissionDecision</span><span class="p">,</span>
@@ -557,6 +563,74 @@
 <span class="sd">        different one. Backends without persisted message logs</span>
 <span class="sd">        return ``[]`` — the agent loop falls back to the</span>
 <span class="sd">        semantic-recall path in that case.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="o">...</span></div>
+
+
+<div class="viewcode-block" id="Memory.profile">
+<a class="viewcode-back" href="../../../api/jeevesagent/index.html#jeevesagent.core.Memory.profile">[docs]</a>
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">profile</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">user_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">MemoryProfile</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Summary of what this memory knows about ``user_id``.</span>
+
+<span class="sd">        Returns counts (episodes, facts), the most-recent sessions</span>
+<span class="sd">        the user touched, the last-seen timestamp, and a sample of</span>
+<span class="sd">        the most-recently-recorded facts. Suitable for rendering a</span>
+<span class="sd">        &quot;what does the bot know about me?&quot; view to the end user, or</span>
+<span class="sd">        for an ops dashboard.</span>
+
+<span class="sd">        Backends MUST honour ``user_id`` as a hard partition —</span>
+<span class="sd">        passing one user&#39;s id never returns counts derived from</span>
+<span class="sd">        another user&#39;s data.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="o">...</span></div>
+
+
+<div class="viewcode-block" id="Memory.forget">
+<a class="viewcode-back" href="../../../api/jeevesagent/index.html#jeevesagent.core.Memory.forget">[docs]</a>
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">forget</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="o">*</span><span class="p">,</span>
+        <span class="n">user_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">session_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">before</span><span class="p">:</span> <span class="n">datetime</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">int</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Erase memory for a user — GDPR / &quot;right to be forgotten&quot;.</span>
+
+<span class="sd">        With ``user_id`` only: erase EVERYTHING (episodes + facts +</span>
+<span class="sd">        session messages + working blocks) belonging to that user.</span>
+<span class="sd">        With ``session_id``: erase only that conversation thread for</span>
+<span class="sd">        that user. With ``before``: erase only data older than the</span>
+<span class="sd">        timestamp (other args still scope it). All filters AND</span>
+<span class="sd">        together.</span>
+
+<span class="sd">        Returns the total number of records deleted (episodes +</span>
+<span class="sd">        facts; backends without precise counts may return their</span>
+<span class="sd">        best estimate).</span>
+
+<span class="sd">        ``user_id=None`` erases the anonymous bucket only — same</span>
+<span class="sd">        partition rule as :meth:`recall`. To erase everything</span>
+<span class="sd">        across all users, callers must enumerate users and call</span>
+<span class="sd">        ``forget`` per-user; the framework deliberately makes the</span>
+<span class="sd">        &quot;delete every user&quot; path explicit so it&#39;s not done by</span>
+<span class="sd">        accident.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="o">...</span></div>
+
+
+<div class="viewcode-block" id="Memory.export">
+<a class="viewcode-back" href="../../../api/jeevesagent/index.html#jeevesagent.core.Memory.export">[docs]</a>
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">export</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">user_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">MemoryExport</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Full data dump for ``user_id`` — GDPR / data portability.</span>
+
+<span class="sd">        Returns every episode, every fact, and the export</span>
+<span class="sd">        timestamp. Serialise with ``MemoryExport.model_dump_json()``</span>
+<span class="sd">        for download or downstream processing. Honours the</span>
+<span class="sd">        ``user_id`` partition: never includes data belonging to a</span>
+<span class="sd">        different user.</span>
 <span class="sd">        &quot;&quot;&quot;</span>
         <span class="o">...</span></div>
 </div>
@@ -854,7 +928,7 @@
       
     </aside>
   </div>
-</div><script src="../../../_static/documentation_options.js?v=21db0d57"></script>
+</div><script src="../../../_static/documentation_options.js?v=889b7931"></script>
     <script src="../../../_static/doctools.js?v=fd6eb6e6"></script>
     <script src="../../../_static/sphinx_highlight.js?v=6ffebe34"></script>
     <script src="../../../_static/scripts/furo.js?v=46bd48cc"></script>

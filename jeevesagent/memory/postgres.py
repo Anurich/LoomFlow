@@ -25,7 +25,15 @@ from typing import Any
 import anyio
 
 from ..core.protocols import Embedder
-from ..core.types import Episode, Fact, MemoryBlock, Message, Role
+from ..core.types import (
+    Episode,
+    Fact,
+    MemoryBlock,
+    MemoryExport,
+    MemoryProfile,
+    Message,
+    Role,
+)
 from .embedder import HashEmbedder
 
 DEFAULT_NAMESPACE = "default"
@@ -134,13 +142,24 @@ class PostgresMemory:
             (
                 "CREATE TABLE IF NOT EXISTS memory_blocks ("
                 "  namespace TEXT NOT NULL,"
+                # ``user_id`` cannot be NULL inside a PK in Postgres,
+                # so the anonymous bucket is the empty string on the
+                # wire; the application layer round-trips it back to
+                # ``None`` on reads.
+                "  user_id TEXT NOT NULL DEFAULT '',"
                 "  name TEXT NOT NULL,"
                 "  content TEXT NOT NULL,"
                 "  pinned_order INT NOT NULL DEFAULT 0,"
                 "  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),"
-                "  PRIMARY KEY (namespace, name)"
+                "  PRIMARY KEY (namespace, user_id, name)"
                 ");"
             ),
+            # Idempotent ALTER for upgrades from pre-M9 schemas. The
+            # default '' ensures existing rows migrate cleanly into
+            # the anonymous bucket, and the new PK constraint can
+            # then be enforced.
+            "ALTER TABLE memory_blocks ADD COLUMN IF NOT EXISTS "
+            "user_id TEXT NOT NULL DEFAULT '';",
             (
                 f"CREATE TABLE IF NOT EXISTS episodes ("
                 f"  id TEXT PRIMARY KEY,"
@@ -183,13 +202,19 @@ class PostgresMemory:
 
     # ---- working blocks --------------------------------------------------
 
-    async def working(self) -> list[MemoryBlock]:
+    async def working(
+        self, *, user_id: str | None = None
+    ) -> list[MemoryBlock]:
+        # Empty string is the anonymous bucket on the wire (Postgres
+        # PK can't carry NULL); round-trip back to ``None`` here.
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 "SELECT name, content, updated_at, pinned_order "
                 "FROM memory_blocks WHERE namespace = $1 "
+                "AND user_id = $2 "
                 "ORDER BY pinned_order ASC",
                 self._namespace,
+                user_id or "",
             )
         return [
             MemoryBlock(
@@ -201,27 +226,33 @@ class PostgresMemory:
             for r in _rows(rows)
         ]
 
-    async def update_block(self, name: str, content: str) -> None:
+    async def update_block(
+        self, name: str, content: str, *, user_id: str | None = None
+    ) -> None:
         async with self._pool.acquire() as conn:
             await conn.execute(
-                "INSERT INTO memory_blocks(namespace, name, content) "
-                "VALUES ($1, $2, $3) "
-                "ON CONFLICT (namespace, name) DO UPDATE "
+                "INSERT INTO memory_blocks(namespace, user_id, name, content) "
+                "VALUES ($1, $2, $3, $4) "
+                "ON CONFLICT (namespace, user_id, name) DO UPDATE "
                 "SET content = EXCLUDED.content, updated_at = NOW();",
                 self._namespace,
+                user_id or "",
                 name,
                 content,
             )
 
-    async def append_block(self, name: str, content: str) -> None:
+    async def append_block(
+        self, name: str, content: str, *, user_id: str | None = None
+    ) -> None:
         async with self._pool.acquire() as conn:
             await conn.execute(
-                "INSERT INTO memory_blocks(namespace, name, content) "
-                "VALUES ($1, $2, $3) "
-                "ON CONFLICT (namespace, name) DO UPDATE "
+                "INSERT INTO memory_blocks(namespace, user_id, name, content) "
+                "VALUES ($1, $2, $3, $4) "
+                "ON CONFLICT (namespace, user_id, name) DO UPDATE "
                 "SET content = memory_blocks.content || EXCLUDED.content, "
                 "    updated_at = NOW();",
                 self._namespace,
+                user_id or "",
                 name,
                 content,
             )
@@ -376,6 +407,111 @@ class PostgresMemory:
                 out.append(Message(role=Role.ASSISTANT, content=ep.output))
         return out
 
+    # ---- profile / forget / export (GDPR) -------------------------------
+
+    async def profile(
+        self, *, user_id: str | None = None
+    ) -> MemoryProfile:
+        async with self._pool.acquire() as conn:
+            count_row = await conn.fetchrow(
+                "SELECT COUNT(*) AS c, MAX(occurred_at) AS last "
+                "FROM episodes WHERE namespace = $1 "
+                "AND user_id IS NOT DISTINCT FROM $2",
+                self._namespace,
+                user_id,
+            )
+            sessions_rows = await conn.fetch(
+                "SELECT DISTINCT session_id, MAX(occurred_at) AS m "
+                "FROM episodes WHERE namespace = $1 "
+                "AND user_id IS NOT DISTINCT FROM $2 "
+                "GROUP BY session_id ORDER BY m DESC LIMIT 10",
+                self._namespace,
+                user_id,
+            )
+        episode_count = int(count_row["c"]) if count_row else 0
+        last_seen = count_row["last"] if count_row else None
+        recent_sessions = [r["session_id"] for r in sessions_rows]
+
+        sample_facts: list[Fact] = []
+        fact_count = 0
+        if self.facts is not None:
+            sample_facts = list(
+                await self.facts.query(user_id=user_id, limit=10)
+            )
+            all_facts = await self.facts.query(user_id=user_id, limit=100_000)
+            fact_count = len(all_facts)
+
+        return MemoryProfile(
+            user_id=user_id,
+            episode_count=episode_count,
+            fact_count=fact_count,
+            last_seen=last_seen,
+            recent_sessions=recent_sessions,
+            sample_facts=sample_facts,
+        )
+
+    async def forget(
+        self,
+        *,
+        user_id: str | None = None,
+        session_id: str | None = None,
+        before: datetime | None = None,
+    ) -> int:
+        # Build episode-delete clause; ``IS NOT DISTINCT FROM`` makes
+        # NULL=NULL behave as expected for the anonymous bucket.
+        clauses = ["namespace = $1", "user_id IS NOT DISTINCT FROM $2"]
+        params: list[Any] = [self._namespace, user_id]
+        idx = 3
+        if session_id is not None:
+            clauses.append(f"session_id = ${idx}")
+            params.append(session_id)
+            idx += 1
+        if before is not None:
+            clauses.append(f"occurred_at < ${idx}")
+            params.append(before)
+            idx += 1
+        sql = "DELETE FROM episodes WHERE " + " AND ".join(clauses)
+        async with self._pool.acquire() as conn:
+            result = await conn.execute(sql, *params)
+        # asyncpg returns "DELETE <n>" — parse the count.
+        deleted = _parse_delete_count(result)
+
+        if session_id is None and self.facts is not None:
+            f_clauses = ["user_id IS NOT DISTINCT FROM $1"]
+            f_params: list[Any] = [user_id]
+            if before is not None:
+                f_clauses.append("recorded_at < $2")
+                f_params.append(before)
+            f_sql = "DELETE FROM facts WHERE " + " AND ".join(f_clauses)
+            async with self._pool.acquire() as conn:
+                f_result = await conn.execute(f_sql, *f_params)
+            deleted += _parse_delete_count(f_result)
+        return deleted
+
+    async def export(
+        self, *, user_id: str | None = None
+    ) -> MemoryExport:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT id, session_id, user_id, occurred_at, input, output, embedding "
+                "FROM episodes WHERE namespace = $1 "
+                "AND user_id IS NOT DISTINCT FROM $2 "
+                "ORDER BY occurred_at ASC",
+                self._namespace,
+                user_id,
+            )
+        episodes = _rows_to_episodes(_rows(rows))
+        facts: list[Fact] = []
+        if self.facts is not None:
+            facts = list(
+                await self.facts.query(user_id=user_id, limit=100_000)
+            )
+        return MemoryExport(
+            user_id=user_id,
+            episodes=episodes,
+            facts=sorted(facts, key=lambda f: f.recorded_at),
+        )
+
     async def consolidate(self) -> None:
         return None
 
@@ -387,6 +523,19 @@ class PostgresMemory:
 
 def _rows(result: Iterable[Any]) -> list[Any]:
     return list(result) if not isinstance(result, list) else result
+
+
+def _parse_delete_count(asyncpg_result: str) -> int:
+    """asyncpg's ``Connection.execute`` returns a status string like
+    ``"DELETE 17"`` for DML; parse the count off the end. Returns
+    ``0`` when the status doesn't carry a number."""
+    parts = asyncpg_result.strip().split()
+    if not parts:
+        return 0
+    try:
+        return int(parts[-1])
+    except (ValueError, IndexError):
+        return 0
 
 
 def _rows_to_episodes(rows: list[Any]) -> list[Episode]:

@@ -181,102 +181,130 @@ agent = Agent("...", tools=registry)
 
 ## 7. Memory: pick a backend
 
-### In-memory (default)
+The simplest way is the **`memory=` resolver** — pass a URL and the
+framework picks the backend:
 
 ```python
-from jeevesagent import Agent, InMemoryMemory
+from jeevesagent import Agent
 
-agent = Agent("...", memory=InMemoryMemory())
+# In-memory (default; lost on restart)
+agent = Agent("...", memory="inmemory")
+
+# Single-file SQLite (persistent, no server)
+agent = Agent("...", memory="sqlite:./bot.db")
+
+# Chroma (ephemeral / persistent)
+agent = Agent("...", memory="chroma")
+agent = Agent("...", memory="chroma:./chroma-db")
+
+# Postgres + pgvector
+agent = Agent("...", memory="postgres://user:pw@localhost/jeeves")
+
+# Redis (with optional RediSearch HNSW vector index)
+agent = Agent("...", memory="redis://localhost:6379/0")
 ```
 
-### Vector (in-memory, embedding-based recall)
+What you get out of the box:
+
+* **Auto fact extraction** — every `agent.run()` runs a small
+  Consolidator pass that pulls structured `(subject, predicate,
+  object)` claims from the conversation into the fact store. Default
+  ON for OpenAI / Anthropic / LiteLLM models. See **Auto fact
+  extraction** below.
+* **Auto-attached fact store** — the resolver wires the
+  bi-temporal fact store automatically (pass `with_facts=False` in
+  the dict form to skip).
+* **Auto-picked embedder** — `OpenAIEmbedder("text-embedding-3-small")`
+  if `OPENAI_API_KEY` is set, `HashEmbedder()` otherwise.
+* **`user_id` partition** — every backend honours the multi-tenant
+  contract. One shared memory file or pool serves N users.
+* **Lazy connect for async backends** — Postgres / Redis URLs return
+  a `LazyMemory` proxy; the connection opens on the first
+  `agent.run`, so `Agent(...)` stays synchronous.
+
+For non-default tweaks, use the dict form:
 
 ```python
-from jeevesagent import Agent, VectorMemory, OpenAIEmbedder
+agent = Agent("...", memory={
+    "backend": "chroma",
+    "path": "./chroma-db",
+    "namespace": "tenant_a",
+    "embedder": "openai-large",
+    "with_facts": True,
+})
+```
+
+For full control, pass an explicit instance (today's API,
+unchanged):
+
+```python
+from jeevesagent import ChromaMemory, OpenAIEmbedder
+
+memory = ChromaMemory.local(
+    "./chroma-db", with_facts=True, embedder=OpenAIEmbedder()
+)
+agent = Agent("...", memory=memory)
+```
+
+## 8. Auto fact extraction (default ON)
+
+Every `agent.run()` against a real model auto-extracts structured
+`(subject, predicate, object)` facts from the conversation into the
+bi-temporal fact store, partitioned by `user_id`. No `Consolidator`
+construction; no manual `consolidate()` call.
+
+```python
+from jeevesagent import Agent
 
 agent = Agent(
-    "...",
-    memory=VectorMemory(embedder=OpenAIEmbedder("text-embedding-3-small")),
+    "You are a personal assistant.",
+    model="claude-opus-4-7",
+    memory="sqlite:./bot.db",
 )
-```
 
-### Chroma (local persistent)
-
-```python
-from jeevesagent import Agent, ChromaMemory
-
-# Persistent on-disk:
-memory = ChromaMemory.local("./chroma-db", with_facts=True)
-# Or in-memory for tests:
-memory = ChromaMemory.ephemeral()
-
-agent = Agent("...", memory=memory)
-```
-
-### Postgres + pgvector
-
-```python
-from jeevesagent import Agent, PostgresMemory, OpenAIEmbedder
-
-memory = await PostgresMemory.connect(
-    dsn="postgres://user:pass@localhost/jeeves",
-    embedder=OpenAIEmbedder("text-embedding-3-small"),
-    with_facts=True,  # enable bi-temporal fact store on the same pool
+await agent.run(
+    "Hi, I'm Alice and I live in Tokyo.",
+    user_id="alice",
 )
-await memory.init_schema()  # creates episodes + facts tables, HNSW indexes
+# A Fact(user_id="alice", subject="alice", predicate="lives_in",
+#        object="Tokyo") is now in memory.facts — the framework
+# extracted it automatically.
 
-agent = Agent("...", memory=memory)
-```
+# Inspect:
+profile = await agent.memory.profile(user_id="alice")
+print(profile.fact_count)        # > 0
+print(profile.sample_facts)      # includes the lives_in fact
 
-### Redis
-
-```python
-from jeevesagent import Agent, RedisMemory
-
-memory = await RedisMemory.connect(
-    "redis://localhost:6379/0",
-    with_facts=True,
+# Days later, fresh process, same db:
+result = await agent.run(
+    "Where do I live?",
+    user_id="alice",
 )
-agent = Agent("...", memory=memory)
+# → "Tokyo" — the fact gets recalled into the seed messages.
 ```
 
-## 8. Bi-temporal facts
+Defaults: ON for `OpenAIModel` / `AnthropicModel` / `LiteLLMModel`;
+OFF for `ScriptedModel` / `EchoModel` / unrecognised custom Models.
+Override with `Agent(..., auto_extract=True/False)`.
 
-Facts are semantic claims `(subject, predicate, object)` with
-bi-temporal validity:
+Facts use **bi-temporal validity** — when a new claim contradicts
+an existing one (same subject + predicate, different object), the
+old fact's `valid_until` is set to the new fact's `valid_from`.
+Historical facts aren't deleted, just *closed off*. Query a moment
+in the past:
 
 ```python
 from datetime import datetime, UTC
-from jeevesagent import Agent, VectorMemory, Consolidator, AnthropicModel
-from jeevesagent.core.types import Fact
 
-memory = VectorMemory(
-    consolidator=Consolidator(model=AnthropicModel("claude-opus-4-7")),
+facts_at_jan_2026 = await agent.memory.facts.query(
+    user_id="alice",
+    subject="alice",
+    valid_at=datetime(2026, 1, 1, tzinfo=UTC),
 )
-
-# Manually:
-await memory.facts.append(
-    Fact(
-        subject="user",
-        predicate="lives_in",
-        object="Tokyo",
-        valid_from=datetime.now(UTC),
-        recorded_at=datetime.now(UTC),
-    )
-)
-
-# Or let the agent do it automatically:
-agent = Agent(
-    "You are a personal assistant.",
-    model=AnthropicModel("claude-opus-4-7"),
-    memory=memory,
-    auto_consolidate=True,  # extracts facts after every run
-)
-
-await agent.run("Hi, I'm Alice and I live in Tokyo.")
-# Facts are now in memory.facts; the next run sees them.
-await agent.run("Where do I live?")  # model gets "user lives_in Tokyo" in context
 ```
+
+You can also write facts manually (skip auto-extraction for
+specific cases) via `agent.memory.facts.append(Fact(...))`.
 
 When a new fact contradicts an existing one (same subject + predicate,
 different object), the old fact's `valid_until` is set to the new
@@ -445,27 +473,22 @@ from datetime import timedelta
 
 from jeevesagent import (
     Agent,
-    AnthropicModel,
-    Consolidator,
     FileAuditLog,
     JeevesGateway,
+    Mode,
     OTelTelemetry,
     SqliteRuntime,
     StandardPermissions,
-    VectorMemory,
-    OpenAIEmbedder,
-    Mode,
 )
 from jeevesagent.governance.budget import BudgetConfig, StandardBudget
 
 async def main():
-    embedder = OpenAIEmbedder("text-embedding-3-small")
-    consolidator = Consolidator(model=AnthropicModel("claude-opus-4-7"))
-
     agent = Agent(
         "You are a research assistant. Cite your sources.",
         model="claude-opus-4-7",
-        memory=VectorMemory(embedder=embedder, consolidator=consolidator),
+        # One string picks the backend; the resolver wires up the
+        # bi-temporal fact store + auto-picks an embedder.
+        memory="postgres://user:pw@db.internal/jeeves",
         runtime=SqliteRuntime("./journal.db"),
         tools=JeevesGateway.from_env(),
         permissions=StandardPermissions(mode=Mode.DEFAULT),
@@ -476,16 +499,24 @@ async def main():
         )),
         audit_log=FileAuditLog("./audit.jsonl", secret="prod-secret"),
         telemetry=OTelTelemetry(),
-        auto_consolidate=True,
+        # auto_extract=True is the default for real network adapters —
+        # pinning explicitly so the production-shape is unambiguous.
+        auto_extract=True,
     )
 
-    async for event in agent.stream("research recent advances in agent harnesses"):
+    async for event in agent.stream(
+        "research recent advances in agent harnesses",
+        user_id="user_42",
+        session_id="research_2026_05_08",
+    ):
         print(f"[{event.kind}]", event.payload.get("chunk", {}).get("text", ""), end="")
 
 asyncio.run(main())
 ```
 
-That's a production-shaped agent in ~30 lines. Memory persists facts
-across runs, the runtime can recover from crashes, every step lands
-in the audit log, every span shows up in your OTel exporter, and the
-budget enforces hard limits.
+That's a production-shaped agent in ~25 lines. Memory persists
+facts across runs (auto-extracted from each conversation), the
+runtime can recover from crashes, every step lands in the audit
+log, every span shows up in your OTel exporter, and the budget
+enforces hard limits. Multi-tenancy is built in via the `user_id`
+kwarg — the same agent serves N users with hard partition.

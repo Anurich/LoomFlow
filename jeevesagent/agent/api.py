@@ -67,7 +67,6 @@ from ..core.types import (
 )
 from ..governance.budget import NoBudget
 from ..governance.retry import RetryPolicy
-from ..memory.inmemory import InMemoryMemory
 from ..model.echo import EchoModel
 from ..observability.tracing import NoTelemetry
 from ..runtime.inproc import InProcRuntime
@@ -96,7 +95,7 @@ class Agent:
         instructions: str,
         *,
         model: Model | str | None = None,
-        memory: Memory | None = None,
+        memory: Memory | str | Mapping[str, Any] | None = None,
         runtime: Runtime | None = None,
         budget: Budget | None = None,
         permissions: Permissions | None = None,
@@ -113,6 +112,7 @@ class Agent:
         architecture: Architecture | str | None = None,
         skills: list[Any] | None = None,
         retry_policy: RetryPolicy | None = None,
+        auto_extract: bool | None = None,
     ) -> None:
         # Skills — packaged on-disk playbooks loaded on demand.
         # Build the registry first so frontmatter validation fires
@@ -161,7 +161,44 @@ class Agent:
             )
         else:
             self._wrapped_model = self._model
-        self._memory: Memory = memory if memory is not None else InMemoryMemory()
+        # Resolve ``memory=`` into a concrete :class:`Memory`.
+        # The resolver handles None (default in-memory), strings
+        # ("sqlite:./bot.db", "postgres://..."), config dicts
+        # ({"backend": ..., ...}), and explicit Memory instances.
+        from ..memory.resolver import resolve_memory
+        self._memory: Memory = resolve_memory(memory)
+
+        # Auto fact extraction. When enabled, the agent loop's
+        # ``remember(episode)`` calls go through an
+        # :class:`AutoExtractMemory` wrapper that runs a small
+        # Consolidator pass after each write, pulling structured
+        # (subject, predicate, object) claims out of the
+        # conversation into the bi-temporal fact store.
+        # ``_wrapped_memory`` is the loop-facing view; ``_memory``
+        # stays as the user-supplied inner so introspection +
+        # tests see the real backend type. Same dual-attribute
+        # pattern as ``_model`` / ``_wrapped_model`` for retries.
+        # Extraction is best-effort — failures (model errors,
+        # malformed JSON) never break the run.
+        #
+        # Default is auto-picked: ON for real network adapters
+        # (OpenAI / Anthropic / LiteLLM) where extraction is the
+        # whole point of "your bot just remembers"; OFF for in-
+        # process fakes (ScriptedModel / EchoModel) since those
+        # produce canned output that confuses the Consolidator
+        # and make tests non-deterministic. Pass ``auto_extract=
+        # True/False`` to override.
+        if auto_extract is None:
+            auto_extract = _default_auto_extract_for(self._model)
+        if auto_extract:
+            from ..memory.auto_extract import AutoExtractMemory
+            from ..memory.consolidator import Consolidator
+            consolidator = Consolidator(model=self._model)
+            self._wrapped_memory: Memory = AutoExtractMemory(
+                self._memory, consolidator
+            )
+        else:
+            self._wrapped_memory = self._memory
         self._runtime: Runtime = runtime if runtime is not None else InProcRuntime()
         self._budget: Budget = budget if budget is not None else NoBudget()
         self._permissions: Permissions = (
@@ -431,15 +468,29 @@ class Agent:
         actor: str,
         action: str,
         payload: dict[str, Any],
+        user_id: str | None = None,
     ) -> None:
         if self._audit_log is None:
             return
-        await self._audit_log.append(
-            session_id=session_id,
-            actor=actor,
-            action=action,
-            payload=payload,
-        )
+        # Forward user_id as a top-level field. Older AuditLog
+        # impls without the kwarg fall back via the
+        # ``except TypeError`` so the agent never breaks on a
+        # legacy custom log.
+        try:
+            await self._audit_log.append(
+                session_id=session_id,
+                actor=actor,
+                action=action,
+                payload=payload,
+                user_id=user_id,
+            )
+        except TypeError:
+            await self._audit_log.append(
+                session_id=session_id,
+                actor=actor,
+                action=action,
+                payload=payload,
+            )
 
     async def _validate_output_with_retry(
         self,
@@ -956,6 +1007,7 @@ class Agent:
             if not fast_audit:
                 await self._audit(
                     session_id=session_id,
+                    user_id=run_ctx.user_id,
                     actor="user",
                     action="run_started",
                     payload={
@@ -963,7 +1015,6 @@ class Agent:
                         "model": self._model.name,
                         "max_turns": self._max_turns,
                         "architecture": self._architecture.name,
-                        "user_id": run_ctx.user_id,
                     },
                 )
             await emit(Event.started(session_id, prompt))
@@ -999,7 +1050,10 @@ class Agent:
                 # disabled, so the architecture loop never sees a
                 # raw SDK exception when retries could have helped.
                 model=self._wrapped_model,
-                memory=self._memory,
+                # ``_wrapped_memory`` runs auto-extract on every
+                # remember() when enabled; falls through to
+                # ``_memory`` when ``auto_extract=False``.
+                memory=self._wrapped_memory,
                 runtime=self._runtime,
                 tools=effective_tools,
                 budget=self._budget,
@@ -1047,11 +1101,11 @@ class Agent:
                 output=session.output,
             )
             if fast_runtime:
-                await self._memory.remember(episode)
+                await self._wrapped_memory.remember(episode)
             else:
                 await self._runtime.step(
                     f"persist_episode_{session.turns}",
-                    self._memory.remember,
+                    self._wrapped_memory.remember,
                     episode,
                 )
 
@@ -1092,6 +1146,7 @@ class Agent:
             if not fast_audit:
                 await self._audit(
                     session_id=session_id,
+                    user_id=run_ctx.user_id,
                     actor="system",
                     action="run_completed",
                     payload={
@@ -1120,6 +1175,19 @@ async def _noop_emit(_event: Event) -> None:
 _NETWORK_MODEL_CLASS_NAMES = frozenset(
     {"OpenAIModel", "AnthropicModel", "LiteLLMModel"}
 )
+
+
+def _default_auto_extract_for(model: Model) -> bool:
+    """Auto-pick the default for ``auto_extract`` based on the model.
+
+    On for in-tree network adapters (OpenAI / Anthropic / LiteLLM):
+    extraction is what makes "your bot just remembers" work. Off
+    for in-process fakes (ScriptedModel / EchoModel) and unrecognised
+    custom Models: their canned responses confuse the Consolidator
+    and would make tests non-deterministic. Custom-model users opt
+    in by passing ``auto_extract=True`` explicitly.
+    """
+    return type(model).__name__ in _NETWORK_MODEL_CLASS_NAMES
 
 
 def _default_retry_policy_for(model: Model) -> RetryPolicy:

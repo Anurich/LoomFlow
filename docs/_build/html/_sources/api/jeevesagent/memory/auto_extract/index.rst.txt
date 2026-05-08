@@ -1,0 +1,144 @@
+jeevesagent.memory.auto_extract
+===============================
+
+.. py:module:: jeevesagent.memory.auto_extract
+
+.. autoapi-nested-parse::
+
+   Auto-extract wrapper — runs the :class:`Consolidator` on every
+   remembered episode so the bot extracts and stores structured facts
+   *automatically* as conversations happen.
+
+   The wrapper is what turns ``Agent(memory="sqlite:./bot.db")`` into a
+   "my bot just remembers things" experience: the user says
+   "I prefer dark mode" and a turn later the framework has a
+   ``Fact(subject="alice", predicate="prefers", object="dark_mode")``
+   in its store, partitioned by ``user_id``, ready to surface in
+   future runs via ``recall_facts``.
+
+   Wiring:
+
+   * Wraps any :class:`Memory` whose ``.facts`` is not ``None``.
+   * On every ``remember(episode)`` call: writes the episode through,
+     then runs the configured :class:`Consolidator` on JUST that
+     episode (single-episode batch), letting the consolidator append
+     any extracted facts to ``inner.facts``.
+   * Extraction is **best-effort**: a failing extract (model error,
+     malformed JSON, rate limit) NEVER breaks the run. The wrapper
+     logs and moves on; the underlying episode write already
+     succeeded.
+   * Every other Memory protocol method forwards straight through to
+     the inner backend.
+
+   The :class:`Agent` builds one of these automatically when
+   ``auto_extract=True`` (the default) and the resolved memory has a
+   fact store. Users who want the today's behaviour pass
+   ``auto_extract=False`` to ``Agent(...)`` — the wrapper simply
+   isn't applied.
+
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   jeevesagent.memory.auto_extract.AutoExtractMemory
+
+
+Module Contents
+---------------
+
+.. py:class:: AutoExtractMemory(inner: jeevesagent.core.protocols.Memory, consolidator: jeevesagent.memory.consolidator.Consolidator, *, on_extract_error: collections.abc.Callable[[BaseException], collections.abc.Awaitable[None]] | None = None)
+
+   Wraps a :class:`Memory` and runs auto fact extraction on every
+   ``remember`` call.
+
+   Construct via the :class:`Agent` ``auto_extract=`` kwarg; this
+   class isn't normally instantiated by user code. The wrapped
+   memory must expose a ``.facts`` attribute (a :class:`FactStore`)
+   for extraction to do anything — when ``inner.facts is None``,
+   the wrapper still installs cleanly but every extraction is a
+   no-op.
+
+
+   .. py:method:: append_block(name: str, content: str) -> None
+      :async:
+
+
+
+   .. py:method:: consolidate() -> None
+      :async:
+
+
+
+   .. py:method:: export(*, user_id: str | None = None) -> jeevesagent.core.types.MemoryExport
+      :async:
+
+
+
+   .. py:method:: forget(*, user_id: str | None = None, session_id: str | None = None, before: datetime.datetime | None = None) -> int
+      :async:
+
+
+
+   .. py:method:: profile(*, user_id: str | None = None) -> jeevesagent.core.types.MemoryProfile
+      :async:
+
+
+
+   .. py:method:: recall(query: str, *, kind: str = 'episodic', limit: int = 5, time_range: tuple[datetime.datetime, datetime.datetime] | None = None, user_id: str | None = None) -> list[jeevesagent.core.types.Episode]
+      :async:
+
+
+
+   .. py:method:: recall_facts(query: str, *, limit: int = 5, valid_at: datetime.datetime | None = None, user_id: str | None = None) -> list[jeevesagent.core.types.Fact]
+      :async:
+
+
+
+   .. py:method:: remember(episode: jeevesagent.core.types.Episode) -> str
+      :async:
+
+
+      Persist the episode, then run auto-extraction.
+
+      The episode write happens first and is the contract — the
+      function returns its id even when extraction fails. So the
+      consolidator's fragility never leaks into the agent's own
+      durability guarantees.
+
+
+
+   .. py:method:: session_messages(session_id: str, *, user_id: str | None = None, limit: int = 20) -> list[jeevesagent.core.types.Message]
+      :async:
+
+
+
+   .. py:method:: update_block(name: str, content: str) -> None
+      :async:
+
+
+
+   .. py:method:: working() -> list[jeevesagent.core.types.MemoryBlock]
+      :async:
+
+
+
+   .. py:property:: facts
+      :type: Any
+
+
+      Forward the inner backend's fact store. Reading this gives
+      callers the same access to the bi-temporal store the
+      consolidator writes into.
+
+
+   .. py:property:: inner
+      :type: jeevesagent.core.protocols.Memory
+
+
+      The wrapped backend. Power-user introspection — most call
+      sites just use the protocol methods.
+
+

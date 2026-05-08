@@ -45,8 +45,19 @@ class HookRegistry:
 
     # ---- HookHost protocol ----------------------------------------------
 
-    async def pre_tool(self, call: ToolCall) -> PermissionDecision:
-        """Run all pre-tool hooks. First deny wins; otherwise allow."""
+    async def pre_tool(
+        self, call: ToolCall, *, user_id: str | None = None
+    ) -> PermissionDecision:
+        """Run all pre-tool hooks. First deny wins; otherwise allow.
+
+        The ``user_id`` kwarg is forwarded for protocol parity (M9);
+        the bundled :class:`HookRegistry` doesn't itself dispatch
+        per-user, but custom :class:`HookHost` implementations can
+        route on it. Individual hook callables continue to receive
+        only ``(call,)`` to keep the existing decorator API stable;
+        hooks that need the user_id can call
+        :func:`get_run_context` themselves.
+        """
         for hook in self.pre_tool_hooks:
             decision: PermissionDecision | None = None
             with anyio.move_on_after(self.hook_timeout_s):
@@ -55,9 +66,17 @@ class HookRegistry:
                 return decision
         return PermissionDecision.allow_()
 
-    async def post_tool(self, call: ToolCall, result: ToolResult) -> None:
+    async def post_tool(
+        self,
+        call: ToolCall,
+        result: ToolResult,
+        *,
+        user_id: str | None = None,
+    ) -> None:
         """Best-effort post-tool callbacks. Failures and timeouts are
-        absorbed so they cannot affect the result the loop returns."""
+        absorbed so they cannot affect the result the loop returns.
+        ``user_id`` follows the same forwarded-but-not-required
+        pattern as :meth:`pre_tool`."""
         for hook in self.post_tool_hooks:
             with anyio.move_on_after(self.hook_timeout_s):
                 try:

@@ -81,6 +81,16 @@ Module Contents
 
 
 
+   .. py:method:: export(*, user_id: str | None = None) -> jeevesagent.core.types.MemoryExport
+      :async:
+
+
+
+   .. py:method:: forget(*, user_id: str | None = None, session_id: str | None = None, before: datetime.datetime | None = None) -> int
+      :async:
+
+
+
    .. py:method:: init_schema() -> None
       :async:
 
@@ -89,6 +99,11 @@ Module Contents
 
       When a :class:`PostgresFactStore` is attached as ``self.facts``,
       its schema is initialised in the same call.
+
+
+
+   .. py:method:: profile(*, user_id: str | None = None) -> jeevesagent.core.types.MemoryProfile
+      :async:
 
 
 

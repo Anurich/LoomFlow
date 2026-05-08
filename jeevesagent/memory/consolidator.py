@@ -152,6 +152,7 @@ class Consolidator:
         except (TypeError, ValueError):
             confidence = 1.0
         return Fact(
+            user_id=episode.user_id,
             subject=str(item["subject"]),
             predicate=str(item["predicate"]),
             object=str(item["object"]),

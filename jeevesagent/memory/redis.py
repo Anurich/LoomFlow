@@ -25,7 +25,15 @@ import anyio
 
 from ..core.errors import MemoryStoreError
 from ..core.protocols import Embedder
-from ..core.types import Episode, Fact, MemoryBlock, Message, Role
+from ..core.types import (
+    Episode,
+    Fact,
+    MemoryBlock,
+    MemoryExport,
+    MemoryProfile,
+    Message,
+    Role,
+)
 from ._embedding_util import pack_float32, unpack_float32
 from .embedder import HashEmbedder
 
@@ -52,7 +60,8 @@ class RedisMemory:
         self._index_name = index_name
         self._use_vector_index = use_vector_index
         self._index_ready = False
-        self._blocks: dict[str, MemoryBlock] = {}
+        # Working blocks partition by user_id; key is (user_id, name).
+        self._blocks: dict[tuple[str | None, str], MemoryBlock] = {}
         self._lock = anyio.Lock()
         # The Agent loop's fact-recall hook. ``None`` by default —
         # construct an explicit :class:`RedisFactStore` (or pass
@@ -160,32 +169,47 @@ class RedisMemory:
 
     # ---- working blocks --------------------------------------------------
 
-    async def working(self) -> list[MemoryBlock]:
+    async def working(
+        self, *, user_id: str | None = None
+    ) -> list[MemoryBlock]:
         async with self._lock:
-            return sorted(self._blocks.values(), key=lambda b: b.pinned_order)
+            scoped = [
+                b for (uid, _name), b in self._blocks.items() if uid == user_id
+            ]
+        return sorted(scoped, key=lambda b: b.pinned_order)
 
-    async def update_block(self, name: str, content: str) -> None:
+    async def update_block(
+        self, name: str, content: str, *, user_id: str | None = None
+    ) -> None:
+        key = (user_id, name)
         async with self._lock:
-            existing = self._blocks.get(name)
-            self._blocks[name] = MemoryBlock(
+            existing = self._blocks.get(key)
+            user_count = sum(
+                1 for (uid, _) in self._blocks if uid == user_id
+            )
+            self._blocks[key] = MemoryBlock(
                 name=name,
                 content=content,
-                pinned_order=(
-                    existing.pinned_order if existing else len(self._blocks)
-                ),
+                pinned_order=existing.pinned_order if existing else user_count,
             )
 
-    async def append_block(self, name: str, content: str) -> None:
+    async def append_block(
+        self, name: str, content: str, *, user_id: str | None = None
+    ) -> None:
+        key = (user_id, name)
         async with self._lock:
-            existing = self._blocks.get(name)
+            existing = self._blocks.get(key)
             if existing is None:
-                self._blocks[name] = MemoryBlock(
+                user_count = sum(
+                    1 for (uid, _) in self._blocks if uid == user_id
+                )
+                self._blocks[key] = MemoryBlock(
                     name=name,
                     content=content,
-                    pinned_order=len(self._blocks),
+                    pinned_order=user_count,
                 )
             else:
-                self._blocks[name] = MemoryBlock(
+                self._blocks[key] = MemoryBlock(
                     name=name,
                     content=existing.content + content,
                     pinned_order=existing.pinned_order,
@@ -374,6 +398,92 @@ class RedisMemory:
 
     async def consolidate(self) -> None:
         return None
+
+    # ---- profile / forget / export (GDPR) -------------------------------
+
+    async def profile(
+        self, *, user_id: str | None = None
+    ) -> MemoryProfile:
+        episodes = await self._scan_all_episodes()
+        episodes = [e for e in episodes if e.user_id == user_id]
+        last_seen: datetime | None = (
+            max(e.occurred_at for e in episodes) if episodes else None
+        )
+        seen: set[str] = set()
+        recent_sessions: list[str] = []
+        for e in sorted(episodes, key=lambda x: x.occurred_at, reverse=True):
+            if e.session_id in seen:
+                continue
+            seen.add(e.session_id)
+            recent_sessions.append(e.session_id)
+            if len(recent_sessions) >= 10:
+                break
+        sample_facts: list[Fact] = []
+        fact_count = 0
+        if self.facts is not None:
+            sample_facts = list(
+                await self.facts.query(user_id=user_id, limit=10)
+            )
+            all_facts = await self.facts.query(user_id=user_id, limit=100_000)
+            fact_count = len(all_facts)
+        return MemoryProfile(
+            user_id=user_id,
+            episode_count=len(episodes),
+            fact_count=fact_count,
+            last_seen=last_seen,
+            recent_sessions=recent_sessions,
+            sample_facts=sample_facts,
+        )
+
+    async def forget(
+        self,
+        *,
+        user_id: str | None = None,
+        session_id: str | None = None,
+        before: datetime | None = None,
+    ) -> int:
+        # Scan all episode keys, filter Python-side, DEL the matches.
+        # Faster than maintaining a secondary index for what's
+        # typically a low-frequency op.
+        episodes = await self._scan_all_episodes()
+        deleted = 0
+        for ep in episodes:
+            if ep.user_id != user_id:
+                continue
+            if session_id is not None and ep.session_id != session_id:
+                continue
+            if before is not None and ep.occurred_at >= before:
+                continue
+            await self._client.delete(self._key_for(ep.id))
+            deleted += 1
+        # Facts: same scan-and-delete pattern via the FactStore's
+        # internals.
+        if session_id is None and self.facts is not None:
+            facts = await self.facts.query(user_id=user_id, limit=100_000)
+            if before is not None:
+                facts = [f for f in facts if f.recorded_at < before]
+            for f in facts:
+                if hasattr(self.facts, "_key_for"):
+                    key = self.facts._key_for(f.id)  # type: ignore[attr-defined]
+                    await self._client.delete(key)
+                    deleted += 1
+        return deleted
+
+    async def export(
+        self, *, user_id: str | None = None
+    ) -> MemoryExport:
+        episodes = await self._scan_all_episodes()
+        episodes = [e for e in episodes if e.user_id == user_id]
+        facts: list[Fact] = []
+        if self.facts is not None:
+            facts = list(
+                await self.facts.query(user_id=user_id, limit=100_000)
+            )
+        return MemoryExport(
+            user_id=user_id,
+            episodes=sorted(episodes, key=lambda e: e.occurred_at),
+            facts=sorted(facts, key=lambda f: f.recorded_at),
+        )
 
     # ---- key helpers -----------------------------------------------------
 

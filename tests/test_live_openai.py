@@ -299,6 +299,35 @@ async def test_invalid_api_key_classifies_as_authentication_error() -> None:
         await agent.run("hi")
 
 
+async def test_auto_extract_populates_facts_after_one_run() -> None:
+    """The headline M8 UX: a single ``agent.run`` against a real
+    model auto-extracts structured facts into memory, partitioned
+    by user_id, with no manual ``Consolidator`` call from the
+    user. ``auto_extract=True`` is the default for in-tree network
+    adapters."""
+    from jeevesagent.memory.inmemory import InMemoryMemory
+
+    memory = InMemoryMemory()
+    agent = Agent(
+        "You are helpful. Acknowledge what the user says briefly.",
+        model=MODEL,
+        memory=memory,
+        # Default is True for OpenAIModel; pin for clarity.
+        auto_extract=True,
+    )
+    await agent.run(
+        "Hi! I'm Alice and my favourite programming language is Python.",
+        user_id="alice",
+    )
+
+    # The Consolidator should have run and persisted at least one
+    # fact to alice's partition.
+    facts = await memory.facts.query(user_id="alice", limit=10)
+    assert facts, "expected auto-extracted facts after one run"
+    blob = " ".join(f"{f.subject} {f.predicate} {f.object}" for f in facts)
+    assert "Python" in blob or "python" in blob
+
+
 async def test_streaming_yields_token_events() -> None:
     """``agent.stream`` produces model-chunk events end-to-end
     against a real model — verifies the stream wiring + retry

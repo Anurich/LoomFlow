@@ -43,6 +43,21 @@ Module Contents
 
 
 
+   .. py:method:: export(*, user_id: str | None = None) -> jeevesagent.core.types.MemoryExport
+      :async:
+
+
+
+   .. py:method:: forget(*, user_id: str | None = None, session_id: str | None = None, before: datetime.datetime | None = None) -> int
+      :async:
+
+
+
+   .. py:method:: profile(*, user_id: str | None = None) -> jeevesagent.core.types.MemoryProfile
+      :async:
+
+
+
    .. py:method:: recall(query: str, *, kind: str = 'episodic', limit: int = 5, time_range: tuple[datetime.datetime, datetime.datetime] | None = None, user_id: str | None = None) -> list[jeevesagent.core.types.Episode]
       :async:
 

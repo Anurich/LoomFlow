@@ -23,6 +23,8 @@ from .types import (
     Event,
     Fact,
     MemoryBlock,
+    MemoryExport,
+    MemoryProfile,
     Message,
     ModelChunk,
     PermissionDecision,
@@ -66,16 +68,31 @@ class Model(Protocol):
 class Memory(Protocol):
     """Tiered memory: working blocks, episodic store, semantic graph."""
 
-    async def working(self) -> list[MemoryBlock]:
-        """All in-context blocks. Pinned to every prompt."""
+    async def working(
+        self, *, user_id: str | None = None
+    ) -> list[MemoryBlock]:
+        """All in-context blocks for ``user_id``. Pinned to every prompt.
+
+        Like every other memory primitive, working blocks are
+        user-partitioned: blocks set under one ``user_id`` are
+        invisible to a query scoped to a different one. Backends
+        MUST honour this — passing alice's user_id never returns
+        bob's pinned blocks.
+        """
         ...
 
-    async def update_block(self, name: str, content: str) -> None:
-        """Replace the contents of a named block."""
+    async def update_block(
+        self, name: str, content: str, *, user_id: str | None = None
+    ) -> None:
+        """Replace the contents of a named block in ``user_id``'s
+        namespace. ``None`` is the anonymous bucket."""
         ...
 
-    async def append_block(self, name: str, content: str) -> None:
-        """Append to a named block, creating it if absent."""
+    async def append_block(
+        self, name: str, content: str, *, user_id: str | None = None
+    ) -> None:
+        """Append to a named block in ``user_id``'s namespace,
+        creating it if absent."""
         ...
 
     async def remember(self, episode: Episode) -> str:
@@ -151,6 +168,65 @@ class Memory(Protocol):
         different one. Backends without persisted message logs
         return ``[]`` — the agent loop falls back to the
         semantic-recall path in that case.
+        """
+        ...
+
+    async def profile(
+        self, *, user_id: str | None = None
+    ) -> MemoryProfile:
+        """Summary of what this memory knows about ``user_id``.
+
+        Returns counts (episodes, facts), the most-recent sessions
+        the user touched, the last-seen timestamp, and a sample of
+        the most-recently-recorded facts. Suitable for rendering a
+        "what does the bot know about me?" view to the end user, or
+        for an ops dashboard.
+
+        Backends MUST honour ``user_id`` as a hard partition —
+        passing one user's id never returns counts derived from
+        another user's data.
+        """
+        ...
+
+    async def forget(
+        self,
+        *,
+        user_id: str | None = None,
+        session_id: str | None = None,
+        before: datetime | None = None,
+    ) -> int:
+        """Erase memory for a user — GDPR / "right to be forgotten".
+
+        With ``user_id`` only: erase EVERYTHING (episodes + facts +
+        session messages + working blocks) belonging to that user.
+        With ``session_id``: erase only that conversation thread for
+        that user. With ``before``: erase only data older than the
+        timestamp (other args still scope it). All filters AND
+        together.
+
+        Returns the total number of records deleted (episodes +
+        facts; backends without precise counts may return their
+        best estimate).
+
+        ``user_id=None`` erases the anonymous bucket only — same
+        partition rule as :meth:`recall`. To erase everything
+        across all users, callers must enumerate users and call
+        ``forget`` per-user; the framework deliberately makes the
+        "delete every user" path explicit so it's not done by
+        accident.
+        """
+        ...
+
+    async def export(
+        self, *, user_id: str | None = None
+    ) -> MemoryExport:
+        """Full data dump for ``user_id`` — GDPR / data portability.
+
+        Returns every episode, every fact, and the export
+        timestamp. Serialise with ``MemoryExport.model_dump_json()``
+        for download or downstream processing. Honours the
+        ``user_id`` partition: never includes data belonging to a
+        different user.
         """
         ...
 
@@ -242,18 +318,38 @@ class Sandbox(Protocol):
 
 
 class Permissions(Protocol):
-    """Decides whether a tool call is allowed."""
+    """Decides whether a tool call is allowed.
+
+    ``user_id`` (M9): the agent loop forwards the live
+    :class:`~jeevesagent.RunContext`'s user_id so multi-tenant
+    permission impls (e.g. :class:`~jeevesagent.PerUserPermissions`)
+    can route to per-user policies. Implementations that don't
+    care about the user can ignore the kwarg; the framework's
+    fallback ``except TypeError`` covers legacy impls.
+    """
 
     async def check(
-        self, call: ToolCall, *, context: Mapping[str, Any]
+        self,
+        call: ToolCall,
+        *,
+        context: Mapping[str, Any],
+        user_id: str | None = None,
     ) -> PermissionDecision:
         ...
 
 
 class HookHost(Protocol):
-    """Aggregator over user-registered lifecycle callbacks."""
+    """Aggregator over user-registered lifecycle callbacks.
 
-    async def pre_tool(self, call: ToolCall) -> PermissionDecision:
+    ``user_id`` (M9): same contract as :class:`Permissions` —
+    forwarded from the live RunContext so per-user hooks can
+    route. Legacy hook impls without the kwarg fall back via
+    ``except TypeError`` in the agent loop.
+    """
+
+    async def pre_tool(
+        self, call: ToolCall, *, user_id: str | None = None
+    ) -> PermissionDecision:
         ...
 
     async def post_tool(self, call: ToolCall, result: ToolResult) -> None:
@@ -264,9 +360,19 @@ class HookHost(Protocol):
 
 
 class Budget(Protocol):
-    """Resource governance — tokens, calls, cost, wall clock."""
+    """Resource governance — tokens, calls, cost, wall clock.
 
-    async def allows_step(self) -> BudgetStatus:
+    ``user_id`` (M9): the agent loop forwards the live
+    :class:`~jeevesagent.RunContext`'s user_id into every
+    ``allows_step`` and ``consume`` call so multi-tenant budget
+    impls can enforce per-user caps. Implementations that don't
+    track per-user usage may ignore the kwarg; the framework
+    falls back gracefully when the kwarg isn't accepted.
+    """
+
+    async def allows_step(
+        self, *, user_id: str | None = None
+    ) -> BudgetStatus:
         ...
 
     async def consume(
@@ -275,6 +381,7 @@ class Budget(Protocol):
         tokens_in: int,
         tokens_out: int,
         cost_usd: float,
+        user_id: str | None = None,
     ) -> None:
         ...
 

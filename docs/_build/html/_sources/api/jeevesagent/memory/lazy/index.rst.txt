@@ -1,0 +1,156 @@
+jeevesagent.memory.lazy
+=======================
+
+.. py:module:: jeevesagent.memory.lazy
+
+.. autoapi-nested-parse::
+
+   Lazy-construction wrapper for async-connect :class:`Memory` backends.
+
+   The framework's resolver lets users write::
+
+       Agent("...", model="...", memory="postgres://prod-db/agent")
+
+   But ``PostgresMemory.connect(...)`` and ``RedisMemory.connect(...)``
+   are async — they open a pool / client on the wire. The
+   :class:`Agent` constructor is synchronous, so we need a way to defer
+   the connection until the agent loop is actually running.
+
+   :class:`LazyMemory` is that bridge. It:
+
+   * takes an **async builder coroutine** that returns the real backend
+     (e.g. ``lambda: PostgresMemory.connect(dsn)``)
+   * holds it un-called until the first protocol method is invoked
+   * connects exactly once, caches the instance, then proxies every
+     subsequent call straight through
+
+   So users see a regular ``Memory`` from the constructor onward; the
+   network round-trip happens on the first ``agent.run`` (where any
+   connection error surfaces as :class:`MemoryStoreError`, not a sync
+   exception in user-side construction code).
+
+   Construction is also safe under structured concurrency: the first-
+   use path is wrapped in an ``anyio.Lock`` so concurrent ``agent.run``
+   calls don't open the pool twice.
+
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   jeevesagent.memory.lazy.LazyMemory
+
+
+Module Contents
+---------------
+
+.. py:class:: LazyMemory(builder: collections.abc.Callable[[], collections.abc.Awaitable[Any]], *, description: str = 'memory')
+
+   Defer construction of an async-built :class:`Memory` until first
+   use.
+
+   Users rarely instantiate this directly — it's what the
+   :func:`_resolve_memory` resolver returns when given a
+   ``postgres://`` or ``redis://`` URL. Pass a zero-arg async
+   callable that builds the real backend; everything else
+   (working / remember / recall / facts / session_messages /
+   consolidate) is forwarded once that callable resolves.
+
+
+   .. py:method:: aclose() -> None
+      :async:
+
+
+      Close the inner backend if it was constructed.
+
+      Safe to call when the backend was never resolved (no-op).
+
+
+
+   .. py:method:: append_block(name: str, content: str) -> None
+      :async:
+
+
+
+   .. py:method:: consolidate() -> None
+      :async:
+
+
+
+   .. py:method:: export(*, user_id: str | None = None) -> jeevesagent.core.types.MemoryExport
+      :async:
+
+
+
+   .. py:method:: forget(*, user_id: str | None = None, session_id: str | None = None, before: datetime.datetime | None = None) -> int
+      :async:
+
+
+
+   .. py:method:: profile(*, user_id: str | None = None) -> jeevesagent.core.types.MemoryProfile
+      :async:
+
+
+
+   .. py:method:: recall(query: str, *, kind: str = 'episodic', limit: int = 5, time_range: tuple[datetime.datetime, datetime.datetime] | None = None, user_id: str | None = None) -> list[jeevesagent.core.types.Episode]
+      :async:
+
+
+
+   .. py:method:: recall_facts(query: str, *, limit: int = 5, valid_at: datetime.datetime | None = None, user_id: str | None = None) -> list[jeevesagent.core.types.Fact]
+      :async:
+
+
+
+   .. py:method:: remember(episode: jeevesagent.core.types.Episode) -> str
+      :async:
+
+
+
+   .. py:method:: session_messages(session_id: str, *, user_id: str | None = None, limit: int = 20) -> list[jeevesagent.core.types.Message]
+      :async:
+
+
+
+   .. py:method:: update_block(name: str, content: str) -> None
+      :async:
+
+
+
+   .. py:method:: working() -> list[jeevesagent.core.types.MemoryBlock]
+      :async:
+
+
+
+   .. py:property:: description
+      :type: str
+
+
+      Human-readable label (e.g. ``"postgres://prod-db/agent"``)
+      — used in error messages so users can tell which Memory
+      failed to connect.
+
+
+   .. py:property:: facts
+      :type: Any | None
+
+
+      Direct access to the inner backend's fact store (if any).
+
+      Reading this BEFORE the backend has connected returns
+      ``None`` — the connection deliberately hasn't happened yet.
+      Once the backend is resolved (after the first ``agent.run``
+      or an explicit ``await mem._resolve()``), this returns the
+      live ``FactStore``. Power-user escape hatch; most callers
+      go through :meth:`recall_facts`.
+
+
+   .. py:property:: is_ready
+      :type: bool
+
+
+      ``True`` once the backend has been constructed and cached.
+
+

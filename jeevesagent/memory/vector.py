@@ -19,7 +19,15 @@ from typing import Any
 import anyio
 
 from ..core.protocols import Embedder
-from ..core.types import Episode, Fact, MemoryBlock, Message, Role
+from ..core.types import (
+    Episode,
+    Fact,
+    MemoryBlock,
+    MemoryExport,
+    MemoryProfile,
+    Message,
+    Role,
+)
 from .consolidator import Consolidator
 from .embedder import HashEmbedder
 from .facts import FactStore, InMemoryFactStore
@@ -58,7 +66,9 @@ class VectorMemory:
     ) -> None:
         self._embedder: Embedder = embedder if embedder is not None else HashEmbedder()
         self._max_episodes = max_episodes
-        self._blocks: dict[str, MemoryBlock] = {}
+        # Working blocks are partitioned by ``user_id``. Storage key
+        # is ``(user_id, name)``; ``user_id=None`` is its own bucket.
+        self._blocks: dict[tuple[str | None, str], MemoryBlock] = {}
         self._episodes: dict[str, Episode] = {}
         self._consolidator = consolidator
         # Default the fact store's embedder to ours, so the same
@@ -79,38 +89,56 @@ class VectorMemory:
 
     def snapshot(self) -> dict[str, Any]:
         return {
-            "blocks": {k: v.model_dump() for k, v in self._blocks.items()},
+            "blocks": {
+                f"{uid or ''}::{name}": v.model_dump()
+                for (uid, name), v in self._blocks.items()
+            },
             "episodes": {k: v.model_dump() for k, v in self._episodes.items()},
         }
 
     # ---- working blocks --------------------------------------------------
 
-    async def working(self) -> list[MemoryBlock]:
+    async def working(
+        self, *, user_id: str | None = None
+    ) -> list[MemoryBlock]:
         async with self._lock:
-            return sorted(self._blocks.values(), key=lambda b: b.pinned_order)
+            scoped = [
+                b for (uid, _name), b in self._blocks.items() if uid == user_id
+            ]
+        return sorted(scoped, key=lambda b: b.pinned_order)
 
-    async def update_block(self, name: str, content: str) -> None:
+    async def update_block(
+        self, name: str, content: str, *, user_id: str | None = None
+    ) -> None:
+        key = (user_id, name)
         async with self._lock:
-            existing = self._blocks.get(name)
-            self._blocks[name] = MemoryBlock(
+            existing = self._blocks.get(key)
+            user_count = sum(
+                1 for (uid, _) in self._blocks if uid == user_id
+            )
+            self._blocks[key] = MemoryBlock(
                 name=name,
                 content=content,
-                pinned_order=(
-                    existing.pinned_order if existing else len(self._blocks)
-                ),
+                pinned_order=existing.pinned_order if existing else user_count,
             )
 
-    async def append_block(self, name: str, content: str) -> None:
+    async def append_block(
+        self, name: str, content: str, *, user_id: str | None = None
+    ) -> None:
+        key = (user_id, name)
         async with self._lock:
-            existing = self._blocks.get(name)
+            existing = self._blocks.get(key)
             if existing is None:
-                self._blocks[name] = MemoryBlock(
+                user_count = sum(
+                    1 for (uid, _) in self._blocks if uid == user_id
+                )
+                self._blocks[key] = MemoryBlock(
                     name=name,
                     content=content,
-                    pinned_order=len(self._blocks),
+                    pinned_order=user_count,
                 )
             else:
-                self._blocks[name] = MemoryBlock(
+                self._blocks[key] = MemoryBlock(
                     name=name,
                     content=existing.content + content,
                     pinned_order=existing.pinned_order,
@@ -226,6 +254,96 @@ class VectorMemory:
             if ep.output:
                 out.append(Message(role=Role.ASSISTANT, content=ep.output))
         return out
+
+    # ---- profile / forget / export (GDPR) -------------------------------
+
+    async def profile(
+        self, *, user_id: str | None = None
+    ) -> MemoryProfile:
+        async with self._lock:
+            user_eps = [
+                e for e in self._episodes.values() if e.user_id == user_id
+            ]
+        sample_facts: list[Fact] = []
+        fact_count = 0
+        if self.facts is not None:
+            sample_facts = list(
+                await self.facts.query(user_id=user_id, limit=10)
+            )
+            all_facts = await self.facts.query(user_id=user_id, limit=100_000)
+            fact_count = len(all_facts)
+
+        seen: set[str] = set()
+        recent_sessions: list[str] = []
+        for e in sorted(user_eps, key=lambda x: x.occurred_at, reverse=True):
+            if e.session_id in seen:
+                continue
+            seen.add(e.session_id)
+            recent_sessions.append(e.session_id)
+            if len(recent_sessions) >= 10:
+                break
+
+        last_seen: datetime | None = None
+        if user_eps:
+            last_seen = max(e.occurred_at for e in user_eps)
+
+        return MemoryProfile(
+            user_id=user_id,
+            episode_count=len(user_eps),
+            fact_count=fact_count,
+            last_seen=last_seen,
+            recent_sessions=recent_sessions,
+            sample_facts=sample_facts,
+        )
+
+    async def forget(
+        self,
+        *,
+        user_id: str | None = None,
+        session_id: str | None = None,
+        before: datetime | None = None,
+    ) -> int:
+        deleted = 0
+        async with self._lock:
+            to_delete = []
+            for eid, ep in self._episodes.items():
+                if ep.user_id != user_id:
+                    continue
+                if session_id is not None and ep.session_id != session_id:
+                    continue
+                if before is not None and ep.occurred_at >= before:
+                    continue
+                to_delete.append(eid)
+            for eid in to_delete:
+                self._episodes.pop(eid, None)
+            deleted += len(to_delete)
+        if session_id is None and self.facts is not None:
+            facts = await self.facts.query(user_id=user_id, limit=100_000)
+            if before is not None:
+                facts = [f for f in facts if f.recorded_at < before]
+            for f in facts:
+                if hasattr(self.facts, "_facts"):
+                    self.facts._facts.pop(f.id, None)  # type: ignore[attr-defined]
+                deleted += 1
+        return deleted
+
+    async def export(
+        self, *, user_id: str | None = None
+    ) -> MemoryExport:
+        async with self._lock:
+            episodes = [
+                e for e in self._episodes.values() if e.user_id == user_id
+            ]
+        facts: list[Fact] = []
+        if self.facts is not None:
+            facts = list(
+                await self.facts.query(user_id=user_id, limit=100_000)
+            )
+        return MemoryExport(
+            user_id=user_id,
+            episodes=sorted(episodes, key=lambda e: e.occurred_at),
+            facts=sorted(facts, key=lambda f: f.recorded_at),
+        )
 
     async def consolidate(self) -> None:
         """Process unconsolidated episodes through the configured

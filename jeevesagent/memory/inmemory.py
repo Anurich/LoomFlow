@@ -15,7 +15,15 @@ from typing import Any
 import anyio
 
 from ..core.context import IsolationWarning
-from ..core.types import Episode, Fact, MemoryBlock, Message, Role
+from ..core.types import (
+    Episode,
+    Fact,
+    MemoryBlock,
+    MemoryExport,
+    MemoryProfile,
+    Message,
+    Role,
+)
 from .consolidator import Consolidator
 from .facts import FactStore, InMemoryFactStore
 
@@ -29,7 +37,11 @@ class InMemoryMemory:
         consolidator: Consolidator | None = None,
         fact_store: FactStore | None = None,
     ) -> None:
-        self._blocks: dict[str, MemoryBlock] = {}
+        # Working blocks are partitioned by ``user_id`` to keep one
+        # tenant's pinned context invisible to another. Storage key
+        # is ``(user_id, name)``; ``user_id=None`` is its own bucket
+        # (anonymous / single-tenant).
+        self._blocks: dict[tuple[str | None, str], MemoryBlock] = {}
         self._episodes: dict[str, Episode] = {}
         self._consolidator = consolidator
         self.facts: FactStore = (
@@ -45,28 +57,47 @@ class InMemoryMemory:
 
     # ---- working blocks --------------------------------------------------
 
-    async def working(self) -> list[MemoryBlock]:
+    async def working(
+        self, *, user_id: str | None = None
+    ) -> list[MemoryBlock]:
         async with self._lock:
-            return sorted(self._blocks.values(), key=lambda b: b.pinned_order)
+            scoped = [
+                b for (uid, _name), b in self._blocks.items() if uid == user_id
+            ]
+        return sorted(scoped, key=lambda b: b.pinned_order)
 
-    async def update_block(self, name: str, content: str) -> None:
+    async def update_block(
+        self, name: str, content: str, *, user_id: str | None = None
+    ) -> None:
+        key = (user_id, name)
         async with self._lock:
-            existing = self._blocks.get(name)
-            self._blocks[name] = MemoryBlock(
+            existing = self._blocks.get(key)
+            # Pinned-order is per-user: count blocks already in this
+            # user's bucket when assigning a slot to a new block.
+            user_count = sum(
+                1 for (uid, _) in self._blocks if uid == user_id
+            )
+            self._blocks[key] = MemoryBlock(
                 name=name,
                 content=content,
-                pinned_order=existing.pinned_order if existing else len(self._blocks),
+                pinned_order=existing.pinned_order if existing else user_count,
             )
 
-    async def append_block(self, name: str, content: str) -> None:
+    async def append_block(
+        self, name: str, content: str, *, user_id: str | None = None
+    ) -> None:
+        key = (user_id, name)
         async with self._lock:
-            existing = self._blocks.get(name)
+            existing = self._blocks.get(key)
             if existing is None:
-                self._blocks[name] = MemoryBlock(
-                    name=name, content=content, pinned_order=len(self._blocks)
+                user_count = sum(
+                    1 for (uid, _) in self._blocks if uid == user_id
+                )
+                self._blocks[key] = MemoryBlock(
+                    name=name, content=content, pinned_order=user_count
                 )
             else:
-                self._blocks[name] = MemoryBlock(
+                self._blocks[key] = MemoryBlock(
                     name=name,
                     content=existing.content + content,
                     pinned_order=existing.pinned_order,
@@ -184,6 +215,107 @@ class InMemoryMemory:
                 out.append(Message(role=Role.ASSISTANT, content=ep.output))
         return out
 
+    # ---- profile / forget / export (GDPR) -------------------------------
+
+    async def profile(
+        self, *, user_id: str | None = None
+    ) -> MemoryProfile:
+        async with self._lock:
+            user_episodes = [
+                e for e in self._episodes.values() if e.user_id == user_id
+            ]
+        # Sample of most-recent facts; the fact store handles the
+        # filter for us via ``query``.
+        sample = await self.facts.query(user_id=user_id, limit=10)
+        fact_count = len(await self.facts.query(user_id=user_id, limit=10_000))
+
+        # Sessions, newest-first, dedup'd.
+        seen: set[str] = set()
+        recent_sessions: list[str] = []
+        for e in sorted(user_episodes, key=lambda x: x.occurred_at, reverse=True):
+            if e.session_id in seen:
+                continue
+            seen.add(e.session_id)
+            recent_sessions.append(e.session_id)
+            if len(recent_sessions) >= 10:
+                break
+
+        last_seen: datetime | None = None
+        if user_episodes:
+            last_seen = max(e.occurred_at for e in user_episodes)
+
+        return MemoryProfile(
+            user_id=user_id,
+            episode_count=len(user_episodes),
+            fact_count=fact_count,
+            last_seen=last_seen,
+            recent_sessions=recent_sessions,
+            sample_facts=list(sample),
+        )
+
+    async def forget(
+        self,
+        *,
+        user_id: str | None = None,
+        session_id: str | None = None,
+        before: datetime | None = None,
+    ) -> int:
+        deleted = 0
+        async with self._lock:
+            to_delete: list[str] = []
+            for eid, ep in self._episodes.items():
+                if ep.user_id != user_id:
+                    continue
+                if session_id is not None and ep.session_id != session_id:
+                    continue
+                if before is not None and ep.occurred_at >= before:
+                    continue
+                to_delete.append(eid)
+            for eid in to_delete:
+                self._episodes.pop(eid, None)
+                self._consolidated_ids.discard(eid)
+            deleted += len(to_delete)
+
+        # Facts are also user-scoped; erase them in the same call
+        # unless the caller narrowed by session_id (facts have no
+        # session, so a session-scoped forget shouldn't touch them).
+        if session_id is None:
+            facts_to_delete = await self.facts.query(
+                user_id=user_id, limit=100_000
+            )
+            if before is not None:
+                facts_to_delete = [
+                    f for f in facts_to_delete
+                    if f.recorded_at < before
+                ]
+            for f in facts_to_delete:
+                # InMemoryFactStore exposes _facts; we'd rather use a
+                # public delete but the protocol doesn't have one
+                # (yet). Best-effort.
+                if hasattr(self.facts, "_facts"):
+                    self.facts._facts.pop(f.id, None)  # type: ignore[attr-defined]
+                    if hasattr(self.facts, "_embeddings"):
+                        self.facts._embeddings.pop(f.id, None)  # type: ignore[attr-defined]
+                deleted += 1
+
+        # Working blocks aren't user-scoped today (one set per
+        # Memory instance); don't touch them.
+        return deleted
+
+    async def export(
+        self, *, user_id: str | None = None
+    ) -> MemoryExport:
+        async with self._lock:
+            episodes = [
+                e for e in self._episodes.values() if e.user_id == user_id
+            ]
+        facts = await self.facts.query(user_id=user_id, limit=100_000)
+        return MemoryExport(
+            user_id=user_id,
+            episodes=sorted(episodes, key=lambda e: e.occurred_at),
+            facts=sorted(facts, key=lambda f: f.recorded_at),
+        )
+
     async def consolidate(self) -> None:
         """Process unconsolidated episodes through the configured
         :class:`Consolidator`, appending facts to ``self.facts``."""
@@ -205,7 +337,13 @@ class InMemoryMemory:
     # ---- introspection (test helpers) -----------------------------------
 
     def snapshot(self) -> dict[str, Any]:
+        # Block keys are now ``(user_id, name)`` tuples; flatten to
+        # a string key for JSON-friendly snapshots so test
+        # introspection keeps working without per-tuple keys.
         return {
-            "blocks": {k: v.model_dump() for k, v in self._blocks.items()},
+            "blocks": {
+                f"{uid or ''}::{name}": v.model_dump()
+                for (uid, name), v in self._blocks.items()
+            },
             "episodes": {k: v.model_dump() for k, v in self._episodes.items()},
         }

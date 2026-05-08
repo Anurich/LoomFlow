@@ -7,25 +7,33 @@ jeevesagent.memory
 
    Memory backends.
 
-   Pick one of these and pass it to ``Agent(..., memory=...)``:
+   The simplest way to pick a backend is to pass a string or URL to
+   ``Agent(memory=...)``::
 
-   * :class:`InMemoryMemory` — naive dict-backed, no embeddings. The
-     default; great for tests and tiny demos.
-   * :class:`VectorMemory` — in-memory with embedding-based cosine
-     recall. Pure Python, no infrastructure. Scales to a few thousand
-     episodes.
-   * :class:`ChromaMemory` — backed by Chroma (local persistent or
-     in-memory client). Lazy ``chromadb`` import.
-   * :class:`PostgresMemory` — Postgres + pgvector with HNSW index.
-     Lazy ``asyncpg`` + ``pgvector`` imports. Production-grade.
-   * :class:`RedisMemory` — Redis with optional RediSearch HNSW
-     vector index, falling back to brute-force when RediSearch isn't
-     available. Lazy ``redis`` import.
+       Agent(..., memory="inmemory")            # default; lost on restart
+       Agent(..., memory="sqlite:./bot.db")     # persistent, no infra
+       Agent(..., memory="chroma:./vectors")    # local Chroma
+       Agent(..., memory="postgres://...")      # Postgres + pgvector
+       Agent(..., memory="redis://...")         # Redis (+ RediSearch)
 
-   Embedders live in :mod:`jeevesagent.memory.embedder`:
+   The :func:`resolve_memory` resolver handles the string parsing; it
+   also accepts a config dict (``{"backend": "chroma", ...}``) and
+   already-constructed Memory instances pass through unchanged.
 
-   * :class:`HashEmbedder` — deterministic, zero-dep, perfect for tests.
-   * :class:`OpenAIEmbedder` — real semantic embeddings via OpenAI.
+   Backends explicitly:
+
+   * :class:`InMemoryMemory` — dict-backed, no embeddings. Default.
+   * :class:`SqliteMemory` — single sqlite file. Persistent, no server.
+   * :class:`VectorMemory` — in-process with cosine recall. No persistence.
+   * :class:`ChromaMemory` — Chroma client (local persistent or in-process).
+   * :class:`PostgresMemory` — Postgres + pgvector + HNSW index.
+   * :class:`RedisMemory` — Redis (+ optional RediSearch HNSW vector index).
+
+   Embedders in :mod:`jeevesagent.memory.embedder`:
+
+   * :class:`HashEmbedder` — deterministic, zero-key, fine for dev / tests.
+   * :class:`OpenAIEmbedder` / :class:`VoyageEmbedder` /
+     :class:`CohereEmbedder` — real semantic embeddings.
 
 
 
@@ -35,16 +43,20 @@ Submodules
 .. toctree::
    :maxdepth: 1
 
+   /api/jeevesagent/memory/auto_extract/index
    /api/jeevesagent/memory/chroma/index
    /api/jeevesagent/memory/chroma_facts/index
    /api/jeevesagent/memory/consolidator/index
    /api/jeevesagent/memory/embedder/index
    /api/jeevesagent/memory/facts/index
    /api/jeevesagent/memory/inmemory/index
+   /api/jeevesagent/memory/lazy/index
    /api/jeevesagent/memory/postgres/index
    /api/jeevesagent/memory/postgres_facts/index
    /api/jeevesagent/memory/redis/index
    /api/jeevesagent/memory/redis_facts/index
+   /api/jeevesagent/memory/resolver/index
+   /api/jeevesagent/memory/sqlite/index
    /api/jeevesagent/memory/sqlite_facts/index
    /api/jeevesagent/memory/vector/index
    /api/jeevesagent/memory/worker/index
@@ -55,6 +67,7 @@ Classes
 
 .. autoapisummary::
 
+   jeevesagent.memory.AutoExtractMemory
    jeevesagent.memory.ChromaFactStore
    jeevesagent.memory.ChromaMemory
    jeevesagent.memory.CohereEmbedder
@@ -64,18 +77,121 @@ Classes
    jeevesagent.memory.HashEmbedder
    jeevesagent.memory.InMemoryFactStore
    jeevesagent.memory.InMemoryMemory
+   jeevesagent.memory.LazyMemory
    jeevesagent.memory.OpenAIEmbedder
    jeevesagent.memory.PostgresFactStore
    jeevesagent.memory.PostgresMemory
    jeevesagent.memory.RedisFactStore
    jeevesagent.memory.RedisMemory
    jeevesagent.memory.SqliteFactStore
+   jeevesagent.memory.SqliteMemory
    jeevesagent.memory.VectorMemory
    jeevesagent.memory.VoyageEmbedder
 
 
+Functions
+---------
+
+.. autoapisummary::
+
+   jeevesagent.memory.resolve_memory
+
+
 Package Contents
 ----------------
+
+.. py:class:: AutoExtractMemory(inner: jeevesagent.core.protocols.Memory, consolidator: jeevesagent.memory.consolidator.Consolidator, *, on_extract_error: collections.abc.Callable[[BaseException], collections.abc.Awaitable[None]] | None = None)
+
+   Wraps a :class:`Memory` and runs auto fact extraction on every
+   ``remember`` call.
+
+   Construct via the :class:`Agent` ``auto_extract=`` kwarg; this
+   class isn't normally instantiated by user code. The wrapped
+   memory must expose a ``.facts`` attribute (a :class:`FactStore`)
+   for extraction to do anything — when ``inner.facts is None``,
+   the wrapper still installs cleanly but every extraction is a
+   no-op.
+
+
+   .. py:method:: append_block(name: str, content: str) -> None
+      :async:
+
+
+
+   .. py:method:: consolidate() -> None
+      :async:
+
+
+
+   .. py:method:: export(*, user_id: str | None = None) -> jeevesagent.core.types.MemoryExport
+      :async:
+
+
+
+   .. py:method:: forget(*, user_id: str | None = None, session_id: str | None = None, before: datetime.datetime | None = None) -> int
+      :async:
+
+
+
+   .. py:method:: profile(*, user_id: str | None = None) -> jeevesagent.core.types.MemoryProfile
+      :async:
+
+
+
+   .. py:method:: recall(query: str, *, kind: str = 'episodic', limit: int = 5, time_range: tuple[datetime.datetime, datetime.datetime] | None = None, user_id: str | None = None) -> list[jeevesagent.core.types.Episode]
+      :async:
+
+
+
+   .. py:method:: recall_facts(query: str, *, limit: int = 5, valid_at: datetime.datetime | None = None, user_id: str | None = None) -> list[jeevesagent.core.types.Fact]
+      :async:
+
+
+
+   .. py:method:: remember(episode: jeevesagent.core.types.Episode) -> str
+      :async:
+
+
+      Persist the episode, then run auto-extraction.
+
+      The episode write happens first and is the contract — the
+      function returns its id even when extraction fails. So the
+      consolidator's fragility never leaks into the agent's own
+      durability guarantees.
+
+
+
+   .. py:method:: session_messages(session_id: str, *, user_id: str | None = None, limit: int = 20) -> list[jeevesagent.core.types.Message]
+      :async:
+
+
+
+   .. py:method:: update_block(name: str, content: str) -> None
+      :async:
+
+
+
+   .. py:method:: working() -> list[jeevesagent.core.types.MemoryBlock]
+      :async:
+
+
+
+   .. py:property:: facts
+      :type: Any
+
+
+      Forward the inner backend's fact store. Reading this gives
+      callers the same access to the bi-temporal store the
+      consolidator writes into.
+
+
+   .. py:property:: inner
+      :type: jeevesagent.core.protocols.Memory
+
+
+      The wrapped backend. Power-user introspection — most call
+      sites just use the protocol methods.
+
 
 .. py:class:: ChromaFactStore(client: Any, *, embedder: jeevesagent.core.protocols.Embedder | None = None, collection_name: str = DEFAULT_FACTS_COLLECTION)
 
@@ -148,6 +264,16 @@ Package Contents
 
 
 
+   .. py:method:: export(*, user_id: str | None = None) -> jeevesagent.core.types.MemoryExport
+      :async:
+
+
+
+   .. py:method:: forget(*, user_id: str | None = None, session_id: str | None = None, before: datetime.datetime | None = None) -> int
+      :async:
+
+
+
    .. py:method:: local(persist_directory: str, *, embedder: jeevesagent.core.protocols.Embedder | None = None, collection_name: str = DEFAULT_COLLECTION, with_facts: bool = False, facts_collection_name: str = 'jeeves_facts') -> ChromaMemory
       :classmethod:
 
@@ -157,6 +283,11 @@ Package Contents
       ``with_facts=True`` attaches a :class:`ChromaFactStore` rooted
       at the same client so facts persist alongside episodes in the
       same on-disk store.
+
+
+
+   .. py:method:: profile(*, user_id: str | None = None) -> jeevesagent.core.types.MemoryProfile
+      :async:
 
 
 
@@ -463,6 +594,21 @@ Package Contents
 
 
 
+   .. py:method:: export(*, user_id: str | None = None) -> jeevesagent.core.types.MemoryExport
+      :async:
+
+
+
+   .. py:method:: forget(*, user_id: str | None = None, session_id: str | None = None, before: datetime.datetime | None = None) -> int
+      :async:
+
+
+
+   .. py:method:: profile(*, user_id: str | None = None) -> jeevesagent.core.types.MemoryProfile
+      :async:
+
+
+
    .. py:method:: recall(query: str, *, kind: str = 'episodic', limit: int = 5, time_range: tuple[datetime.datetime, datetime.datetime] | None = None, user_id: str | None = None) -> list[jeevesagent.core.types.Episode]
       :async:
 
@@ -508,6 +654,114 @@ Package Contents
 
    .. py:attribute:: facts
       :type:  jeevesagent.memory.facts.FactStore
+
+
+.. py:class:: LazyMemory(builder: collections.abc.Callable[[], collections.abc.Awaitable[Any]], *, description: str = 'memory')
+
+   Defer construction of an async-built :class:`Memory` until first
+   use.
+
+   Users rarely instantiate this directly — it's what the
+   :func:`_resolve_memory` resolver returns when given a
+   ``postgres://`` or ``redis://`` URL. Pass a zero-arg async
+   callable that builds the real backend; everything else
+   (working / remember / recall / facts / session_messages /
+   consolidate) is forwarded once that callable resolves.
+
+
+   .. py:method:: aclose() -> None
+      :async:
+
+
+      Close the inner backend if it was constructed.
+
+      Safe to call when the backend was never resolved (no-op).
+
+
+
+   .. py:method:: append_block(name: str, content: str) -> None
+      :async:
+
+
+
+   .. py:method:: consolidate() -> None
+      :async:
+
+
+
+   .. py:method:: export(*, user_id: str | None = None) -> jeevesagent.core.types.MemoryExport
+      :async:
+
+
+
+   .. py:method:: forget(*, user_id: str | None = None, session_id: str | None = None, before: datetime.datetime | None = None) -> int
+      :async:
+
+
+
+   .. py:method:: profile(*, user_id: str | None = None) -> jeevesagent.core.types.MemoryProfile
+      :async:
+
+
+
+   .. py:method:: recall(query: str, *, kind: str = 'episodic', limit: int = 5, time_range: tuple[datetime.datetime, datetime.datetime] | None = None, user_id: str | None = None) -> list[jeevesagent.core.types.Episode]
+      :async:
+
+
+
+   .. py:method:: recall_facts(query: str, *, limit: int = 5, valid_at: datetime.datetime | None = None, user_id: str | None = None) -> list[jeevesagent.core.types.Fact]
+      :async:
+
+
+
+   .. py:method:: remember(episode: jeevesagent.core.types.Episode) -> str
+      :async:
+
+
+
+   .. py:method:: session_messages(session_id: str, *, user_id: str | None = None, limit: int = 20) -> list[jeevesagent.core.types.Message]
+      :async:
+
+
+
+   .. py:method:: update_block(name: str, content: str) -> None
+      :async:
+
+
+
+   .. py:method:: working() -> list[jeevesagent.core.types.MemoryBlock]
+      :async:
+
+
+
+   .. py:property:: description
+      :type: str
+
+
+      Human-readable label (e.g. ``"postgres://prod-db/agent"``)
+      — used in error messages so users can tell which Memory
+      failed to connect.
+
+
+   .. py:property:: facts
+      :type: Any | None
+
+
+      Direct access to the inner backend's fact store (if any).
+
+      Reading this BEFORE the backend has connected returns
+      ``None`` — the connection deliberately hasn't happened yet.
+      Once the backend is resolved (after the first ``agent.run``
+      or an explicit ``await mem._resolve()``), this returns the
+      live ``FactStore``. Power-user escape hatch; most callers
+      go through :meth:`recall_facts`.
+
+
+   .. py:property:: is_ready
+      :type: bool
+
+
+      ``True`` once the backend has been constructed and cached.
 
 
 .. py:class:: OpenAIEmbedder(model: str = 'text-embedding-3-small', *, dimensions: int | None = None, client: Any | None = None, api_key: str | None = None)
@@ -644,6 +898,16 @@ Package Contents
 
 
 
+   .. py:method:: export(*, user_id: str | None = None) -> jeevesagent.core.types.MemoryExport
+      :async:
+
+
+
+   .. py:method:: forget(*, user_id: str | None = None, session_id: str | None = None, before: datetime.datetime | None = None) -> int
+      :async:
+
+
+
    .. py:method:: init_schema() -> None
       :async:
 
@@ -652,6 +916,11 @@ Package Contents
 
       When a :class:`PostgresFactStore` is attached as ``self.facts``,
       its schema is initialised in the same call.
+
+
+
+   .. py:method:: profile(*, user_id: str | None = None) -> jeevesagent.core.types.MemoryProfile
+      :async:
 
 
 
@@ -798,6 +1067,21 @@ Package Contents
 
 
 
+   .. py:method:: export(*, user_id: str | None = None) -> jeevesagent.core.types.MemoryExport
+      :async:
+
+
+
+   .. py:method:: forget(*, user_id: str | None = None, session_id: str | None = None, before: datetime.datetime | None = None) -> int
+      :async:
+
+
+
+   .. py:method:: profile(*, user_id: str | None = None) -> jeevesagent.core.types.MemoryProfile
+      :async:
+
+
+
    .. py:method:: recall(query: str, *, kind: str = 'episodic', limit: int = 5, time_range: tuple[datetime.datetime, datetime.datetime] | None = None, user_id: str | None = None) -> list[jeevesagent.core.types.Episode]
       :async:
 
@@ -882,6 +1166,99 @@ Package Contents
 
 
 
+.. py:class:: SqliteMemory(path: str | pathlib.Path, *, embedder: jeevesagent.core.protocols.Embedder | None = None, with_facts: bool = True, fact_store: jeevesagent.memory.facts.FactStore | None = None)
+
+   Durable :class:`Memory` rooted at a single sqlite file.
+
+   Construct directly from a path::
+
+       memory = SqliteMemory("./bot.db")
+       agent = Agent("...", model="gpt-4.1-mini", memory=memory)
+
+   Or via the resolver::
+
+       agent = Agent("...", model="gpt-4.1-mini", memory="sqlite:./bot.db")
+
+   Pass ``path=":memory:"`` for an ephemeral in-process database
+   (lost on close — useful for tests).
+
+   The fact store is auto-attached: the same ``.db`` file holds a
+   ``facts`` table managed by :class:`SqliteFactStore`. Pass
+   ``with_facts=False`` to skip it; pass an explicit
+   ``fact_store=`` to override (e.g. point facts at a different
+   sqlite file).
+
+
+   .. py:method:: aclose() -> None
+      :async:
+
+
+
+   .. py:method:: append_block(name: str, content: str) -> None
+      :async:
+
+
+
+   .. py:method:: consolidate() -> None
+      :async:
+
+
+
+   .. py:method:: export(*, user_id: str | None = None) -> jeevesagent.core.types.MemoryExport
+      :async:
+
+
+
+   .. py:method:: forget(*, user_id: str | None = None, session_id: str | None = None, before: datetime.datetime | None = None) -> int
+      :async:
+
+
+
+   .. py:method:: profile(*, user_id: str | None = None) -> jeevesagent.core.types.MemoryProfile
+      :async:
+
+
+
+   .. py:method:: recall(query: str, *, kind: str = 'episodic', limit: int = 5, time_range: tuple[datetime.datetime, datetime.datetime] | None = None, user_id: str | None = None) -> list[jeevesagent.core.types.Episode]
+      :async:
+
+
+
+   .. py:method:: recall_facts(query: str, *, limit: int = 5, valid_at: datetime.datetime | None = None, user_id: str | None = None) -> list[jeevesagent.core.types.Fact]
+      :async:
+
+
+
+   .. py:method:: remember(episode: jeevesagent.core.types.Episode) -> str
+      :async:
+
+
+
+   .. py:method:: session_messages(session_id: str, *, user_id: str | None = None, limit: int = 20) -> list[jeevesagent.core.types.Message]
+      :async:
+
+
+
+   .. py:method:: update_block(name: str, content: str) -> None
+      :async:
+
+
+
+   .. py:method:: working() -> list[jeevesagent.core.types.MemoryBlock]
+      :async:
+
+
+
+   .. py:property:: embedder
+      :type: jeevesagent.core.protocols.Embedder
+
+
+
+   .. py:property:: path
+      :type: pathlib.Path
+
+
+
 .. py:class:: VectorMemory(*, embedder: jeevesagent.core.protocols.Embedder | None = None, max_episodes: int | None = None, consolidator: jeevesagent.memory.consolidator.Consolidator | None = None, fact_store: jeevesagent.memory.facts.FactStore | None = None)
 
    Pure-Python embedding-backed :class:`Memory`.
@@ -900,6 +1277,21 @@ Package Contents
       :class:`Consolidator`, appending facts to ``self.facts``.
 
       No-op when no consolidator is configured.
+
+
+
+   .. py:method:: export(*, user_id: str | None = None) -> jeevesagent.core.types.MemoryExport
+      :async:
+
+
+
+   .. py:method:: forget(*, user_id: str | None = None, session_id: str | None = None, before: datetime.datetime | None = None) -> int
+      :async:
+
+
+
+   .. py:method:: profile(*, user_id: str | None = None) -> jeevesagent.core.types.MemoryProfile
+      :async:
 
 
 
@@ -983,5 +1375,15 @@ Package Contents
       :type:  str
       :value: 'voyage-3'
 
+
+
+.. py:function:: resolve_memory(spec: Any) -> jeevesagent.core.protocols.Memory
+
+   Resolve a ``memory=`` argument into a concrete :class:`Memory`.
+
+   ``None`` returns the default in-memory backend; a string parses
+   by URL scheme; a dict parses by ``backend`` key; anything else
+   is assumed to already be a :class:`Memory` and passed through
+   unchanged.
 
 

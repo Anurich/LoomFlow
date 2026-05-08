@@ -1,0 +1,68 @@
+jeevesagent.memory.resolver
+===========================
+
+.. py:module:: jeevesagent.memory.resolver
+
+.. autoapi-nested-parse::
+
+   String / dict resolver for the ``memory=`` :class:`Agent` kwarg.
+
+   Mirrors the design of :func:`jeevesagent.agent.api._resolve_model`:
+   the user passes a string ("``sqlite:./bot.db``") or a dict
+   ({"backend": "chroma", "path": "./mem", ...}) and the framework
+   returns a fully-constructed :class:`Memory` (or a
+   :class:`LazyMemory` proxy for async-connect backends).
+
+   Recognised string schemes:
+
+   * ``inmemory`` — in-process dict, lost on restart (the default)
+   * ``sqlite:<path>`` — single-file SQLite, persistent
+   * ``sqlite`` (no path) — alias for ``sqlite::memory:`` (ephemeral)
+   * ``chroma`` — ephemeral Chroma client
+   * ``chroma:<path>`` — persistent Chroma at ``<path>``
+   * ``postgres://<dsn>`` / ``postgresql://<dsn>`` — Postgres+pgvector
+   * ``redis://<dsn>`` / ``rediss://<dsn>`` — Redis (with optional
+     RediSearch vector index)
+
+   Recognised dict keys:
+
+   * ``backend`` (required) — same scheme set as above
+   * ``path`` / ``url`` / ``dsn`` — backend-specific connection target
+   * ``namespace`` — partition / collection / key-prefix (consistent
+     name across backends; each backend maps it to its native kwarg)
+   * ``embedder`` — ``"openai"`` / ``"hash"`` / explicit
+     :class:`Embedder` instance. ``None`` triggers auto-pick (OpenAI
+     if ``OPENAI_API_KEY`` set, else Hash)
+   * ``with_facts`` — default ``True`` for the resolver path; pass
+     ``False`` to skip the fact-store wiring
+   * ``collection_name`` (Chroma), ``key_prefix`` (Redis), etc. —
+     any backend-native kwarg passes through unchanged
+
+   The resolver is **non-async** even when the underlying backend
+   needs an async connect. Postgres / Redis URLs return a
+   :class:`LazyMemory` proxy that opens the connection on first use,
+   so the ``Agent.__init__`` call site stays synchronous.
+
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   jeevesagent.memory.resolver.resolve_memory
+
+
+Module Contents
+---------------
+
+.. py:function:: resolve_memory(spec: Any) -> jeevesagent.core.protocols.Memory
+
+   Resolve a ``memory=`` argument into a concrete :class:`Memory`.
+
+   ``None`` returns the default in-memory backend; a string parses
+   by URL scheme; a dict parses by ``backend`` key; anything else
+   is assumed to already be a :class:`Memory` and passed through
+   unchanged.
+
+

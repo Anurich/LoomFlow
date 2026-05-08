@@ -67,6 +67,8 @@ Classes
    jeevesagent.core.HookHost
    jeevesagent.core.Memory
    jeevesagent.core.MemoryBlock
+   jeevesagent.core.MemoryExport
+   jeevesagent.core.MemoryProfile
    jeevesagent.core.Message
    jeevesagent.core.Model
    jeevesagent.core.ModelChunk
@@ -975,6 +977,64 @@ Package Contents
 
 
 
+   .. py:method:: export(*, user_id: str | None = None) -> jeevesagent.core.types.MemoryExport
+      :async:
+
+
+      Full data dump for ``user_id`` — GDPR / data portability.
+
+      Returns every episode, every fact, and the export
+      timestamp. Serialise with ``MemoryExport.model_dump_json()``
+      for download or downstream processing. Honours the
+      ``user_id`` partition: never includes data belonging to a
+      different user.
+
+
+
+   .. py:method:: forget(*, user_id: str | None = None, session_id: str | None = None, before: datetime.datetime | None = None) -> int
+      :async:
+
+
+      Erase memory for a user — GDPR / "right to be forgotten".
+
+      With ``user_id`` only: erase EVERYTHING (episodes + facts +
+      session messages + working blocks) belonging to that user.
+      With ``session_id``: erase only that conversation thread for
+      that user. With ``before``: erase only data older than the
+      timestamp (other args still scope it). All filters AND
+      together.
+
+      Returns the total number of records deleted (episodes +
+      facts; backends without precise counts may return their
+      best estimate).
+
+      ``user_id=None`` erases the anonymous bucket only — same
+      partition rule as :meth:`recall`. To erase everything
+      across all users, callers must enumerate users and call
+      ``forget`` per-user; the framework deliberately makes the
+      "delete every user" path explicit so it's not done by
+      accident.
+
+
+
+   .. py:method:: profile(*, user_id: str | None = None) -> jeevesagent.core.types.MemoryProfile
+      :async:
+
+
+      Summary of what this memory knows about ``user_id``.
+
+      Returns counts (episodes, facts), the most-recent sessions
+      the user touched, the last-seen timestamp, and a sample of
+      the most-recently-recorded facts. Suitable for rendering a
+      "what does the bot know about me?" view to the end user, or
+      for an ops dashboard.
+
+      Backends MUST honour ``user_id`` as a hard partition —
+      passing one user's id never returns counts derived from
+      another user's data.
+
+
+
    .. py:method:: recall(query: str, *, kind: str = 'episodic', limit: int = 5, time_range: tuple[datetime.datetime, datetime.datetime] | None = None, user_id: str | None = None) -> list[jeevesagent.core.types.Episode]
       :async:
 
@@ -1091,6 +1151,110 @@ Package Contents
       :type:  datetime.datetime
       :value: None
 
+
+
+.. py:class:: MemoryExport(/, **data: Any)
+
+   Bases: :py:obj:`pydantic.BaseModel`
+
+
+   Full data dump for a single user — GDPR / data-portability use.
+
+   Returned by :meth:`Memory.export`. Carries the complete record of
+   everything the memory holds for ``user_id``: all episodes, all
+   facts, working blocks the user touched. Serialise with
+   ``.model_dump_json()`` for download or downstream processing.
+
+   Create a new model by parsing and validating input data from keyword arguments.
+
+   Raises [`ValidationError`][pydantic_core.ValidationError] if the input data cannot be
+   validated to form a valid model.
+
+   `self` is explicitly positional-only to allow `self` as a field name.
+
+
+   .. py:attribute:: episodes
+      :type:  list[Episode]
+      :value: None
+
+
+
+   .. py:attribute:: exported_at
+      :type:  datetime.datetime
+      :value: None
+
+
+
+   .. py:attribute:: facts
+      :type:  list[Fact]
+      :value: None
+
+
+
+   .. py:attribute:: user_id
+      :type:  str | None
+
+
+.. py:class:: MemoryProfile(/, **data: Any)
+
+   Bases: :py:obj:`pydantic.BaseModel`
+
+
+   Summary of what a :class:`Memory` knows about a single user.
+
+   Returned by :meth:`Memory.profile`. Cheap aggregate counts +
+   last-seen timestamp + the most-recent facts; suitable for
+   rendering a "what does the bot know about me?" view to the
+   end user, or a tenant dashboard for ops.
+
+   Backends that don't track full episode counts (e.g. Redis without
+   `FT.SEARCH` aggregations available) report what they can; the
+   counts are best-effort, never wildly wrong.
+
+   Create a new model by parsing and validating input data from keyword arguments.
+
+   Raises [`ValidationError`][pydantic_core.ValidationError] if the input data cannot be
+   validated to form a valid model.
+
+   `self` is explicitly positional-only to allow `self` as a field name.
+
+
+   .. py:attribute:: episode_count
+      :type:  int
+      :value: 0
+
+
+
+   .. py:attribute:: fact_count
+      :type:  int
+      :value: 0
+
+
+
+   .. py:attribute:: last_seen
+      :type:  datetime.datetime | None
+      :value: None
+
+
+
+   .. py:attribute:: recent_sessions
+      :type:  list[str]
+      :value: None
+
+
+      Up to the 10 most-recent ``session_id``s touched, newest first.
+
+
+   .. py:attribute:: sample_facts
+      :type:  list[Fact]
+      :value: None
+
+
+      Up to 10 of the most-recently-recorded facts about the user.
+
+
+   .. py:attribute:: user_id
+      :type:  str | None
 
 
 .. py:class:: Message(/, **data: Any)

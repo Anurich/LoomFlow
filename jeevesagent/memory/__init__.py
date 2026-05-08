@@ -1,41 +1,54 @@
 """Memory backends.
 
-Pick one of these and pass it to ``Agent(..., memory=...)``:
+The simplest way to pick a backend is to pass a string or URL to
+``Agent(memory=...)``::
 
-* :class:`InMemoryMemory` — naive dict-backed, no embeddings. The
-  default; great for tests and tiny demos.
-* :class:`VectorMemory` — in-memory with embedding-based cosine
-  recall. Pure Python, no infrastructure. Scales to a few thousand
-  episodes.
-* :class:`ChromaMemory` — backed by Chroma (local persistent or
-  in-memory client). Lazy ``chromadb`` import.
-* :class:`PostgresMemory` — Postgres + pgvector with HNSW index.
-  Lazy ``asyncpg`` + ``pgvector`` imports. Production-grade.
-* :class:`RedisMemory` — Redis with optional RediSearch HNSW
-  vector index, falling back to brute-force when RediSearch isn't
-  available. Lazy ``redis`` import.
+    Agent(..., memory="inmemory")            # default; lost on restart
+    Agent(..., memory="sqlite:./bot.db")     # persistent, no infra
+    Agent(..., memory="chroma:./vectors")    # local Chroma
+    Agent(..., memory="postgres://...")      # Postgres + pgvector
+    Agent(..., memory="redis://...")         # Redis (+ RediSearch)
 
-Embedders live in :mod:`jeevesagent.memory.embedder`:
+The :func:`resolve_memory` resolver handles the string parsing; it
+also accepts a config dict (``{"backend": "chroma", ...}``) and
+already-constructed Memory instances pass through unchanged.
 
-* :class:`HashEmbedder` — deterministic, zero-dep, perfect for tests.
-* :class:`OpenAIEmbedder` — real semantic embeddings via OpenAI.
+Backends explicitly:
+
+* :class:`InMemoryMemory` — dict-backed, no embeddings. Default.
+* :class:`SqliteMemory` — single sqlite file. Persistent, no server.
+* :class:`VectorMemory` — in-process with cosine recall. No persistence.
+* :class:`ChromaMemory` — Chroma client (local persistent or in-process).
+* :class:`PostgresMemory` — Postgres + pgvector + HNSW index.
+* :class:`RedisMemory` — Redis (+ optional RediSearch HNSW vector index).
+
+Embedders in :mod:`jeevesagent.memory.embedder`:
+
+* :class:`HashEmbedder` — deterministic, zero-key, fine for dev / tests.
+* :class:`OpenAIEmbedder` / :class:`VoyageEmbedder` /
+  :class:`CohereEmbedder` — real semantic embeddings.
 """
 
+from .auto_extract import AutoExtractMemory
 from .chroma import ChromaMemory
 from .chroma_facts import ChromaFactStore
 from .consolidator import Consolidator
 from .embedder import CohereEmbedder, HashEmbedder, OpenAIEmbedder, VoyageEmbedder
 from .facts import FactStore, InMemoryFactStore
 from .inmemory import InMemoryMemory
+from .lazy import LazyMemory
 from .postgres import PostgresMemory
 from .postgres_facts import PostgresFactStore
 from .redis import RedisMemory
 from .redis_facts import RedisFactStore
+from .resolver import resolve_memory
+from .sqlite import SqliteMemory
 from .sqlite_facts import SqliteFactStore
 from .vector import VectorMemory
 from .worker import ConsolidationWorker
 
 __all__ = [
+    "AutoExtractMemory",
     "ChromaFactStore",
     "ChromaMemory",
     "CohereEmbedder",
@@ -45,12 +58,15 @@ __all__ = [
     "HashEmbedder",
     "InMemoryFactStore",
     "InMemoryMemory",
+    "LazyMemory",
     "OpenAIEmbedder",
     "PostgresFactStore",
     "PostgresMemory",
     "RedisFactStore",
     "RedisMemory",
     "SqliteFactStore",
+    "SqliteMemory",
     "VectorMemory",
     "VoyageEmbedder",
+    "resolve_memory",
 ]

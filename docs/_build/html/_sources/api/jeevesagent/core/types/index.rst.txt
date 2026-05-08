@@ -26,6 +26,8 @@ Classes
    jeevesagent.core.types.EventKind
    jeevesagent.core.types.Fact
    jeevesagent.core.types.MemoryBlock
+   jeevesagent.core.types.MemoryExport
+   jeevesagent.core.types.MemoryProfile
    jeevesagent.core.types.Message
    jeevesagent.core.types.ModelChunk
    jeevesagent.core.types.PermissionDecision
@@ -556,6 +558,110 @@ Module Contents
       :type:  datetime.datetime
       :value: None
 
+
+
+.. py:class:: MemoryExport(/, **data: Any)
+
+   Bases: :py:obj:`pydantic.BaseModel`
+
+
+   Full data dump for a single user — GDPR / data-portability use.
+
+   Returned by :meth:`Memory.export`. Carries the complete record of
+   everything the memory holds for ``user_id``: all episodes, all
+   facts, working blocks the user touched. Serialise with
+   ``.model_dump_json()`` for download or downstream processing.
+
+   Create a new model by parsing and validating input data from keyword arguments.
+
+   Raises [`ValidationError`][pydantic_core.ValidationError] if the input data cannot be
+   validated to form a valid model.
+
+   `self` is explicitly positional-only to allow `self` as a field name.
+
+
+   .. py:attribute:: episodes
+      :type:  list[Episode]
+      :value: None
+
+
+
+   .. py:attribute:: exported_at
+      :type:  datetime.datetime
+      :value: None
+
+
+
+   .. py:attribute:: facts
+      :type:  list[Fact]
+      :value: None
+
+
+
+   .. py:attribute:: user_id
+      :type:  str | None
+
+
+.. py:class:: MemoryProfile(/, **data: Any)
+
+   Bases: :py:obj:`pydantic.BaseModel`
+
+
+   Summary of what a :class:`Memory` knows about a single user.
+
+   Returned by :meth:`Memory.profile`. Cheap aggregate counts +
+   last-seen timestamp + the most-recent facts; suitable for
+   rendering a "what does the bot know about me?" view to the
+   end user, or a tenant dashboard for ops.
+
+   Backends that don't track full episode counts (e.g. Redis without
+   `FT.SEARCH` aggregations available) report what they can; the
+   counts are best-effort, never wildly wrong.
+
+   Create a new model by parsing and validating input data from keyword arguments.
+
+   Raises [`ValidationError`][pydantic_core.ValidationError] if the input data cannot be
+   validated to form a valid model.
+
+   `self` is explicitly positional-only to allow `self` as a field name.
+
+
+   .. py:attribute:: episode_count
+      :type:  int
+      :value: 0
+
+
+
+   .. py:attribute:: fact_count
+      :type:  int
+      :value: 0
+
+
+
+   .. py:attribute:: last_seen
+      :type:  datetime.datetime | None
+      :value: None
+
+
+
+   .. py:attribute:: recent_sessions
+      :type:  list[str]
+      :value: None
+
+
+      Up to the 10 most-recent ``session_id``s touched, newest first.
+
+
+   .. py:attribute:: sample_facts
+      :type:  list[Fact]
+      :value: None
+
+
+      Up to 10 of the most-recently-recorded facts about the user.
+
+
+   .. py:attribute:: user_id
+      :type:  str | None
 
 
 .. py:class:: Message(/, **data: Any)

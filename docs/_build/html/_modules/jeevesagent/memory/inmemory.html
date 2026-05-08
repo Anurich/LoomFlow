@@ -5,7 +5,7 @@
     <meta name="color-scheme" content="light dark"><link rel="index" title="Index" href="../../../genindex.html"><link rel="search" title="Search" href="../../../search.html">
 
     <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
-        <title>jeevesagent.memory.inmemory - JeevesAgent 0.9.2</title>
+        <title>jeevesagent.memory.inmemory - JeevesAgent 0.9.3</title>
       <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=d111a655" />
     <link rel="stylesheet" type="text/css" href="../../../_static/styles/furo.css?v=7bdb33bb" />
     <link rel="stylesheet" type="text/css" href="../../../_static/graphviz.css?v=4ae1632d" />
@@ -161,7 +161,7 @@
       </label>
     </div>
     <div class="header-center">
-      <a href="../../../index.html"><div class="brand">JeevesAgent 0.9.2</div></a>
+      <a href="../../../index.html"><div class="brand">JeevesAgent 0.9.3</div></a>
     </div>
     <div class="header-right">
       <div class="theme-toggle-container theme-toggle-header">
@@ -182,7 +182,7 @@
       
       <div class="sidebar-sticky"><a class="sidebar-brand" href="../../../index.html">
   
-  <span class="sidebar-brand-text">JeevesAgent 0.9.2</span>
+  <span class="sidebar-brand-text">JeevesAgent 0.9.3</span>
   
 </a><form class="sidebar-search-container" method="get" action="../../../search.html" role="search">
   <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
@@ -268,16 +268,20 @@
 </ul>
 </li>
 <li class="toctree-l2 has-children"><a class="reference internal" href="../../../api/jeevesagent/memory/index.html">jeevesagent.memory</a><input aria-label="Toggle navigation of jeevesagent.memory" class="toctree-checkbox" id="toctree-checkbox-10" name="toctree-checkbox-10" role="switch" type="checkbox"/><label for="toctree-checkbox-10"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/memory/auto_extract/index.html">jeevesagent.memory.auto_extract</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/memory/chroma/index.html">jeevesagent.memory.chroma</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/memory/chroma_facts/index.html">jeevesagent.memory.chroma_facts</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/memory/consolidator/index.html">jeevesagent.memory.consolidator</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/memory/embedder/index.html">jeevesagent.memory.embedder</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/memory/facts/index.html">jeevesagent.memory.facts</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/memory/inmemory/index.html">jeevesagent.memory.inmemory</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/memory/lazy/index.html">jeevesagent.memory.lazy</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/memory/postgres/index.html">jeevesagent.memory.postgres</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/memory/postgres_facts/index.html">jeevesagent.memory.postgres_facts</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/memory/redis/index.html">jeevesagent.memory.redis</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/memory/redis_facts/index.html">jeevesagent.memory.redis_facts</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/memory/resolver/index.html">jeevesagent.memory.resolver</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/memory/sqlite/index.html">jeevesagent.memory.sqlite</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/memory/sqlite_facts/index.html">jeevesagent.memory.sqlite_facts</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/memory/vector/index.html">jeevesagent.memory.vector</a></li>
 <li class="toctree-l3"><a class="reference internal" href="../../../api/jeevesagent/memory/worker/index.html">jeevesagent.memory.worker</a></li>
@@ -390,7 +394,15 @@
 <span class="kn">import</span><span class="w"> </span><span class="nn">anyio</span>
 
 <span class="kn">from</span><span class="w"> </span><span class="nn">..core.context</span><span class="w"> </span><span class="kn">import</span> <span class="n">IsolationWarning</span>
-<span class="kn">from</span><span class="w"> </span><span class="nn">..core.types</span><span class="w"> </span><span class="kn">import</span> <span class="n">Episode</span><span class="p">,</span> <span class="n">Fact</span><span class="p">,</span> <span class="n">MemoryBlock</span><span class="p">,</span> <span class="n">Message</span><span class="p">,</span> <span class="n">Role</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">..core.types</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">Episode</span><span class="p">,</span>
+    <span class="n">Fact</span><span class="p">,</span>
+    <span class="n">MemoryBlock</span><span class="p">,</span>
+    <span class="n">MemoryExport</span><span class="p">,</span>
+    <span class="n">MemoryProfile</span><span class="p">,</span>
+    <span class="n">Message</span><span class="p">,</span>
+    <span class="n">Role</span><span class="p">,</span>
+<span class="p">)</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">.consolidator</span><span class="w"> </span><span class="kn">import</span> <span class="n">Consolidator</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">.facts</span><span class="w"> </span><span class="kn">import</span> <span class="n">FactStore</span><span class="p">,</span> <span class="n">InMemoryFactStore</span>
 
@@ -582,6 +594,116 @@
         <span class="k">return</span> <span class="n">out</span></div>
 
 
+    <span class="c1"># ---- profile / forget / export (GDPR) -------------------------------</span>
+
+<div class="viewcode-block" id="InMemoryMemory.profile">
+<a class="viewcode-back" href="../../../api/jeevesagent/memory/inmemory/index.html#jeevesagent.InMemoryMemory.profile">[docs]</a>
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">profile</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">user_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">MemoryProfile</span><span class="p">:</span>
+        <span class="k">async</span> <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">_lock</span><span class="p">:</span>
+            <span class="n">user_episodes</span> <span class="o">=</span> <span class="p">[</span>
+                <span class="n">e</span> <span class="k">for</span> <span class="n">e</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_episodes</span><span class="o">.</span><span class="n">values</span><span class="p">()</span> <span class="k">if</span> <span class="n">e</span><span class="o">.</span><span class="n">user_id</span> <span class="o">==</span> <span class="n">user_id</span>
+            <span class="p">]</span>
+        <span class="c1"># Sample of most-recent facts; the fact store handles the</span>
+        <span class="c1"># filter for us via ``query``.</span>
+        <span class="n">sample</span> <span class="o">=</span> <span class="k">await</span> <span class="bp">self</span><span class="o">.</span><span class="n">facts</span><span class="o">.</span><span class="n">query</span><span class="p">(</span><span class="n">user_id</span><span class="o">=</span><span class="n">user_id</span><span class="p">,</span> <span class="n">limit</span><span class="o">=</span><span class="mi">10</span><span class="p">)</span>
+        <span class="n">fact_count</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="k">await</span> <span class="bp">self</span><span class="o">.</span><span class="n">facts</span><span class="o">.</span><span class="n">query</span><span class="p">(</span><span class="n">user_id</span><span class="o">=</span><span class="n">user_id</span><span class="p">,</span> <span class="n">limit</span><span class="o">=</span><span class="mi">10_000</span><span class="p">))</span>
+
+        <span class="c1"># Sessions, newest-first, dedup&#39;d.</span>
+        <span class="n">seen</span><span class="p">:</span> <span class="nb">set</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="nb">set</span><span class="p">()</span>
+        <span class="n">recent_sessions</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
+        <span class="k">for</span> <span class="n">e</span> <span class="ow">in</span> <span class="nb">sorted</span><span class="p">(</span><span class="n">user_episodes</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="k">lambda</span> <span class="n">x</span><span class="p">:</span> <span class="n">x</span><span class="o">.</span><span class="n">occurred_at</span><span class="p">,</span> <span class="n">reverse</span><span class="o">=</span><span class="kc">True</span><span class="p">):</span>
+            <span class="k">if</span> <span class="n">e</span><span class="o">.</span><span class="n">session_id</span> <span class="ow">in</span> <span class="n">seen</span><span class="p">:</span>
+                <span class="k">continue</span>
+            <span class="n">seen</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="n">e</span><span class="o">.</span><span class="n">session_id</span><span class="p">)</span>
+            <span class="n">recent_sessions</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">e</span><span class="o">.</span><span class="n">session_id</span><span class="p">)</span>
+            <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">recent_sessions</span><span class="p">)</span> <span class="o">&gt;=</span> <span class="mi">10</span><span class="p">:</span>
+                <span class="k">break</span>
+
+        <span class="n">last_seen</span><span class="p">:</span> <span class="n">datetime</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="k">if</span> <span class="n">user_episodes</span><span class="p">:</span>
+            <span class="n">last_seen</span> <span class="o">=</span> <span class="nb">max</span><span class="p">(</span><span class="n">e</span><span class="o">.</span><span class="n">occurred_at</span> <span class="k">for</span> <span class="n">e</span> <span class="ow">in</span> <span class="n">user_episodes</span><span class="p">)</span>
+
+        <span class="k">return</span> <span class="n">MemoryProfile</span><span class="p">(</span>
+            <span class="n">user_id</span><span class="o">=</span><span class="n">user_id</span><span class="p">,</span>
+            <span class="n">episode_count</span><span class="o">=</span><span class="nb">len</span><span class="p">(</span><span class="n">user_episodes</span><span class="p">),</span>
+            <span class="n">fact_count</span><span class="o">=</span><span class="n">fact_count</span><span class="p">,</span>
+            <span class="n">last_seen</span><span class="o">=</span><span class="n">last_seen</span><span class="p">,</span>
+            <span class="n">recent_sessions</span><span class="o">=</span><span class="n">recent_sessions</span><span class="p">,</span>
+            <span class="n">sample_facts</span><span class="o">=</span><span class="nb">list</span><span class="p">(</span><span class="n">sample</span><span class="p">),</span>
+        <span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="InMemoryMemory.forget">
+<a class="viewcode-back" href="../../../api/jeevesagent/memory/inmemory/index.html#jeevesagent.InMemoryMemory.forget">[docs]</a>
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">forget</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="o">*</span><span class="p">,</span>
+        <span class="n">user_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">session_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">before</span><span class="p">:</span> <span class="n">datetime</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">int</span><span class="p">:</span>
+        <span class="n">deleted</span> <span class="o">=</span> <span class="mi">0</span>
+        <span class="k">async</span> <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">_lock</span><span class="p">:</span>
+            <span class="n">to_delete</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
+            <span class="k">for</span> <span class="n">eid</span><span class="p">,</span> <span class="n">ep</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_episodes</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+                <span class="k">if</span> <span class="n">ep</span><span class="o">.</span><span class="n">user_id</span> <span class="o">!=</span> <span class="n">user_id</span><span class="p">:</span>
+                    <span class="k">continue</span>
+                <span class="k">if</span> <span class="n">session_id</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">ep</span><span class="o">.</span><span class="n">session_id</span> <span class="o">!=</span> <span class="n">session_id</span><span class="p">:</span>
+                    <span class="k">continue</span>
+                <span class="k">if</span> <span class="n">before</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">ep</span><span class="o">.</span><span class="n">occurred_at</span> <span class="o">&gt;=</span> <span class="n">before</span><span class="p">:</span>
+                    <span class="k">continue</span>
+                <span class="n">to_delete</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">eid</span><span class="p">)</span>
+            <span class="k">for</span> <span class="n">eid</span> <span class="ow">in</span> <span class="n">to_delete</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_episodes</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span><span class="n">eid</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_consolidated_ids</span><span class="o">.</span><span class="n">discard</span><span class="p">(</span><span class="n">eid</span><span class="p">)</span>
+            <span class="n">deleted</span> <span class="o">+=</span> <span class="nb">len</span><span class="p">(</span><span class="n">to_delete</span><span class="p">)</span>
+
+        <span class="c1"># Facts are also user-scoped; erase them in the same call</span>
+        <span class="c1"># unless the caller narrowed by session_id (facts have no</span>
+        <span class="c1"># session, so a session-scoped forget shouldn&#39;t touch them).</span>
+        <span class="k">if</span> <span class="n">session_id</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">facts_to_delete</span> <span class="o">=</span> <span class="k">await</span> <span class="bp">self</span><span class="o">.</span><span class="n">facts</span><span class="o">.</span><span class="n">query</span><span class="p">(</span>
+                <span class="n">user_id</span><span class="o">=</span><span class="n">user_id</span><span class="p">,</span> <span class="n">limit</span><span class="o">=</span><span class="mi">100_000</span>
+            <span class="p">)</span>
+            <span class="k">if</span> <span class="n">before</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="n">facts_to_delete</span> <span class="o">=</span> <span class="p">[</span>
+                    <span class="n">f</span> <span class="k">for</span> <span class="n">f</span> <span class="ow">in</span> <span class="n">facts_to_delete</span>
+                    <span class="k">if</span> <span class="n">f</span><span class="o">.</span><span class="n">recorded_at</span> <span class="o">&lt;</span> <span class="n">before</span>
+                <span class="p">]</span>
+            <span class="k">for</span> <span class="n">f</span> <span class="ow">in</span> <span class="n">facts_to_delete</span><span class="p">:</span>
+                <span class="c1"># InMemoryFactStore exposes _facts; we&#39;d rather use a</span>
+                <span class="c1"># public delete but the protocol doesn&#39;t have one</span>
+                <span class="c1"># (yet). Best-effort.</span>
+                <span class="k">if</span> <span class="nb">hasattr</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">facts</span><span class="p">,</span> <span class="s2">&quot;_facts&quot;</span><span class="p">):</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">facts</span><span class="o">.</span><span class="n">_facts</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span><span class="n">f</span><span class="o">.</span><span class="n">id</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>  <span class="c1"># type: ignore[attr-defined]</span>
+                    <span class="k">if</span> <span class="nb">hasattr</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">facts</span><span class="p">,</span> <span class="s2">&quot;_embeddings&quot;</span><span class="p">):</span>
+                        <span class="bp">self</span><span class="o">.</span><span class="n">facts</span><span class="o">.</span><span class="n">_embeddings</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span><span class="n">f</span><span class="o">.</span><span class="n">id</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>  <span class="c1"># type: ignore[attr-defined]</span>
+                <span class="n">deleted</span> <span class="o">+=</span> <span class="mi">1</span>
+
+        <span class="c1"># Working blocks aren&#39;t user-scoped today (one set per</span>
+        <span class="c1"># Memory instance); don&#39;t touch them.</span>
+        <span class="k">return</span> <span class="n">deleted</span></div>
+
+
+<div class="viewcode-block" id="InMemoryMemory.export">
+<a class="viewcode-back" href="../../../api/jeevesagent/memory/inmemory/index.html#jeevesagent.InMemoryMemory.export">[docs]</a>
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">export</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">user_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">MemoryExport</span><span class="p">:</span>
+        <span class="k">async</span> <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">_lock</span><span class="p">:</span>
+            <span class="n">episodes</span> <span class="o">=</span> <span class="p">[</span>
+                <span class="n">e</span> <span class="k">for</span> <span class="n">e</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_episodes</span><span class="o">.</span><span class="n">values</span><span class="p">()</span> <span class="k">if</span> <span class="n">e</span><span class="o">.</span><span class="n">user_id</span> <span class="o">==</span> <span class="n">user_id</span>
+            <span class="p">]</span>
+        <span class="n">facts</span> <span class="o">=</span> <span class="k">await</span> <span class="bp">self</span><span class="o">.</span><span class="n">facts</span><span class="o">.</span><span class="n">query</span><span class="p">(</span><span class="n">user_id</span><span class="o">=</span><span class="n">user_id</span><span class="p">,</span> <span class="n">limit</span><span class="o">=</span><span class="mi">100_000</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">MemoryExport</span><span class="p">(</span>
+            <span class="n">user_id</span><span class="o">=</span><span class="n">user_id</span><span class="p">,</span>
+            <span class="n">episodes</span><span class="o">=</span><span class="nb">sorted</span><span class="p">(</span><span class="n">episodes</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="k">lambda</span> <span class="n">e</span><span class="p">:</span> <span class="n">e</span><span class="o">.</span><span class="n">occurred_at</span><span class="p">),</span>
+            <span class="n">facts</span><span class="o">=</span><span class="nb">sorted</span><span class="p">(</span><span class="n">facts</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="k">lambda</span> <span class="n">f</span><span class="p">:</span> <span class="n">f</span><span class="o">.</span><span class="n">recorded_at</span><span class="p">),</span>
+        <span class="p">)</span></div>
+
+
 <div class="viewcode-block" id="InMemoryMemory.consolidate">
 <a class="viewcode-back" href="../../../api/jeevesagent/memory/inmemory/index.html#jeevesagent.InMemoryMemory.consolidate">[docs]</a>
     <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">consolidate</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
@@ -646,7 +768,7 @@
       
     </aside>
   </div>
-</div><script src="../../../_static/documentation_options.js?v=21db0d57"></script>
+</div><script src="../../../_static/documentation_options.js?v=889b7931"></script>
     <script src="../../../_static/doctools.js?v=fd6eb6e6"></script>
     <script src="../../../_static/sphinx_highlight.js?v=6ffebe34"></script>
     <script src="../../../_static/scripts/furo.js?v=46bd48cc"></script>

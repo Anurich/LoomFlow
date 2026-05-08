@@ -79,6 +79,7 @@ Classes
    jeevesagent.Architecture
    jeevesagent.AuditEntry
    jeevesagent.AuditLog
+   jeevesagent.AutoExtractMemory
    jeevesagent.Blackboard
    jeevesagent.BlackboardArchitecture
    jeevesagent.BlackboardEntry
@@ -118,6 +119,7 @@ Classes
    jeevesagent.JeevesGateway
    jeevesagent.JournalStore
    jeevesagent.JournaledRuntime
+   jeevesagent.LazyMemory
    jeevesagent.LineagePolicy
    jeevesagent.LiteLLMModel
    jeevesagent.MCPClient
@@ -125,6 +127,8 @@ Classes
    jeevesagent.MCPServerSpec
    jeevesagent.Memory
    jeevesagent.MemoryBlock
+   jeevesagent.MemoryExport
+   jeevesagent.MemoryProfile
    jeevesagent.Message
    jeevesagent.Mode
    jeevesagent.Model
@@ -174,6 +178,7 @@ Classes
    jeevesagent.Span
    jeevesagent.SqliteFactStore
    jeevesagent.SqliteJournalStore
+   jeevesagent.SqliteMemory
    jeevesagent.SqliteRuntime
    jeevesagent.StandardPermissions
    jeevesagent.StepResult
@@ -213,6 +218,7 @@ Functions
    jeevesagent.new_id
    jeevesagent.read_tool
    jeevesagent.resolve_architecture
+   jeevesagent.resolve_memory
    jeevesagent.run_architecture
    jeevesagent.tool
    jeevesagent.write_graph
@@ -579,7 +585,7 @@ Package Contents
 
 
 
-.. py:class:: Agent(instructions: str, *, model: jeevesagent.core.protocols.Model | str | None = None, memory: jeevesagent.core.protocols.Memory | None = None, runtime: jeevesagent.core.protocols.Runtime | None = None, budget: jeevesagent.core.protocols.Budget | None = None, permissions: jeevesagent.core.protocols.Permissions | None = None, hooks: jeevesagent.security.hooks.HookRegistry | None = None, tools: list[jeevesagent.tools.registry.Tool | collections.abc.Callable[Ellipsis, object]] | jeevesagent.core.protocols.ToolHost | jeevesagent.tools.registry.Tool | collections.abc.Callable[Ellipsis, object] | None = None, telemetry: jeevesagent.core.protocols.Telemetry | None = None, audit_log: jeevesagent.security.audit.AuditLog | None = None, max_turns: int = DEFAULT_MAX_TURNS, auto_consolidate: bool = False, architecture: jeevesagent.architecture.Architecture | str | None = None, skills: list[Any] | None = None, retry_policy: jeevesagent.governance.retry.RetryPolicy | None = None)
+.. py:class:: Agent(instructions: str, *, model: jeevesagent.core.protocols.Model | str | None = None, memory: jeevesagent.core.protocols.Memory | str | collections.abc.Mapping[str, Any] | None = None, runtime: jeevesagent.core.protocols.Runtime | None = None, budget: jeevesagent.core.protocols.Budget | None = None, permissions: jeevesagent.core.protocols.Permissions | None = None, hooks: jeevesagent.security.hooks.HookRegistry | None = None, tools: list[jeevesagent.tools.registry.Tool | collections.abc.Callable[Ellipsis, object]] | jeevesagent.core.protocols.ToolHost | jeevesagent.tools.registry.Tool | collections.abc.Callable[Ellipsis, object] | None = None, telemetry: jeevesagent.core.protocols.Telemetry | None = None, audit_log: jeevesagent.security.audit.AuditLog | None = None, max_turns: int = DEFAULT_MAX_TURNS, auto_consolidate: bool = False, architecture: jeevesagent.architecture.Architecture | str | None = None, skills: list[Any] | None = None, retry_policy: jeevesagent.governance.retry.RetryPolicy | None = None, auto_extract: bool | None = None)
 
    A fully-async, MCP-native, model-agnostic agent harness.
 
@@ -1197,6 +1203,99 @@ Package Contents
 
 
 
+.. py:class:: AutoExtractMemory(inner: jeevesagent.core.protocols.Memory, consolidator: jeevesagent.memory.consolidator.Consolidator, *, on_extract_error: collections.abc.Callable[[BaseException], collections.abc.Awaitable[None]] | None = None)
+
+   Wraps a :class:`Memory` and runs auto fact extraction on every
+   ``remember`` call.
+
+   Construct via the :class:`Agent` ``auto_extract=`` kwarg; this
+   class isn't normally instantiated by user code. The wrapped
+   memory must expose a ``.facts`` attribute (a :class:`FactStore`)
+   for extraction to do anything — when ``inner.facts is None``,
+   the wrapper still installs cleanly but every extraction is a
+   no-op.
+
+
+   .. py:method:: append_block(name: str, content: str) -> None
+      :async:
+
+
+
+   .. py:method:: consolidate() -> None
+      :async:
+
+
+
+   .. py:method:: export(*, user_id: str | None = None) -> jeevesagent.core.types.MemoryExport
+      :async:
+
+
+
+   .. py:method:: forget(*, user_id: str | None = None, session_id: str | None = None, before: datetime.datetime | None = None) -> int
+      :async:
+
+
+
+   .. py:method:: profile(*, user_id: str | None = None) -> jeevesagent.core.types.MemoryProfile
+      :async:
+
+
+
+   .. py:method:: recall(query: str, *, kind: str = 'episodic', limit: int = 5, time_range: tuple[datetime.datetime, datetime.datetime] | None = None, user_id: str | None = None) -> list[jeevesagent.core.types.Episode]
+      :async:
+
+
+
+   .. py:method:: recall_facts(query: str, *, limit: int = 5, valid_at: datetime.datetime | None = None, user_id: str | None = None) -> list[jeevesagent.core.types.Fact]
+      :async:
+
+
+
+   .. py:method:: remember(episode: jeevesagent.core.types.Episode) -> str
+      :async:
+
+
+      Persist the episode, then run auto-extraction.
+
+      The episode write happens first and is the contract — the
+      function returns its id even when extraction fails. So the
+      consolidator's fragility never leaks into the agent's own
+      durability guarantees.
+
+
+
+   .. py:method:: session_messages(session_id: str, *, user_id: str | None = None, limit: int = 20) -> list[jeevesagent.core.types.Message]
+      :async:
+
+
+
+   .. py:method:: update_block(name: str, content: str) -> None
+      :async:
+
+
+
+   .. py:method:: working() -> list[jeevesagent.core.types.MemoryBlock]
+      :async:
+
+
+
+   .. py:property:: facts
+      :type: Any
+
+
+      Forward the inner backend's fact store. Reading this gives
+      callers the same access to the bi-temporal store the
+      consolidator writes into.
+
+
+   .. py:property:: inner
+      :type: jeevesagent.core.protocols.Memory
+
+
+      The wrapped backend. Power-user introspection — most call
+      sites just use the protocol methods.
+
+
 .. py:class:: Blackboard
 
    Public + per-agent private state for the architecture.
@@ -1460,6 +1559,16 @@ Package Contents
 
 
 
+   .. py:method:: export(*, user_id: str | None = None) -> jeevesagent.core.types.MemoryExport
+      :async:
+
+
+
+   .. py:method:: forget(*, user_id: str | None = None, session_id: str | None = None, before: datetime.datetime | None = None) -> int
+      :async:
+
+
+
    .. py:method:: local(persist_directory: str, *, embedder: jeevesagent.core.protocols.Embedder | None = None, collection_name: str = DEFAULT_COLLECTION, with_facts: bool = False, facts_collection_name: str = 'jeeves_facts') -> ChromaMemory
       :classmethod:
 
@@ -1469,6 +1578,11 @@ Package Contents
       ``with_facts=True`` attaches a :class:`ChromaFactStore` rooted
       at the same client so facts persist alongside episodes in the
       same on-disk store.
+
+
+
+   .. py:method:: profile(*, user_id: str | None = None) -> jeevesagent.core.types.MemoryProfile
+      :async:
 
 
 
@@ -2690,6 +2804,21 @@ Package Contents
 
 
 
+   .. py:method:: export(*, user_id: str | None = None) -> jeevesagent.core.types.MemoryExport
+      :async:
+
+
+
+   .. py:method:: forget(*, user_id: str | None = None, session_id: str | None = None, before: datetime.datetime | None = None) -> int
+      :async:
+
+
+
+   .. py:method:: profile(*, user_id: str | None = None) -> jeevesagent.core.types.MemoryProfile
+      :async:
+
+
+
    .. py:method:: recall(query: str, *, kind: str = 'episodic', limit: int = 5, time_range: tuple[datetime.datetime, datetime.datetime] | None = None, user_id: str | None = None) -> list[jeevesagent.core.types.Episode]
       :async:
 
@@ -3057,6 +3186,114 @@ Package Contents
 
 
 
+.. py:class:: LazyMemory(builder: collections.abc.Callable[[], collections.abc.Awaitable[Any]], *, description: str = 'memory')
+
+   Defer construction of an async-built :class:`Memory` until first
+   use.
+
+   Users rarely instantiate this directly — it's what the
+   :func:`_resolve_memory` resolver returns when given a
+   ``postgres://`` or ``redis://`` URL. Pass a zero-arg async
+   callable that builds the real backend; everything else
+   (working / remember / recall / facts / session_messages /
+   consolidate) is forwarded once that callable resolves.
+
+
+   .. py:method:: aclose() -> None
+      :async:
+
+
+      Close the inner backend if it was constructed.
+
+      Safe to call when the backend was never resolved (no-op).
+
+
+
+   .. py:method:: append_block(name: str, content: str) -> None
+      :async:
+
+
+
+   .. py:method:: consolidate() -> None
+      :async:
+
+
+
+   .. py:method:: export(*, user_id: str | None = None) -> jeevesagent.core.types.MemoryExport
+      :async:
+
+
+
+   .. py:method:: forget(*, user_id: str | None = None, session_id: str | None = None, before: datetime.datetime | None = None) -> int
+      :async:
+
+
+
+   .. py:method:: profile(*, user_id: str | None = None) -> jeevesagent.core.types.MemoryProfile
+      :async:
+
+
+
+   .. py:method:: recall(query: str, *, kind: str = 'episodic', limit: int = 5, time_range: tuple[datetime.datetime, datetime.datetime] | None = None, user_id: str | None = None) -> list[jeevesagent.core.types.Episode]
+      :async:
+
+
+
+   .. py:method:: recall_facts(query: str, *, limit: int = 5, valid_at: datetime.datetime | None = None, user_id: str | None = None) -> list[jeevesagent.core.types.Fact]
+      :async:
+
+
+
+   .. py:method:: remember(episode: jeevesagent.core.types.Episode) -> str
+      :async:
+
+
+
+   .. py:method:: session_messages(session_id: str, *, user_id: str | None = None, limit: int = 20) -> list[jeevesagent.core.types.Message]
+      :async:
+
+
+
+   .. py:method:: update_block(name: str, content: str) -> None
+      :async:
+
+
+
+   .. py:method:: working() -> list[jeevesagent.core.types.MemoryBlock]
+      :async:
+
+
+
+   .. py:property:: description
+      :type: str
+
+
+      Human-readable label (e.g. ``"postgres://prod-db/agent"``)
+      — used in error messages so users can tell which Memory
+      failed to connect.
+
+
+   .. py:property:: facts
+      :type: Any | None
+
+
+      Direct access to the inner backend's fact store (if any).
+
+      Reading this BEFORE the backend has connected returns
+      ``None`` — the connection deliberately hasn't happened yet.
+      Once the backend is resolved (after the first ``agent.run``
+      or an explicit ``await mem._resolve()``), this returns the
+      live ``FactStore``. Power-user escape hatch; most callers
+      go through :meth:`recall_facts`.
+
+
+   .. py:property:: is_ready
+      :type: bool
+
+
+      ``True`` once the backend has been constructed and cached.
+
+
 .. py:class:: LineagePolicy
 
    Allow-list of source prefixes for the entire lineage chain.
@@ -3288,6 +3525,64 @@ Package Contents
 
 
 
+   .. py:method:: export(*, user_id: str | None = None) -> jeevesagent.core.types.MemoryExport
+      :async:
+
+
+      Full data dump for ``user_id`` — GDPR / data portability.
+
+      Returns every episode, every fact, and the export
+      timestamp. Serialise with ``MemoryExport.model_dump_json()``
+      for download or downstream processing. Honours the
+      ``user_id`` partition: never includes data belonging to a
+      different user.
+
+
+
+   .. py:method:: forget(*, user_id: str | None = None, session_id: str | None = None, before: datetime.datetime | None = None) -> int
+      :async:
+
+
+      Erase memory for a user — GDPR / "right to be forgotten".
+
+      With ``user_id`` only: erase EVERYTHING (episodes + facts +
+      session messages + working blocks) belonging to that user.
+      With ``session_id``: erase only that conversation thread for
+      that user. With ``before``: erase only data older than the
+      timestamp (other args still scope it). All filters AND
+      together.
+
+      Returns the total number of records deleted (episodes +
+      facts; backends without precise counts may return their
+      best estimate).
+
+      ``user_id=None`` erases the anonymous bucket only — same
+      partition rule as :meth:`recall`. To erase everything
+      across all users, callers must enumerate users and call
+      ``forget`` per-user; the framework deliberately makes the
+      "delete every user" path explicit so it's not done by
+      accident.
+
+
+
+   .. py:method:: profile(*, user_id: str | None = None) -> jeevesagent.core.types.MemoryProfile
+      :async:
+
+
+      Summary of what this memory knows about ``user_id``.
+
+      Returns counts (episodes, facts), the most-recent sessions
+      the user touched, the last-seen timestamp, and a sample of
+      the most-recently-recorded facts. Suitable for rendering a
+      "what does the bot know about me?" view to the end user, or
+      for an ops dashboard.
+
+      Backends MUST honour ``user_id`` as a hard partition —
+      passing one user's id never returns counts derived from
+      another user's data.
+
+
+
    .. py:method:: recall(query: str, *, kind: str = 'episodic', limit: int = 5, time_range: tuple[datetime.datetime, datetime.datetime] | None = None, user_id: str | None = None) -> list[jeevesagent.core.types.Episode]
       :async:
 
@@ -3404,6 +3699,110 @@ Package Contents
       :type:  datetime.datetime
       :value: None
 
+
+
+.. py:class:: MemoryExport(/, **data: Any)
+
+   Bases: :py:obj:`pydantic.BaseModel`
+
+
+   Full data dump for a single user — GDPR / data-portability use.
+
+   Returned by :meth:`Memory.export`. Carries the complete record of
+   everything the memory holds for ``user_id``: all episodes, all
+   facts, working blocks the user touched. Serialise with
+   ``.model_dump_json()`` for download or downstream processing.
+
+   Create a new model by parsing and validating input data from keyword arguments.
+
+   Raises [`ValidationError`][pydantic_core.ValidationError] if the input data cannot be
+   validated to form a valid model.
+
+   `self` is explicitly positional-only to allow `self` as a field name.
+
+
+   .. py:attribute:: episodes
+      :type:  list[Episode]
+      :value: None
+
+
+
+   .. py:attribute:: exported_at
+      :type:  datetime.datetime
+      :value: None
+
+
+
+   .. py:attribute:: facts
+      :type:  list[Fact]
+      :value: None
+
+
+
+   .. py:attribute:: user_id
+      :type:  str | None
+
+
+.. py:class:: MemoryProfile(/, **data: Any)
+
+   Bases: :py:obj:`pydantic.BaseModel`
+
+
+   Summary of what a :class:`Memory` knows about a single user.
+
+   Returned by :meth:`Memory.profile`. Cheap aggregate counts +
+   last-seen timestamp + the most-recent facts; suitable for
+   rendering a "what does the bot know about me?" view to the
+   end user, or a tenant dashboard for ops.
+
+   Backends that don't track full episode counts (e.g. Redis without
+   `FT.SEARCH` aggregations available) report what they can; the
+   counts are best-effort, never wildly wrong.
+
+   Create a new model by parsing and validating input data from keyword arguments.
+
+   Raises [`ValidationError`][pydantic_core.ValidationError] if the input data cannot be
+   validated to form a valid model.
+
+   `self` is explicitly positional-only to allow `self` as a field name.
+
+
+   .. py:attribute:: episode_count
+      :type:  int
+      :value: 0
+
+
+
+   .. py:attribute:: fact_count
+      :type:  int
+      :value: 0
+
+
+
+   .. py:attribute:: last_seen
+      :type:  datetime.datetime | None
+      :value: None
+
+
+
+   .. py:attribute:: recent_sessions
+      :type:  list[str]
+      :value: None
+
+
+      Up to the 10 most-recent ``session_id``s touched, newest first.
+
+
+   .. py:attribute:: sample_facts
+      :type:  list[Fact]
+      :value: None
+
+
+      Up to 10 of the most-recently-recorded facts about the user.
+
+
+   .. py:attribute:: user_id
+      :type:  str | None
 
 
 .. py:class:: Message(/, **data: Any)
@@ -4000,6 +4399,16 @@ Package Contents
 
 
 
+   .. py:method:: export(*, user_id: str | None = None) -> jeevesagent.core.types.MemoryExport
+      :async:
+
+
+
+   .. py:method:: forget(*, user_id: str | None = None, session_id: str | None = None, before: datetime.datetime | None = None) -> int
+      :async:
+
+
+
    .. py:method:: init_schema() -> None
       :async:
 
@@ -4008,6 +4417,11 @@ Package Contents
 
       When a :class:`PostgresFactStore` is attached as ``self.facts``,
       its schema is initialised in the same call.
+
+
+
+   .. py:method:: profile(*, user_id: str | None = None) -> jeevesagent.core.types.MemoryProfile
+      :async:
 
 
 
@@ -4480,6 +4894,21 @@ Package Contents
 
       Skipped silently when ``use_vector_index=False`` or when
       RediSearch isn't available on the server.
+
+
+
+   .. py:method:: export(*, user_id: str | None = None) -> jeevesagent.core.types.MemoryExport
+      :async:
+
+
+
+   .. py:method:: forget(*, user_id: str | None = None, session_id: str | None = None, before: datetime.datetime | None = None) -> int
+      :async:
+
+
+
+   .. py:method:: profile(*, user_id: str | None = None) -> jeevesagent.core.types.MemoryProfile
+      :async:
 
 
 
@@ -5478,6 +5907,99 @@ Package Contents
 
 
 
+.. py:class:: SqliteMemory(path: str | pathlib.Path, *, embedder: jeevesagent.core.protocols.Embedder | None = None, with_facts: bool = True, fact_store: jeevesagent.memory.facts.FactStore | None = None)
+
+   Durable :class:`Memory` rooted at a single sqlite file.
+
+   Construct directly from a path::
+
+       memory = SqliteMemory("./bot.db")
+       agent = Agent("...", model="gpt-4.1-mini", memory=memory)
+
+   Or via the resolver::
+
+       agent = Agent("...", model="gpt-4.1-mini", memory="sqlite:./bot.db")
+
+   Pass ``path=":memory:"`` for an ephemeral in-process database
+   (lost on close — useful for tests).
+
+   The fact store is auto-attached: the same ``.db`` file holds a
+   ``facts`` table managed by :class:`SqliteFactStore`. Pass
+   ``with_facts=False`` to skip it; pass an explicit
+   ``fact_store=`` to override (e.g. point facts at a different
+   sqlite file).
+
+
+   .. py:method:: aclose() -> None
+      :async:
+
+
+
+   .. py:method:: append_block(name: str, content: str) -> None
+      :async:
+
+
+
+   .. py:method:: consolidate() -> None
+      :async:
+
+
+
+   .. py:method:: export(*, user_id: str | None = None) -> jeevesagent.core.types.MemoryExport
+      :async:
+
+
+
+   .. py:method:: forget(*, user_id: str | None = None, session_id: str | None = None, before: datetime.datetime | None = None) -> int
+      :async:
+
+
+
+   .. py:method:: profile(*, user_id: str | None = None) -> jeevesagent.core.types.MemoryProfile
+      :async:
+
+
+
+   .. py:method:: recall(query: str, *, kind: str = 'episodic', limit: int = 5, time_range: tuple[datetime.datetime, datetime.datetime] | None = None, user_id: str | None = None) -> list[jeevesagent.core.types.Episode]
+      :async:
+
+
+
+   .. py:method:: recall_facts(query: str, *, limit: int = 5, valid_at: datetime.datetime | None = None, user_id: str | None = None) -> list[jeevesagent.core.types.Fact]
+      :async:
+
+
+
+   .. py:method:: remember(episode: jeevesagent.core.types.Episode) -> str
+      :async:
+
+
+
+   .. py:method:: session_messages(session_id: str, *, user_id: str | None = None, limit: int = 20) -> list[jeevesagent.core.types.Message]
+      :async:
+
+
+
+   .. py:method:: update_block(name: str, content: str) -> None
+      :async:
+
+
+
+   .. py:method:: working() -> list[jeevesagent.core.types.MemoryBlock]
+      :async:
+
+
+
+   .. py:property:: embedder
+      :type: jeevesagent.core.protocols.Embedder
+
+
+
+   .. py:property:: path
+      :type: pathlib.Path
+
+
+
 .. py:class:: SqliteRuntime(path: str | pathlib.Path)
 
    Bases: :py:obj:`jeevesagent.runtime.journaled.JournaledRuntime`
@@ -6140,6 +6662,21 @@ Package Contents
 
 
 
+   .. py:method:: export(*, user_id: str | None = None) -> jeevesagent.core.types.MemoryExport
+      :async:
+
+
+
+   .. py:method:: forget(*, user_id: str | None = None, session_id: str | None = None, before: datetime.datetime | None = None) -> int
+      :async:
+
+
+
+   .. py:method:: profile(*, user_id: str | None = None) -> jeevesagent.core.types.MemoryProfile
+      :async:
+
+
+
    .. py:method:: recall(query: str, *, kind: str = 'episodic', limit: int = 5, time_range: tuple[datetime.datetime, datetime.datetime] | None = None, user_id: str | None = None) -> list[jeevesagent.core.types.Episode]
       :async:
 
@@ -6488,6 +7025,16 @@ Package Contents
 
    Unknown strings raise :class:`ConfigError` with a list of known
    names.
+
+
+.. py:function:: resolve_memory(spec: Any) -> jeevesagent.core.protocols.Memory
+
+   Resolve a ``memory=`` argument into a concrete :class:`Memory`.
+
+   ``None`` returns the default in-memory backend; a string parses
+   by URL scheme; a dict parses by ``backend`` key; anything else
+   is assumed to already be a :class:`Memory` and passed through
+   unchanged.
 
 
 .. py:function:: run_architecture(architecture: jeevesagent.architecture.Architecture, prompt: str, *, instructions: str = '', model: jeevesagent.core.protocols.Model | str | None = None, memory: jeevesagent.core.protocols.Memory | None = None, runtime: jeevesagent.core.protocols.Runtime | None = None, budget: jeevesagent.core.protocols.Budget | None = None, permissions: jeevesagent.core.protocols.Permissions | None = None, hooks: jeevesagent.security.hooks.HookRegistry | None = None, tools: list[jeevesagent.tools.registry.Tool | collections.abc.Callable[Ellipsis, object]] | jeevesagent.core.protocols.ToolHost | jeevesagent.tools.registry.Tool | collections.abc.Callable[Ellipsis, object] | None = None, telemetry: jeevesagent.core.protocols.Telemetry | None = None, audit_log: jeevesagent.security.audit.AuditLog | None = None, max_turns: int = DEFAULT_MAX_TURNS, auto_consolidate: bool = False) -> jeevesagent.core.types.RunResult

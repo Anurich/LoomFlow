@@ -63,6 +63,16 @@ Module Contents
 
 
 
+   .. py:method:: export(*, user_id: str | None = None) -> jeevesagent.core.types.MemoryExport
+      :async:
+
+
+
+   .. py:method:: forget(*, user_id: str | None = None, session_id: str | None = None, before: datetime.datetime | None = None) -> int
+      :async:
+
+
+
    .. py:method:: local(persist_directory: str, *, embedder: jeevesagent.core.protocols.Embedder | None = None, collection_name: str = DEFAULT_COLLECTION, with_facts: bool = False, facts_collection_name: str = 'jeeves_facts') -> ChromaMemory
       :classmethod:
 
@@ -72,6 +82,11 @@ Module Contents
       ``with_facts=True`` attaches a :class:`ChromaFactStore` rooted
       at the same client so facts persist alongside episodes in the
       same on-disk store.
+
+
+
+   .. py:method:: profile(*, user_id: str | None = None) -> jeevesagent.core.types.MemoryProfile
+      :async:
 
 
 

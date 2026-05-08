@@ -18,7 +18,15 @@ from typing import Any
 import anyio
 
 from ..core.protocols import Embedder
-from ..core.types import Episode, Fact, MemoryBlock, Message, Role
+from ..core.types import (
+    Episode,
+    Fact,
+    MemoryBlock,
+    MemoryExport,
+    MemoryProfile,
+    Message,
+    Role,
+)
 from .embedder import HashEmbedder
 
 DEFAULT_COLLECTION = "jeeves_episodes"
@@ -43,7 +51,8 @@ class ChromaMemory:
         self._embedder: Embedder = embedder if embedder is not None else HashEmbedder()
         self._collection_name = collection_name
         self._collection: Any | None = None
-        self._blocks: dict[str, MemoryBlock] = {}
+        # Working blocks partition by ``user_id``; key is ``(user_id, name)``.
+        self._blocks: dict[tuple[str | None, str], MemoryBlock] = {}
         self._lock = anyio.Lock()
         # ``facts`` is the Agent loop's hook for surfacing semantic
         # claims into the model's context. Defaults to ``None`` to
@@ -125,32 +134,47 @@ class ChromaMemory:
 
     # ---- working blocks --------------------------------------------------
 
-    async def working(self) -> list[MemoryBlock]:
+    async def working(
+        self, *, user_id: str | None = None
+    ) -> list[MemoryBlock]:
         async with self._lock:
-            return sorted(self._blocks.values(), key=lambda b: b.pinned_order)
+            scoped = [
+                b for (uid, _name), b in self._blocks.items() if uid == user_id
+            ]
+        return sorted(scoped, key=lambda b: b.pinned_order)
 
-    async def update_block(self, name: str, content: str) -> None:
+    async def update_block(
+        self, name: str, content: str, *, user_id: str | None = None
+    ) -> None:
+        key = (user_id, name)
         async with self._lock:
-            existing = self._blocks.get(name)
-            self._blocks[name] = MemoryBlock(
+            existing = self._blocks.get(key)
+            user_count = sum(
+                1 for (uid, _) in self._blocks if uid == user_id
+            )
+            self._blocks[key] = MemoryBlock(
                 name=name,
                 content=content,
-                pinned_order=(
-                    existing.pinned_order if existing else len(self._blocks)
-                ),
+                pinned_order=existing.pinned_order if existing else user_count,
             )
 
-    async def append_block(self, name: str, content: str) -> None:
+    async def append_block(
+        self, name: str, content: str, *, user_id: str | None = None
+    ) -> None:
+        key = (user_id, name)
         async with self._lock:
-            existing = self._blocks.get(name)
+            existing = self._blocks.get(key)
             if existing is None:
-                self._blocks[name] = MemoryBlock(
+                user_count = sum(
+                    1 for (uid, _) in self._blocks if uid == user_id
+                )
+                self._blocks[key] = MemoryBlock(
                     name=name,
                     content=content,
-                    pinned_order=len(self._blocks),
+                    pinned_order=user_count,
                 )
             else:
-                self._blocks[name] = MemoryBlock(
+                self._blocks[key] = MemoryBlock(
                     name=name,
                     content=existing.content + content,
                     pinned_order=existing.pinned_order,
@@ -294,6 +318,128 @@ class ChromaMemory:
             if ep.output:
                 out.append(Message(role=Role.ASSISTANT, content=ep.output))
         return out
+
+    # ---- profile / forget / export (GDPR) -------------------------------
+
+    async def profile(
+        self, *, user_id: str | None = None
+    ) -> MemoryProfile:
+        coll = await self._get_collection()
+        where_filter = {"user_id": user_id or ""}
+        result = await anyio.to_thread.run_sync(
+            lambda: coll.get(
+                where=where_filter, include=["metadatas", "documents", "embeddings"]
+            )
+        )
+        episodes = _decode_get_result(result)
+        last_seen: datetime | None = (
+            max(e.occurred_at for e in episodes) if episodes else None
+        )
+        seen: set[str] = set()
+        recent_sessions: list[str] = []
+        for e in sorted(episodes, key=lambda x: x.occurred_at, reverse=True):
+            if e.session_id in seen:
+                continue
+            seen.add(e.session_id)
+            recent_sessions.append(e.session_id)
+            if len(recent_sessions) >= 10:
+                break
+        sample_facts: list[Fact] = []
+        fact_count = 0
+        if self.facts is not None:
+            sample_facts = list(
+                await self.facts.query(user_id=user_id, limit=10)
+            )
+            all_facts = await self.facts.query(user_id=user_id, limit=100_000)
+            fact_count = len(all_facts)
+        return MemoryProfile(
+            user_id=user_id,
+            episode_count=len(episodes),
+            fact_count=fact_count,
+            last_seen=last_seen,
+            recent_sessions=recent_sessions,
+            sample_facts=sample_facts,
+        )
+
+    async def forget(
+        self,
+        *,
+        user_id: str | None = None,
+        session_id: str | None = None,
+        before: datetime | None = None,
+    ) -> int:
+        coll = await self._get_collection()
+        where_filter: dict[str, Any] = {"user_id": user_id or ""}
+        # Chroma's where filter doesn't natively support "<" on
+        # numeric strings; fetch then post-filter for the time-range
+        # case. Session filter we can push down.
+        if session_id is not None:
+            where_filter = {
+                "$and": [
+                    {"user_id": user_id or ""},
+                    {"session_id": session_id},
+                ]
+            }
+        result = await anyio.to_thread.run_sync(
+            lambda: coll.get(where=where_filter, include=["metadatas"])
+        )
+        ids = list(result.get("ids") or [])
+        if before is not None:
+            metas = list(result.get("metadatas") or [])
+            keep_idx = []
+            for i, meta in enumerate(metas):
+                if meta is None:
+                    continue
+                ts = meta.get("occurred_at")
+                if isinstance(ts, str):
+                    try:
+                        if datetime.fromisoformat(ts) < before:
+                            keep_idx.append(i)
+                    except ValueError:
+                        pass
+            ids = [ids[i] for i in keep_idx]
+        if ids:
+            await anyio.to_thread.run_sync(lambda: coll.delete(ids=ids))
+        deleted = len(ids)
+
+        # Facts: rely on the FactStore's ``query`` + per-id deletion.
+        if session_id is None and self.facts is not None:
+            facts = await self.facts.query(user_id=user_id, limit=100_000)
+            if before is not None:
+                facts = [f for f in facts if f.recorded_at < before]
+            # ChromaFactStore stores facts in its own collection;
+            # rely on the public ``query`` + private ``_collection``
+            # for delete (no public delete method yet).
+            if facts and hasattr(self.facts, "_collection"):
+                fact_coll = self.facts._collection  # type: ignore[attr-defined]
+                fact_ids = [f.id for f in facts]
+                await anyio.to_thread.run_sync(
+                    lambda: fact_coll.delete(ids=fact_ids)
+                )
+                deleted += len(fact_ids)
+        return deleted
+
+    async def export(
+        self, *, user_id: str | None = None
+    ) -> MemoryExport:
+        coll = await self._get_collection()
+        result = await anyio.to_thread.run_sync(
+            lambda: coll.get(
+                where={"user_id": user_id or ""},
+                include=["metadatas", "documents", "embeddings"],
+            )
+        )
+        episodes = _decode_get_result(result)
+        facts: list[Fact] = []
+        if self.facts is not None:
+            facts = list(
+                await self.facts.query(user_id=user_id, limit=100_000)
+            )
+        return MemoryExport(
+            user_id=user_id,
+            episodes=sorted(episodes, key=lambda e: e.occurred_at),
+            facts=sorted(facts, key=lambda f: f.recorded_at),
+        )
 
     async def consolidate(self) -> None:
         return None

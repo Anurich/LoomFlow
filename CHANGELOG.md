@@ -128,6 +128,195 @@ models opt in.
   fences before parsing, since real models occasionally wrap
   output despite being told not to.
 
+### Added — Multi-tenant by default *everywhere* (M9)
+
+Closes the remaining gaps so every stateful primitive partitions by
+``user_id``. Memory was already done (M1–M8); M9 covers working
+blocks, budget, audit log, permissions, hooks.
+
+* **Working memory blocks** — ``Memory.working(user_id=)`` /
+  ``update_block(name, content, user_id=)`` /
+  ``append_block(name, content, user_id=)``. All six backends
+  partition: in-memory dicts re-keyed to ``(user_id, name)`` tuples;
+  SQLite + Postgres got migrations adding a ``user_id`` PK column
+  (idempotent, with table-rebuild fallback for SQLite which can't
+  ``ALTER`` a PK). Pinned-order is per-user — adding bob's first
+  block doesn't bump alice's slots. The agent loop reads
+  ``deps.memory.working(user_id=deps.context.user_id)``; legacy
+  custom Memory impls without the kwarg fall back gracefully.
+* **Per-user budget accounting** — ``StandardBudget`` now tracks
+  tokens / cost per ``user_id``. New ``BudgetConfig`` fields
+  ``per_user_max_tokens``, ``per_user_max_input_tokens``,
+  ``per_user_max_output_tokens``, ``per_user_max_cost_usd``,
+  ``per_user_max_wall_clock`` enforce per-user caps alongside (or
+  instead of) the global ones. ``Budget.allows_step(user_id=)`` /
+  ``consume(user_id=)`` are the new protocol shape.
+  ``StandardBudget.usage_for(user_id)`` snapshots a single user's
+  totals for ops dashboards.
+* **Audit log: top-level ``user_id``** — ``AuditEntry.user_id`` is
+  now a first-class field (was buried in payload). ``AuditLog.append``
+  + ``AuditLog.query`` gain the kwarg. The HMAC signature covers
+  ``user_id`` so a tampered entry that swaps user identity won't
+  verify. Both ``InMemoryAuditLog`` and ``FileAuditLog`` updated.
+* **Permissions: ``user_id`` kwarg** — ``Permissions.check(call,
+  context=, user_id=)``. ``StandardPermissions`` accepts and ignores
+  it; the new ``PerUserPermissions`` routes to per-user policies::
+
+      perms = PerUserPermissions(
+          policies={
+              "admin_alice": StandardPermissions(mode=Mode.BYPASS),
+              "paid_user_42": StandardPermissions(mode=Mode.ACCEPT_EDITS),
+          },
+          default=StandardPermissions(
+              mode=Mode.DEFAULT, denied_tools=["bash"]
+          ),
+      )
+      Agent(..., permissions=perms)
+
+* **Hooks: ``user_id`` kwarg** — ``HookHost.pre_tool`` /
+  ``post_tool`` accept ``user_id`` so custom hook hosts can dispatch
+  per-user. The bundled ``HookRegistry`` accepts and ignores the
+  kwarg; individual hook callables continue to receive only
+  ``(call,)`` / ``(call, result)`` for API stability.
+* **Backwards-compatible everywhere** — every protocol change is a
+  keyword-only add. The agent loop wraps every kwarg-bearing call in
+  a ``try / except TypeError`` fallback to the legacy signature, so
+  custom implementations users wrote pre-M9 keep working unchanged.
+* **Public exports** — ``PerUserPermissions`` is exported from both
+  ``jeevesagent.security`` and the top-level ``jeevesagent`` package.
+* **Tests** — 14 new in ``tests/test_user_id_isolation_full.py``
+  covering every primitive: working-block partition (in-memory +
+  SQLite-persistent), pinned-order per-user, budget per-user
+  totals + per-user caps + global+per-user combination, audit
+  top-level user_id + filter + combined filter, permissions
+  routing + default fallback, full end-to-end with one Agent
+  serving alice and bob through Memory + Budget + AuditLog all at
+  once.
+
+### Added — Auto fact extraction (M8)
+
+* **`AutoExtractMemory`** — a :class:`Memory` wrapper that runs the
+  bundled :class:`Consolidator` on every persisted episode,
+  extracting structured ``(subject, predicate, object)`` claims
+  into the inner backend's fact store. Implements the full
+  :class:`Memory` protocol; forwards every method through to the
+  inner backend; only ``remember`` adds the extraction pass.
+* **`Agent(auto_extract=...)`** — new kwarg, default-picked by
+  model class. ON for in-tree network adapters (``OpenAIModel`` /
+  ``AnthropicModel`` / ``LiteLLMModel``); OFF for in-process fakes
+  (``ScriptedModel`` / ``EchoModel``) and unrecognised custom
+  Models. Pass ``auto_extract=True``/``False`` to override.
+* **Internal split: `_memory` vs `_wrapped_memory`** —
+  ``agent.memory`` (the public accessor) keeps returning the
+  user-supplied / resolver-built backend so introspection and
+  ``agent.memory.profile(...)`` style code work transparently.
+  ``_wrapped_memory`` is the loop-facing view that runs through
+  the auto-extract layer. Same dual-attribute pattern as
+  ``_model`` / ``_wrapped_model`` for the retry layer.
+* **Best-effort by design** — extraction failures (model errors,
+  malformed JSON, rate limits) never break the run. The episode
+  write succeeds first; extraction runs after and either appends
+  facts or logs and moves on. The agent's primary contract
+  (return a result, persist the episode) is preserved unchanged.
+* **End-to-end UX** — a single ``agent.run("I prefer dark mode",
+  user_id="alice")`` against a real model now leaves a
+  ``Fact(user_id="alice", subject="alice", predicate="prefers",
+  object="dark_mode")`` in the store, partition-respecting, ready
+  for future ``recall_facts`` queries to surface.
+
+### Added — Memory inspection + GDPR helpers (M7)
+
+* **`Memory.profile(user_id=)`** — returns a `MemoryProfile`
+  carrying episode count, fact count, last-seen timestamp, the 10
+  most-recent sessions touched, and a sample of the most-recently-
+  recorded facts. Per-user, partition-respecting; suitable for
+  rendering "what does the bot know about me?" views to end users
+  or ops dashboards.
+* **`Memory.forget(*, user_id=, session_id=, before=)`** —
+  right-to-erasure. With ``user_id`` only, erases all episodes +
+  facts for that user. With ``session_id``, narrows to that
+  conversation. With ``before``, narrows to a retention window.
+  Filters AND together. Returns the count of records deleted.
+  ``user_id=None`` erases the anonymous bucket only — same hard
+  partition rule as `recall`. Erasing every user is deliberately
+  per-user-explicit so it can't happen by accident.
+* **`Memory.export(user_id=)`** — full data dump for portability /
+  DSAR responses. Returns a `MemoryExport` with every episode and
+  fact for the user; serialise with `.model_dump_json()` for
+  download.
+* **`MemoryProfile`, `MemoryExport`** — new Pydantic types in
+  `core/types.py`, exported from both `jeevesagent.core` and the
+  top-level `jeevesagent` package.
+* **Cross-backend implementations** — all six backends
+  (`InMemoryMemory`, `SqliteMemory`, `VectorMemory`, `ChromaMemory`,
+  `PostgresMemory`, `RedisMemory`) honour the new methods.
+  Postgres uses native `IS NOT DISTINCT FROM`-aware DELETEs;
+  Chroma uses native `where` filters; SQLite uses `DELETE` against
+  the same `.db` file the FactStore lives in; in-memory backends
+  filter dicts directly. `LazyMemory` forwards through to the
+  inner backend on first use, same as the other protocol methods.
+* **Bug fix in `Consolidator._build_fact`** — extracted facts now
+  inherit the source episode's ``user_id``. Prior to this, every
+  consolidator-extracted fact landed in the anonymous bucket
+  regardless of which user the episode belonged to, breaking
+  multi-tenant fact recall.
+* **Example** — `examples/05_memory_showcase.py` walks every
+  backend (Postgres + Redis skip gracefully without DSNs),
+  exercises the resolver in all three tiers (string / dict /
+  instance), demonstrates profile / forget / export across
+  backends, and runs the `Consolidator` to extract structured
+  facts from raw episodes. Single runnable file.
+
+### Added — Memory string resolver + SqliteMemory (M6)
+
+* **`memory=` URL/dict/instance resolver** — `Agent(...)` accepts:
+  * `None` → default `InMemoryMemory()`
+  * `"inmemory"` / `"sqlite:./bot.db"` / `"sqlite"` /
+    `"chroma:./vec"` / `"chroma"` / `"postgres://..."` /
+    `"redis://..."` (URL scheme picks the backend)
+  * `{"backend": ..., "path": ..., "namespace": ...,
+    "embedder": ..., "with_facts": ...}` (config dict)
+  * any already-constructed `Memory` instance (today's API, unchanged)
+  Mirrors the design of the existing `model=` resolver.
+* **`resolve_memory(spec)`** — public helper for the same resolution
+  logic. Used internally by `Agent.__init__`; exposed so external
+  config systems (TOML, YAML, env-driven configs) can drive memory
+  picks.
+* **`SqliteMemory`** — new backend at
+  `jeevesagent.memory.sqlite.SqliteMemory`. Episodes, working
+  blocks, session messages, and the bi-temporal fact store all in
+  one sqlite file. Single-file persistence, no server, idempotent
+  schema migrations (`CREATE TABLE IF NOT EXISTS`,
+  `ALTER TABLE ADD COLUMN`-with-duplicate-tolerant exception).
+  Honours the M1 `user_id` partition contract; emits
+  `IsolationWarning` on mixed-bucket recall, same as
+  `InMemoryMemory`. Use `SqliteMemory(":memory:")` for an
+  ephemeral in-process database.
+* **`LazyMemory`** — wraps async-construct backends (Postgres /
+  Redis) so `Agent(...)` stays synchronous. Connection opens on
+  first protocol method call; concurrent first-uses serialise
+  through an `anyio.Lock`; backend exceptions get normalised to
+  `MemoryStoreError` with the original on `__cause__`. The proxy
+  forwards every Memory protocol method (`working`,
+  `update_block`, `append_block`, `remember`, `recall`,
+  `recall_facts`, `session_messages`, `consolidate`) and exposes
+  `.facts` once resolved.
+* **Auto-picked embedder** — string and dict specs pick
+  `OpenAIEmbedder("text-embedding-3-small")` when
+  `OPENAI_API_KEY` is set, `HashEmbedder()` otherwise. Override
+  via `embedder=` in the dict form, taking either an `Embedder`
+  instance or one of `"hash"`, `"openai"`, `"openai-large"`,
+  `"voyage"`, `"cohere"`.
+* **Auto-attached fact store on resolver path** —
+  `with_facts=True` is the default for string and dict specs;
+  semantic-recall layer is on out of the box. Pass
+  `with_facts=False` in the dict form to skip it. Explicit
+  `Memory(...)` instances keep their existing per-backend
+  defaults so today's call sites are unchanged.
+* **Public exports** — `SqliteMemory`, `LazyMemory`,
+  `resolve_memory` exported from both `jeevesagent.memory` and
+  the top-level `jeevesagent` package.
+
 ### Added — Resilient model calls (M5)
 
 * **Error taxonomy** — `ModelError` base + `TransientModelError`
