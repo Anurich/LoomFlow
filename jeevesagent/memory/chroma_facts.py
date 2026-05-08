@@ -108,12 +108,13 @@ class ChromaFactStore:
         coll = await self._get_collection()
 
         async with self._lock:
-            # Find currently-valid prior facts with matching subject +
-            # predicate that we may need to supersede.
+            # Namespace-scoped supersession: only invalidate prior
+            # facts in the same ``user_id`` partition.
             existing = await anyio.to_thread.run_sync(
                 lambda: coll.get(
                     where={
                         "$and": [
+                            {"user_id": fact.user_id or ""},
                             {"subject": fact.subject},
                             {"predicate": fact.predicate},
                             {"currently_valid": True},
@@ -167,9 +168,10 @@ class ChromaFactStore:
         object_: str | None = None,
         valid_at: datetime | None = None,
         limit: int = 10,
+        user_id: str | None = None,
     ) -> list[Fact]:
         coll = await self._get_collection()
-        where = _build_where(subject, predicate, object_, valid_at)
+        where = _build_where(subject, predicate, object_, valid_at, user_id)
 
         # Chroma's ``get`` accepts ``limit`` only in newer releases;
         # fall back to slicing in Python if it raises.
@@ -198,10 +200,11 @@ class ChromaFactStore:
         *,
         limit: int = 5,
         valid_at: datetime | None = None,
+        user_id: str | None = None,
     ) -> list[Fact]:
         coll = await self._get_collection()
         query_embedding = await self._embedder.embed(query)
-        where = _build_where(None, None, None, valid_at)
+        where = _build_where(None, None, None, valid_at, user_id)
 
         result = await anyio.to_thread.run_sync(
             lambda: coll.query(
@@ -248,6 +251,9 @@ def _triple_text(fact: Fact) -> str:
 
 def _fact_to_metadata(fact: Fact) -> dict[str, Any]:
     return {
+        # Empty string is the anonymous bucket — Chroma rejects None
+        # metadata values, so we substitute and round-trip on read.
+        "user_id": fact.user_id or "",
         "subject": fact.subject,
         "predicate": fact.predicate,
         "object": fact.object,
@@ -276,8 +282,10 @@ def _metadata_to_fact(eid: str, meta: dict[str, Any]) -> Fact:
     until_ts = meta.get("valid_until_ts", 0.0) or 0.0
     if not meta.get("currently_valid", True) and until_ts > 0:
         valid_until = datetime.fromtimestamp(float(until_ts), tz=UTC)
+    user_id_raw = str(meta.get("user_id", ""))
     return Fact(
         id=eid,
+        user_id=user_id_raw or None,
         subject=str(meta.get("subject", "")),
         predicate=str(meta.get("predicate", "")),
         object=str(meta.get("object", "")),
@@ -322,10 +330,13 @@ def _build_where(
     predicate: str | None,
     object_: str | None,
     valid_at: datetime | None,
+    user_id: str | None,
 ) -> dict[str, Any] | None:
-    """Compose Chroma ``where`` from optional filters. Multiple filters
-    fold into a single ``$and``; a single filter is its own clause."""
-    clauses: list[dict[str, Any]] = []
+    """Compose Chroma ``where`` from optional filters. Always pins
+    ``user_id`` (empty string for the anonymous bucket) so recall is
+    namespace-partitioned by default. Multiple filters fold into a
+    single ``$and``."""
+    clauses: list[dict[str, Any]] = [{"user_id": user_id or ""}]
     if subject is not None:
         clauses.append({"subject": subject})
     if predicate is not None:

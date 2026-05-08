@@ -19,7 +19,7 @@ from typing import Any
 import anyio
 
 from ..core.protocols import Embedder
-from ..core.types import Episode, Fact, MemoryBlock
+from ..core.types import Episode, Fact, MemoryBlock, Message, Role
 from .consolidator import Consolidator
 from .embedder import HashEmbedder
 from .facts import FactStore, InMemoryFactStore
@@ -145,9 +145,10 @@ class VectorMemory:
         kind: str = "episodic",
         limit: int = 5,
         time_range: tuple[datetime, datetime] | None = None,
+        user_id: str | None = None,
     ) -> list[Episode]:
         if not query.strip():
-            return await self._recall_recent(limit, time_range)
+            return await self._recall_recent(limit, time_range, user_id)
 
         query_embedding = await self._embedder.embed(query)
 
@@ -158,6 +159,8 @@ class VectorMemory:
                 if e.embedding is not None
             ]
 
+        # Hard namespace partition by ``user_id``.
+        candidates = [e for e in candidates if e.user_id == user_id]
         if time_range is not None:
             lo, hi = time_range
             candidates = [
@@ -176,9 +179,11 @@ class VectorMemory:
         self,
         limit: int,
         time_range: tuple[datetime, datetime] | None,
+        user_id: str | None,
     ) -> list[Episode]:
         async with self._lock:
             episodes = list(self._episodes.values())
+        episodes = [e for e in episodes if e.user_id == user_id]
         if time_range is not None:
             lo, hi = time_range
             episodes = [e for e in episodes if lo <= e.occurred_at <= hi]
@@ -191,10 +196,36 @@ class VectorMemory:
         *,
         limit: int = 5,
         valid_at: datetime | None = None,
+        user_id: str | None = None,
     ) -> list[Fact]:
         return await self.facts.recall_text(
-            query, limit=limit, valid_at=valid_at
+            query, limit=limit, valid_at=valid_at, user_id=user_id
         )
+
+    async def session_messages(
+        self,
+        session_id: str,
+        *,
+        user_id: str | None = None,
+        limit: int = 20,
+    ) -> list[Message]:
+        async with self._lock:
+            episodes = list(self._episodes.values())
+        episodes = [
+            e
+            for e in episodes
+            if e.session_id == session_id and e.user_id == user_id
+        ]
+        episodes.sort(key=lambda e: e.occurred_at)
+        max_episodes = max(1, limit // 2)
+        episodes = episodes[-max_episodes:]
+        out: list[Message] = []
+        for ep in episodes:
+            if ep.input:
+                out.append(Message(role=Role.USER, content=ep.input))
+            if ep.output:
+                out.append(Message(role=Role.ASSISTANT, content=ep.output))
+        return out
 
     async def consolidate(self) -> None:
         """Process unconsolidated episodes through the configured

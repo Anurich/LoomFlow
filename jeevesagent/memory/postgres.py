@@ -25,7 +25,7 @@ from typing import Any
 import anyio
 
 from ..core.protocols import Embedder
-from ..core.types import Episode, Fact, MemoryBlock
+from ..core.types import Episode, Fact, MemoryBlock, Message, Role
 from .embedder import HashEmbedder
 
 DEFAULT_NAMESPACE = "default"
@@ -146,15 +146,22 @@ class PostgresMemory:
                 f"  id TEXT PRIMARY KEY,"
                 f"  namespace TEXT NOT NULL,"
                 f"  session_id TEXT NOT NULL,"
+                f"  user_id TEXT,"
                 f"  occurred_at TIMESTAMPTZ NOT NULL,"
                 f"  input TEXT NOT NULL,"
                 f"  output TEXT NOT NULL,"
                 f"  embedding vector({self.embedding_dimensions}) NOT NULL"
                 f");"
             ),
+            # Idempotent ALTER for upgrades from pre-``user_id`` schemas.
+            "ALTER TABLE episodes ADD COLUMN IF NOT EXISTS user_id TEXT;",
             (
                 "CREATE INDEX IF NOT EXISTS episodes_namespace_idx "
                 "ON episodes (namespace, occurred_at DESC);"
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS episodes_user_id_idx "
+                "ON episodes (namespace, user_id, occurred_at DESC);"
             ),
             (
                 "CREATE INDEX IF NOT EXISTS episodes_embedding_idx "
@@ -239,13 +246,14 @@ class PostgresMemory:
 
         async with self._pool.acquire() as conn:
             await conn.execute(
-                "INSERT INTO episodes(id, namespace, session_id, occurred_at, "
-                "                     input, output, embedding) "
-                "VALUES ($1, $2, $3, $4, $5, $6, $7) "
+                "INSERT INTO episodes(id, namespace, session_id, user_id, "
+                "                     occurred_at, input, output, embedding) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8) "
                 "ON CONFLICT (id) DO NOTHING;",
                 episode.id,
                 self._namespace,
                 episode.session_id,
+                episode.user_id,
                 episode.occurred_at,
                 episode.input,
                 episode.output,
@@ -260,24 +268,30 @@ class PostgresMemory:
         kind: str = "episodic",
         limit: int = 5,
         time_range: tuple[datetime, datetime] | None = None,
+        user_id: str | None = None,
     ) -> list[Episode]:
         if not query.strip():
-            return await self._recall_recent(limit, time_range)
+            return await self._recall_recent(limit, time_range, user_id)
 
         query_embedding = await self._embedder.embed(query)
         lo = time_range[0] if time_range is not None else None
         hi = time_range[1] if time_range is not None else None
 
+        # Hard namespace partition by ``user_id``: NULL filter matches
+        # only NULL rows; a string filter matches exactly. ``IS NOT
+        # DISTINCT FROM`` makes ``NULL = NULL`` work correctly.
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT id, session_id, occurred_at, input, output, embedding "
+                "SELECT id, session_id, user_id, occurred_at, input, output, embedding "
                 "FROM episodes "
                 "WHERE namespace = $1 "
-                "  AND ($2::timestamptz IS NULL OR occurred_at >= $2) "
-                "  AND ($3::timestamptz IS NULL OR occurred_at <= $3) "
-                "ORDER BY embedding <=> $4 "
-                "LIMIT $5",
+                "  AND user_id IS NOT DISTINCT FROM $2 "
+                "  AND ($3::timestamptz IS NULL OR occurred_at >= $3) "
+                "  AND ($4::timestamptz IS NULL OR occurred_at <= $4) "
+                "ORDER BY embedding <=> $5 "
+                "LIMIT $6",
                 self._namespace,
+                user_id,
                 lo,
                 hi,
                 query_embedding,
@@ -289,19 +303,22 @@ class PostgresMemory:
         self,
         limit: int,
         time_range: tuple[datetime, datetime] | None,
+        user_id: str | None,
     ) -> list[Episode]:
         lo = time_range[0] if time_range is not None else None
         hi = time_range[1] if time_range is not None else None
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT id, session_id, occurred_at, input, output, embedding "
+                "SELECT id, session_id, user_id, occurred_at, input, output, embedding "
                 "FROM episodes "
                 "WHERE namespace = $1 "
-                "  AND ($2::timestamptz IS NULL OR occurred_at >= $2) "
-                "  AND ($3::timestamptz IS NULL OR occurred_at <= $3) "
+                "  AND user_id IS NOT DISTINCT FROM $2 "
+                "  AND ($3::timestamptz IS NULL OR occurred_at >= $3) "
+                "  AND ($4::timestamptz IS NULL OR occurred_at <= $4) "
                 "ORDER BY occurred_at DESC "
-                "LIMIT $4",
+                "LIMIT $5",
                 self._namespace,
+                user_id,
                 lo,
                 hi,
                 limit,
@@ -314,14 +331,50 @@ class PostgresMemory:
         *,
         limit: int = 5,
         valid_at: datetime | None = None,
+        user_id: str | None = None,
     ) -> list[Fact]:
         if self.facts is None:
             return []
         return list(
             await self.facts.recall_text(
-                query, limit=limit, valid_at=valid_at
+                query, limit=limit, valid_at=valid_at, user_id=user_id
             )
         )
+
+    async def session_messages(
+        self,
+        session_id: str,
+        *,
+        user_id: str | None = None,
+        limit: int = 20,
+    ) -> list[Message]:
+        max_episodes = max(1, limit // 2)
+        async with self._pool.acquire() as conn:
+            # Pull the most-recent ``max_episodes`` for the session,
+            # then return them oldest-first below.
+            rows = await conn.fetch(
+                "SELECT id, session_id, user_id, occurred_at, "
+                "       input, output, embedding "
+                "FROM episodes "
+                "WHERE namespace = $1 "
+                "  AND session_id = $2 "
+                "  AND user_id IS NOT DISTINCT FROM $3 "
+                "ORDER BY occurred_at DESC "
+                "LIMIT $4",
+                self._namespace,
+                session_id,
+                user_id,
+                max_episodes,
+            )
+        episodes = _rows_to_episodes(_rows(rows))
+        episodes.sort(key=lambda e: e.occurred_at)
+        out: list[Message] = []
+        for ep in episodes:
+            if ep.input:
+                out.append(Message(role=Role.USER, content=ep.input))
+            if ep.output:
+                out.append(Message(role=Role.ASSISTANT, content=ep.output))
+        return out
 
     async def consolidate(self) -> None:
         return None
@@ -342,10 +395,17 @@ def _rows_to_episodes(rows: list[Any]) -> list[Episode]:
         emb = r["embedding"]
         # asyncpg + pgvector returns numpy array or list; coerce.
         emb_list = list(emb) if emb is not None else None
+        # ``user_id`` may not be present on rows fetched from a legacy
+        # SELECT that doesn't list it. Treat absence as ``None``.
+        try:
+            user_id_val = r["user_id"]
+        except (KeyError, IndexError):
+            user_id_val = None
         out.append(
             Episode(
                 id=r["id"],
                 session_id=r["session_id"],
+                user_id=user_id_val,
                 occurred_at=r["occurred_at"],
                 input=r["input"],
                 output=r["output"],

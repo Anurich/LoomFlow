@@ -34,6 +34,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
+from ..core.context import RunContext
 from ..core.protocols import (
     Budget,
     Memory,
@@ -138,6 +139,23 @@ class Dependencies:
     fast_budget: bool = True
     """Skip ``budget.allows_step()`` and ``budget.consume(...)``
     when budget is ``NoBudget``."""
+
+    # ---------------------------------------------------------------
+    # Per-run context — populated from :class:`~jeevesagent.RunContext`
+    # at the top of :meth:`Agent.run`. Architectures forward
+    # ``context.user_id`` to :meth:`Memory.recall` so episodic /
+    # factual recall is namespace-partitioned, and pass the whole
+    # ``context`` to spawned sub-agents (with possibly-derived
+    # ``session_id``) so multi-agent orchestration preserves
+    # isolation. The same ``RunContext`` is also installed in a
+    # :class:`contextvars.ContextVar` for the duration of the run
+    # so tools and hooks can read it via ``get_run_context()``.
+    # ---------------------------------------------------------------
+    context: RunContext = field(default_factory=RunContext)
+    """Typed scope for the run — ``user_id`` (memory namespace),
+    ``session_id`` (conversation thread), ``run_id`` (this specific
+    invocation), and ``metadata`` (free-form app context). See
+    :class:`~jeevesagent.RunContext` for the per-field semantics."""
 
 
 @runtime_checkable

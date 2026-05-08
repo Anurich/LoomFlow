@@ -56,7 +56,7 @@ async def test_init_creates_facts_table_and_indexes(tmp_path: Path) -> None:
         }
     assert "facts" in names
     assert "facts_subject_idx" in names
-    assert "facts_subject_predicate_idx" in names
+    assert "facts_user_subject_predicate_idx" in names
     assert store.path == db
 
 

@@ -18,7 +18,7 @@ from typing import Any
 import anyio
 
 from ..core.protocols import Embedder
-from ..core.types import Episode, Fact, MemoryBlock
+from ..core.types import Episode, Fact, MemoryBlock, Message, Role
 from .embedder import HashEmbedder
 
 DEFAULT_COLLECTION = "jeeves_episodes"
@@ -166,8 +166,13 @@ class ChromaMemory:
 
         coll = await self._get_collection()
         document = _embedding_text(episode)
+        # Store ``user_id`` as a metadata field so Chroma's ``where``
+        # filter can partition recall queries natively. Chroma rejects
+        # ``None`` metadata values, so we substitute the empty string
+        # for the anonymous bucket and round-trip on read.
         metadata = {
             "session_id": episode.session_id,
+            "user_id": episode.user_id or "",
             "input": episode.input,
             "output": episode.output,
             "occurred_at": episode.occurred_at.isoformat(),
@@ -190,18 +195,25 @@ class ChromaMemory:
         kind: str = "episodic",
         limit: int = 5,
         time_range: tuple[datetime, datetime] | None = None,
+        user_id: str | None = None,
     ) -> list[Episode]:
         coll = await self._get_collection()
 
         if not query.strip():
-            return await self._recall_recent(coll, limit, time_range)
+            return await self._recall_recent(coll, limit, time_range, user_id)
 
         query_embedding = list(await self._embedder.embed(query))
+
+        # Hard namespace partition by ``user_id``, pushed into Chroma's
+        # native ``where`` filter so we don't waste a round-trip on
+        # other users' rows. Empty string is the anonymous bucket.
+        where_filter = {"user_id": user_id or ""}
 
         result = await anyio.to_thread.run_sync(
             lambda: coll.query(
                 query_embeddings=[query_embedding],
                 n_results=limit,
+                where=where_filter,
             )
         )
         episodes = _decode_query_result(result)
@@ -216,10 +228,13 @@ class ChromaMemory:
         coll: Any,
         limit: int,
         time_range: tuple[datetime, datetime] | None,
+        user_id: str | None,
     ) -> list[Episode]:
+        where_filter = {"user_id": user_id or ""}
         result = await anyio.to_thread.run_sync(
             lambda: coll.get(
                 limit=None,  # we'll sort + slice ourselves
+                where=where_filter,
                 include=["metadatas", "documents", "embeddings"],
             )
         )
@@ -236,14 +251,49 @@ class ChromaMemory:
         *,
         limit: int = 5,
         valid_at: datetime | None = None,
+        user_id: str | None = None,
     ) -> list[Fact]:
         if self.facts is None:
             return []
         return list(
             await self.facts.recall_text(
-                query, limit=limit, valid_at=valid_at
+                query, limit=limit, valid_at=valid_at, user_id=user_id
             )
         )
+
+    async def session_messages(
+        self,
+        session_id: str,
+        *,
+        user_id: str | None = None,
+        limit: int = 20,
+    ) -> list[Message]:
+        coll = await self._get_collection()
+        # Native ``where`` filter — namespace partition on user_id +
+        # session pin. Empty-string is the anonymous bucket on disk.
+        where_filter = {
+            "$and": [
+                {"user_id": user_id or ""},
+                {"session_id": session_id},
+            ]
+        }
+        result = await anyio.to_thread.run_sync(
+            lambda: coll.get(
+                where=where_filter,
+                include=["metadatas", "documents", "embeddings"],
+            )
+        )
+        episodes = _decode_get_result(result)
+        episodes.sort(key=lambda e: e.occurred_at)
+        max_episodes = max(1, limit // 2)
+        episodes = episodes[-max_episodes:]
+        out: list[Message] = []
+        for ep in episodes:
+            if ep.input:
+                out.append(Message(role=Role.USER, content=ep.input))
+            if ep.output:
+                out.append(Message(role=Role.ASSISTANT, content=ep.output))
+        return out
 
     async def consolidate(self) -> None:
         return None
@@ -320,10 +370,14 @@ def _episodes_from_parallel(
     for i, eid in enumerate(ids):
         meta = metas[i] if i < len(metas) and metas[i] is not None else {}
         emb = list(embeds[i]) if i < len(embeds) else None
+        # Chroma can't store ``None`` so the anonymous bucket is the
+        # empty string on the wire; round-trip back to ``None`` here.
+        user_id_raw = str(meta.get("user_id", ""))
         episodes.append(
             Episode(
                 id=str(eid),
                 session_id=str(meta.get("session_id", "")),
+                user_id=user_id_raw or None,
                 occurred_at=_parse_occurred(meta),
                 input=str(meta.get("input", "")),
                 output=str(meta.get("output", "")),

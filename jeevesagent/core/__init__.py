@@ -1,5 +1,6 @@
 """Layer-free primitives: types, protocols, errors, IDs."""
 
+from .context import RunContext, get_run_context, set_run_context
 from .errors import (
     BudgetExceeded,
     CancelledByUser,
@@ -85,6 +86,10 @@ __all__ = [
     "Secrets",
     "Telemetry",
     "ToolHost",
+    # context
+    "RunContext",
+    "get_run_context",
+    "set_run_context",
     # errors
     "BudgetExceeded",
     "CancelledByUser",

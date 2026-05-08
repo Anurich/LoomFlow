@@ -28,7 +28,7 @@ unboundedly.
 from __future__ import annotations
 
 import contextlib
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -42,6 +42,7 @@ from ..architecture import (
     resolve_architecture,
 )
 from ..architecture.tool_host_wrappers import ExtendedToolHost
+from ..core.context import RunContext, set_run_context
 from ..core.ids import new_id
 from ..core.protocols import (
     Budget,
@@ -555,16 +556,38 @@ class Agent:
         self,
         prompt: str,
         *,
+        user_id: str | None = None,
         session_id: str | None = None,
+        metadata: Mapping[str, Any] | None = None,
+        context: RunContext | None = None,
         extra_tools: list[Tool] | None = None,
         emit: Emit | None = None,
     ) -> RunResult:
         """Run the agent to completion and return its :class:`RunResult`.
 
+        ``user_id`` is the namespace partition for memory recall and
+        persistence — episodes and facts stored with one ``user_id``
+        are never visible to a query scoped to a different ``user_id``.
+        ``None`` is the "anonymous / single-tenant" bucket. See
+        :class:`~jeevesagent.RunContext` for the partitioning
+        contract.
+
         Pass ``session_id`` to resume a journaled run — when paired with
         a durable runtime (e.g. :class:`SqliteRuntime`), already-completed
         steps replay from the journal instead of re-executing. Without a
         durable runtime, ``session_id`` just labels the run.
+
+        ``metadata`` is a free-form bag for application context the
+        framework does not interpret (locale, request id, feature
+        flags). Tools and hooks read it via
+        ``get_run_context().metadata``.
+
+        ``context`` accepts a fully-formed :class:`RunContext` instead
+        of the individual kwargs — useful when passing context through
+        multi-agent boundaries that received their parent's context as
+        a single object. When both ``context`` and the individual
+        kwargs are provided, the kwargs override the corresponding
+        fields on ``context``.
 
         ``extra_tools`` injects additional :class:`Tool`\\ s for this
         run only — the agent's configured ``ToolHost`` is wrapped so
@@ -588,7 +611,10 @@ class Agent:
         return await self._loop(
             prompt,
             emit=emit if emit is not None else _noop_emit,
+            user_id=user_id,
             session_id=session_id,
+            metadata=metadata,
+            context=context,
             extra_tools=extra_tools,
         )
 
@@ -597,6 +623,8 @@ class Agent:
         session_id: str,
         prompt: str,
         *,
+        user_id: str | None = None,
+        metadata: Mapping[str, Any] | None = None,
         extra_tools: list[Tool] | None = None,
         emit: Emit | None = None,
     ) -> RunResult:
@@ -609,7 +637,9 @@ class Agent:
         """
         return await self.run(
             prompt,
+            user_id=user_id,
             session_id=session_id,
+            metadata=metadata,
             extra_tools=extra_tools,
             emit=emit,
         )
@@ -618,7 +648,10 @@ class Agent:
         self,
         prompt: str,
         *,
+        user_id: str | None = None,
         session_id: str | None = None,
+        metadata: Mapping[str, Any] | None = None,
+        context: RunContext | None = None,
         extra_tools: list[Tool] | None = None,
     ) -> AsyncIterator[Event]:
         """Stream :class:`Event`\\ s as the loop produces them.
@@ -639,7 +672,10 @@ class Agent:
                 await self._loop(
                     prompt,
                     emit=send.send,
+                    user_id=user_id,
                     session_id=session_id,
+                    metadata=metadata,
+                    context=context,
                     extra_tools=extra_tools,
                 )
             except Exception as exc:  # noqa: BLE001 — surface as ERROR + re-raise
@@ -665,7 +701,10 @@ class Agent:
         prompt: str,
         *,
         emit: Emit,
+        user_id: str | None = None,
         session_id: str | None = None,
+        metadata: Mapping[str, Any] | None = None,
+        context: RunContext | None = None,
         extra_tools: list[Tool] | None = None,
     ) -> RunResult:
         """Setup → delegate iteration to the architecture → teardown.
@@ -673,14 +712,50 @@ class Agent:
         The architecture (default :class:`ReAct`) drives the iteration
         and yields events as it goes. Setup wraps the run in a runtime
         session + telemetry trace so every ``runtime.step`` recorded
-        from inside the architecture lands on the same journal entry.
-        Teardown persists the episode, builds the :class:`RunResult`,
-        emits final metrics, and triggers ``auto_consolidate``.
+        from inside the architecture lands on the same journal entry,
+        and installs a :class:`~jeevesagent.RunContext` in a
+        contextvar so tools / hooks / sub-agents see ``user_id``,
+        ``session_id``, ``run_id``, and ``metadata`` without having
+        to thread them through every signature. Teardown persists
+        the episode (tagged with ``user_id`` for namespace
+        partitioning), builds the :class:`RunResult`, emits final
+        metrics, and triggers ``auto_consolidate``.
         """
         started_at = datetime.now(UTC)
-        if session_id is None:
-            session_id = new_id("sess")
+        run_id = new_id("run")
         loop_started = anyio.current_time()
+
+        # Resolve scope from kwargs + optional ``context``: kwargs
+        # win when explicitly supplied; otherwise fall back to
+        # ``context``'s value; otherwise the framework default
+        # (auto-generated session_id; None for everything else).
+        # ``run_id`` is always framework-assigned — caller-supplied
+        # values on ``context.run_id`` are overridden because each
+        # ``Agent.run`` invocation is its own run.
+        ctx_user_id = (
+            user_id if user_id is not None
+            else (context.user_id if context is not None else None)
+        )
+        ctx_session_id = (
+            session_id if session_id is not None
+            else (context.session_id if context is not None else None)
+        )
+        if ctx_session_id is None:
+            ctx_session_id = new_id("sess")
+        # ``session_id`` is the public-facing id used for
+        # journal/audit/telemetry; mirror it back so the rest of
+        # ``_loop`` (which references it directly) stays consistent.
+        session_id = ctx_session_id
+        ctx_metadata: Mapping[str, Any] = (
+            metadata if metadata is not None
+            else (context.metadata if context is not None else {})
+        )
+        run_ctx = RunContext(
+            user_id=ctx_user_id,
+            session_id=ctx_session_id,
+            run_id=run_id,
+            metadata=ctx_metadata,
+        )
 
         # Fast-mode flags — auto-detect "no-op default" implementations
         # so hot-path call sites can skip the integration layer
@@ -712,7 +787,11 @@ class Agent:
             )
         )
 
-        async with self._runtime.session(session_id), run_trace:
+        async with (
+            self._runtime.session(session_id),
+            run_trace,
+            set_run_context(run_ctx),
+        ):
             if not fast_audit:
                 await self._audit(
                     session_id=session_id,
@@ -723,6 +802,7 @@ class Agent:
                         "model": self._model.name,
                         "max_turns": self._max_turns,
                         "architecture": self._architecture.name,
+                        "user_id": run_ctx.user_id,
                     },
                 )
             await emit(Event.started(session_id, prompt))
@@ -760,6 +840,7 @@ class Agent:
                 fast_hooks=fast_hooks,
                 fast_runtime=fast_runtime,
                 fast_budget=fast_budget,
+                context=run_ctx,
             )
 
             async for event in self._architecture.run(session, deps, prompt):
@@ -767,6 +848,7 @@ class Agent:
 
             episode = Episode(
                 session_id=session_id,
+                user_id=run_ctx.user_id,
                 input=prompt,
                 output=session.output,
             )

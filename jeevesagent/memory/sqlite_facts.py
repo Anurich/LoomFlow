@@ -35,6 +35,7 @@ from ._embedding_util import pack_float32, unpack_float32
 _FACTS_DDL = """
 CREATE TABLE IF NOT EXISTS facts (
     id          TEXT PRIMARY KEY,
+    user_id     TEXT,
     subject     TEXT NOT NULL,
     predicate   TEXT NOT NULL,
     object      TEXT NOT NULL,
@@ -47,12 +48,15 @@ CREATE TABLE IF NOT EXISTS facts (
 )
 """
 
+# Idempotent ALTER for upgrades from a pre-``user_id`` schema.
+_FACTS_ADD_USER_ID = "ALTER TABLE facts ADD COLUMN user_id TEXT"
+
 _FACTS_SUBJECT_INDEX = (
     "CREATE INDEX IF NOT EXISTS facts_subject_idx ON facts (subject)"
 )
-_FACTS_SUBJECT_PRED_INDEX = (
-    "CREATE INDEX IF NOT EXISTS facts_subject_predicate_idx "
-    "ON facts (subject, predicate)"
+_FACTS_USER_SUBJECT_PRED_INDEX = (
+    "CREATE INDEX IF NOT EXISTS facts_user_subject_predicate_idx "
+    "ON facts (user_id, subject, predicate)"
 )
 
 
@@ -93,8 +97,16 @@ class SqliteFactStore:
     def _init_schema(self) -> None:
         with self._connect() as conn:
             conn.execute(_FACTS_DDL)
+            # Best-effort upgrade: add the column if it doesn't exist.
+            # ``ALTER TABLE ADD COLUMN`` raises if the column is already
+            # present; suppress that case but let real errors propagate.
+            try:
+                conn.execute(_FACTS_ADD_USER_ID)
+            except sqlite3.OperationalError as exc:
+                if "duplicate column name" not in str(exc).lower():
+                    raise
             conn.execute(_FACTS_SUBJECT_INDEX)
-            conn.execute(_FACTS_SUBJECT_PRED_INDEX)
+            conn.execute(_FACTS_USER_SUBJECT_PRED_INDEX)
             conn.commit()
 
     # ---- mutation --------------------------------------------------------
@@ -125,12 +137,17 @@ class SqliteFactStore:
     ) -> None:
         with self._connect() as conn:
             # Close off any still-valid superseded predecessors.
+            # Namespace-scoped: alice's facts never invalidate bob's.
+            # SQLite uses ``IS`` to compare against NULL (since
+            # ``=`` returns NULL when either side is NULL).
             conn.execute(
                 "UPDATE facts SET valid_until = ? "
-                "WHERE subject = ? AND predicate = ? AND object != ? "
+                "WHERE user_id IS ? "
+                "AND subject = ? AND predicate = ? AND object != ? "
                 "AND valid_until IS NULL",
                 (
                     _to_epoch(fact.valid_from),
+                    fact.user_id,
                     fact.subject,
                     fact.predicate,
                     fact.object,
@@ -138,11 +155,12 @@ class SqliteFactStore:
             )
             conn.execute(
                 "INSERT OR REPLACE INTO facts "
-                "(id, subject, predicate, object, confidence, "
+                "(id, user_id, subject, predicate, object, confidence, "
                 "valid_from, valid_until, recorded_at, sources, embedding) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     fact.id,
+                    fact.user_id,
                     fact.subject,
                     fact.predicate,
                     fact.object,
@@ -168,6 +186,7 @@ class SqliteFactStore:
         object_: str | None = None,
         valid_at: datetime | None = None,
         limit: int = 10,
+        user_id: str | None = None,
     ) -> list[Fact]:
         rows = await anyio.to_thread.run_sync(
             self._query_sync,
@@ -176,6 +195,7 @@ class SqliteFactStore:
             object_,
             valid_at,
             limit,
+            user_id,
         )
         return [_row_to_fact(r) for r in rows]
 
@@ -186,9 +206,11 @@ class SqliteFactStore:
         object_: str | None,
         valid_at: datetime | None,
         limit: int,
+        user_id: str | None,
     ) -> list[tuple[Any, ...]]:
-        sql_parts = ["SELECT * FROM facts WHERE 1=1"]
-        params: list[Any] = []
+        # Hard namespace partition by ``user_id`` (always in WHERE).
+        sql_parts = ["SELECT * FROM facts WHERE user_id IS ?"]
+        params: list[Any] = [user_id]
         if subject is not None:
             sql_parts.append("AND subject = ?")
             params.append(subject)
@@ -218,25 +240,27 @@ class SqliteFactStore:
         *,
         limit: int = 5,
         valid_at: datetime | None = None,
+        user_id: str | None = None,
     ) -> list[Fact]:
         if self._embedder is not None:
-            return await self._recall_embedding(query, limit, valid_at)
-        return await self._recall_tokens(query, limit, valid_at)
+            return await self._recall_embedding(query, limit, valid_at, user_id)
+        return await self._recall_tokens(query, limit, valid_at, user_id)
 
     async def _recall_embedding(
         self,
         query: str,
         limit: int,
         valid_at: datetime | None,
+        user_id: str | None,
     ) -> list[Fact]:
         assert self._embedder is not None
         query_embedding = await self._embedder.embed(query)
         rows = await anyio.to_thread.run_sync(
-            self._scan_for_recall, valid_at
+            self._scan_for_recall, valid_at, user_id
         )
         scored: list[tuple[float, tuple[Any, ...]]] = []
         for row in rows:
-            blob = row[9]  # embedding column
+            blob = row[10]  # embedding column (index shifted by user_id)
             if not blob:
                 continue
             stored = unpack_float32(bytes(blob))
@@ -249,9 +273,10 @@ class SqliteFactStore:
         query: str,
         limit: int,
         valid_at: datetime | None,
+        user_id: str | None,
     ) -> list[Fact]:
         rows = await anyio.to_thread.run_sync(
-            self._scan_for_recall, valid_at
+            self._scan_for_recall, valid_at, user_id
         )
         query_tokens = _tokenize(query)
         if not query_tokens:
@@ -260,7 +285,9 @@ class SqliteFactStore:
 
         scored: list[tuple[int, int, tuple[Any, ...]]] = []
         for row in rows:
-            haystack = f"{row[1]} {row[2]} {row[3]}"
+            # Columns shifted by user_id at index 1: subject/predicate/
+            # object are now indices 2/3/4.
+            haystack = f"{row[2]} {row[3]} {row[4]}"
             haystack_tokens = _tokenize(haystack)
             overlap = sum(1 for t in query_tokens if t in haystack_tokens)
             if overlap > 0:
@@ -269,21 +296,24 @@ class SqliteFactStore:
         return [_row_to_fact(r) for _, _, r in scored[:limit]]
 
     def _scan_for_recall(
-        self, valid_at: datetime | None
+        self, valid_at: datetime | None, user_id: str | None
     ) -> list[tuple[Any, ...]]:
         with self._connect() as conn:
             if valid_at is None:
                 cursor = conn.execute(
-                    "SELECT * FROM facts ORDER BY recorded_at DESC"
+                    "SELECT * FROM facts WHERE user_id IS ? "
+                    "ORDER BY recorded_at DESC",
+                    (user_id,),
                 )
             else:
                 ts = _to_epoch(valid_at)
                 cursor = conn.execute(
                     "SELECT * FROM facts "
-                    "WHERE valid_from <= ? "
+                    "WHERE user_id IS ? "
+                    "AND valid_from <= ? "
                     "AND (valid_until IS NULL OR ? < valid_until) "
                     "ORDER BY recorded_at DESC",
-                    (ts, ts),
+                    (user_id, ts, ts),
                 )
             return cursor.fetchall()
 
@@ -319,24 +349,28 @@ def _from_epoch(ts: float | None) -> datetime | None:
 
 
 def _row_to_fact(row: tuple[Any, ...]) -> Fact:
+    # Column layout (after the user_id migration):
+    # 0:id 1:user_id 2:subject 3:predicate 4:object 5:confidence
+    # 6:valid_from 7:valid_until 8:recorded_at 9:sources 10:embedding
     sources: list[str] = []
-    if row[8]:
+    if row[9]:
         try:
-            sources = list(json.loads(row[8]))
+            sources = list(json.loads(row[9]))
         except json.JSONDecodeError:
             sources = []
-    valid_from = _from_epoch(row[5])
+    valid_from = _from_epoch(row[6])
     assert valid_from is not None
-    recorded_at = _from_epoch(row[7])
+    recorded_at = _from_epoch(row[8])
     assert recorded_at is not None
     return Fact(
         id=row[0],
-        subject=row[1],
-        predicate=row[2],
-        object=row[3],
-        confidence=row[4],
+        user_id=row[1],
+        subject=row[2],
+        predicate=row[3],
+        object=row[4],
+        confidence=row[5],
         valid_from=valid_from,
-        valid_until=_from_epoch(row[6]),
+        valid_until=_from_epoch(row[7]),
         recorded_at=recorded_at,
         sources=sources,
     )

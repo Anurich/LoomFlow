@@ -33,7 +33,7 @@ def test_schema_sql_includes_pgvector_table_and_indexes() -> None:
     assert "CREATE TABLE IF NOT EXISTS facts" in statements
     assert "vector(384)" in statements
     assert "facts_subject_idx" in statements
-    assert "facts_subject_predicate_idx" in statements
+    assert "facts_user_subject_predicate_idx" in statements
     assert "hnsw" in statements  # only when embedder configured
 
 
@@ -153,10 +153,12 @@ async def test_append_with_embedder_runs_embed_and_passes_vector() -> None:
         if sql.startswith("INSERT")
     )
     sql, args = insert
-    # 10 placeholders ⇒ embedding is the 10th positional arg.
-    assert "$10" in sql
-    assert isinstance(args[9], list)
-    assert len(args[9]) == 32
+    # 11 placeholders ⇒ embedding is the 11th positional arg
+    # (id, user_id, subject, predicate, object, confidence,
+    #  valid_from, valid_until, recorded_at, sources, embedding).
+    assert "$11" in sql
+    assert isinstance(args[10], list)
+    assert len(args[10]) == 32
 
 
 # ---------------------------------------------------------------------------
@@ -178,14 +180,17 @@ async def test_query_with_filters_assembles_clauses() -> None:
     )
 
     sql, args = store_state.queried[0]
-    assert "subject = $1" in sql
-    assert "predicate = $2" in sql
-    assert "valid_from <= $3" in sql
-    assert "ORDER BY recorded_at DESC LIMIT $4" in sql
-    assert args[0] == "alice"
-    assert args[1] == "lives_in"
-    assert args[2] == base
-    assert args[3] == 4
+    # $1 is the user_id namespace partition.
+    assert "user_id IS NOT DISTINCT FROM $1" in sql
+    assert "subject = $2" in sql
+    assert "predicate = $3" in sql
+    assert "valid_from <= $4" in sql
+    assert "ORDER BY recorded_at DESC LIMIT $5" in sql
+    assert args[0] is None  # user_id (anonymous bucket)
+    assert args[1] == "alice"
+    assert args[2] == "lives_in"
+    assert args[3] == base
+    assert args[4] == 4
 
 
 async def test_recall_text_uses_pgvector_distance_when_embedder_set() -> None:
@@ -223,8 +228,11 @@ async def test_recall_text_time_window_passed_through() -> None:
     base = datetime(2026, 1, 1, tzinfo=UTC)
     await store.recall_text("anything", limit=5, valid_at=base)
     sql, args = store_state.queried[0]
-    assert "valid_from <= $1" in sql
-    assert args[0] == base
+    # $1 is the user_id namespace partition; valid_at moves to $2.
+    assert "user_id IS NOT DISTINCT FROM $1" in sql
+    assert "valid_from <= $2" in sql
+    assert args[0] is None  # user_id (anonymous bucket)
+    assert args[1] == base
 
 
 # ---------------------------------------------------------------------------

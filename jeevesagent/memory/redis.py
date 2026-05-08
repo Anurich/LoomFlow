@@ -25,7 +25,7 @@ import anyio
 
 from ..core.errors import MemoryStoreError
 from ..core.protocols import Embedder
-from ..core.types import Episode, Fact, MemoryBlock
+from ..core.types import Episode, Fact, MemoryBlock, Message, Role
 from ._embedding_util import pack_float32, unpack_float32
 from .embedder import HashEmbedder
 
@@ -206,6 +206,11 @@ class RedisMemory:
         mapping = {
             "id": episode.id.encode("utf-8"),
             "session_id": episode.session_id.encode("utf-8"),
+            # Persist ``user_id`` so recall queries can filter
+            # by namespace partition. Encoded as the empty bytestring
+            # for ``None`` so we can round-trip it (Redis doesn't
+            # natively distinguish missing fields from empty values).
+            "user_id": (episode.user_id or "").encode("utf-8"),
             "occurred_at": str(episode.occurred_at.timestamp()).encode("utf-8"),
             "input": episode.input.encode("utf-8"),
             "output": episode.output.encode("utf-8"),
@@ -221,23 +226,31 @@ class RedisMemory:
         kind: str = "episodic",
         limit: int = 5,
         time_range: tuple[datetime, datetime] | None = None,
+        user_id: str | None = None,
     ) -> list[Episode]:
         await self.ensure_index()
 
         if not query.strip():
-            return await self._recall_recent(limit, time_range)
+            return await self._recall_recent(limit, time_range, user_id)
 
         query_embedding = await self._embedder.embed(query)
 
-        if self._use_vector_index:
-            episodes = await self._recall_via_index(query_embedding, limit)
-        else:
-            episodes = await self._recall_brute_force(query_embedding, limit)
+        # Over-fetch when filtering so we have enough candidates after
+        # the namespace partition is applied. The vector index lacks
+        # native ``user_id`` faceting today; this is a post-filter.
+        fetch_limit = limit * 8 if user_id is not None else limit
 
+        if self._use_vector_index:
+            episodes = await self._recall_via_index(query_embedding, fetch_limit)
+        else:
+            episodes = await self._recall_brute_force(query_embedding, fetch_limit)
+
+        # Hard namespace partition by ``user_id``.
+        episodes = [e for e in episodes if e.user_id == user_id]
         if time_range is not None:
             lo, hi = time_range
             episodes = [e for e in episodes if lo <= e.occurred_at <= hi]
-        return episodes
+        return episodes[:limit]
 
     async def _recall_via_index(
         self, query_embedding: list[float], limit: int
@@ -253,8 +266,9 @@ class RedisMemory:
             "SORTBY",
             "score",
             "RETURN",
-            "5",
+            "6",
             "session_id",
+            "user_id",
             "occurred_at",
             "input",
             "output",
@@ -287,8 +301,10 @@ class RedisMemory:
         self,
         limit: int,
         time_range: tuple[datetime, datetime] | None,
+        user_id: str | None,
     ) -> list[Episode]:
         episodes = await self._scan_all_episodes()
+        episodes = [e for e in episodes if e.user_id == user_id]
         if time_range is not None:
             lo, hi = time_range
             episodes = [e for e in episodes if lo <= e.occurred_at <= hi]
@@ -318,14 +334,43 @@ class RedisMemory:
         *,
         limit: int = 5,
         valid_at: datetime | None = None,
+        user_id: str | None = None,
     ) -> list[Fact]:
         if self.facts is None:
             return []
         return list(
             await self.facts.recall_text(
-                query, limit=limit, valid_at=valid_at
+                query, limit=limit, valid_at=valid_at, user_id=user_id
             )
         )
+
+    async def session_messages(
+        self,
+        session_id: str,
+        *,
+        user_id: str | None = None,
+        limit: int = 20,
+    ) -> list[Message]:
+        # No native ``WHERE session_id`` index in vanilla Redis Hash;
+        # scan all episode keys, post-filter, and slice. Matches the
+        # InMemoryMemory + Vector backends' best-effort behaviour for
+        # the M2 session-continuity path.
+        episodes = await self._scan_all_episodes()
+        episodes = [
+            e
+            for e in episodes
+            if e.session_id == session_id and e.user_id == user_id
+        ]
+        episodes.sort(key=lambda e: e.occurred_at)
+        max_episodes = max(1, limit // 2)
+        episodes = episodes[-max_episodes:]
+        out: list[Message] = []
+        for ep in episodes:
+            if ep.input:
+                out.append(Message(role=Role.USER, content=ep.input))
+            if ep.output:
+                out.append(Message(role=Role.ASSISTANT, content=ep.output))
+        return out
 
     async def consolidate(self) -> None:
         return None
@@ -388,9 +433,11 @@ def _decode_hash(data: dict[Any, Any]) -> Episode | None:
         embedding: list[float] | None = _unpack_float32(bytes(embedding_blob))
     else:
         embedding = None
+    user_id_raw = _decode_field(norm.get("user_id", ""))
     return Episode(
         id=eid,
         session_id=_decode_field(norm.get("session_id", "")),
+        user_id=user_id_raw or None,
         occurred_at=occurred_at,
         input=_decode_field(norm.get("input", "")),
         output=_decode_field(norm.get("output", "")),
@@ -433,10 +480,12 @@ def _decode_ft_search(result: Any) -> list[Episode]:
             occurred_at = datetime.fromtimestamp(float(occurred_raw), tz=UTC)
         except ValueError:
             occurred_at = datetime.now(UTC)
+        user_id_raw = _decode_field(decoded.get("user_id", ""))
         out.append(
             Episode(
                 id=eid,
                 session_id=_decode_field(decoded.get("session_id", "")),
+                user_id=user_id_raw or None,
                 occurred_at=occurred_at,
                 input=_decode_field(decoded.get("input", "")),
                 output=_decode_field(decoded.get("output", "")),

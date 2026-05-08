@@ -325,7 +325,30 @@ class ReAct:
 async def _build_seed_messages(
     deps: Dependencies, instructions: str, prompt: str
 ) -> list[Message]:
-    """Construct the initial message list: system + memory recall + user."""
+    """Construct the initial message list: system + memory recall +
+    rehydrated session history + current user prompt.
+
+    Two layers of memory feed the model:
+
+    * **Cross-session recall** (``recall_facts`` + ``recall_episodes``)
+      — surfaces relevant context from OTHER conversations the same
+      user has had. Returned as a single SYSTEM block above the
+      message log, partitioned by ``deps.context.user_id``.
+
+    * **Within-session continuity** (``session_messages``) —
+      rehydrates this conversation's prior user/assistant turns as
+      real :class:`Message` history so the model sees the chat
+      thread, not just a recall summary. Driven by
+      ``deps.context.session_id``: reusing the same id continues
+      the conversation.
+
+    Recall episodes that belong to *this same session* are filtered
+    out before the SYSTEM block is built — those would just
+    duplicate content the rehydrated message history already
+    carries.
+    """
+    user_id = deps.context.user_id
+    session_id = deps.context.session_id
     messages: list[Message] = [
         Message(role=Role.SYSTEM, content=instructions),
     ]
@@ -337,12 +360,29 @@ async def _build_seed_messages(
 
     facts: list[Any] = []
     try:
-        facts = await deps.memory.recall_facts(prompt, limit=5)
-    except AttributeError:
-        # 0.1.x backends without recall_facts: silent fallback.
+        facts = await deps.memory.recall_facts(
+            prompt, limit=5, user_id=user_id
+        )
+    except (AttributeError, TypeError):
+        # 0.1.x backends without recall_facts, or older signatures
+        # missing ``user_id``: silent fallback.
         facts = []
 
-    episodes = await deps.memory.recall(prompt, kind="episodic", limit=3)
+    try:
+        episodes = await deps.memory.recall(
+            prompt, kind="episodic", limit=3, user_id=user_id
+        )
+    except TypeError:
+        # Backends that haven't picked up the user_id kwarg yet.
+        episodes = await deps.memory.recall(
+            prompt, kind="episodic", limit=3
+        )
+
+    # Cross-session recall only — drop any episode that belongs to
+    # this same conversation (its content will be rehydrated as a
+    # real chat turn below).
+    if session_id is not None:
+        episodes = [e for e in episodes if e.session_id != session_id]
 
     recall_parts: list[str] = []
     if facts:
@@ -358,6 +398,19 @@ async def _build_seed_messages(
         messages.append(
             Message(role=Role.SYSTEM, content="\n\n".join(recall_parts))
         )
+
+    # Rehydrate this conversation's prior turns so the model sees
+    # real chat history rather than relying only on semantic
+    # recall. Backends without persisted message logs return [] —
+    # in which case we fall through to the current-prompt-only path.
+    if session_id is not None:
+        try:
+            history = await deps.memory.session_messages(
+                session_id, user_id=user_id, limit=20
+            )
+        except (AttributeError, TypeError):
+            history = []
+        messages.extend(history)
 
     messages.append(Message(role=Role.USER, content=prompt))
     return messages

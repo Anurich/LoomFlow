@@ -58,6 +58,7 @@ from .core import (
     PermissionDenied,
     Permissions,
     Role,
+    RunContext,
     RunResult,
     Runtime,
     RuntimeJournalError,
@@ -75,7 +76,9 @@ from .core import (
     ToolResult,
     Usage,
     deterministic_hash,
+    get_run_context,
     new_id,
+    set_run_context,
 )
 from .data import FreshnessPolicy, LineagePolicy
 from .graph import AgentGraph, build_graph, write_graph
@@ -288,6 +291,10 @@ __all__ = [
     "Secrets",
     "Telemetry",
     "ToolHost",
+    # context
+    "RunContext",
+    "get_run_context",
+    "set_run_context",
     # errors
     "BudgetExceeded",
     "CancelledByUser",

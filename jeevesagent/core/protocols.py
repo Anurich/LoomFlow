@@ -89,8 +89,18 @@ class Memory(Protocol):
         kind: str = "episodic",
         limit: int = 5,
         time_range: tuple[datetime, datetime] | None = None,
+        user_id: str | None = None,
     ) -> list[Episode]:
-        """Retrieve episodes (or facts, when ``kind='semantic'``)."""
+        """Retrieve episodes (or facts, when ``kind='semantic'``).
+
+        When ``user_id`` is supplied, results are restricted to
+        episodes stored with that exact ``user_id`` value. ``None``
+        is its own bucket (the "anonymous / single-tenant"
+        namespace) — episodes stored with ``user_id=None`` are never
+        visible to a query with ``user_id="alice"`` and vice versa.
+        Backends MUST honour this filter to preserve the framework's
+        multi-tenant safety contract.
+        """
         ...
 
     async def recall_facts(
@@ -99,6 +109,7 @@ class Memory(Protocol):
         *,
         limit: int = 5,
         valid_at: datetime | None = None,
+        user_id: str | None = None,
     ) -> list[Fact]:
         """Retrieve bi-temporal facts matching ``query``.
 
@@ -106,11 +117,41 @@ class Memory(Protocol):
         loop calls this directly rather than duck-typing on
         ``memory.facts`` so backends without fact support don't need
         any opt-out mechanism.
+
+        ``user_id`` filters by namespace partition with the same
+        semantics as :meth:`recall`: ``None`` is its own bucket and
+        does not cross-contaminate with non-None values.
         """
         ...
 
     async def consolidate(self) -> None:
         """Background: extract semantic facts from recent episodes."""
+        ...
+
+    async def session_messages(
+        self,
+        session_id: str,
+        *,
+        user_id: str | None = None,
+        limit: int = 20,
+    ) -> list[Message]:
+        """Return the most-recent ``limit`` user/assistant turns from
+        the conversation identified by ``session_id``, in order
+        (oldest first).
+
+        This is the conversation-continuity primitive — the agent
+        loop calls it at the top of every run so that reusing a
+        ``session_id`` actually continues the chat (the model sees
+        previous turns as real :class:`Message` history) rather than
+        starting fresh and relying solely on semantic recall.
+
+        ``user_id`` MUST be respected by backends as a hard
+        namespace partition: messages persisted under one
+        ``user_id`` are never visible to a query scoped to a
+        different one. Backends without persisted message logs
+        return ``[]`` — the agent loop falls back to the
+        semantic-recall path in that case.
+        """
         ...
 
 

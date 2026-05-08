@@ -98,6 +98,7 @@ class PostgresFactStore:
             (
                 f"CREATE TABLE IF NOT EXISTS facts ("
                 f"  id TEXT PRIMARY KEY,"
+                f"  user_id TEXT,"
                 f"  subject TEXT NOT NULL,"
                 f"  predicate TEXT NOT NULL,"
                 f"  object TEXT NOT NULL,"
@@ -109,13 +110,14 @@ class PostgresFactStore:
                 f"  embedding vector({self._dimensions()}) "
                 f");"
             ),
+            "ALTER TABLE facts ADD COLUMN IF NOT EXISTS user_id TEXT;",
             (
                 "CREATE INDEX IF NOT EXISTS facts_subject_idx "
                 "ON facts (subject);"
             ),
             (
-                "CREATE INDEX IF NOT EXISTS facts_subject_predicate_idx "
-                "ON facts (subject, predicate);"
+                "CREATE INDEX IF NOT EXISTS facts_user_subject_predicate_idx "
+                "ON facts (user_id, subject, predicate);"
             ),
         ]
         if self._embedder is not None:
@@ -143,24 +145,29 @@ class PostgresFactStore:
             embedding = await self._embedder.embed(triple)
 
         async with self._pool.acquire() as conn:
-            # Supersession: close off any currently-valid predecessors
-            # for the same (subject, predicate) where the object differs.
+            # Supersession is namespace-scoped — a fact from user A
+            # never invalidates user B's claim on the same (subject,
+            # predicate). ``IS NOT DISTINCT FROM`` makes the
+            # ``NULL = NULL`` case (anonymous bucket) work correctly.
             await conn.execute(
                 "UPDATE facts SET valid_until = $1 "
-                "WHERE subject = $2 AND predicate = $3 "
-                "AND object != $4 AND valid_until IS NULL",
+                "WHERE user_id IS NOT DISTINCT FROM $2 "
+                "AND subject = $3 AND predicate = $4 "
+                "AND object != $5 AND valid_until IS NULL",
                 fact.valid_from,
+                fact.user_id,
                 fact.subject,
                 fact.predicate,
                 fact.object,
             )
             await conn.execute(
                 "INSERT INTO facts "
-                "(id, subject, predicate, object, confidence, "
+                "(id, user_id, subject, predicate, object, confidence, "
                 " valid_from, valid_until, recorded_at, sources, embedding) "
-                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) "
                 "ON CONFLICT (id) DO NOTHING;",
                 fact.id,
+                fact.user_id,
                 fact.subject,
                 fact.predicate,
                 fact.object,
@@ -186,10 +193,14 @@ class PostgresFactStore:
         object_: str | None = None,
         valid_at: datetime | None = None,
         limit: int = 10,
+        user_id: str | None = None,
     ) -> list[Fact]:
-        clauses: list[str] = ["1=1"]
-        params: list[Any] = []
-        idx = 1
+        # Hard namespace partition by ``user_id``. Always present in
+        # the WHERE clause; uses ``IS NOT DISTINCT FROM`` so the
+        # anonymous (NULL) bucket matches itself.
+        clauses: list[str] = ["user_id IS NOT DISTINCT FROM $1"]
+        params: list[Any] = [user_id]
+        idx = 2
         if subject is not None:
             clauses.append(f"subject = ${idx}")
             params.append(subject)
@@ -211,7 +222,7 @@ class PostgresFactStore:
             idx += 1
 
         sql = (
-            "SELECT id, subject, predicate, object, confidence, "
+            "SELECT id, user_id, subject, predicate, object, confidence, "
             "valid_from, valid_until, recorded_at, sources, embedding "
             "FROM facts "
             f"WHERE {' AND '.join(clauses)} "
@@ -229,25 +240,28 @@ class PostgresFactStore:
         *,
         limit: int = 5,
         valid_at: datetime | None = None,
+        user_id: str | None = None,
     ) -> list[Fact]:
         if self._embedder is not None:
-            return await self._recall_embedding(query, limit, valid_at)
-        return await self._recall_ilike(query, limit, valid_at)
+            return await self._recall_embedding(query, limit, valid_at, user_id)
+        return await self._recall_ilike(query, limit, valid_at, user_id)
 
     async def _recall_embedding(
         self,
         query: str,
         limit: int,
         valid_at: datetime | None,
+        user_id: str | None,
     ) -> list[Fact]:
         assert self._embedder is not None
         query_embedding = await self._embedder.embed(query)
 
-        # Cosine distance via pgvector's ``<=>`` operator. NULL
-        # embeddings are excluded so the index stays useful.
-        clauses = ["embedding IS NOT NULL"]
-        params: list[Any] = []
-        idx = 1
+        # Cosine distance via pgvector's ``<=>`` operator. Hard
+        # ``user_id`` partition + NULL-embedding exclusion + optional
+        # bi-temporal window.
+        clauses = ["embedding IS NOT NULL", "user_id IS NOT DISTINCT FROM $1"]
+        params: list[Any] = [user_id]
+        idx = 2
         if valid_at is not None:
             clauses.append(
                 f"valid_from <= ${idx} "
@@ -261,7 +275,7 @@ class PostgresFactStore:
         params.append(limit)
 
         sql = (
-            "SELECT id, subject, predicate, object, confidence, "
+            "SELECT id, user_id, subject, predicate, object, confidence, "
             "valid_from, valid_until, recorded_at, sources, embedding "
             "FROM facts "
             f"WHERE {' AND '.join(clauses)} "
@@ -278,10 +292,11 @@ class PostgresFactStore:
         query: str,
         limit: int,
         valid_at: datetime | None,
+        user_id: str | None,
     ) -> list[Fact]:
-        clauses = ["1=1"]
-        params: list[Any] = []
-        idx = 1
+        clauses = ["user_id IS NOT DISTINCT FROM $1"]
+        params: list[Any] = [user_id]
+        idx = 2
         if valid_at is not None:
             clauses.append(
                 f"valid_from <= ${idx} "
@@ -305,7 +320,7 @@ class PostgresFactStore:
 
         params.append(limit)
         sql = (
-            "SELECT id, subject, predicate, object, confidence, "
+            "SELECT id, user_id, subject, predicate, object, confidence, "
             "valid_from, valid_until, recorded_at, sources, embedding "
             "FROM facts "
             f"WHERE {' AND '.join(clauses)} "
@@ -319,7 +334,7 @@ class PostgresFactStore:
     async def all_facts(self) -> list[Fact]:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT id, subject, predicate, object, confidence, "
+                "SELECT id, user_id, subject, predicate, object, confidence, "
                 "valid_from, valid_until, recorded_at, sources, embedding "
                 "FROM facts ORDER BY recorded_at DESC"
             )
@@ -338,8 +353,14 @@ def _row_to_fact(row: Any) -> Fact:
     sources = row["sources"]
     if sources is None:
         sources = []
+    # Older rows from a pre-migration schema may not include user_id.
+    try:
+        user_id_val = row["user_id"]
+    except (KeyError, IndexError):
+        user_id_val = None
     return Fact(
         id=row["id"],
+        user_id=user_id_val,
         subject=row["subject"],
         predicate=row["predicate"],
         object=row["object"],

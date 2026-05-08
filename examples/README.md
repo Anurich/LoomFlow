@@ -1,13 +1,15 @@
 # Examples
 
-Two end-to-end examples that exercise JeevesAgent's own loader, vector
-store, retriever-as-tool pattern, and multi-agent architectures —
-nothing pulled in from outside the framework.
+Three end-to-end examples that exercise JeevesAgent's own loader,
+vector store, retriever-as-tool pattern, multi-agent architectures,
+and the multi-user / session-continuity primitives — nothing pulled
+in from outside the framework.
 
 | File | What it shows |
 |---|---|
 | [`01_rag_pdf.py`](01_rag_pdf.py) | Single-agent RAG over a folder of PDFs. Loader → `RecursiveChunker` → `ChromaVectorStore` → `@tool` retriever → `Agent`. |
 | [`02_specialist_debate.py`](02_specialist_debate.py) | Five domain specialists (IT / physics / medicine / finance / law), each with their own folder of PDFs and their own Chroma collection, composed via `Team.debate(...)` with a synthesising judge agent. |
+| [`03_multi_user_sessions.py`](03_multi_user_sessions.py) | Multi-user namespacing + conversation continuity on **one** shared `Agent` + `InMemoryMemory`. Demonstrates that `user_id` is a hard partition (Alice's history never surfaces in Bob's recall) and that reusing `session_id` rehydrates prior turns as real chat history. Also shows tools reading scope via `get_run_context()`. |
 
 Both examples generate small sample PDFs on first run (via
 `reportlab`) and cache them under `examples/data/`. The on-disk

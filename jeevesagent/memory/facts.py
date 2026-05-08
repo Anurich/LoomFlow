@@ -50,6 +50,7 @@ class FactStore(Protocol):
         object_: str | None = None,
         valid_at: datetime | None = None,
         limit: int = 10,
+        user_id: str | None = None,
     ) -> list[Fact]: ...
 
     async def recall_text(
@@ -58,6 +59,7 @@ class FactStore(Protocol):
         *,
         limit: int = 5,
         valid_at: datetime | None = None,
+        user_id: str | None = None,
     ) -> list[Fact]: ...
 
     async def all_facts(self) -> list[Fact]: ...
@@ -111,6 +113,11 @@ class InMemoryFactStore:
 
         async with self._lock:
             for existing_id, existing in list(self._facts.items()):
+                # Supersession is namespace-scoped — alice's facts never
+                # invalidate bob's, anonymous facts never invalidate
+                # named-user facts.
+                if existing.user_id != fact.user_id:
+                    continue
                 if existing.subject != fact.subject:
                     continue
                 if existing.predicate != fact.predicate:
@@ -186,10 +193,13 @@ class InMemoryFactStore:
         object_: str | None = None,
         valid_at: datetime | None = None,
         limit: int = 10,
+        user_id: str | None = None,
     ) -> list[Fact]:
         async with self._lock:
             results = list(self._facts.values())
 
+        # Hard namespace partition by ``user_id``.
+        results = [f for f in results if f.user_id == user_id]
         if subject is not None:
             results = [f for f in results if f.subject == subject]
         if predicate is not None:
@@ -209,6 +219,7 @@ class InMemoryFactStore:
         *,
         limit: int = 5,
         valid_at: datetime | None = None,
+        user_id: str | None = None,
     ) -> list[Fact]:
         """Rank facts against ``query``.
 
@@ -216,11 +227,16 @@ class InMemoryFactStore:
         embedding vs each fact triple's stored embedding. Without one:
         token-overlap with a small stop-word list (longer overlaps
         win, ties break by shorter haystack = more specific match).
+
+        ``user_id`` partitions the candidate set as a hard namespace
+        boundary — see :class:`Fact` for semantics.
         """
         async with self._lock:
             facts = list(self._facts.values())
             embeddings = dict(self._embeddings)
 
+        # Hard namespace partition by ``user_id``.
+        facts = [f for f in facts if f.user_id == user_id]
         if valid_at is not None:
             facts = [f for f in facts if _is_valid_at(f, valid_at)]
 

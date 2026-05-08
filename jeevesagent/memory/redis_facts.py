@@ -97,6 +97,12 @@ class RedisFactStore:
     async def _supersede(self, fact: Fact) -> None:
         ts = str(fact.valid_from.timestamp()).encode("utf-8")
         async for key, data in self._scan_facts():
+            # Namespace-scoped supersession: alice's facts never
+            # invalidate bob's. Anonymous bucket (None / empty) is
+            # its own namespace.
+            other_user = _decode_field(data.get(b"user_id", b"")) or None
+            if other_user != fact.user_id:
+                continue
             if _decode_field(data.get(b"subject", b"")) != fact.subject:
                 continue
             if _decode_field(data.get(b"predicate", b"")) != fact.predicate:
@@ -124,6 +130,10 @@ class RedisFactStore:
         )
         mapping = {
             b"id": fact.id.encode("utf-8"),
+            # Persist ``user_id`` so recall queries can filter by
+            # namespace partition. Empty bytes for the anonymous
+            # bucket; round-trip back to ``None`` on read.
+            b"user_id": (fact.user_id or "").encode("utf-8"),
             b"subject": fact.subject.encode("utf-8"),
             b"predicate": fact.predicate.encode("utf-8"),
             b"object": fact.object.encode("utf-8"),
@@ -147,12 +157,16 @@ class RedisFactStore:
         object_: str | None = None,
         valid_at: datetime | None = None,
         limit: int = 10,
+        user_id: str | None = None,
     ) -> list[Fact]:
         valid_at_ts = valid_at.timestamp() if valid_at is not None else None
         results: list[Fact] = []
         async for _key, data in self._scan_facts():
             fact = _hash_to_fact(data)
             if fact is None:
+                continue
+            # Hard namespace partition by ``user_id``.
+            if fact.user_id != user_id:
                 continue
             if subject is not None and fact.subject != subject:
                 continue
@@ -172,6 +186,7 @@ class RedisFactStore:
         *,
         limit: int = 5,
         valid_at: datetime | None = None,
+        user_id: str | None = None,
     ) -> list[Fact]:
         query_embedding = await self._embedder.embed(query)
         valid_at_ts = valid_at.timestamp() if valid_at is not None else None
@@ -180,6 +195,9 @@ class RedisFactStore:
         async for _key, data in self._scan_facts():
             fact = _hash_to_fact(data)
             if fact is None:
+                continue
+            # Hard namespace partition by ``user_id``.
+            if fact.user_id != user_id:
                 continue
             if valid_at_ts is not None and not _is_valid_at(fact, valid_at_ts):
                 continue
@@ -276,8 +294,10 @@ def _hash_to_fact(data: dict[bytes, Any]) -> Fact | None:
         confidence = float(_decode_field(data.get(b"confidence", "1.0")))
     except ValueError:
         confidence = 1.0
+    user_id_raw = _decode_field(data.get(b"user_id", b""))
     return Fact(
         id=eid,
+        user_id=user_id_raw or None,
         subject=_decode_field(data.get(b"subject", b"")),
         predicate=_decode_field(data.get(b"predicate", b"")),
         object=_decode_field(data.get(b"object", b"")),

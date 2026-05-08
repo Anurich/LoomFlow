@@ -103,13 +103,14 @@ async def test_remember_inserts_with_namespace_and_embedding() -> None:
     assert len(store.executed) == 1
     sql, args = store.executed[0]
     assert "INSERT INTO episodes" in sql
-    # Args: id, namespace, session_id, occurred_at, input, output, embedding
+    # Args: id, namespace, session_id, user_id, occurred_at, input, output, embedding
     assert args[1] == "default"
     assert args[2] == "s"
-    assert args[4] == "hello"
-    assert args[5] == "world"
-    assert isinstance(args[6], list)
-    assert len(args[6]) == 64
+    assert args[3] is None  # user_id (anonymous bucket)
+    assert args[5] == "hello"
+    assert args[6] == "world"
+    assert isinstance(args[7], list)
+    assert len(args[7]) == 64
 
 
 async def test_recall_uses_pgvector_distance_operator() -> None:
@@ -134,13 +135,14 @@ async def test_recall_uses_pgvector_distance_operator() -> None:
     assert len(out) == 1
     assert out[0].id == "ep_1"
     sql, args = store.queried[0]
-    assert "embedding <=> $4" in sql  # cosine distance ordering
-    # Args: namespace, lo, hi, query_embedding, limit
+    assert "embedding <=> $5" in sql  # cosine distance ordering
+    # Args: namespace, user_id, lo, hi, query_embedding, limit
     assert args[0] == "default"
-    assert args[1] is None
+    assert args[1] is None  # user_id (anonymous bucket)
     assert args[2] is None
-    assert isinstance(args[3], list)
-    assert args[4] == 3
+    assert args[3] is None
+    assert isinstance(args[4], list)
+    assert args[5] == 3
 
 
 async def test_recall_recent_when_query_is_empty() -> None:
@@ -174,8 +176,9 @@ async def test_recall_with_time_range_passes_bounds() -> None:
     store.next_rows = []
     await mem.recall("anything", limit=2, time_range=window)
     _, args = store.queried[0]
-    assert args[1] == window[0]
-    assert args[2] == window[1]
+    # Args: namespace, user_id, lo, hi, query_embedding, limit
+    assert args[2] == window[0]
+    assert args[3] == window[1]
 
 
 # ---------------------------------------------------------------------------

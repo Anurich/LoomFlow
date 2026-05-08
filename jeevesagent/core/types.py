@@ -147,10 +147,21 @@ class MemoryBlock(BaseModel):
 
 
 class Episode(BaseModel):
-    """A single (input, decisions, tool calls, output) tuple from history."""
+    """A single (input, decisions, tool calls, output) tuple from history.
+
+    ``user_id`` is the framework-managed namespace partition. Episodes
+    persisted with one ``user_id`` value are never visible to memory
+    recall queries scoped to a different ``user_id``. ``None`` is its
+    own bucket — the "anonymous / single-tenant" namespace — and does
+    not see episodes belonging to a non-None ``user_id`` (and vice
+    versa). Set automatically from :class:`~jeevesagent.RunContext`
+    by the agent loop; pass explicitly when constructing episodes
+    outside a run.
+    """
 
     id: str = Field(default_factory=lambda: new_id("ep"))
     session_id: str
+    user_id: str | None = None
     occurred_at: datetime = Field(default_factory=_utcnow)
     input: str
     output: str
@@ -166,9 +177,16 @@ class Fact(BaseModel):
 
     Bi-temporal: ``valid_from``/``valid_until`` tracks when the fact was
     true in the world; ``recorded_at`` tracks when we learned it.
+
+    ``user_id`` is the framework-managed namespace partition. Facts
+    persisted with one ``user_id`` value are never visible to recall
+    queries scoped to a different ``user_id``. Set automatically from
+    :class:`~jeevesagent.RunContext` by the agent loop / consolidator;
+    pass explicitly when constructing facts outside a run.
     """
 
     id: str = Field(default_factory=lambda: new_id("fact"))
+    user_id: str | None = None
     subject: str
     predicate: str
     object: str
