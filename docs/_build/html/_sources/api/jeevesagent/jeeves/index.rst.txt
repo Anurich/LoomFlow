@@ -1,0 +1,162 @@
+jeevesagent.jeeves
+==================
+
+.. py:module:: jeevesagent.jeeves
+
+.. autoapi-nested-parse::
+
+   First-party Jeeves Gateway integration.
+
+   Sugar over :mod:`jeevesagent.mcp` for the public Jeeves MCP gateway.
+   ``JeevesGateway`` is itself a ``ToolHost`` so it drops straight into
+   ``Agent(tools=...)``.
+
+   Quick start::
+
+       from jeevesagent import Agent
+       from jeevesagent.jeeves import JeevesGateway
+
+       agent = Agent(
+           "You are a productivity assistant",
+           tools=JeevesGateway.from_env(),
+       )
+
+
+
+Submodules
+----------
+
+.. toctree::
+   :maxdepth: 1
+
+   /api/jeevesagent/jeeves/client/index
+
+
+Attributes
+----------
+
+.. autoapisummary::
+
+   jeevesagent.jeeves.JEEVES_API_KEY_ENV
+   jeevesagent.jeeves.JEEVES_DEFAULT_BASE_URL
+   jeevesagent.jeeves.JEEVES_TOKEN_PREFIX
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   jeevesagent.jeeves.JeevesConfig
+   jeevesagent.jeeves.JeevesGateway
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   jeevesagent.jeeves.looks_like_jeeves_key
+
+
+Package Contents
+----------------
+
+.. py:class:: JeevesConfig
+
+   Connection details for the Jeeves Gateway.
+
+
+   .. py:attribute:: api_key
+      :type:  str
+
+
+   .. py:attribute:: base_url
+      :type:  str
+      :value: 'https://jeeves.works/mcp'
+
+
+
+   .. py:attribute:: server_name
+      :type:  str
+      :value: 'jeeves'
+
+
+
+.. py:class:: JeevesGateway(config: JeevesConfig, *, registry: jeevesagent.mcp.registry.MCPRegistry | None = None)
+
+   ToolHost-shaped wrapper around the Jeeves Gateway.
+
+
+   .. py:method:: aclose() -> None
+      :async:
+
+
+
+   .. py:method:: as_mcp_server() -> jeevesagent.mcp.spec.MCPServerSpec
+
+      Return the :class:`MCPServerSpec` describing this gateway.
+
+
+
+   .. py:method:: as_registry() -> jeevesagent.mcp.registry.MCPRegistry
+
+      Return a one-server :class:`MCPRegistry` rooted at this gateway.
+
+
+
+   .. py:method:: call(tool: str, args: collections.abc.Mapping[str, Any], *, call_id: str = '') -> jeevesagent.core.types.ToolResult
+      :async:
+
+
+
+   .. py:method:: from_env(*, env_var: str = JEEVES_API_KEY_ENV, base_url: str | None = None, server_name: str = JEEVES_DEFAULT_SERVER_NAME) -> JeevesGateway
+      :classmethod:
+
+
+      Build a gateway from the ``JEEVES_API_KEY`` environment variable.
+
+
+
+   .. py:method:: list_tools(*, query: str | None = None) -> list[jeevesagent.core.types.ToolDef]
+      :async:
+
+
+
+   .. py:method:: watch() -> collections.abc.AsyncIterator[jeevesagent.core.types.ToolEvent]
+      :async:
+
+
+
+   .. py:property:: config
+      :type: JeevesConfig
+
+
+
+   .. py:property:: server_name
+      :type: str
+
+
+
+.. py:function:: looks_like_jeeves_key(value: str) -> bool
+
+   Return ``True`` if ``value`` matches the Jeeves API-key shape.
+
+   The check is intentionally permissive — it only verifies the
+   well-known ``jm_sk_`` prefix so callers can warn on obviously-wrong
+   inputs without blocking unconventional formats the server may
+   accept.
+
+
+.. py:data:: JEEVES_API_KEY_ENV
+   :value: 'JEEVES_API_KEY'
+
+
+.. py:data:: JEEVES_DEFAULT_BASE_URL
+   :value: 'https://jeeves.works/mcp'
+
+
+.. py:data:: JEEVES_TOKEN_PREFIX
+   :value: 'jm_sk_'
+
+

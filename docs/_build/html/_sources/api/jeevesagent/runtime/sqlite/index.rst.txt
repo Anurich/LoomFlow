@@ -1,0 +1,50 @@
+jeevesagent.runtime.sqlite
+==========================
+
+.. py:module:: jeevesagent.runtime.sqlite
+
+.. autoapi-nested-parse::
+
+   Convenience subclass: ``JournaledRuntime`` rooted at a sqlite file.
+
+   Usage::
+
+       runtime = SqliteRuntime("./jeeves-journal.db")
+       agent = Agent("...", runtime=runtime)
+
+   The DB file (and any missing parent directories) is created on first
+   use. Each ``Agent.run()`` opens its own ``runtime.session(session_id)``
+   context, so multiple concurrent runs share the same sqlite file
+   without conflicting on rows.
+
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   jeevesagent.runtime.sqlite.SqliteRuntime
+
+
+Module Contents
+---------------
+
+.. py:class:: SqliteRuntime(path: str | pathlib.Path)
+
+   Bases: :py:obj:`jeevesagent.runtime.journaled.JournaledRuntime`
+
+
+   :class:`JournaledRuntime` with a :class:`SqliteJournalStore`.
+
+
+   .. py:attribute:: name
+      :value: 'sqlite'
+
+
+
+   .. py:property:: path
+      :type: pathlib.Path
+
+
+

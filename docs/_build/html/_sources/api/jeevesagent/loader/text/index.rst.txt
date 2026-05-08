@@ -1,0 +1,38 @@
+jeevesagent.loader.text
+=======================
+
+.. py:module:: jeevesagent.loader.text
+
+.. autoapi-nested-parse::
+
+   Plain-text and markdown loaders.
+
+   These are the simplest cases — markdown / text files are already
+   UTF-8 text; we just read and tag.
+
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   jeevesagent.loader.text.load_markdown
+   jeevesagent.loader.text.load_text
+
+
+Module Contents
+---------------
+
+.. py:function:: load_markdown(path: str | pathlib.Path) -> jeevesagent.loader.base.Document
+
+   Load a markdown file. Just reads UTF-8 text.
+
+
+.. py:function:: load_text(path: str | pathlib.Path) -> jeevesagent.loader.base.Document
+
+   Load a plain-text file. Wraps content in markdown by
+   adding a ``# {filename}`` heading so downstream chunkers /
+   consumers see consistent markdown.
+
+

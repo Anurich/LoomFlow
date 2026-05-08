@@ -1,0 +1,117 @@
+jeevesagent.vectorstore.postgres
+================================
+
+.. py:module:: jeevesagent.vectorstore.postgres
+
+.. autoapi-nested-parse::
+
+   Postgres + pgvector vector store.
+
+   Production durable storage. Lazy import via ``asyncpg``; install
+   with ``pip install 'jeevesagent[vectorstore-postgres]'`` and ensure
+   the ``vector`` extension is enabled on your database
+   (``CREATE EXTENSION IF NOT EXISTS vector``).
+
+   Schema (auto-created via :meth:`init_schema`)::
+
+       CREATE TABLE jeeves_vectors (
+           id          TEXT PRIMARY KEY,
+           content     TEXT NOT NULL,
+           metadata    JSONB,
+           embedding   vector(N) NOT NULL
+       );
+       CREATE INDEX ON jeeves_vectors USING hnsw (embedding vector_cosine_ops);
+
+   Filter language: full Mongo-style operators translated to JSONB
+   SQL. ``$eq`` / ``$ne`` / ``$gt`` / ``$gte`` / ``$lt`` / ``$lte`` /
+   ``$in`` / ``$nin`` / ``$and`` / ``$or`` / ``$not`` / ``$exists``
+   are all supported.
+
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   jeevesagent.vectorstore.postgres.PostgresVectorStore
+
+
+Module Contents
+---------------
+
+.. py:class:: PostgresVectorStore(embedder: jeevesagent.core.protocols.Embedder, *, dsn: str, table: str = 'jeeves_vectors', dimension: int | None = None)
+
+   Vector store backed by Postgres + ``pgvector``.
+
+
+   .. py:method:: add(chunks: list[jeevesagent.loader.base.Chunk], ids: list[str] | None = None) -> list[str]
+      :async:
+
+
+
+   .. py:method:: count() -> int
+      :async:
+
+
+
+   .. py:method:: delete(ids: list[str]) -> None
+      :async:
+
+
+
+   .. py:method:: from_chunks(chunks: list[jeevesagent.loader.base.Chunk], *, embedder: jeevesagent.core.protocols.Embedder, ids: list[str] | None = None, dsn: str, table: str = 'jeeves_vectors', dimension: int | None = None) -> PostgresVectorStore
+      :classmethod:
+
+      :async:
+
+
+      One-shot: construct a PostgresVectorStore + add ``chunks``.
+
+
+
+   .. py:method:: from_texts(texts: list[str], *, embedder: jeevesagent.core.protocols.Embedder, metadatas: list[dict[str, Any]] | None = None, ids: list[str] | None = None, dsn: str, table: str = 'jeeves_vectors', dimension: int | None = None) -> PostgresVectorStore
+      :classmethod:
+
+      :async:
+
+
+      One-shot: construct a PostgresVectorStore from raw text
+      strings (each becomes a :class:`Chunk` with the matching
+      metadata dict, or empty if ``metadatas`` is None).
+
+
+
+   .. py:method:: get_by_ids(ids: list[str]) -> list[jeevesagent.loader.base.Chunk]
+      :async:
+
+
+
+   .. py:method:: init_schema(dimension: int) -> None
+      :async:
+
+
+      Create the table + HNSW index. Idempotent.
+
+
+
+   .. py:method:: search(query: str, *, k: int = 4, filter: collections.abc.Mapping[str, Any] | None = None, diversity: float | None = None) -> list[jeevesagent.vectorstore.base.SearchResult]
+      :async:
+
+
+
+   .. py:method:: search_by_vector(vector: list[float], *, k: int = 4, filter: collections.abc.Mapping[str, Any] | None = None, diversity: float | None = None) -> list[jeevesagent.vectorstore.base.SearchResult]
+      :async:
+
+
+
+   .. py:property:: embedder
+      :type: jeevesagent.core.protocols.Embedder
+
+
+
+   .. py:attribute:: name
+      :value: 'postgres'
+
+
+

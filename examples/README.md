@@ -10,6 +10,7 @@ in from outside the framework.
 | [`01_rag_pdf.py`](01_rag_pdf.py) | Single-agent RAG over a folder of PDFs. Loader → `RecursiveChunker` → `ChromaVectorStore` → `@tool` retriever → `Agent`. |
 | [`02_specialist_debate.py`](02_specialist_debate.py) | Five domain specialists (IT / physics / medicine / finance / law), each with their own folder of PDFs and their own Chroma collection, composed via `Team.debate(...)` with a synthesising judge agent. |
 | [`03_multi_user_sessions.py`](03_multi_user_sessions.py) | Multi-user namespacing + conversation continuity on **one** shared `Agent` + `InMemoryMemory`. Demonstrates that `user_id` is a hard partition (Alice's history never surfaces in Bob's recall) and that reusing `session_id` rehydrates prior turns as real chat history. Also shows tools reading scope via `get_run_context()`. |
+| [`04_structured_outputs.py`](04_structured_outputs.py) | Type-safe structured outputs. Define a Pydantic `BaseModel`, pass it as `output_schema=`, get a validated typed instance back on `result.parsed`. Demonstrates schema-driven extraction (a `MeetingSummary` with nested `ActionItem`s, ISO dates, sentiment enum) from a raw meeting transcript. |
 
 Both examples generate small sample PDFs on first run (via
 `reportlab`) and cache them under `examples/data/`. The on-disk

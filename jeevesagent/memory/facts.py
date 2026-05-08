@@ -26,6 +26,7 @@ fact stores are a follow-up — the protocol is stable.
 from __future__ import annotations
 
 import math
+import warnings
 from collections.abc import Iterable
 from datetime import datetime
 from typing import Protocol, runtime_checkable
@@ -234,6 +235,19 @@ class InMemoryFactStore:
         async with self._lock:
             facts = list(self._facts.values())
             embeddings = dict(self._embeddings)
+
+        # Footgun protection — see ``InMemoryMemory.recall``.
+        if user_id is None and any(f.user_id is not None for f in facts):
+            from ..core.context import IsolationWarning
+            warnings.warn(
+                "FactStore.recall_text called without user_id, but the "
+                "store contains facts for one or more named users. The "
+                "anonymous bucket is partitioned from named-user "
+                "buckets, so this query will only see anonymous facts. "
+                "Did you forget to pass user_id=?",
+                IsolationWarning,
+                stacklevel=3,
+            )
 
         # Hard namespace partition by ``user_id``.
         facts = [f for f in facts if f.user_id == user_id]

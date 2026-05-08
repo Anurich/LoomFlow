@@ -1,0 +1,207 @@
+jeevesagent.architecture.blackboard
+===================================
+
+.. py:module:: jeevesagent.architecture.blackboard
+
+.. autoapi-nested-parse::
+
+   Blackboard: shared state board with a coordinator picking the
+   next contributor each round.
+
+   Classical AI: Erman et al. 1980 (Hearsay-II). Han & Zhang 2025
+   revived for LLM agents (arXiv:2507.01701). Salemi et al. 2026
+   (arXiv:2510.01285) reports +13-57% relative improvement on
+   data-discovery tasks.
+
+   Pattern
+   -------
+
+   1. Initialize the blackboard with the user's problem statement.
+   2. Each round, the **coordinator** reads the blackboard and picks
+      one agent to contribute next (or terminates).
+   3. The chosen agent runs with the blackboard view in its prompt and
+      produces a contribution.
+   4. The contribution is appended to the blackboard.
+   5. Loop until the coordinator terminates or ``max_rounds`` is hit.
+   6. The **decider** synthesizes the final answer from the
+      blackboard. ``decider=None`` falls back to the last
+      ``answer``-kind contribution, or the most recent contribution
+      if no answer-kind exists.
+
+   Coordinator API
+   ---------------
+
+   The coordinator is a :class:`Agent` that produces JSON in this shape::
+
+       {"terminate": bool, "next_agent": str|null, "instruction": str|null}
+
+   If ``terminate`` is true, the loop ends. Otherwise ``next_agent``
+   must name one of the configured agents. If the coordinator emits an
+   unknown name or malformed JSON, the round is skipped and a warning
+   event fires (Blackboard does not crash on coordinator misbehavior).
+
+   Set ``coordinator=None`` to fall back to round-robin selection —
+   useful for testing / prototyping but defeats the "contribute when
+   relevant" feature of the architecture.
+
+   Strengths
+   ---------
+   * Decentralized contribution; agents react to current state rather
+     than being forced into a fixed delegation graph.
+   * Transparent state — the blackboard is the audit log.
+
+   Weaknesses
+   ----------
+   * Coordinator quality is critical. A bad coordinator picks wrong
+     agents and the system stalls.
+   * Blackboard state grows monotonically; long sessions can blow up
+     the LLM context.
+   * "Theoretically interesting but rarely outperforms hierarchical or
+     graph in production" (2026 taxonomy guide). Reserve for
+     exploratory research / data-discovery problems.
+
+
+
+Attributes
+----------
+
+.. autoapisummary::
+
+   jeevesagent.architecture.blackboard.DEFAULT_COORDINATOR_INSTRUCTIONS
+   jeevesagent.architecture.blackboard.DEFAULT_DECIDER_INSTRUCTIONS
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   jeevesagent.architecture.blackboard.Blackboard
+   jeevesagent.architecture.blackboard.BlackboardArchitecture
+   jeevesagent.architecture.blackboard.BlackboardEntry
+
+
+Module Contents
+---------------
+
+.. py:class:: Blackboard
+
+   Public + per-agent private state for the architecture.
+
+
+   .. py:method:: post(author: str, content: str, *, kind: str = 'contribution', private_to: str | None = None) -> BlackboardEntry
+
+
+   .. py:method:: render_for(agent_name: str) -> str
+
+      Format the blackboard state as a string for ``agent_name``.
+
+      Includes every public entry and the agent's own private
+      scratchpad if any.
+
+
+
+   .. py:attribute:: private
+      :type:  dict[str, list[BlackboardEntry]]
+
+
+   .. py:attribute:: public
+      :type:  list[BlackboardEntry]
+      :value: []
+
+
+
+.. py:class:: BlackboardArchitecture(*, agents: dict[str, jeevesagent.agent.api.Agent], coordinator: jeevesagent.agent.api.Agent | None = None, decider: jeevesagent.agent.api.Agent | None = None, max_rounds: int = 10, coordinator_instructions: str | None = None, decider_instructions: str | None = None)
+
+   Coordinator + agents + decider, mediated by a shared
+   blackboard.
+
+
+   .. py:method:: declared_workers() -> dict[str, jeevesagent.agent.api.Agent]
+
+
+   .. py:method:: run(session: jeevesagent.architecture.base.AgentSession, deps: jeevesagent.architecture.base.Dependencies, prompt: str) -> collections.abc.AsyncIterator[jeevesagent.core.types.Event]
+      :async:
+
+
+
+   .. py:attribute:: name
+      :value: 'blackboard'
+
+
+
+.. py:class:: BlackboardEntry
+
+   One contribution on the blackboard.
+
+
+   .. py:attribute:: author
+      :type:  str
+
+
+   .. py:attribute:: content
+      :type:  str
+
+
+   .. py:attribute:: kind
+      :type:  str
+      :value: 'contribution'
+
+
+
+   .. py:attribute:: timestamp
+      :type:  datetime.datetime
+
+
+.. py:data:: DEFAULT_COORDINATOR_INSTRUCTIONS
+   :value: Multiline-String
+
+   .. raw:: html
+
+      <details><summary>Show Value</summary>
+
+   .. code-block:: python
+
+      """You coordinate a team of specialist agents on a shared problem.
+      
+      Read the blackboard state below and decide:
+      - Should we terminate now? (Has a satisfactory answer been written?)
+      - If continuing, which agent should contribute next?
+      - What specific instruction should that agent receive?
+      
+      Available agents:
+      {agents}
+      
+      Output JSON exactly:
+      {{"terminate": <bool>, "next_agent": <str|null>, "instruction": <str|null>}}
+      
+      If terminating, set next_agent and instruction to null.
+      """
+
+   .. raw:: html
+
+      </details>
+
+
+
+.. py:data:: DEFAULT_DECIDER_INSTRUCTIONS
+   :value: Multiline-String
+
+   .. raw:: html
+
+      <details><summary>Show Value</summary>
+
+   .. code-block:: python
+
+      """You synthesize the final answer from a multi-agent blackboard
+      discussion. Read the blackboard state below and produce the best
+      answer you can. Cite specific contributions when useful;
+      acknowledge dissent if it matters.
+      """
+
+   .. raw:: html
+
+      </details>
+
+
+

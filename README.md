@@ -1,25 +1,74 @@
 # JeevesAgent
 
-**A model-agnostic, MCP-native, fully-async agent harness with memory done right.**
+**Production-ready async agent harness. Multi-tenant by default,
+typed outputs, retries on transient errors, model-agnostic, MCP-native.**
+
+📖 **Docs** — <https://jeevesagent.readthedocs.io>
+&nbsp;&nbsp;·&nbsp;&nbsp;
+**Migrating?** — [from LangGraph](docs/migrations/from-langgraph.md)
+&nbsp;·&nbsp;
+[from raw OpenAI SDK](docs/migrations/from-openai-sdk.md)
+&nbsp;&nbsp;·&nbsp;&nbsp;
+**Changelog** — [CHANGELOG.md](CHANGELOG.md)
 
 ```python
-from jeevesagent import Agent
 import asyncio
+from pydantic import BaseModel
+from jeevesagent import Agent
+
+class WeatherReport(BaseModel):
+    city: str
+    temp_c: float
+    conditions: str
 
 async def main():
-  
-  agent = Agent("You are a helpful assistant.", model="claude-opus-4-7")
-  result = await agent.run("What's 2 + 2?")
-  print(result.output)  # "4"
+    agent = Agent("Be precise.", model="gpt-4.1-mini")
+
+    # Free-form run, scoped to a user (memory partitions automatically).
+    r = await agent.run("Hi, my name is Alice.", user_id="alice")
+    print(r.output)
+
+    # Same agent, structured output, conversation continues.
+    r = await agent.run(
+        "Weather in Tokyo right now: sunny, 22°C, light wind. Extract.",
+        user_id="alice",
+        session_id="conv_42",
+        output_schema=WeatherReport,
+    )
+    report: WeatherReport = r.parsed   # ← typed, validated
+    print(f"{report.city}: {report.temp_c}°C — {report.conditions}")
 
 asyncio.run(main())
 ```
 
-That's the whole quickstart. Set `ANTHROPIC_API_KEY` and you're talking
-to Claude. Swap `"claude-opus-4-7"` for `"gpt-4o"` to talk to GPT, or
-`"echo"` to use the zero-key fake (echoes the prompt — useful for
-tests and local dev). Memory, runtime, telemetry, sandbox, audit are
-all opt-in behind the same `Agent` constructor.
+Set `OPENAI_API_KEY` and run. Swap `"gpt-4.1-mini"` for
+`"claude-opus-4-7"`, `"mistral-large"`, `"command-r-plus"`,
+`"echo"` (zero-key fake), or any of ~100 providers via LiteLLM.
+
+**What's actually different about this framework:**
+
+* `user_id` is a first-class typed primitive. One shared `Agent` +
+  one shared `Memory` partitions automatically across N tenants
+  with no cross-contamination. **No more "forgot to namespace" data
+  leaks.**
+* `output_schema=` accepts any Pydantic model. The framework
+  augments the system prompt, parses the result, validates,
+  retries-with-feedback on validation failure. **Typed outputs by
+  default, free-text by omission.**
+* Network model adapters are auto-wrapped with a typed error
+  taxonomy + retry policy. Rate limits, 5xx, network blips don't
+  blow up your run. **Resilient by default.**
+* `session_id` is a real conversation handle. Reuse it across
+  `agent.run()` calls and prior turns rehydrate as real chat
+  history. **No reducer protocol, no `add_messages` magic.**
+* The agent loop is a *strategy*. Twelve architectures shipped
+  (ReAct, Self-Refine, Reflexion, TreeOfThoughts, PlanAndExecute,
+  ReWOO, Router, Supervisor, ActorCritic, MultiAgentDebate, Swarm,
+  Blackboard) behind one `Agent` constructor. **One kwarg flips
+  the iteration pattern.**
+* Async-only, anyio everywhere, structured concurrency cancellation
+  works correctly. Fast path when production features (audit / OTel
+  / permissions / hooks / journaling) aren't wired up.
 
 > ⚠️ **`model` is required** as of v0.2.0. Earlier `0.1.x` releases
 > silently defaulted to `EchoModel` which produced confusing output;
@@ -27,57 +76,56 @@ all opt-in behind the same `Agent` constructor.
 
 ---
 
-## Why this exists
+## Why pick this over LangGraph / CrewAI / AutoGen
 
-Every agent framework today forces a choice you shouldn't have to make:
+Every agent framework forces a choice you shouldn't have to make:
 
-* **LangChain / LangGraph** lock you into a graph editor and a specific
-  state model. Production teams report runaway loops, opaque debugging,
-  and brittle abstractions.
+* **LangChain / LangGraph** lock you into a graph editor and a
+  specific state model. `user_id` is a string in
+  `config["configurable"]` — typo it once and you silently leak
+  data across tenants. Structured outputs and retries are
+  developer-side concerns.
 * **Claude Agent SDK** is excellent if you're committed to Anthropic
   forever. It's not model-agnostic.
 * **OpenAI Assistants** is a black box you don't run yourself.
-* **CrewAI / AutoGen** are abstractions over LangChain — same problems.
+* **CrewAI / AutoGen** are abstractions over LangChain — same
+  problems.
 
-JeevesAgent is the harness for engineers who want to **ship production
-agents without binding their stack to one model lab**. It's:
+JeevesAgent is the harness for engineers shipping production agents
+without binding their stack to one model lab — and without wiring
+multi-tenancy / structured outputs / retries by hand.
+
+**Capabilities at a glance:**
 
 * **Model-agnostic** — Anthropic, OpenAI, and ~100 more via LiteLLM
-  (Mistral, Cohere, Bedrock, Vertex, Together, Ollama, Gemini, Groq,
-  Replicate, Azure …) behind one `Model` protocol. String-based
-  resolver: `model="claude-opus-4-7"`, `"gpt-4o"`, `"mistral-large"`,
-  `"command-r-plus"`, … — no decision lock-in.
-* **Pluggable architectures** — the agent loop is a strategy.
-  Twelve shipped: ReAct (default), SelfRefine, Reflexion,
-  TreeOfThoughts, PlanAndExecute, ReWOO (single-agent); Router,
-  Supervisor, ActorCritic, MultiAgentDebate, Swarm,
-  BlackboardArchitecture (multi-agent). Same `Agent` surface;
-  one kwarg flips the iteration pattern.
-* **MCP-native** — MCP isn't an integration, it's the spine. Plug
-  Jeeves Gateway, Composio, or any MCP server into a single
-  `MCPRegistry` and your tools just work.
-* **Memory done right** — five backends (in-memory, vector, Chroma,
-  Postgres+pgvector, Redis), pluggable embedders (HashEmbedder for
-  zero-key, OpenAIEmbedder for production), and **bi-temporal facts**
-  that track when claims were true *in the world* vs when *you learned
-  them* — the Zep-style memory wedge, with native fact stores in every
-  backend.
-* **Durable** — `SqliteRuntime` gives you crash-recovery replay with
-  zero infrastructure. DBOS / Temporal adapters land next.
-* **Observable** — every step emits OpenTelemetry spans and metrics.
-  Drop in your existing exporter; Honeycomb / Datadog / LangSmith just
-  work.
-* **Safe** — permission policies, sandbox layers, append-only HMAC-signed
-  audit log, freshness/lineage policies for certified values.
-* **Async-only, structured concurrency only** — anyio everywhere; zero
+  behind one `Model` protocol. String-based resolver:
+  `model="claude-opus-4-7"`, `"gpt-4.1-mini"`, `"mistral-large"`, …
+* **Pluggable architectures** — twelve shipped, same `Agent`
+  surface, one kwarg switches the iteration strategy.
+* **MCP-native** — MCP is the tool spine, not an integration. Jeeves
+  Gateway / Composio / any MCP server plugs into a single
+  `MCPRegistry`.
+* **Memory done right** — five backends (in-memory / vector /
+  Chroma / Postgres+pgvector / Redis), pluggable embedders, and
+  **bi-temporal facts** that track when claims were true in the
+  world vs when you learned them. All five backends partition by
+  `user_id`.
+* **Durable runtime** — `SqliteRuntime` gives crash-recovery replay
+  with zero infrastructure. Postgres also supported.
+* **Observable** — OpenTelemetry spans and metrics for every step.
+  Drop in your exporter (Honeycomb / Datadog / LangSmith).
+* **Safe** — permission policies, sandbox layers, append-only
+  HMAC-signed audit log, freshness/lineage policies for certified
+  values.
+* **Async-only, structured concurrency** — anyio everywhere, zero
   raw `asyncio.create_task` / `gather`. Parallel tool dispatch via
-  task groups. Backpressure-aware streaming via memory-object streams.
+  task groups. Backpressure-aware streaming.
 
 Three principles govern every line of code:
 
 1. **The loop is deterministic; the world isn't.** Every side effect
    goes through `runtime.step(...)` so it can be cached and replayed.
-2. **Trust boundary stays outside the sandbox.** The harness runs the
+2. **Trust boundary stays outside the sandbox.** The harness runs
    tools inside a sandbox; the harness doesn't run inside one.
 3. **Validate state on write, not on read.** Pydantic everywhere.
 
@@ -659,10 +707,214 @@ speed when you don't, with no code changes between modes.
 
 ---
 
+## Resilient by default
+
+Real model APIs fail. Rate limits, 5xx blips, transient connection
+drops happen on every production deployment. JeevesAgent ships
+**retry on transient errors enabled by default** for the in-tree
+network adapters (OpenAI, Anthropic, LiteLLM) — the moment you
+construct a real-world agent it's already covered:
+
+```python
+agent = Agent("...", model="gpt-4.1-mini")
+# Default policy: 3 attempts, 1 s → 2 s → 4 s backoff
+# (capped at 30 s, ±10% jitter), respects provider Retry-After.
+```
+
+The framework normalises every model SDK's exceptions into a small
+typed taxonomy so callers + the retry layer reason about failures
+uniformly:
+
+```text
+ModelError                       — base (catch-all model failure)
+├── TransientModelError          — retry-able
+│   └── RateLimitError           — 429 / quota; carries retry_after
+└── PermanentModelError          — don't retry
+    ├── AuthenticationError      — bad API key
+    ├── InvalidRequestError      — malformed prompt / args
+    └── ContentFilterError       — safety system rejection
+```
+
+`classify_model_error(exc)` does the SDK-specific mapping (lazy
+imports, no hard dependency on any provider package). The wrapper
+treats `TransientModelError` as retryable, `PermanentModelError` as
+fatal, and any *unrecognised* exception is propagated unchanged —
+the framework refuses to silently retry errors it doesn't understand.
+
+Tune the policy per-Agent:
+
+```python
+from jeevesagent import Agent, RetryPolicy
+
+# Default (production-sensible)
+agent = Agent("...", model="gpt-4.1-mini")
+
+# Aggressive — tolerates long provider blips
+agent = Agent("...", model="gpt-4.1-mini",
+              retry_policy=RetryPolicy.aggressive())
+
+# Disabled — handle errors yourself
+agent = Agent("...", model="gpt-4.1-mini",
+              retry_policy=RetryPolicy.disabled())
+
+# Custom
+agent = Agent("...", model="gpt-4.1-mini",
+              retry_policy=RetryPolicy(
+                  max_attempts=4,
+                  initial_delay_s=0.5,
+                  max_delay_s=15.0,
+              ))
+```
+
+Behaviour highlights:
+
+* **Provider-supplied `Retry-After` is honoured** — when a 429
+  response carries the header, the framework waits at least that
+  long before the next attempt (even if it exceeds `max_delay_s`).
+  Provider authority wins over local heuristics.
+* **Streaming retries fire before the first chunk** — once the
+  consumer has received any tokens we cannot rewind, so mid-stream
+  errors propagate. Pre-first-chunk failures are retried per
+  policy.
+* **Custom Models are not auto-wrapped.** The framework only
+  wraps its in-tree adapters by default because it knows their
+  error classes. Custom Models opt in by passing `retry_policy=`
+  explicitly to `Agent(...)`.
+
+---
+
+## Structured outputs
+
+Production agents need to emit *data*, not free-form prose. Pass a
+Pydantic `BaseModel` as `output_schema=` to `agent.run(...)` and the
+framework gives you a typed, validated instance:
+
+```python
+from pydantic import BaseModel
+from jeevesagent import Agent
+
+class CompanyInfo(BaseModel):
+    name: str
+    founded_year: int
+    headquarters: str
+
+agent = Agent("extract company info", model="gpt-4.1-mini")
+result = await agent.run("Tell me about Acme.", output_schema=CompanyInfo)
+
+info: CompanyInfo = result.parsed   # ← typed, validated
+print(info.founded_year)            # 2008
+print(result.output)                # raw JSON text, still available
+```
+
+What the framework does:
+
+1. **Schema-aware system prompt** — appends a `STRUCTURED OUTPUT
+   REQUIRED` directive to the run's instructions, embedding the
+   schema's JSON Schema. Your static `Agent(...)` instructions are
+   not mutated; the augmentation is per-run.
+2. **Tolerates real-world model quirks** — strips ` ```json ` /
+   ` ``` ` markdown fences before parsing.
+3. **Retry-with-feedback** — on a parse failure, the framework
+   gives the model up to `output_validation_retries` (default `1`)
+   extra single-shot turns to fix it, feeding the validation error
+   back as a USER message ("Your previous response failed schema
+   validation: ...; return only a corrected JSON object"). After
+   the retry budget is exhausted, raises
+   `OutputValidationError` with the underlying Pydantic
+   `ValidationError` attached as `.cause`, the bad text on `.raw`,
+   and the schema on `.schema` — so callers can build whatever
+   recovery strategy they need.
+4. **`result.output`** keeps the (cleaned) raw JSON text so you can
+   log or audit what the model produced; **`result.parsed`** holds
+   the validated Pydantic instance.
+
+Set `output_validation_retries=0` to fail fast (no recovery turn).
+
+End-to-end demo: [`examples/04_structured_outputs.py`](examples/04_structured_outputs.py)
+extracts a structured `MeetingSummary` (with nested `ActionItem`
+lists, ISO dates, and a sentiment enum) from a raw meeting transcript.
+
+---
+
+## Multi-tenancy by default
+
+JeevesAgent treats `user_id` and `session_id` as **first-class typed
+primitives**, not strings buried in a free-form config dict. The
+moment you pass them to `agent.run(...)`, the framework partitions
+memory automatically and rehydrates conversation history without
+any extra plumbing.
+
+```python
+result = await agent.run(
+    "what is my favourite food?",
+    user_id="alice",            # hard namespace partition for memory
+    session_id="conv_42",       # conversation thread; reused = continued
+    metadata={"locale": "en"},  # free-form bag for app-specific keys
+)
+```
+
+What the framework does with these:
+
+* **`user_id`** is a hard partition on every memory primitive.
+  Episodes and facts stored under one `user_id` are **never visible**
+  to a recall scoped to a different one. `None` is its own bucket
+  ("anonymous / single-tenant"). One shared `Memory` instance can
+  back N concurrent users with zero risk of cross-contamination.
+* **`session_id`** is the conversation handle. Reuse the same id
+  across calls and the loop rehydrates prior user/assistant turns
+  as real `Message` history — the model sees the chat thread, not
+  just a recall summary.
+* **`metadata`** rides along on the per-run `RunContext` and is
+  reachable from any tool / hook via `get_run_context()` without
+  threading it through every function signature.
+
+Inside a tool, you read scope from the live `RunContext`:
+
+```python
+from jeevesagent import tool, get_run_context
+
+@tool
+async def fetch_user_orders() -> str:
+    """Look up the current user's recent orders."""
+    ctx = get_run_context()
+    return await db.query("orders", user_id=ctx.user_id)
+```
+
+The model never sees `user_id` in the tool schema, can't pass the
+wrong one, and the framework guarantees the tool gets the right
+value (set by `_loop`, propagated through `anyio` task groups for
+parallel tool dispatch and sub-agent spawning).
+
+**Sub-agents inherit automatically.** Every multi-agent architecture
+(Supervisor, Debate, Swarm, Router, ActorCritic, Blackboard, ReWOO)
+forwards the parent's `RunContext` to its workers, so `user_id`
+flows through deeply nested agent trees with no per-architecture
+plumbing. Workers get a fresh `session_id` so their conversation
+history stays separate from the parent's.
+
+**Footgun protection.** When a memory store contains episodes for
+named users and a recall runs with `user_id=None`, the framework
+emits an `IsolationWarning` — the partition is still safe, but the
+dev probably forgot to pass `user_id=` somewhere. Apps that want
+strict enforcement promote it to an exception:
+
+```python
+import warnings
+from jeevesagent import IsolationWarning
+warnings.simplefilter("error", IsolationWarning)
+```
+
+End-to-end demo: [`examples/03_multi_user_sessions.py`](examples/03_multi_user_sessions.py).
+
+---
+
 ## Capability matrix
 
 | Capability | What you get | Where |
 |---|---|---|
+| **Multi-tenant memory** | First-class `user_id` partition + `session_id` continuity. One shared `Memory` instance backs N users with no cross-contamination; sub-agents inherit context automatically | `RunContext`, `get_run_context`, `set_run_context`, `IsolationWarning`, `Agent.run(user_id=, session_id=, metadata=)` |
+| **Structured outputs** | Pass `output_schema=` to get a typed, validated Pydantic instance back. Framework augments the system prompt with the schema, parses + validates, retries with feedback on failure | `Agent.run(output_schema=)`, `RunResult.parsed`, `OutputValidationError` |
+| **Resilient model calls** | Network adapters auto-wrapped with retry-on-transient (rate limit, 5xx, network blip). Typed error taxonomy. Provider `Retry-After` honoured. | `RetryPolicy`, `RetryPolicy.disabled/aggressive`, `ModelError`, `TransientModelError`, `RateLimitError`, `PermanentModelError`, `AuthenticationError`, `InvalidRequestError`, `ContentFilterError`, `classify_model_error` |
 | **Architecture protocol** | Pluggable agent-loop strategy: 12 architectures shipped | `Architecture`, `ReAct`, `SelfRefine`, `Reflexion`, `TreeOfThoughts`, `PlanAndExecute`, `ReWOO`, `Router`, `Supervisor`, `ActorCritic`, `MultiAgentDebate`, `Swarm`, `BlackboardArchitecture` |
 | **Team facade** | Sibling-style builders (`Team.supervisor`, `Team.swarm`, `Team.router`, `Team.debate`, `Team.actor_critic`, `Team.blackboard`) for the common multi-agent shapes | `Team`, `Handoff`, `run_architecture` |
 | **Vector store** | `add` / `search` / `delete` with Mongo-style filters, MMR diversity, BM25 hybrid search, save/load | `InMemoryVectorStore`, `ChromaVectorStore`, `PostgresVectorStore`, `FAISSVectorStore`, `SearchResult` |
@@ -692,30 +944,81 @@ speed when you don't, with no code changes between modes.
 
 ## Documentation
 
+The full Sphinx-built documentation site lives at
+<https://jeevesagent.readthedocs.io> — every public symbol is
+auto-documented from its docstring, and the migration / quickstart
+guides are mounted alongside the API reference.
+
+Build it locally with:
+
+```bash
+pip install -e ".[docs]"
+sphinx-build -b html docs docs/_build/html
+open docs/_build/html/index.html
+```
+
+In-tree starting points:
+
 | Doc | What's there |
 |---|---|
 | [`docs/quickstart.md`](docs/quickstart.md) | Step-by-step examples for each backend combo |
 | [`docs/recipes.md`](docs/recipes.md) | Production patterns: persistent memory, MCP, durable replay, audit |
 | [`docs/architecture.md`](docs/architecture.md) | Module tour, lifecycle, extension points |
+| [`docs/migrations/from-langgraph.md`](docs/migrations/from-langgraph.md) | LangGraph → JeevesAgent translation guide |
+| [`docs/migrations/from-openai-sdk.md`](docs/migrations/from-openai-sdk.md) | Hand-rolled OpenAI loop → JeevesAgent translation guide |
 | [`docs/migration_0.1_to_0.2.md`](docs/migration_0.1_to_0.2.md) | What changed in 0.2.0; how to migrate |
+| [`CHANGELOG.md`](CHANGELOG.md) | Version-by-version release notes |
 | [`Subagent.md`](Subagent.md) | Architecture-protocol design rationale; full 14-architecture catalogue (the 5 shipped, the 9 candidates) |
 | [`project.md`](project.md) | The full engineering plan (the design doc) |
 | [`BUILD_LOG.md`](BUILD_LOG.md) | Slice-by-slice changelog |
-| [`examples/`](examples/) | Two runnable end-to-end samples: `01_rag_pdf.py` (single-agent RAG over a folder of PDFs — loader → Chroma → retriever tool → Agent) and `02_specialist_debate.py` (five domain specialists, each with their own per-domain RAG, composed via `Team.debate(...)` with a synthesising judge) |
+| [`examples/`](examples/) | Four runnable end-to-end samples: `01_rag_pdf.py`, `02_specialist_debate.py`, `03_multi_user_sessions.py`, `04_structured_outputs.py` |
+
+---
+
+## API stability
+
+The framework is pre-1.0 — major versions can introduce breaking
+changes — but the surface area is split into stability tiers so
+adopters know what they can pin against today.
+
+| Tier | API | What it covers |
+|---|---|---|
+| **Stable** | `Agent`, `Agent.run` / `stream` / `resume`, `RunResult`, `RunContext`, `get_run_context`, `set_run_context`, `Memory` protocol, `Episode`, `Fact`, `Message`, `Role`, `Event`, `Tool`, `@tool`, `Model` protocol, the error hierarchy under `JeevesAgentError`, `RetryPolicy`, `OutputValidationError`, `IsolationWarning` | Will not break in 0.x without a migration note + deprecation cycle. Pin against these in production code. |
+| **Stable backends** | `InMemoryMemory`, `ChromaMemory`, `PostgresMemory`, `RedisMemory`, `VectorMemory`, `OpenAIModel`, `AnthropicModel`, `LiteLLMModel`, `EchoModel`, `ScriptedModel`, `InProcRuntime`, `SqliteRuntime`, `PostgresRuntime`, `StandardBudget`, `NoBudget`, `AllowAll`, `StandardPermissions`, `HookRegistry`, `OTelTelemetry`, `NoTelemetry`, `FileAuditLog`, `InMemoryAuditLog` | Concrete implementations; constructor signatures stable, behaviour locked. |
+| **Experimental** | `MultiAgentDebate` / `Swarm` / `Blackboard` / `ReWOO` / `TreeOfThoughts` (the newer architectures), `Skills` and `SkillRegistry`, `JeevesGateway`, `agent.generate_graph()`, the `Team.*` builders | Useful, tested, but newer — internal details may change as we collect production feedback. Wrap with your own thin layer if you depend on them. |
+| **Internal** | `_loop`, `_wrapped_model`, `Dependencies`, `AgentSession`, the architecture protocol's exact shape, anything starting with `_` | No stability promise. Subject to change without notice. |
+
+If a symbol isn't listed, it's experimental by default. Open an
+issue if you depend on something not yet in the Stable tier and
+need it promoted.
 
 ---
 
 ## Status
 
-* **815 tests pass** in ~6 seconds (5 env-gated integrations skip
+* **866 tests pass** in ~6 seconds (5 env-gated integrations skip
   without `JEEVES_TEST_PG_DSN` / `JEEVES_TEST_REDIS_URL`)
-* **mypy `--strict`** clean across 102 production source files
+* **mypy `--strict`** clean across 105 production source files
 * **ruff** clean including `flake8-async` lints
-* v0.10 ships the **fast path by default** — every layer (audit,
-  telemetry, permissions, hooks, runtime, budget) is detected as
-  no-op or production-wired at construction time, and the hot path
-  skips the integration when the layer is no-op. Same `Agent`
-  class, same API, no flags.
+* v0.10 ships **multi-tenancy by default**, **structured outputs**,
+  **retry-on-transient by default**, and the **fast path by
+  default**. Every layer (audit, telemetry, permissions, hooks,
+  runtime, budget) is detected as no-op or production-wired at
+  construction time, so a barebones `Agent` runs at LangChain-class
+  latency with the integration skipped. `user_id` and `session_id`
+  are first-class typed primitives — memory is hard-partitioned
+  per `user_id`, conversations continue when a `session_id` is
+  reused, and sub-agents inherit the parent's `RunContext`
+  automatically via a contextvar (`get_run_context()`). Pass
+  `output_schema=` (any Pydantic `BaseModel`) and `agent.run`
+  returns a typed, validated instance on `result.parsed` — with
+  retry-with-feedback on validation failure. Network model
+  adapters are auto-wrapped with a typed error taxonomy
+  (`TransientModelError` / `RateLimitError` /
+  `PermanentModelError` / `AuthenticationError` /
+  `InvalidRequestError` / `ContentFilterError`) and a configurable
+  `RetryPolicy` so transient 5xx / 429 / network blips don't blow
+  up production runs. All zero-config; no flags.
 * v0.9 ships **Skills** (Anthropic Agent Skills format, with
   `tools.py` auto-discovery for in-process Python tools and
   frontmatter `tools:` manifest for any-language scripts wrapped

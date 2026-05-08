@@ -1,19 +1,32 @@
 """Layer-free primitives: types, protocols, errors, IDs."""
 
-from .context import RunContext, get_run_context, set_run_context
+from .context import (
+    IsolationWarning,
+    RunContext,
+    get_run_context,
+    set_run_context,
+)
 from .errors import (
+    AuthenticationError,
     BudgetExceeded,
     CancelledByUser,
     ConfigError,
+    ContentFilterError,
     FreshnessError,
+    InvalidRequestError,
     JeevesAgentError,
     LineageError,
     MCPError,
     MemoryStoreError,
+    ModelError,
+    OutputValidationError,
+    PermanentModelError,
     PermissionDenied,
+    RateLimitError,
     RuntimeJournalError,
     SandboxError,
     ToolError,
+    TransientModelError,
 )
 from .ids import deterministic_hash, new_id
 from .protocols import (
@@ -87,22 +100,31 @@ __all__ = [
     "Telemetry",
     "ToolHost",
     # context
+    "IsolationWarning",
     "RunContext",
     "get_run_context",
     "set_run_context",
     # errors
+    "AuthenticationError",
     "BudgetExceeded",
     "CancelledByUser",
     "ConfigError",
+    "ContentFilterError",
     "FreshnessError",
+    "InvalidRequestError",
     "JeevesAgentError",
     "LineageError",
     "MCPError",
     "MemoryStoreError",
+    "ModelError",
+    "OutputValidationError",
+    "PermanentModelError",
     "PermissionDenied",
+    "RateLimitError",
     "RuntimeJournalError",
     "SandboxError",
     "ToolError",
+    "TransientModelError",
     # ids
     "deterministic_hash",
     "new_id",

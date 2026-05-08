@@ -1,0 +1,139 @@
+jeevesagent.architecture.self_refine
+====================================
+
+.. py:module:: jeevesagent.architecture.self_refine
+
+.. autoapi-nested-parse::
+
+   Self-Refine: iterative refinement via critique.
+
+   Madaan et al. 2023 — `Self-Refine: Iterative Refinement with
+   Self-Feedback <https://arxiv.org/abs/2303.17651>`_. The same model
+   plays generator, critic, and refiner across rounds.
+
+   Pattern:
+
+   1. **Round 0 (generator).** Run the base architecture (default
+      :class:`~jeevesagent.architecture.ReAct`) to produce an initial
+      output.
+   2. **Round 1..max_rounds:**
+
+      a. **Critic.** Review the current output. Output a critique. If
+         the critique contains ``stop_phrase`` (default ``"no issues"``)
+         anywhere, terminate — the model considers the output good
+         enough.
+      b. **Refiner.** Produce a revised output that addresses the
+         critique. The new output replaces the old.
+
+   When the same model plays all three roles, gains are real but
+   modest (~5-15% on most tasks). For asymmetric blind-spot coverage,
+   use ``ActorCritic`` with a different model for the critic — that
+   ships in a later release.
+
+   Strengths
+   ---------
+   * Simple, well-defined; one new architecture wraps any base.
+   * Cheap relative to multi-agent debate or actor-critic with
+     separate models.
+   * Composes with :class:`~jeevesagent.architecture.ReAct` (default
+     ``base``) and any other architecture that satisfies the protocol.
+
+   Weaknesses
+   ----------
+   * Same-model self-critique shares blind spots — bounded gains.
+   * 2-3× token cost vs single-pass.
+   * Latency adds up — sequential critic / refiner per round.
+
+
+
+Attributes
+----------
+
+.. autoapisummary::
+
+   jeevesagent.architecture.self_refine.DEFAULT_CRITIC_PROMPT
+   jeevesagent.architecture.self_refine.DEFAULT_REFINER_PROMPT
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   jeevesagent.architecture.self_refine.SelfRefine
+
+
+Module Contents
+---------------
+
+.. py:class:: SelfRefine(*, base: jeevesagent.architecture.base.Architecture | None = None, max_rounds: int = 3, critic_prompt: str | None = None, refiner_prompt: str | None = None, stop_phrase: str = 'no issues')
+
+   Wrap a base architecture with iterative critique / refine.
+
+   ``base`` defaults to :class:`ReAct`; the round-0 generator runs
+   the base architecture's full strategy. Subsequent rounds are
+   text-only model calls — no tools, just critique and rewrite.
+
+
+   .. py:method:: declared_workers() -> dict[str, jeevesagent.agent.api.Agent]
+
+
+   .. py:method:: run(session: jeevesagent.architecture.base.AgentSession, deps: jeevesagent.architecture.base.Dependencies, prompt: str) -> collections.abc.AsyncIterator[jeevesagent.core.types.Event]
+      :async:
+
+
+
+   .. py:attribute:: name
+      :value: 'self-refine'
+
+
+
+.. py:data:: DEFAULT_CRITIC_PROMPT
+   :value: Multiline-String
+
+   .. raw:: html
+
+      <details><summary>Show Value</summary>
+
+   .. code-block:: python
+
+      """You are a careful reviewer. Read the original task and the proposed
+      output. Identify every issue you can find: factual errors, missing
+      edge cases, unclear language, inconsistent reasoning, gaps versus
+      what the task asked for.
+      
+      Be specific. Cite the relevant section of the output.
+      
+      If you find no issues at all and the output fully satisfies the
+      task, respond with exactly:
+      
+        no issues
+      
+      Otherwise, list the issues as a bulleted critique."""
+
+   .. raw:: html
+
+      </details>
+
+
+
+.. py:data:: DEFAULT_REFINER_PROMPT
+   :value: Multiline-String
+
+   .. raw:: html
+
+      <details><summary>Show Value</summary>
+
+   .. code-block:: python
+
+      """You are revising your previous output based on a critique. Address
+      every point in the critique. Preserve what was correct; fix what
+      was wrong; add what was missing. Output ONLY the revised version,
+      not commentary about the changes."""
+
+   .. raw:: html
+
+      </details>
+
+
+

@@ -28,12 +28,14 @@ unboundedly.
 from __future__ import annotations
 
 import contextlib
+import json
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import anyio
+from pydantic import BaseModel, ValidationError
 
 from ..architecture import (
     AgentSession,
@@ -43,6 +45,7 @@ from ..architecture import (
 )
 from ..architecture.tool_host_wrappers import ExtendedToolHost
 from ..core.context import RunContext, set_run_context
+from ..core.errors import OutputValidationError
 from ..core.ids import new_id
 from ..core.protocols import (
     Budget,
@@ -57,9 +60,13 @@ from ..core.protocols import (
 from ..core.types import (
     Episode,
     Event,
+    Message,
+    Role,
     RunResult,
+    Usage,
 )
 from ..governance.budget import NoBudget
+from ..governance.retry import RetryPolicy
 from ..memory.inmemory import InMemoryMemory
 from ..model.echo import EchoModel
 from ..observability.tracing import NoTelemetry
@@ -105,6 +112,7 @@ class Agent:
         auto_consolidate: bool = False,
         architecture: Architecture | str | None = None,
         skills: list[Any] | None = None,
+        retry_policy: RetryPolicy | None = None,
     ) -> None:
         # Skills — packaged on-disk playbooks loaded on demand.
         # Build the registry first so frontmatter validation fires
@@ -129,7 +137,30 @@ class Agent:
                 f"{skill_registry.catalog_section()}"
             )
 
+        # ``_model`` is the inner, concrete adapter (OpenAIModel,
+        # AnthropicModel, etc.) — kept as-is so introspection +
+        # tests see the real type. ``_wrapped_model`` is the
+        # retry-decorated version that gets handed to
+        # :class:`Dependencies` and used by every architecture's
+        # model call. We wrap when (a) a caller-supplied policy
+        # says to retry, or (b) the default policy is appropriate
+        # for this model class — ScriptedModel and EchoModel are
+        # tests / dev fakes (no retry needed); real network-backed
+        # models (OpenAI, Anthropic, LiteLLM) get the sensible
+        # default unless the caller passed ``RetryPolicy.disabled()``.
         self._model: Model = _resolve_model(model)
+        self._retry_policy: RetryPolicy = (
+            retry_policy
+            if retry_policy is not None
+            else _default_retry_policy_for(self._model)
+        )
+        if self._retry_policy.is_enabled():
+            from ..model.retrying import RetryingModel
+            self._wrapped_model: Model = RetryingModel(
+                self._model, self._retry_policy
+            )
+        else:
+            self._wrapped_model = self._model
         self._memory: Memory = memory if memory is not None else InMemoryMemory()
         self._runtime: Runtime = runtime if runtime is not None else InProcRuntime()
         self._budget: Budget = budget if budget is not None else NoBudget()
@@ -410,6 +441,103 @@ class Agent:
             payload=payload,
         )
 
+    async def _validate_output_with_retry(
+        self,
+        *,
+        session: AgentSession,
+        schema: type[BaseModel],
+        retries: int,
+        deps: Dependencies,
+    ) -> BaseModel:
+        """Validate ``session.output`` against ``schema``; on failure,
+        give the model up to ``retries`` follow-up turns to fix it.
+
+        Retry turns are single-shot model calls (no tools, no full
+        ReAct loop) because the architecture has already terminated
+        — the model just needs to re-emit the JSON. Each retry
+        appends the validation error as a USER message so the model
+        sees what went wrong, regenerates, and we update
+        ``session.output`` + ``cumulative_usage`` accordingly.
+
+        Raises :class:`OutputValidationError` when the retry budget
+        is exhausted.
+        """
+        from ..architecture.helpers import add_usage
+
+        last_error: ValidationError | None = None
+        for attempt in range(retries + 1):
+            text = _strip_json_fences(session.output)
+            try:
+                parsed = schema.model_validate_json(text)
+                # Stash the cleaned text so the persisted episode
+                # has parseable JSON, not the fenced version.
+                session.output = text
+                return parsed
+            except ValidationError as exc:
+                last_error = exc
+                if attempt >= retries:
+                    break
+
+                # Re-prompt: tell the model what was wrong and ask
+                # for a clean JSON re-emission.
+                error_summary = _summarise_validation_error(exc)
+                schema_json = json.dumps(
+                    schema.model_json_schema(), separators=(",", ":")
+                )
+                retry_prompt = (
+                    "Your previous response failed schema validation:\n"
+                    f"{error_summary}\n\n"
+                    "Return a corrected response — ONLY a single valid "
+                    "JSON object that matches this schema, with no "
+                    "prose, no markdown fences, no explanation:\n"
+                    f"{schema_json}"
+                )
+                session.messages.append(
+                    Message(role=Role.USER, content=retry_prompt)
+                )
+
+                # Single-shot model call. Use ``complete`` when
+                # available (no streaming overhead); fall back to
+                # consuming ``stream`` otherwise.
+                if hasattr(deps.model, "complete"):
+                    new_text, _calls, usage, _finish = (
+                        await deps.model.complete(
+                            session.messages, tools=None
+                        )
+                    )
+                else:
+                    parts: list[str] = []
+                    usage = Usage()
+                    async for chunk in deps.model.stream(
+                        session.messages, tools=None
+                    ):
+                        if chunk.kind == "text" and chunk.text:
+                            parts.append(chunk.text)
+                        elif (
+                            chunk.kind == "finish"
+                            and chunk.usage is not None
+                        ):
+                            usage = chunk.usage
+                    new_text = "".join(parts)
+
+                session.messages.append(
+                    Message(role=Role.ASSISTANT, content=new_text)
+                )
+                session.output = new_text
+                session.cumulative_usage = add_usage(
+                    session.cumulative_usage, usage
+                )
+                session.turns += 1
+
+        assert last_error is not None  # we only break above on a failure
+        raise OutputValidationError(
+            f"Model output did not validate against {schema.__name__} "
+            f"after {retries} retry attempt(s).",
+            raw=session.output,
+            schema=schema,
+            cause=last_error,
+        ) from last_error
+
     # ---- factory: from dict / TOML config ------------------------------
 
     @classmethod
@@ -562,6 +690,8 @@ class Agent:
         context: RunContext | None = None,
         extra_tools: list[Tool] | None = None,
         emit: Emit | None = None,
+        output_schema: type[BaseModel] | None = None,
+        output_validation_retries: int = 1,
     ) -> RunResult:
         """Run the agent to completion and return its :class:`RunResult`.
 
@@ -607,6 +737,21 @@ class Agent:
         worker.run(prompt, emit=parent_send)`` surface the worker's
         token-by-token streaming to the outermost ``agent.stream(...)``
         consumer.
+
+        ``output_schema`` requests a structured, validated final
+        answer. Pass any Pydantic ``BaseModel`` subclass and the
+        framework will (1) append a JSON-schema directive to the
+        system prompt instructing the model to emit a final answer
+        that matches, (2) parse the final assistant text against the
+        schema, and (3) populate :attr:`RunResult.parsed` with the
+        validated instance. ``RunResult.output`` keeps the raw text
+        so you can log or display it. Up to
+        ``output_validation_retries`` extra turns are spent
+        recovering from a parse failure (the model is given the
+        validation error as feedback and asked to try again); if it
+        still fails after the retry budget, the run raises
+        :class:`~jeevesagent.OutputValidationError`. Set retries to
+        0 to fail fast.
         """
         return await self._loop(
             prompt,
@@ -616,6 +761,8 @@ class Agent:
             metadata=metadata,
             context=context,
             extra_tools=extra_tools,
+            output_schema=output_schema,
+            output_validation_retries=output_validation_retries,
         )
 
     async def resume(
@@ -625,23 +772,31 @@ class Agent:
         *,
         user_id: str | None = None,
         metadata: Mapping[str, Any] | None = None,
+        context: RunContext | None = None,
         extra_tools: list[Tool] | None = None,
         emit: Emit | None = None,
+        output_schema: type[BaseModel] | None = None,
+        output_validation_retries: int = 1,
     ) -> RunResult:
         """Resume a previously-interrupted run from its journal.
 
-        Equivalent to ``agent.run(prompt, session_id=session_id)``.
-        Exists as a separate method so the intent is explicit at the
-        call site and to match the surface advertised by the engineering
-        plan.
+        Equivalent to ``agent.run(prompt, session_id=session_id, ...)``
+        with the same kwarg surface as :meth:`run`. Exists as a
+        separate method so the intent is explicit at the call site
+        — when a durable :class:`Runtime` (e.g. :class:`SqliteRuntime`)
+        is configured, completed steps replay from the journal
+        instead of re-executing.
         """
         return await self.run(
             prompt,
             user_id=user_id,
             session_id=session_id,
             metadata=metadata,
+            context=context,
             extra_tools=extra_tools,
             emit=emit,
+            output_schema=output_schema,
+            output_validation_retries=output_validation_retries,
         )
 
     async def stream(
@@ -653,6 +808,8 @@ class Agent:
         metadata: Mapping[str, Any] | None = None,
         context: RunContext | None = None,
         extra_tools: list[Tool] | None = None,
+        output_schema: type[BaseModel] | None = None,
+        output_validation_retries: int = 1,
     ) -> AsyncIterator[Event]:
         """Stream :class:`Event`\\ s as the loop produces them.
 
@@ -677,6 +834,8 @@ class Agent:
                     metadata=metadata,
                     context=context,
                     extra_tools=extra_tools,
+                    output_schema=output_schema,
+                    output_validation_retries=output_validation_retries,
                 )
             except Exception as exc:  # noqa: BLE001 — surface as ERROR + re-raise
                 with anyio.CancelScope(shield=True):
@@ -706,6 +865,8 @@ class Agent:
         metadata: Mapping[str, Any] | None = None,
         context: RunContext | None = None,
         extra_tools: list[Tool] | None = None,
+        output_schema: type[BaseModel] | None = None,
+        output_validation_retries: int = 1,
     ) -> RunResult:
         """Setup → delegate iteration to the architecture → teardown.
 
@@ -807,9 +968,21 @@ class Agent:
                 )
             await emit(Event.started(session_id, prompt))
 
+            # Append the JSON-schema directive when a structured
+            # output is requested — augments the agent's base
+            # instructions for this run only, leaving the static
+            # ``self._instructions`` unchanged.
+            effective_instructions = (
+                _augment_instructions_for_schema(
+                    self._instructions, output_schema
+                )
+                if output_schema is not None
+                else self._instructions
+            )
+
             session = AgentSession(
                 id=session_id,
-                instructions=self._instructions,
+                instructions=effective_instructions,
             )
             # Per-run tool injection: if extra_tools provided, wrap
             # the agent's host so the model sees them alongside the
@@ -821,7 +994,11 @@ class Agent:
                 else self._tool_host
             )
             deps = Dependencies(
-                model=self._model,
+                # ``_wrapped_model`` is the retry-decorated view —
+                # falls through to ``_model`` when the policy is
+                # disabled, so the architecture loop never sees a
+                # raw SDK exception when retries could have helped.
+                model=self._wrapped_model,
                 memory=self._memory,
                 runtime=self._runtime,
                 tools=effective_tools,
@@ -846,6 +1023,23 @@ class Agent:
             async for event in self._architecture.run(session, deps, prompt):
                 await emit(event)
 
+            # Structured output validation + retry. Only kicks in
+            # when the caller requested a schema; happens AFTER the
+            # architecture loop has finalised ``session.output`` and
+            # BEFORE we persist the episode (so the persisted text
+            # is the validated one). Up to
+            # ``output_validation_retries`` extra single-turn model
+            # calls are spent fixing the output; on the last
+            # failure :class:`OutputValidationError` is raised.
+            parsed: Any | None = None
+            if output_schema is not None:
+                parsed = await self._validate_output_with_retry(
+                    session=session,
+                    schema=output_schema,
+                    retries=output_validation_retries,
+                    deps=deps,
+                )
+
             episode = Episode(
                 session_id=session_id,
                 user_id=run_ctx.user_id,
@@ -864,6 +1058,7 @@ class Agent:
             result = RunResult(
                 session_id=session_id,
                 output=session.output,
+                parsed=parsed,
                 turns=session.turns,
                 tokens_in=session.cumulative_usage.input_tokens,
                 tokens_out=session.cumulative_usage.output_tokens,
@@ -920,6 +1115,107 @@ class Agent:
 
 async def _noop_emit(_event: Event) -> None:
     return None
+
+
+_NETWORK_MODEL_CLASS_NAMES = frozenset(
+    {"OpenAIModel", "AnthropicModel", "LiteLLMModel"}
+)
+
+
+def _default_retry_policy_for(model: Model) -> RetryPolicy:
+    """Pick a sensible default retry policy based on the model type.
+
+    The framework wraps **only** the in-tree network adapters
+    (``OpenAIModel`` / ``AnthropicModel`` / ``LiteLLMModel``) by
+    default — those are the ones whose call sites can hit transient
+    failures (5xx, rate limit, network blip). Everything else
+    (in-process fakes, custom user-supplied :class:`Model`
+    implementations, test mocks) is left unwrapped: the framework
+    cannot assume a custom Model's exception classes match our
+    classifier, and silently retrying its calls could mask real
+    bugs. Callers who DO want retries on a custom model pass
+    ``retry_policy=RetryPolicy()`` (or any enabled policy)
+    explicitly to opt in.
+    """
+    if type(model).__name__ in _NETWORK_MODEL_CLASS_NAMES:
+        return RetryPolicy()
+    return RetryPolicy.disabled()
+
+
+# ---------------------------------------------------------------------------
+# Structured-output helpers
+# ---------------------------------------------------------------------------
+
+
+_SCHEMA_DIRECTIVE_TEMPLATE = """
+
+---
+**STRUCTURED OUTPUT REQUIRED.**
+Your final answer must be a single valid JSON object that conforms
+exactly to this JSON Schema:
+
+```json
+{schema_json}
+```
+
+Return ONLY the JSON object — no surrounding prose, no markdown
+fences, no explanation. The receiver will validate your response
+with Pydantic and reject any extra text.
+""".rstrip()
+
+
+def _augment_instructions_for_schema(
+    base_instructions: str, schema: type[BaseModel]
+) -> str:
+    """Build the run-scoped system prompt when ``output_schema`` is
+    requested. Appends a clear, schema-specific directive to the
+    agent's static instructions so the model knows it must emit JSON
+    matching the schema."""
+    schema_json = json.dumps(
+        schema.model_json_schema(), indent=2, sort_keys=True
+    )
+    return base_instructions.rstrip() + _SCHEMA_DIRECTIVE_TEMPLATE.format(
+        schema_json=schema_json
+    )
+
+
+_FENCE_RE_PREFIX = "```"
+
+
+def _strip_json_fences(text: str) -> str:
+    """Strip markdown code fences a model might wrap its JSON in.
+
+    Tolerates ```json``` and bare ``` fences, with or without
+    trailing newlines. Idempotent for already-clean JSON.
+    """
+    stripped = text.strip()
+    if not stripped.startswith(_FENCE_RE_PREFIX):
+        return stripped
+    # Drop opening fence (and optional language tag).
+    after_open = stripped[len(_FENCE_RE_PREFIX):]
+    newline_idx = after_open.find("\n")
+    if newline_idx == -1:
+        return stripped
+    body = after_open[newline_idx + 1:]
+    if body.endswith(_FENCE_RE_PREFIX):
+        body = body[: -len(_FENCE_RE_PREFIX)]
+    return body.strip()
+
+
+def _summarise_validation_error(exc: ValidationError) -> str:
+    """Compact, retry-friendly description of a Pydantic
+    :class:`ValidationError` — one bullet per error, capped to keep
+    the retry prompt small enough not to blow the context window
+    on pathological cases."""
+    lines: list[str] = []
+    for err in exc.errors()[:10]:
+        loc = ".".join(str(p) for p in err.get("loc", ()))
+        msg = err.get("msg", "invalid")
+        kind = err.get("type", "")
+        lines.append(f"- {loc}: {msg} (type={kind})")
+    if len(exc.errors()) > 10:
+        lines.append(f"- ... ({len(exc.errors()) - 10} more error(s))")
+    return "\n".join(lines)
 
 
 _LITELLM_PREFIXES: tuple[str, ...] = (

@@ -1,0 +1,320 @@
+jeevesagent.core.errors
+=======================
+
+.. py:module:: jeevesagent.core.errors
+
+.. autoapi-nested-parse::
+
+   Exception hierarchy.
+
+   All harness-raised exceptions inherit from :class:`JeevesAgentError` so
+   callers can catch the family without binding to specific subtypes.
+
+
+
+Exceptions
+----------
+
+.. autoapisummary::
+
+   jeevesagent.core.errors.AuthenticationError
+   jeevesagent.core.errors.BudgetExceeded
+   jeevesagent.core.errors.CancelledByUser
+   jeevesagent.core.errors.ConfigError
+   jeevesagent.core.errors.ContentFilterError
+   jeevesagent.core.errors.FreshnessError
+   jeevesagent.core.errors.InvalidRequestError
+   jeevesagent.core.errors.JeevesAgentError
+   jeevesagent.core.errors.LineageError
+   jeevesagent.core.errors.MCPError
+   jeevesagent.core.errors.MemoryStoreError
+   jeevesagent.core.errors.ModelError
+   jeevesagent.core.errors.OutputValidationError
+   jeevesagent.core.errors.PermanentModelError
+   jeevesagent.core.errors.PermissionDenied
+   jeevesagent.core.errors.RateLimitError
+   jeevesagent.core.errors.RuntimeJournalError
+   jeevesagent.core.errors.SandboxError
+   jeevesagent.core.errors.ToolError
+   jeevesagent.core.errors.TransientModelError
+
+
+Module Contents
+---------------
+
+.. py:exception:: AuthenticationError(message: str, *, cause: BaseException | None = None)
+
+   Bases: :py:obj:`PermanentModelError`
+
+
+   Invalid, missing, or revoked API credentials.
+
+   Initialize self.  See help(type(self)) for accurate signature.
+
+
+.. py:exception:: BudgetExceeded(reason: str)
+
+   Bases: :py:obj:`JeevesAgentError`
+
+
+   A run was halted because a budget limit was hit.
+
+   Initialize self.  See help(type(self)) for accurate signature.
+
+
+   .. py:attribute:: reason
+
+
+.. py:exception:: CancelledByUser
+
+   Bases: :py:obj:`JeevesAgentError`
+
+
+   A user-driven interruption (signal, timeout) ended the run.
+
+   Initialize self.  See help(type(self)) for accurate signature.
+
+
+.. py:exception:: ConfigError
+
+   Bases: :py:obj:`JeevesAgentError`
+
+
+   Invalid or unresolvable configuration passed to ``Agent``.
+
+   Initialize self.  See help(type(self)) for accurate signature.
+
+
+.. py:exception:: ContentFilterError(message: str, *, cause: BaseException | None = None)
+
+   Bases: :py:obj:`PermanentModelError`
+
+
+   The provider's safety system blocked the request or response.
+
+   Typically a permanent failure for the same prompt; users may
+   rephrase but the framework should not silently retry.
+
+   Initialize self.  See help(type(self)) for accurate signature.
+
+
+.. py:exception:: FreshnessError
+
+   Bases: :py:obj:`JeevesAgentError`
+
+
+   A certified value failed its freshness policy.
+
+   Initialize self.  See help(type(self)) for accurate signature.
+
+
+.. py:exception:: InvalidRequestError(message: str, *, cause: BaseException | None = None)
+
+   Bases: :py:obj:`PermanentModelError`
+
+
+   The request was malformed or violated the provider's API
+   contract — bad parameters, oversized prompt, unknown model
+   name, etc. Fix the request, don't retry.
+
+   Initialize self.  See help(type(self)) for accurate signature.
+
+
+.. py:exception:: JeevesAgentError
+
+   Bases: :py:obj:`Exception`
+
+
+   Base class for all harness errors.
+
+   Initialize self.  See help(type(self)) for accurate signature.
+
+
+.. py:exception:: LineageError
+
+   Bases: :py:obj:`JeevesAgentError`
+
+
+   A certified value failed its lineage policy.
+
+   Initialize self.  See help(type(self)) for accurate signature.
+
+
+.. py:exception:: MCPError
+
+   Bases: :py:obj:`JeevesAgentError`
+
+
+   An MCP transport, handshake, or protocol error.
+
+   Initialize self.  See help(type(self)) for accurate signature.
+
+
+.. py:exception:: MemoryStoreError
+
+   Bases: :py:obj:`JeevesAgentError`
+
+
+   The memory backend failed an operation.
+
+   Initialize self.  See help(type(self)) for accurate signature.
+
+
+.. py:exception:: ModelError(message: str, *, cause: BaseException | None = None)
+
+   Bases: :py:obj:`JeevesAgentError`
+
+
+   A call to the underlying model adapter failed.
+
+   Base of the model-error taxonomy: catch this to handle every
+   model failure regardless of whether it is transient or
+   permanent. The SDK exception that triggered the classification
+   is attached via ``__cause__`` (and ``cause``) so debug code
+   can still inspect the raw error.
+
+   Initialize self.  See help(type(self)) for accurate signature.
+
+
+   .. py:attribute:: cause
+      :value: None
+
+
+
+.. py:exception:: OutputValidationError(message: str, *, raw: str, schema: type, cause: BaseException | None = None)
+
+   Bases: :py:obj:`JeevesAgentError`
+
+
+   The model's final answer did not validate against the supplied
+   ``output_schema``.
+
+   Raised by :meth:`Agent.run` when the caller passed
+   ``output_schema=`` and the model's final assistant text could
+   not be parsed/validated as the requested Pydantic model — even
+   after the optional one-shot "retry with the validation error"
+   turn.
+
+   Carries the raw model output (``raw``), the underlying Pydantic
+   :class:`pydantic.ValidationError` (``cause``, also exposed via
+   ``__cause__``), and the schema that was being targeted
+   (``schema``) so callers can build whatever recovery strategy
+   they need (re-prompt with extra examples, fall back to
+   free-text, etc.).
+
+   Initialize self.  See help(type(self)) for accurate signature.
+
+
+   .. py:attribute:: cause
+      :value: None
+
+
+
+   .. py:attribute:: raw
+
+
+   .. py:attribute:: schema
+
+
+.. py:exception:: PermanentModelError(message: str, *, cause: BaseException | None = None)
+
+   Bases: :py:obj:`ModelError`
+
+
+   A model call failed in a way that retrying will not fix.
+
+   Wrong API key, malformed request, content-filter rejection,
+   deprecated model name, etc. The retry layer raises these
+   immediately without backoff so callers can fail fast and
+   surface the real problem.
+
+   Initialize self.  See help(type(self)) for accurate signature.
+
+
+.. py:exception:: PermissionDenied(tool: str, reason: str)
+
+   Bases: :py:obj:`JeevesAgentError`
+
+
+   A tool call was denied by the permission layer or a user hook.
+
+   Initialize self.  See help(type(self)) for accurate signature.
+
+
+   .. py:attribute:: reason
+
+
+   .. py:attribute:: tool
+
+
+.. py:exception:: RateLimitError(message: str, *, retry_after: float | None = None, cause: BaseException | None = None)
+
+   Bases: :py:obj:`TransientModelError`
+
+
+   The provider returned a 429 / quota-exhausted response.
+
+   Carries ``retry_after`` when the provider supplied one. Subclass
+   of :class:`TransientModelError` so generic transient handlers
+   cover it; catch ``RateLimitError`` specifically when you need
+   to surface "slow down" to the caller (e.g. propagate a 429 to
+   your own clients).
+
+   Initialize self.  See help(type(self)) for accurate signature.
+
+
+.. py:exception:: RuntimeJournalError
+
+   Bases: :py:obj:`JeevesAgentError`
+
+
+   The durable runtime journal is unreadable or inconsistent.
+
+   Initialize self.  See help(type(self)) for accurate signature.
+
+
+.. py:exception:: SandboxError
+
+   Bases: :py:obj:`JeevesAgentError`
+
+
+   The sandbox refused or failed to execute a tool.
+
+   Initialize self.  See help(type(self)) for accurate signature.
+
+
+.. py:exception:: ToolError
+
+   Bases: :py:obj:`JeevesAgentError`
+
+
+   A tool invocation failed at the tool's own boundary.
+
+   Initialize self.  See help(type(self)) for accurate signature.
+
+
+.. py:exception:: TransientModelError(message: str, *, retry_after: float | None = None, cause: BaseException | None = None)
+
+   Bases: :py:obj:`ModelError`
+
+
+   A model call failed in a way that may succeed on retry.
+
+   Covers HTTP 5xx responses, network errors, timeouts, and
+   provider-side rate limits. The retry layer treats this family
+   as retryable and applies backoff.
+
+   ``retry_after`` (in seconds) carries a provider-supplied hint
+   when one is available — e.g. an ``Retry-After`` HTTP header on
+   a 429 response. The retry layer respects the larger of the
+   policy's computed backoff and ``retry_after`` so we never wait
+   less than the provider asked for.
+
+   Initialize self.  See help(type(self)) for accurate signature.
+
+
+   .. py:attribute:: retry_after
+      :value: None
+
+
+

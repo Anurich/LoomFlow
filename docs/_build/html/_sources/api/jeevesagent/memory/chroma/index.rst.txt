@@ -1,0 +1,117 @@
+jeevesagent.memory.chroma
+=========================
+
+.. py:module:: jeevesagent.memory.chroma
+
+.. autoapi-nested-parse::
+
+   Memory backed by Chroma (local persistent or in-memory client).
+
+   Chroma's Python API is sync; we dispatch every blocking call to a
+   worker thread via :func:`anyio.to_thread.run_sync` so the event loop
+   stays free.
+
+   Working blocks are kept in process memory (small, re-derivable);
+   episodes go to Chroma. The collection is created lazily on first use
+   and — if a ``persist_directory`` was supplied — survives process
+   restarts.
+
+
+
+Attributes
+----------
+
+.. autoapisummary::
+
+   jeevesagent.memory.chroma.DEFAULT_COLLECTION
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   jeevesagent.memory.chroma.ChromaMemory
+
+
+Module Contents
+---------------
+
+.. py:class:: ChromaMemory(client: Any, *, embedder: jeevesagent.core.protocols.Embedder | None = None, collection_name: str = DEFAULT_COLLECTION, fact_store: Any | None = None)
+
+   Memory backed by ``chromadb``.
+
+   Construct via :meth:`local` for an on-disk persistent client or
+   :meth:`ephemeral` for a process-local in-memory client.
+
+
+   .. py:method:: append_block(name: str, content: str) -> None
+      :async:
+
+
+
+   .. py:method:: consolidate() -> None
+      :async:
+
+
+
+   .. py:method:: ephemeral(*, embedder: jeevesagent.core.protocols.Embedder | None = None, collection_name: str = DEFAULT_COLLECTION, with_facts: bool = False, facts_collection_name: str = 'jeeves_facts') -> ChromaMemory
+      :classmethod:
+
+
+      In-memory client (lost on process exit). Great for tests.
+
+
+
+   .. py:method:: local(persist_directory: str, *, embedder: jeevesagent.core.protocols.Embedder | None = None, collection_name: str = DEFAULT_COLLECTION, with_facts: bool = False, facts_collection_name: str = 'jeeves_facts') -> ChromaMemory
+      :classmethod:
+
+
+      Persistent on-disk client at ``persist_directory``.
+
+      ``with_facts=True`` attaches a :class:`ChromaFactStore` rooted
+      at the same client so facts persist alongside episodes in the
+      same on-disk store.
+
+
+
+   .. py:method:: recall(query: str, *, kind: str = 'episodic', limit: int = 5, time_range: tuple[datetime.datetime, datetime.datetime] | None = None, user_id: str | None = None) -> list[jeevesagent.core.types.Episode]
+      :async:
+
+
+
+   .. py:method:: recall_facts(query: str, *, limit: int = 5, valid_at: datetime.datetime | None = None, user_id: str | None = None) -> list[jeevesagent.core.types.Fact]
+      :async:
+
+
+
+   .. py:method:: remember(episode: jeevesagent.core.types.Episode) -> str
+      :async:
+
+
+
+   .. py:method:: session_messages(session_id: str, *, user_id: str | None = None, limit: int = 20) -> list[jeevesagent.core.types.Message]
+      :async:
+
+
+
+   .. py:method:: update_block(name: str, content: str) -> None
+      :async:
+
+
+
+   .. py:method:: working() -> list[jeevesagent.core.types.MemoryBlock]
+      :async:
+
+
+
+   .. py:attribute:: facts
+      :type:  Any | None
+      :value: None
+
+
+
+.. py:data:: DEFAULT_COLLECTION
+   :value: 'jeeves_episodes'
+
+

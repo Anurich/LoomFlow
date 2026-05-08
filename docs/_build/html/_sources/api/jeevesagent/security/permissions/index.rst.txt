@@ -1,0 +1,95 @@
+jeevesagent.security.permissions
+================================
+
+.. py:module:: jeevesagent.security.permissions
+
+.. autoapi-nested-parse::
+
+   Permission decisions for tool calls.
+
+   Three modes mirror the Claude Agent SDK so users don't relearn:
+
+   - ``DEFAULT`` — allow non-destructive tools, ask on destructive
+   - ``ACCEPT_EDITS`` — auto-approve filesystem writes; otherwise like default
+   - ``BYPASS`` — allow everything (CI / sandbox use only)
+
+   Allow- and deny-lists win over modes; deny-list wins over allow-list.
+   The decision flow:
+
+       1. Tool in deny-list → deny
+       2. Allow-list set and tool not in it → deny
+       3. Mode == BYPASS → allow
+       4. Mode == ACCEPT_EDITS and call is a non-destructive edit → allow
+       5. Tool is destructive → ask
+       6. Otherwise → allow
+
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   jeevesagent.security.permissions.AllowAll
+   jeevesagent.security.permissions.Mode
+   jeevesagent.security.permissions.StandardPermissions
+
+
+Module Contents
+---------------
+
+.. py:class:: AllowAll
+
+   Trivial permission policy: every call is allowed.
+
+   The default for :class:`Agent` when no permissions are configured.
+
+
+   .. py:method:: check(call: jeevesagent.core.types.ToolCall, *, context: collections.abc.Mapping[str, Any]) -> jeevesagent.core.types.PermissionDecision
+      :async:
+
+
+
+.. py:class:: Mode
+
+   Bases: :py:obj:`enum.StrEnum`
+
+
+   Enum where members are also (and must be) strings
+
+   Initialize self.  See help(type(self)) for accurate signature.
+
+
+   .. py:attribute:: ACCEPT_EDITS
+      :value: 'acceptEdits'
+
+
+
+   .. py:attribute:: BYPASS
+      :value: 'bypassPermissions'
+
+
+
+   .. py:attribute:: DEFAULT
+      :value: 'default'
+
+
+
+.. py:class:: StandardPermissions(*, mode: Mode = Mode.DEFAULT, allowed_tools: list[str] | None = None, denied_tools: list[str] | None = None)
+
+   Mode + allow/deny-list permission policy.
+
+
+   .. py:method:: check(call: jeevesagent.core.types.ToolCall, *, context: collections.abc.Mapping[str, Any]) -> jeevesagent.core.types.PermissionDecision
+      :async:
+
+
+
+   .. py:method:: strict() -> StandardPermissions
+      :classmethod:
+
+
+      Convenience: default-mode permissions with no overrides.
+
+
+

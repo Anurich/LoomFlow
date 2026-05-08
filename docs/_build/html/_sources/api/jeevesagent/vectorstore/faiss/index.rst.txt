@@ -1,0 +1,106 @@
+jeevesagent.vectorstore.faiss
+=============================
+
+.. py:module:: jeevesagent.vectorstore.faiss
+
+.. autoapi-nested-parse::
+
+   FAISS-backed vector store.
+
+   In-process ANN over a FAISS index. Fast on large corpora (millions
+   of vectors). Lazy import — install via
+   ``pip install 'jeevesagent[vectorstore-faiss]'``.
+
+   The index is HNSW by default; pass ``index_factory_string`` to
+   override (``"Flat"`` for exact, ``"IVF1024,Flat"`` for IVF, see
+   https://github.com/facebookresearch/faiss/wiki/The-index-factory).
+
+   FAISS doesn't natively support metadata filtering — we apply the
+   ``filter`` argument by post-filtering the candidate set after the
+   ANN search returns. For tight filters with large ``k``, we
+   internally over-fetch so enough candidates survive the filter.
+
+   We also keep a parallel in-process vector list to support MMR
+   diversity reranking (some FAISS index types can't reconstruct
+   vectors from the index, so we cache them ourselves).
+
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   jeevesagent.vectorstore.faiss.FAISSVectorStore
+
+
+Module Contents
+---------------
+
+.. py:class:: FAISSVectorStore(embedder: jeevesagent.core.protocols.Embedder, *, dimension: int | None = None, index_factory_string: str = 'HNSW32', metric: str = 'ip')
+
+   Vector store backed by ``faiss-cpu``.
+
+
+   .. py:method:: add(chunks: list[jeevesagent.loader.base.Chunk], ids: list[str] | None = None) -> list[str]
+      :async:
+
+
+
+   .. py:method:: count() -> int
+      :async:
+
+
+
+   .. py:method:: delete(ids: list[str]) -> None
+      :async:
+
+
+
+   .. py:method:: from_chunks(chunks: list[jeevesagent.loader.base.Chunk], *, embedder: jeevesagent.core.protocols.Embedder, ids: list[str] | None = None, dimension: int | None = None, index_factory_string: str = 'HNSW32', metric: str = 'ip') -> FAISSVectorStore
+      :classmethod:
+
+      :async:
+
+
+      One-shot: construct a FAISSVectorStore + add ``chunks``.
+
+
+
+   .. py:method:: from_texts(texts: list[str], *, embedder: jeevesagent.core.protocols.Embedder, metadatas: list[dict[str, Any]] | None = None, ids: list[str] | None = None, dimension: int | None = None, index_factory_string: str = 'HNSW32', metric: str = 'ip') -> FAISSVectorStore
+      :classmethod:
+
+      :async:
+
+
+      One-shot: construct a FAISSVectorStore from raw text
+      strings (each becomes a :class:`Chunk` with the matching
+      metadata dict, or empty if ``metadatas`` is None).
+
+
+
+   .. py:method:: get_by_ids(ids: list[str]) -> list[jeevesagent.loader.base.Chunk]
+      :async:
+
+
+
+   .. py:method:: search(query: str, *, k: int = 4, filter: collections.abc.Mapping[str, Any] | None = None, diversity: float | None = None) -> list[jeevesagent.vectorstore.base.SearchResult]
+      :async:
+
+
+
+   .. py:method:: search_by_vector(vector: list[float], *, k: int = 4, filter: collections.abc.Mapping[str, Any] | None = None, diversity: float | None = None) -> list[jeevesagent.vectorstore.base.SearchResult]
+      :async:
+
+
+
+   .. py:property:: embedder
+      :type: jeevesagent.core.protocols.Embedder
+
+
+
+   .. py:attribute:: name
+      :value: 'faiss'
+
+
+

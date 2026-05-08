@@ -1,0 +1,96 @@
+jeevesagent.memory.chroma_facts
+===============================
+
+.. py:module:: jeevesagent.memory.chroma_facts
+
+.. autoapi-nested-parse::
+
+   Chroma-backed bi-temporal fact store.
+
+   Each fact lives in a Chroma collection as a (id, embedding, document,
+   metadata) tuple. The metadata carries the bi-temporal fields:
+
+   * ``subject`` / ``predicate`` / ``object`` — strings
+   * ``confidence`` — float
+   * ``valid_from_ts`` / ``recorded_at_ts`` — unix-epoch floats
+   * ``valid_until_ts`` — unix-epoch float; ``0.0`` when still valid
+   * ``currently_valid`` — bool, mirrors ``valid_until_ts == 0`` so we
+     can use it directly in Chroma's ``where`` filters
+   * ``sources`` — JSON-encoded list of episode ids
+
+   Supersession is two round-trips: a ``coll.get`` to find the prior
+   currently-valid facts with matching subject + predicate + different
+   object, followed by a ``coll.update`` that flips their
+   ``currently_valid`` to false and stamps ``valid_until_ts`` to the new
+   fact's ``valid_from``.
+
+
+
+Attributes
+----------
+
+.. autoapisummary::
+
+   jeevesagent.memory.chroma_facts.DEFAULT_FACTS_COLLECTION
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   jeevesagent.memory.chroma_facts.ChromaFactStore
+
+
+Module Contents
+---------------
+
+.. py:class:: ChromaFactStore(client: Any, *, embedder: jeevesagent.core.protocols.Embedder | None = None, collection_name: str = DEFAULT_FACTS_COLLECTION)
+
+   Bi-temporal fact store backed by a Chroma collection.
+
+
+   .. py:method:: aclose() -> None
+      :async:
+
+
+
+   .. py:method:: all_facts() -> list[jeevesagent.core.types.Fact]
+      :async:
+
+
+
+   .. py:method:: append(fact: jeevesagent.core.types.Fact) -> str
+      :async:
+
+
+
+   .. py:method:: ephemeral(*, embedder: jeevesagent.core.protocols.Embedder | None = None, collection_name: str = DEFAULT_FACTS_COLLECTION) -> ChromaFactStore
+      :classmethod:
+
+
+
+   .. py:method:: local(persist_directory: str, *, embedder: jeevesagent.core.protocols.Embedder | None = None, collection_name: str = DEFAULT_FACTS_COLLECTION) -> ChromaFactStore
+      :classmethod:
+
+
+
+   .. py:method:: query(*, subject: str | None = None, predicate: str | None = None, object_: str | None = None, valid_at: datetime.datetime | None = None, limit: int = 10, user_id: str | None = None) -> list[jeevesagent.core.types.Fact]
+      :async:
+
+
+
+   .. py:method:: recall_text(query: str, *, limit: int = 5, valid_at: datetime.datetime | None = None, user_id: str | None = None) -> list[jeevesagent.core.types.Fact]
+      :async:
+
+
+
+   .. py:property:: embedder
+      :type: jeevesagent.core.protocols.Embedder
+
+
+
+.. py:data:: DEFAULT_FACTS_COLLECTION
+   :value: 'jeeves_facts'
+
+

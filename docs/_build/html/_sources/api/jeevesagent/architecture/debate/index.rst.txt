@@ -1,0 +1,153 @@
+jeevesagent.architecture.debate
+===============================
+
+.. py:module:: jeevesagent.architecture.debate
+
+.. autoapi-nested-parse::
+
+   Multi-Agent Debate: N debaters argue, judge synthesizes.
+
+   Du et al. 2023 — `Improving Factuality and Reasoning in Language
+   Models through Multiagent Debate <https://arxiv.org/abs/2305.14325>`_.
+   Liang et al. 2023 (divergent thinking via debate). Production
+   patterns in AutoGen GroupChat, CAMEL.
+
+   Reserve for **high-stakes contested questions where a wrong answer
+   is expensive**. The 2026 production literature is cautious — debate
+   adds 3-5× cost over single-agent and works best on a narrow set of
+   decision-style questions where blind-spot triangulation matters.
+
+   Pattern
+   -------
+
+   1. **Round 0 (independent).** All debaters answer the original
+      question simultaneously, with no awareness of each other. Run
+      in parallel.
+   2. **Rounds 1..K (debate).** Each debater receives the original
+      question + the full transcript so far. They defend or update
+      their position. All debaters in a round run in parallel.
+   3. **Optional convergence check.** If all debaters in a round
+      produce exactly-matching answers (after whitespace normalize),
+      terminate early. Defaults on; disable for adversarial-only
+      debates where you want full rounds.
+   4. **Judge synthesis.** A separate ``judge`` :class:`Agent`
+      receives the full transcript and produces the final answer.
+      ``judge=None`` falls back to majority vote (modal answer
+      across the final round; tie-broken by first appearance).
+
+   Deterministic session ids
+   -------------------------
+   Each debater invocation uses
+   ``{parent}__debater_<i>_round_<r>``; the judge uses
+   ``{parent}__judge``. Replays of the parent journal cache the
+   sub-results and don't re-execute debaters.
+
+   Strengths
+   ---------
+   * **Surfaces blind spots through disagreement** — different priors
+     produce different errors; debate transcribes them.
+   * **Strong on factuality.** TruthfulQA improvement over single-agent
+     is well-documented (Du et al. 2023, +12% on 3 debaters / 2 rounds).
+   * **Heterogeneous-model friendly.** Use Claude + GPT + Llama for
+     genuine prior diversity rather than 3× of the same model.
+
+   Weaknesses
+   ----------
+   * **3-5× cost.** N debaters × K rounds + judge. Real money.
+   * **Sequential rounds.** Even with parallel debaters per round, you
+     still wait round-by-round.
+   * **Groupthink risk.** Same model → same priors → no real
+     disagreement. Differentiate models or personas.
+   * **Judge quality is critical.** Bad judge = bad final answer.
+
+
+
+Attributes
+----------
+
+.. autoapisummary::
+
+   jeevesagent.architecture.debate.DEFAULT_DEBATER_INSTRUCTIONS
+   jeevesagent.architecture.debate.DEFAULT_JUDGE_INSTRUCTIONS
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   jeevesagent.architecture.debate.MultiAgentDebate
+
+
+Module Contents
+---------------
+
+.. py:class:: MultiAgentDebate(*, debaters: list[jeevesagent.agent.api.Agent], judge: jeevesagent.agent.api.Agent | None = None, rounds: int = 2, convergence_check: bool = True, convergence_similarity: float = 0.85, debater_instructions: str | None = None, judge_instructions: str | None = None)
+
+   N debaters + optional judge orchestration.
+
+
+   .. py:method:: declared_workers() -> dict[str, jeevesagent.agent.api.Agent]
+
+
+   .. py:method:: run(session: jeevesagent.architecture.base.AgentSession, deps: jeevesagent.architecture.base.Dependencies, prompt: str) -> collections.abc.AsyncIterator[jeevesagent.core.types.Event]
+      :async:
+
+
+
+   .. py:attribute:: name
+      :value: 'debate'
+
+
+
+.. py:data:: DEFAULT_DEBATER_INSTRUCTIONS
+   :value: Multiline-String
+
+   .. raw:: html
+
+      <details><summary>Show Value</summary>
+
+   .. code-block:: python
+
+      """You are participating in a structured debate. Other debaters have
+      proposed answers (shown below). Your task on this round:
+      
+      1. State your position clearly.
+      2. Address each other debater's argument: where you agree, where
+         you disagree, and why.
+      3. If a counter-argument is convincing, update your position
+         openly — don't be stubborn for its own sake.
+      4. Cite specifics; avoid hand-waving.
+      
+      End with a clear final answer for THIS round.
+      """
+
+   .. raw:: html
+
+      </details>
+
+
+
+.. py:data:: DEFAULT_JUDGE_INSTRUCTIONS
+   :value: Multiline-String
+
+   .. raw:: html
+
+      <details><summary>Show Value</summary>
+
+   .. code-block:: python
+
+      """You are an impartial judge synthesizing a multi-agent debate. Read
+      the original question and the full debate transcript below, then
+      output the answer you believe is best supported by the arguments.
+      
+      Output the final answer as plain text. Be decisive — pick the
+      strongest position even when debaters didn't fully agree.
+      """
+
+   .. raw:: html
+
+      </details>
+
+
+

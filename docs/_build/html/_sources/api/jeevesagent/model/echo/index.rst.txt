@@ -1,0 +1,52 @@
+jeevesagent.model.echo
+======================
+
+.. py:module:: jeevesagent.model.echo
+
+.. autoapi-nested-parse::
+
+   A trivial model that echoes the last user message back, in chunks.
+
+   Useful for proving the loop end-to-end without API keys or network. It
+   emits one ``text`` chunk per word followed by a single ``finish`` chunk
+   with a synthetic usage record.
+
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   jeevesagent.model.echo.EchoModel
+
+
+Module Contents
+---------------
+
+.. py:class:: EchoModel(*, prefix: str = 'Echo: ', chunk_delay_s: float = 0.0, cost_per_token: float = 0.0)
+
+   Echo-style model for tests and demos.
+
+
+   .. py:method:: complete(messages: list[jeevesagent.core.types.Message], *, tools: list[jeevesagent.core.types.ToolDef] | None = None, temperature: float = 1.0, max_tokens: int | None = None) -> tuple[str, list[jeevesagent.core.types.ToolCall], jeevesagent.core.types.Usage, str]
+      :async:
+
+
+      Single-shot echo. Returns the echoed user prompt as one
+      string with synthetic usage. No per-token chunking — used by
+      the non-streaming hot path (``agent.run()``).
+
+
+
+   .. py:method:: stream(messages: list[jeevesagent.core.types.Message], *, tools: list[jeevesagent.core.types.ToolDef] | None = None, temperature: float = 1.0, max_tokens: int | None = None) -> collections.abc.AsyncIterator[jeevesagent.core.types.ModelChunk]
+      :async:
+
+
+
+   .. py:attribute:: name
+      :type:  str
+      :value: 'echo'
+
+
+

@@ -1,0 +1,1067 @@
+jeevesagent.architecture
+========================
+
+.. py:module:: jeevesagent.architecture
+
+.. autoapi-nested-parse::
+
+   Architecture layer.
+
+   An :class:`Architecture` is a strategy for driving the agent loop.
+   The canonical default is :class:`ReAct` — observe / think / act in a
+   tight loop. Other architectures (Plan-and-Execute, Reflexion,
+   Self-Refine, Tree of Thoughts, Supervisor, Router, ...) plug into the
+   same :class:`Agent` by satisfying the :class:`Architecture` protocol.
+
+   See ``Subagent.md`` in the repo root for the full architecture
+   catalogue and design rationale.
+
+   Public surface:
+
+   * :class:`Architecture` — the protocol architectures implement
+   * :class:`AgentSession` — mutable per-run state
+   * :class:`Dependencies` — bundled protocol implementations
+   * :class:`ReAct` — the canonical default (observe / think / act)
+   * :func:`resolve_architecture` — string -> Architecture instance
+
+
+
+Submodules
+----------
+
+.. toctree::
+   :maxdepth: 1
+
+   /api/jeevesagent/architecture/actor_critic/index
+   /api/jeevesagent/architecture/base/index
+   /api/jeevesagent/architecture/blackboard/index
+   /api/jeevesagent/architecture/debate/index
+   /api/jeevesagent/architecture/helpers/index
+   /api/jeevesagent/architecture/plan_and_execute/index
+   /api/jeevesagent/architecture/react/index
+   /api/jeevesagent/architecture/reflexion/index
+   /api/jeevesagent/architecture/resolver/index
+   /api/jeevesagent/architecture/rewoo/index
+   /api/jeevesagent/architecture/router/index
+   /api/jeevesagent/architecture/self_refine/index
+   /api/jeevesagent/architecture/supervisor/index
+   /api/jeevesagent/architecture/swarm/index
+   /api/jeevesagent/architecture/tool_host_wrappers/index
+   /api/jeevesagent/architecture/tree_of_thoughts/index
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   jeevesagent.architecture.ActorCritic
+   jeevesagent.architecture.AgentSession
+   jeevesagent.architecture.Architecture
+   jeevesagent.architecture.Blackboard
+   jeevesagent.architecture.BlackboardArchitecture
+   jeevesagent.architecture.BlackboardEntry
+   jeevesagent.architecture.Dependencies
+   jeevesagent.architecture.Handoff
+   jeevesagent.architecture.MultiAgentDebate
+   jeevesagent.architecture.Plan
+   jeevesagent.architecture.PlanAndExecute
+   jeevesagent.architecture.PlanStep
+   jeevesagent.architecture.ReAct
+   jeevesagent.architecture.ReWOO
+   jeevesagent.architecture.ReWOOPlan
+   jeevesagent.architecture.ReWOOStep
+   jeevesagent.architecture.ReWOOStepResult
+   jeevesagent.architecture.Reflexion
+   jeevesagent.architecture.Router
+   jeevesagent.architecture.RouterRoute
+   jeevesagent.architecture.SelfRefine
+   jeevesagent.architecture.StepResult
+   jeevesagent.architecture.Supervisor
+   jeevesagent.architecture.Swarm
+   jeevesagent.architecture.ThoughtNode
+   jeevesagent.architecture.TreeOfThoughts
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   jeevesagent.architecture.resolve_architecture
+
+
+Package Contents
+----------------
+
+.. py:class:: ActorCritic(*, actor: jeevesagent.agent.api.Agent, critic: jeevesagent.agent.api.Agent, max_rounds: int = 3, approval_threshold: float = 0.9, critique_template: str | None = None, refine_template: str | None = None)
+
+   Actor + adversarial critic with optional different models.
+
+   Constructor parameters:
+
+   * ``actor`` (required): the generating :class:`Agent`. Sees the
+     original prompt on round 0 and a refine prompt on subsequent
+     rounds.
+   * ``critic`` (required): the reviewing :class:`Agent`. Sees the
+     original prompt + the actor's current output and produces
+     structured JSON critique.
+   * ``max_rounds``: cap on critique-refine cycles after the
+     initial generation. Default 3.
+   * ``approval_threshold``: terminate when ``critique.score`` is
+     at or above this value. Default 0.9.
+   * ``critique_template`` / ``refine_template``: override the
+     default prompts. Templates use ``{prompt}``, ``{output}``,
+     ``{critique}``, ``{issues_bulleted}``.
+
+
+   .. py:method:: declared_workers() -> dict[str, jeevesagent.agent.api.Agent]
+
+
+   .. py:method:: run(session: jeevesagent.architecture.base.AgentSession, deps: jeevesagent.architecture.base.Dependencies, prompt: str) -> collections.abc.AsyncIterator[jeevesagent.core.types.Event]
+      :async:
+
+
+
+   .. py:attribute:: name
+      :value: 'actor-critic'
+
+
+
+.. py:class:: AgentSession
+
+   Mutable per-run state shared between :class:`Agent` and an
+   :class:`Architecture`.
+
+   The :class:`Agent` constructs this once per run, the architecture
+   mutates it as iteration progresses, and the :class:`Agent` reads
+   the final state to build a :class:`RunResult`.
+
+   ``metadata`` is a free-form dict architectures use for things
+   that don't deserve their own field — multi-agent architectures
+   stash worker handoff state, planners stash plans, etc.
+
+
+   .. py:attribute:: cumulative_usage
+      :type:  jeevesagent.core.types.Usage
+
+
+   .. py:attribute:: id
+      :type:  str
+
+
+   .. py:attribute:: instructions
+      :type:  str
+
+
+   .. py:attribute:: interrupted
+      :type:  bool
+      :value: False
+
+
+
+   .. py:attribute:: interruption_reason
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: messages
+      :type:  list[jeevesagent.core.types.Message]
+      :value: []
+
+
+
+   .. py:attribute:: metadata
+      :type:  dict[str, Any]
+
+
+   .. py:attribute:: output
+      :type:  str
+      :value: ''
+
+
+
+   .. py:attribute:: turns
+      :type:  int
+      :value: 0
+
+
+
+.. py:class:: Architecture
+
+   Bases: :py:obj:`Protocol`
+
+
+   Strategy interface for driving the agent loop.
+
+   Implementations are async generators: they ``yield`` :class:`Event`
+   values for every milestone they want surfaced (model chunks, tool
+   calls, tool results, budget warnings, errors, architecture-specific
+   progress events).
+
+   See ``Subagent.md`` for the catalogue of architectures and the
+   design rationale behind the protocol shape.
+
+
+   .. py:method:: declared_workers() -> dict[str, jeevesagent.agent.api.Agent]
+
+      Sub-Agents this architecture composes, keyed by role name.
+
+      Used by multi-agent architectures (Supervisor, Actor-Critic,
+      Debate, Router, Blackboard, Swarm) to expose their workers for
+      introspection (logging, telemetry, eval). Single-agent
+      architectures return ``{}``.
+
+
+
+   .. py:method:: run(session: AgentSession, deps: Dependencies, prompt: str) -> collections.abc.AsyncIterator[jeevesagent.core.types.Event]
+
+      Drive iteration; yield events as they happen.
+
+      The architecture mutates ``session`` (turns, output,
+      cumulative_usage, messages, interrupted, interruption_reason,
+      metadata) as it iterates and yields :class:`Event`\ s for the
+      caller to forward (or ignore, in non-streaming runs).
+
+      Implementations are *async generators* — declared
+      ``async def run(...) -> AsyncIterator[Event]:`` with ``yield``
+      statements in the body.
+
+
+
+   .. py:attribute:: name
+      :type:  str
+
+
+.. py:class:: Blackboard
+
+   Public + per-agent private state for the architecture.
+
+
+   .. py:method:: post(author: str, content: str, *, kind: str = 'contribution', private_to: str | None = None) -> BlackboardEntry
+
+
+   .. py:method:: render_for(agent_name: str) -> str
+
+      Format the blackboard state as a string for ``agent_name``.
+
+      Includes every public entry and the agent's own private
+      scratchpad if any.
+
+
+
+   .. py:attribute:: private
+      :type:  dict[str, list[BlackboardEntry]]
+
+
+   .. py:attribute:: public
+      :type:  list[BlackboardEntry]
+      :value: []
+
+
+
+.. py:class:: BlackboardArchitecture(*, agents: dict[str, jeevesagent.agent.api.Agent], coordinator: jeevesagent.agent.api.Agent | None = None, decider: jeevesagent.agent.api.Agent | None = None, max_rounds: int = 10, coordinator_instructions: str | None = None, decider_instructions: str | None = None)
+
+   Coordinator + agents + decider, mediated by a shared
+   blackboard.
+
+
+   .. py:method:: declared_workers() -> dict[str, jeevesagent.agent.api.Agent]
+
+
+   .. py:method:: run(session: jeevesagent.architecture.base.AgentSession, deps: jeevesagent.architecture.base.Dependencies, prompt: str) -> collections.abc.AsyncIterator[jeevesagent.core.types.Event]
+      :async:
+
+
+
+   .. py:attribute:: name
+      :value: 'blackboard'
+
+
+
+.. py:class:: BlackboardEntry
+
+   One contribution on the blackboard.
+
+
+   .. py:attribute:: author
+      :type:  str
+
+
+   .. py:attribute:: content
+      :type:  str
+
+
+   .. py:attribute:: kind
+      :type:  str
+      :value: 'contribution'
+
+
+
+   .. py:attribute:: timestamp
+      :type:  datetime.datetime
+
+
+.. py:class:: Dependencies
+
+   Bundled protocol implementations passed to every architecture.
+
+   Constructed once per run from the :class:`Agent`'s configured
+   backends. Architectures treat this as read-only — they call
+   methods on the contained protocols but don't mutate the struct
+   itself.
+
+   Multi-agent architectures (Supervisor, Router, etc.) will grow
+   helper methods on this class — ``fresh_session``,
+   ``scope_for_worker``, ``with_extra_tools``, ``spawn_child`` — as
+   they land in v0.5+. v0.3 keeps it as a passive struct.
+
+
+   .. py:attribute:: audit_log
+      :type:  jeevesagent.security.audit.AuditLog | None
+
+
+   .. py:attribute:: budget
+      :type:  jeevesagent.core.protocols.Budget
+
+
+   .. py:attribute:: context
+      :type:  jeevesagent.core.context.RunContext
+
+      Typed scope for the run — ``user_id`` (memory namespace),
+      ``session_id`` (conversation thread), ``run_id`` (this specific
+      invocation), and ``metadata`` (free-form app context). See
+      :class:`~jeevesagent.RunContext` for the per-field semantics.
+
+
+   .. py:attribute:: fast_audit
+      :type:  bool
+      :value: True
+
+
+      Skip ``_audit(...)`` calls when ``audit_log`` is ``None``.
+
+
+   .. py:attribute:: fast_budget
+      :type:  bool
+      :value: True
+
+
+      Skip ``budget.allows_step()`` and ``budget.consume(...)``
+      when budget is ``NoBudget``.
+
+
+   .. py:attribute:: fast_hooks
+      :type:  bool
+      :value: True
+
+
+      Skip ``hooks.pre_tool`` / ``hooks.post_tool`` dispatch when
+      no hooks have been registered.
+
+
+   .. py:attribute:: fast_permissions
+      :type:  bool
+      :value: True
+
+
+      Skip per-tool ``permissions.check(...)`` when permissions is
+      the no-op ``AllowAll``.
+
+
+   .. py:attribute:: fast_runtime
+      :type:  bool
+      :value: True
+
+
+      Inline ``await fn(*args)`` (skipping ``runtime.step(...)``
+      wrapping + idempotency-key derivation) when runtime is
+      ``InProcRuntime``.
+
+
+   .. py:attribute:: fast_telemetry
+      :type:  bool
+      :value: True
+
+
+      Skip ``telemetry.trace(...)`` contextmanagers + ``emit_metric``
+      calls when ``telemetry`` is ``NoTelemetry``.
+
+
+   .. py:attribute:: hooks
+      :type:  jeevesagent.security.hooks.HookRegistry
+
+
+   .. py:attribute:: max_turns
+      :type:  int
+
+
+   .. py:attribute:: memory
+      :type:  jeevesagent.core.protocols.Memory
+
+
+   .. py:attribute:: model
+      :type:  jeevesagent.core.protocols.Model
+
+
+   .. py:attribute:: permissions
+      :type:  jeevesagent.core.protocols.Permissions
+
+
+   .. py:attribute:: runtime
+      :type:  jeevesagent.core.protocols.Runtime
+
+
+   .. py:attribute:: streaming
+      :type:  bool
+      :value: False
+
+
+      Whether a downstream consumer is reading from
+      ``agent.stream()``. When True, architectures should preserve
+      real-time event-arrival semantics so a consumer that breaks
+      out of the iterator triggers prompt cancellation. When False
+      (the default for ``agent.run()``), architectures may batch
+      events for fewer task-group / channel allocations on the
+      hot path.
+
+
+   .. py:attribute:: telemetry
+      :type:  jeevesagent.core.protocols.Telemetry
+
+
+   .. py:attribute:: tools
+      :type:  jeevesagent.core.protocols.ToolHost
+
+
+.. py:class:: Handoff
+
+   Per-peer handoff configuration.
+
+   * ``agent`` — the peer :class:`Agent`.
+   * ``input_type`` — optional Pydantic model. When set, the
+     generated handoff tool's input schema mirrors this model's
+     fields, so the calling model gets a typed schema (instead of
+     a string ``message``). The validated payload is exposed to
+     ``input_filter`` and surfaces in the ``swarm.handoff`` event.
+   * ``input_filter`` — optional callback ``(history, payload)
+     → prompt`` for selective context forwarding. Default behavior
+     respects the Swarm's ``pass_full_history`` flag.
+   * ``description`` — override the generated tool's description.
+     Useful when the agent's name is opaque ("billing_v2") but
+     the description should be user-friendly.
+   * ``tool_name`` — override the auto-generated tool name. Default
+     is ``"transfer_to_<key>"`` where ``<key>`` is the peer's key
+     in the swarm's ``agents`` dict.
+
+
+   .. py:attribute:: agent
+      :type:  jeevesagent.agent.api.Agent
+
+
+   .. py:attribute:: description
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: input_filter
+      :type:  InputFilter | None
+      :value: None
+
+
+
+   .. py:attribute:: input_type
+      :type:  type[pydantic.BaseModel] | None
+      :value: None
+
+
+
+   .. py:attribute:: tool_name
+      :type:  str | None
+      :value: None
+
+
+
+.. py:class:: MultiAgentDebate(*, debaters: list[jeevesagent.agent.api.Agent], judge: jeevesagent.agent.api.Agent | None = None, rounds: int = 2, convergence_check: bool = True, convergence_similarity: float = 0.85, debater_instructions: str | None = None, judge_instructions: str | None = None)
+
+   N debaters + optional judge orchestration.
+
+
+   .. py:method:: declared_workers() -> dict[str, jeevesagent.agent.api.Agent]
+
+
+   .. py:method:: run(session: jeevesagent.architecture.base.AgentSession, deps: jeevesagent.architecture.base.Dependencies, prompt: str) -> collections.abc.AsyncIterator[jeevesagent.core.types.Event]
+      :async:
+
+
+
+   .. py:attribute:: name
+      :value: 'debate'
+
+
+
+.. py:class:: Plan(/, **data: Any)
+
+   Bases: :py:obj:`pydantic.BaseModel`
+
+
+   A list of plan steps in execution order.
+
+   Create a new model by parsing and validating input data from keyword arguments.
+
+   Raises [`ValidationError`][pydantic_core.ValidationError] if the input data cannot be
+   validated to form a valid model.
+
+   `self` is explicitly positional-only to allow `self` as a field name.
+
+
+   .. py:attribute:: steps
+      :type:  list[PlanStep]
+      :value: None
+
+
+
+.. py:class:: PlanAndExecute(*, max_steps: int = 8, planner_prompt: str | None = None, executor_prompt: str | None = None, synthesizer_prompt: str | None = None)
+
+   Planner → step executor → synthesizer.
+
+
+   .. py:method:: declared_workers() -> dict[str, jeevesagent.agent.api.Agent]
+
+
+   .. py:method:: run(session: jeevesagent.architecture.base.AgentSession, deps: jeevesagent.architecture.base.Dependencies, prompt: str) -> collections.abc.AsyncIterator[jeevesagent.core.types.Event]
+      :async:
+
+
+
+   .. py:attribute:: name
+      :value: 'plan-and-execute'
+
+
+
+.. py:class:: PlanStep(/, **data: Any)
+
+   Bases: :py:obj:`pydantic.BaseModel`
+
+
+   One step of a plan.
+
+   Create a new model by parsing and validating input data from keyword arguments.
+
+   Raises [`ValidationError`][pydantic_core.ValidationError] if the input data cannot be
+   validated to form a valid model.
+
+   `self` is explicitly positional-only to allow `self` as a field name.
+
+
+   .. py:attribute:: description
+      :type:  str
+
+
+   .. py:attribute:: id
+      :type:  str
+
+
+.. py:class:: ReAct(*, max_turns: int | None = None)
+
+   Observe-think-act in a tight loop.
+
+   The default architecture for every :class:`Agent`. Other
+   architectures wrap or replace this strategy; see ``Subagent.md``.
+
+   ``max_turns`` overrides ``Dependencies.max_turns`` for this
+   architecture only — useful when wrapping ReAct inside another
+   architecture that sets its own per-leaf cap (Reflexion,
+   Plan-and-Execute, etc.). ``None`` means "use whatever the Agent
+   was configured with".
+
+
+   .. py:method:: declared_workers() -> dict[str, jeevesagent.agent.api.Agent]
+
+
+   .. py:method:: run(session: jeevesagent.architecture.base.AgentSession, deps: jeevesagent.architecture.base.Dependencies, prompt: str) -> collections.abc.AsyncIterator[jeevesagent.core.types.Event]
+      :async:
+
+
+
+   .. py:attribute:: name
+      :value: 'react'
+
+
+
+.. py:class:: ReWOO(*, max_steps: int = 8, planner_prompt: str | None = None, solver_prompt: str | None = None, parallel_levels: bool = True)
+
+   Plan-then-tool-execute with placeholder substitution.
+
+
+   .. py:method:: declared_workers() -> dict[str, jeevesagent.agent.api.Agent]
+
+
+   .. py:method:: run(session: jeevesagent.architecture.base.AgentSession, deps: jeevesagent.architecture.base.Dependencies, prompt: str) -> collections.abc.AsyncIterator[jeevesagent.core.types.Event]
+      :async:
+
+
+
+   .. py:attribute:: name
+      :value: 'rewoo'
+
+
+
+.. py:class:: ReWOOPlan(/, **data: Any)
+
+   Bases: :py:obj:`pydantic.BaseModel`
+
+
+   A list of ReWOO steps (no required ordering — dependencies
+   are inferred from ``{{En}}`` placeholders).
+
+   Create a new model by parsing and validating input data from keyword arguments.
+
+   Raises [`ValidationError`][pydantic_core.ValidationError] if the input data cannot be
+   validated to form a valid model.
+
+   `self` is explicitly positional-only to allow `self` as a field name.
+
+
+   .. py:attribute:: steps
+      :type:  list[ReWOOStep]
+      :value: None
+
+
+
+.. py:class:: ReWOOStep(/, **data: Any)
+
+   Bases: :py:obj:`pydantic.BaseModel`
+
+
+   One step of a ReWOO plan: id + tool + args.
+
+   Create a new model by parsing and validating input data from keyword arguments.
+
+   Raises [`ValidationError`][pydantic_core.ValidationError] if the input data cannot be
+   validated to form a valid model.
+
+   `self` is explicitly positional-only to allow `self` as a field name.
+
+
+   .. py:attribute:: args
+      :type:  dict[str, Any]
+      :value: None
+
+
+
+   .. py:property:: depends_on
+      :type: list[str]
+
+
+      Extract ``{{En}}`` step ids referenced in args.
+
+
+   .. py:attribute:: id
+      :type:  str
+
+
+   .. py:attribute:: tool
+      :type:  str
+
+
+.. py:class:: ReWOOStepResult(/, **data: Any)
+
+   Bases: :py:obj:`pydantic.BaseModel`
+
+
+   !!! abstract "Usage Documentation"
+       [Models](../concepts/models.md)
+
+   A base class for creating Pydantic models.
+
+   .. attribute:: __class_vars__
+
+      The names of the class variables defined on the model.
+
+   .. attribute:: __private_attributes__
+
+      Metadata about the private attributes of the model.
+
+   .. attribute:: __signature__
+
+      The synthesized `__init__` [`Signature`][inspect.Signature] of the model.
+
+   .. attribute:: __pydantic_complete__
+
+      Whether model building is completed, or if there are still undefined fields.
+
+   .. attribute:: __pydantic_core_schema__
+
+      The core schema of the model.
+
+   .. attribute:: __pydantic_custom_init__
+
+      Whether the model has a custom `__init__` function.
+
+   .. attribute:: __pydantic_decorators__
+
+      Metadata containing the decorators defined on the model.
+      This replaces `Model.__validators__` and `Model.__root_validators__` from Pydantic V1.
+
+   .. attribute:: __pydantic_generic_metadata__
+
+      Metadata for generic models; contains data used for a similar purpose to
+      __args__, __origin__, __parameters__ in typing-module generics. May eventually be replaced by these.
+
+   .. attribute:: __pydantic_parent_namespace__
+
+      Parent namespace of the model, used for automatic rebuilding of models.
+
+   .. attribute:: __pydantic_post_init__
+
+      The name of the post-init method for the model, if defined.
+
+   .. attribute:: __pydantic_root_model__
+
+      Whether the model is a [`RootModel`][pydantic.root_model.RootModel].
+
+   .. attribute:: __pydantic_serializer__
+
+      The `pydantic-core` `SchemaSerializer` used to dump instances of the model.
+
+   .. attribute:: __pydantic_validator__
+
+      The `pydantic-core` `SchemaValidator` used to validate instances of the model.
+
+   .. attribute:: __pydantic_fields__
+
+      A dictionary of field names and their corresponding [`FieldInfo`][pydantic.fields.FieldInfo] objects.
+
+   .. attribute:: __pydantic_computed_fields__
+
+      A dictionary of computed field names and their corresponding [`ComputedFieldInfo`][pydantic.fields.ComputedFieldInfo] objects.
+
+   .. attribute:: __pydantic_extra__
+
+      A dictionary containing extra values, if [`extra`][pydantic.config.ConfigDict.extra]
+      is set to `'allow'`.
+
+   .. attribute:: __pydantic_fields_set__
+
+      The names of fields explicitly set during instantiation.
+
+   .. attribute:: __pydantic_private__
+
+      Values of private attributes set on the model instance.
+
+   Create a new model by parsing and validating input data from keyword arguments.
+
+   Raises [`ValidationError`][pydantic_core.ValidationError] if the input data cannot be
+   validated to form a valid model.
+
+   `self` is explicitly positional-only to allow `self` as a field name.
+
+
+   .. py:attribute:: error
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: output
+      :type:  str
+
+
+   .. py:attribute:: step_id
+      :type:  str
+
+
+   .. py:attribute:: tool
+      :type:  str
+
+
+.. py:class:: Reflexion(*, base: jeevesagent.architecture.base.Architecture | None = None, max_attempts: int = 3, threshold: float = 0.8, evaluator_prompt: str | None = None, reflector_prompt: str | None = None, lessons_block_name: str = 'reflexion_lessons', lesson_store: jeevesagent.vectorstore.base.VectorStore | None = None, top_k_lessons: int = 5)
+
+   Wrap a base architecture with evaluator + reflector + lesson
+   memory.
+
+   See module docstring for the full mechanism. Constructor
+   parameters:
+
+   * ``base`` — architecture to retry. Default :class:`ReAct`.
+   * ``max_attempts`` — cap on retries within a single run.
+     Default 3.
+   * ``threshold`` — minimum evaluator score to terminate as
+     success. Default 0.8.
+   * ``evaluator_prompt`` / ``reflector_prompt`` — override the
+     default system prompts.
+   * ``lessons_block_name`` — memory working-block name for
+     persisted lessons. Default ``"reflexion_lessons"``. Multiple
+     Reflexion-wrapped agents in the same memory should pick
+     distinct names.
+   * ``lesson_store`` — optional :class:`VectorStore` enabling
+     selective recall. When set, lessons are stored as embedded
+     chunks and only the top-``top_k_lessons`` most relevant
+     lessons are surfaced on each attempt (instead of all past
+     lessons). Avoids context bloat as lessons accumulate.
+   * ``top_k_lessons`` — how many lessons to recall per attempt
+     (selective-recall mode only). Default 5.
+
+
+   .. py:method:: declared_workers() -> dict[str, jeevesagent.agent.api.Agent]
+
+
+   .. py:method:: run(session: jeevesagent.architecture.base.AgentSession, deps: jeevesagent.architecture.base.Dependencies, prompt: str) -> collections.abc.AsyncIterator[jeevesagent.core.types.Event]
+      :async:
+
+
+
+   .. py:attribute:: name
+      :value: 'reflexion'
+
+
+
+.. py:class:: Router(*, routes: list[RouterRoute], fallback_route: str | None = None, require_confidence_above: float = 0.0, classifier_prompt: str | None = None)
+
+   Classify input → dispatch to ONE specialist :class:`Agent`.
+
+
+   .. py:method:: declared_workers() -> dict[str, jeevesagent.agent.api.Agent]
+
+
+   .. py:method:: run(session: jeevesagent.architecture.base.AgentSession, deps: jeevesagent.architecture.base.Dependencies, prompt: str) -> collections.abc.AsyncIterator[jeevesagent.core.types.Event]
+      :async:
+
+
+
+   .. py:attribute:: name
+      :value: 'router'
+
+
+
+.. py:class:: RouterRoute
+
+   One specialist + classification metadata.
+
+   ``name`` is what the classifier emits in its ``route:`` line and
+   must be unique within a Router. ``description`` is shown to the
+   classifier alongside the name — keep it specific and
+   distinguishing so the classifier picks reliably.
+
+
+   .. py:attribute:: agent
+      :type:  jeevesagent.agent.api.Agent
+
+
+   .. py:attribute:: description
+      :type:  str
+      :value: ''
+
+
+
+   .. py:attribute:: name
+      :type:  str
+
+
+.. py:class:: SelfRefine(*, base: jeevesagent.architecture.base.Architecture | None = None, max_rounds: int = 3, critic_prompt: str | None = None, refiner_prompt: str | None = None, stop_phrase: str = 'no issues')
+
+   Wrap a base architecture with iterative critique / refine.
+
+   ``base`` defaults to :class:`ReAct`; the round-0 generator runs
+   the base architecture's full strategy. Subsequent rounds are
+   text-only model calls — no tools, just critique and rewrite.
+
+
+   .. py:method:: declared_workers() -> dict[str, jeevesagent.agent.api.Agent]
+
+
+   .. py:method:: run(session: jeevesagent.architecture.base.AgentSession, deps: jeevesagent.architecture.base.Dependencies, prompt: str) -> collections.abc.AsyncIterator[jeevesagent.core.types.Event]
+      :async:
+
+
+
+   .. py:attribute:: name
+      :value: 'self-refine'
+
+
+
+.. py:class:: StepResult(/, **data: Any)
+
+   Bases: :py:obj:`pydantic.BaseModel`
+
+
+   The output of executing one step.
+
+   Create a new model by parsing and validating input data from keyword arguments.
+
+   Raises [`ValidationError`][pydantic_core.ValidationError] if the input data cannot be
+   validated to form a valid model.
+
+   `self` is explicitly positional-only to allow `self` as a field name.
+
+
+   .. py:attribute:: description
+      :type:  str
+
+
+   .. py:attribute:: output
+      :type:  str
+
+
+   .. py:attribute:: step_id
+      :type:  str
+
+
+.. py:class:: Supervisor(*, workers: dict[str, jeevesagent.agent.api.Agent], base: jeevesagent.architecture.base.Architecture | None = None, instructions_template: str | None = None, delegate_tool_name: str = 'delegate', forward_tool_name: str = 'forward_message')
+
+   Coordinator + workers, glued by a ``delegate`` tool.
+
+   The supervisor's base architecture (default :class:`ReAct`) sees
+   a fresh ``delegate(worker, instructions)`` tool that routes calls
+   to the named worker :class:`Agent`. Worker outputs come back as
+   tool results just like any other tool call.
+
+   Constructor
+   -----------
+   * ``workers``: dict mapping role-names to fully-built
+     :class:`Agent` instances. Names must be valid identifiers
+     (the model emits them as the ``worker`` argument).
+   * ``base``: the architecture the supervisor itself runs.
+     Default :class:`ReAct`. Wrap inside :class:`Reflexion` to
+     learn delegation patterns across runs.
+   * ``instructions_template``: format string with
+     ``{worker_descriptions}``. Default teaches the supervisor
+     to delegate effectively. The agent's own ``instructions``
+     are *prepended* (so domain context survives).
+   * ``delegate_tool_name``: defaults to ``"delegate"``. Customize
+     to avoid clashes with user-defined tools that happen to have
+     the same name.
+   * ``forward_tool_name``: defaults to ``"forward_message"``. The
+     supervisor calls this with a worker name to return that
+     worker's last output VERBATIM as the supervisor's final
+     response. Skips a synthesis round-trip — the
+     `langchain.com/blog/benchmarking-multi-agent-architectures`_
+     benchmark showed +50% quality on tasks where the supervisor
+     would otherwise paraphrase a worker's output.
+
+
+   .. py:method:: add_worker(name: str, agent: jeevesagent.agent.api.Agent) -> None
+
+      Register a worker between runs.
+
+      Safe to call between :meth:`Agent.run` invocations on the
+      agent that owns this supervisor; the new worker becomes
+      available for ``delegate(name, ...)`` on the next run.
+      Calling mid-run is undefined — the supervisor's prompt is
+      composed at run start.
+
+
+
+   .. py:method:: declared_workers() -> dict[str, jeevesagent.agent.api.Agent]
+
+
+   .. py:method:: remove_worker(name: str) -> jeevesagent.agent.api.Agent | None
+
+      Unregister a worker by name. Returns the removed Agent
+      if it was registered, ``None`` otherwise. Same lifecycle
+      rules as :meth:`add_worker`.
+
+
+
+   .. py:method:: run(session: jeevesagent.architecture.base.AgentSession, deps: jeevesagent.architecture.base.Dependencies, prompt: str) -> collections.abc.AsyncIterator[jeevesagent.core.types.Event]
+      :async:
+
+
+
+   .. py:attribute:: name
+      :value: 'supervisor'
+
+
+
+.. py:class:: Swarm(*, agents: dict[str, jeevesagent.agent.api.Agent | Handoff], entry_agent: str, max_handoffs: int = 8, detect_cycles: bool = True, pass_full_history: bool = True, handoff_tool_name: str = 'handoff')
+
+   Peer agents passing control through handoff tools.
+
+
+   .. py:method:: declared_workers() -> dict[str, jeevesagent.agent.api.Agent]
+
+
+   .. py:method:: run(session: jeevesagent.architecture.base.AgentSession, deps: jeevesagent.architecture.base.Dependencies, prompt: str) -> collections.abc.AsyncIterator[jeevesagent.core.types.Event]
+      :async:
+
+
+
+   .. py:attribute:: name
+      :value: 'swarm'
+
+
+
+.. py:class:: ThoughtNode(/, **data: Any)
+
+   Bases: :py:obj:`pydantic.BaseModel`
+
+
+   One node in the Tree-of-Thoughts search tree.
+
+   Children are stored implicitly (each node has a ``parent_id``).
+   The full tree is reconstructable from the node list ToT keeps in
+   its session metadata.
+
+   Create a new model by parsing and validating input data from keyword arguments.
+
+   Raises [`ValidationError`][pydantic_core.ValidationError] if the input data cannot be
+   validated to form a valid model.
+
+   `self` is explicitly positional-only to allow `self` as a field name.
+
+
+   .. py:attribute:: content
+      :type:  str
+
+
+   .. py:attribute:: depth
+      :type:  int
+
+
+   .. py:attribute:: id
+      :type:  str
+
+
+   .. py:attribute:: parent_id
+      :type:  str | None
+
+
+   .. py:attribute:: score
+      :type:  float
+      :value: 0.0
+
+
+
+.. py:class:: TreeOfThoughts(*, branch_factor: int = 3, max_depth: int = 3, beam_width: int = 2, solved_threshold: float = 1.0, min_score: float = 0.0, parallel: bool = True, proposer_prompt: str | None = None, evaluator_prompt: str | None = None)
+
+   Branch + evaluate + prune. BFS beam search over thoughts.
+
+
+   .. py:method:: declared_workers() -> dict[str, jeevesagent.agent.api.Agent]
+
+
+   .. py:method:: run(session: jeevesagent.architecture.base.AgentSession, deps: jeevesagent.architecture.base.Dependencies, prompt: str) -> collections.abc.AsyncIterator[jeevesagent.core.types.Event]
+      :async:
+
+
+
+   .. py:attribute:: name
+      :value: 'tree-of-thoughts'
+
+
+
+.. py:function:: resolve_architecture(spec: jeevesagent.architecture.base.Architecture | str | None) -> jeevesagent.architecture.base.Architecture
+
+   Coerce ``spec`` to a concrete :class:`Architecture`.
+
+   * ``None`` → :class:`ReAct` (the default)
+   * ``str`` → looked up in :data:`KNOWN` (only ``"react"`` in v0.3)
+   * Architecture instance → returned as-is
+
+   Unknown strings raise :class:`ConfigError` with a list of known
+   names.
+
+

@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any
 
 import anyio
 
+from ..core.context import RunContext, get_run_context
 from ..core.types import Event, Message, Usage
 from .base import Dependencies
 
@@ -119,12 +120,26 @@ class SubagentInvocation:
         prompt: str,
         *,
         session_id: str | None = None,
+        context: RunContext | None = None,
         extra_tools: list[Tool] | None = None,
         buffer_size: int = 128,
     ) -> None:
         self._agent = agent
         self._prompt = prompt
         self._session_id = session_id
+        # Sub-agents inherit the parent's :class:`RunContext` by
+        # default — read the live context off the contextvar that
+        # ``Agent._loop`` installed when the parent run started.
+        # That propagates ``user_id`` and ``metadata`` down a
+        # multi-agent tree without each architecture having to
+        # plumb them by hand. ``session_id`` (if supplied) overrides
+        # the parent's so each spawn gets its own conversation
+        # thread; if not, the framework auto-generates a fresh one.
+        # When called outside an active parent run,
+        # ``get_run_context`` returns the empty default — sub-agents
+        # then run anonymously, same as direct ``Agent.run`` with
+        # no kwargs.
+        self._context = context if context is not None else get_run_context()
         self._extra_tools = extra_tools
         self._buffer_size = buffer_size
         self.result: dict[str, Any] = {}
@@ -157,6 +172,7 @@ class SubagentInvocation:
                 await self._agent.run(
                     self._prompt,
                     session_id=self._session_id,
+                    context=self._context,
                     extra_tools=self._extra_tools,
                     emit=_capture,
                 )

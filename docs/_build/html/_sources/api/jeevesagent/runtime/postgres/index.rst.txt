@@ -1,0 +1,73 @@
+jeevesagent.runtime.postgres
+============================
+
+.. py:module:: jeevesagent.runtime.postgres
+
+.. autoapi-nested-parse::
+
+   Convenience: ``JournaledRuntime`` rooted at a Postgres pool.
+
+   Usage::
+
+       runtime = await PostgresRuntime.connect("postgres://localhost/jeeves")
+       await runtime.init_schema()
+       agent = Agent("...", model="claude-opus-4-7", runtime=runtime)
+
+   The journal lives in two Postgres tables (``journal_steps`` and
+   ``journal_streams``) which :meth:`init_schema` creates idempotently.
+   Same protocol as :class:`SqliteRuntime`; production-grade durability
+   when paired with a managed Postgres instance.
+
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   jeevesagent.runtime.postgres.PostgresRuntime
+
+
+Module Contents
+---------------
+
+.. py:class:: PostgresRuntime(pool: Any)
+
+   Bases: :py:obj:`jeevesagent.runtime.journaled.JournaledRuntime`
+
+
+   :class:`JournaledRuntime` backed by Postgres for cross-host
+   durable replay.
+
+
+   .. py:method:: aclose() -> None
+      :async:
+
+
+      Close the underlying connection pool.
+
+
+
+   .. py:method:: connect(dsn: str, *, min_size: int = 1, max_size: int = 10) -> PostgresRuntime
+      :classmethod:
+
+      :async:
+
+
+      Open a fresh asyncpg pool and return the runtime rooted at it.
+
+
+
+   .. py:method:: init_schema() -> None
+      :async:
+
+
+      Create the journal tables if they don't already exist.
+
+
+
+   .. py:attribute:: name
+      :value: 'postgres'
+
+
+

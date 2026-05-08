@@ -401,10 +401,32 @@ class Event(BaseModel):
 
 
 class RunResult(BaseModel):
-    """Final outcome of an ``Agent.run`` call."""
+    """Final outcome of an ``Agent.run`` call.
+
+    ``output`` is always the raw assistant text (the JSON itself when
+    a structured-output schema was supplied). ``parsed`` is the
+    validated Pydantic instance — populated only when the caller
+    passed ``output_schema=`` to :meth:`Agent.run`. Use whichever
+    fits the call site::
+
+        # free-form text run
+        result = await agent.run("summarise this PDF")
+        print(result.output)
+
+        # structured-output run
+        result = await agent.run(prompt, output_schema=Invoice)
+        invoice: Invoice = result.parsed   # typed, validated
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     session_id: str
     output: str
+    parsed: Any | None = None
+    """The validated Pydantic instance when ``output_schema=`` was
+    supplied to :meth:`Agent.run`; ``None`` otherwise. Typed as
+    ``Any`` to keep the runtime type free; the call site has the
+    schema and can cast or annotate as needed."""
     turns: int
     tokens_in: int = 0
     tokens_out: int = 0

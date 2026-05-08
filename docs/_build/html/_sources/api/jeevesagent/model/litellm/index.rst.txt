@@ -1,0 +1,69 @@
+jeevesagent.model.litellm
+=========================
+
+.. py:module:: jeevesagent.model.litellm
+
+.. autoapi-nested-parse::
+
+   LiteLLM-backed model adapter — one adapter, every provider.
+
+   `LiteLLM <https://github.com/BerriAI/litellm>`_ normalises 100+
+   provider APIs to OpenAI's chat-completion shape, including:
+
+   * Anthropic (``claude-*``) — though :class:`AnthropicModel` is a
+     faster direct path
+   * OpenAI (``gpt-*``) — same; :class:`OpenAIModel` is the direct path
+   * Cohere (``command-r``, ``command-r-plus``)
+   * Mistral (``mistral-large``, ``mistral-small``, ...)
+   * AWS Bedrock (``bedrock/anthropic.claude-3-...``)
+   * Google Vertex AI (``vertex_ai/gemini-pro``)
+   * Together AI (``together_ai/...``)
+   * Groq, Replicate, Ollama, …
+
+   Because LiteLLM produces OpenAI-shaped streaming chunks, this adapter
+   can subclass :class:`OpenAIModel` and reuse its entire chunk
+   aggregation / tool-call delta accumulation logic. The only
+   difference: where :class:`OpenAIModel` calls
+   ``self._client.chat.completions.create``, this one routes through
+   ``litellm.acompletion``.
+
+   Usage::
+
+       from jeevesagent import Agent
+       from jeevesagent.model.litellm import LiteLLMModel
+
+       agent = Agent(
+           "...",
+           model=LiteLLMModel("mistral-large", api_key="..."),
+       )
+
+   The string-based resolver in :mod:`jeevesagent.agent.api` recognises
+   several common LiteLLM prefixes (``mistral-``, ``command-``,
+   ``bedrock/``, ``vertex_ai/``, ``together_ai/``, ``ollama/``,
+   ``gemini/``) so passing the bare model spec works too.
+
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   jeevesagent.model.litellm.LiteLLMModel
+
+
+Module Contents
+---------------
+
+.. py:class:: LiteLLMModel(model: str, *, api_key: str | None = None, client: Any | None = None, **litellm_kwargs: Any)
+
+   Bases: :py:obj:`jeevesagent.model.openai.OpenAIModel`
+
+
+   Talks to any LiteLLM-supported provider.
+
+   Inherits chunk normalisation, tool-call delta aggregation, and
+   message-conversion from :class:`OpenAIModel` because LiteLLM
+   produces OpenAI-shaped outputs.
+
+

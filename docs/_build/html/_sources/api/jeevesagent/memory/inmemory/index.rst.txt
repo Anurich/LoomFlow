@@ -1,0 +1,92 @@
+jeevesagent.memory.inmemory
+===========================
+
+.. py:module:: jeevesagent.memory.inmemory
+
+.. autoapi-nested-parse::
+
+   Dict-backed memory for tests and tiny demos.
+
+   Recall is naive: filter episodes by substring + recency. Production
+   deployments use :class:`PostgresMemory` (Phase 4) which uses pgvector
+   for semantic search and tracks bi-temporal facts.
+
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   jeevesagent.memory.inmemory.InMemoryMemory
+
+
+Module Contents
+---------------
+
+.. py:class:: InMemoryMemory(*, consolidator: jeevesagent.memory.consolidator.Consolidator | None = None, fact_store: jeevesagent.memory.facts.FactStore | None = None)
+
+   Dict-backed implementation of :class:`Memory`.
+
+
+   .. py:method:: append_block(name: str, content: str) -> None
+      :async:
+
+
+
+   .. py:method:: consolidate() -> None
+      :async:
+
+
+      Process unconsolidated episodes through the configured
+      :class:`Consolidator`, appending facts to ``self.facts``.
+
+
+
+   .. py:method:: recall(query: str, *, kind: str = 'episodic', limit: int = 5, time_range: tuple[datetime.datetime, datetime.datetime] | None = None, user_id: str | None = None) -> list[jeevesagent.core.types.Episode]
+      :async:
+
+
+
+   .. py:method:: recall_facts(query: str, *, limit: int = 5, valid_at: datetime.datetime | None = None, user_id: str | None = None) -> list[jeevesagent.core.types.Fact]
+      :async:
+
+
+
+   .. py:method:: remember(episode: jeevesagent.core.types.Episode) -> str
+      :async:
+
+
+
+   .. py:method:: session_messages(session_id: str, *, user_id: str | None = None, limit: int = 20) -> list[jeevesagent.core.types.Message]
+      :async:
+
+
+      Return user/assistant pairs from prior runs of this session.
+
+      Materialises each persisted :class:`Episode` for the given
+      ``session_id`` (within the ``user_id`` partition) into a
+      ``[USER input, ASSISTANT output]`` pair, ordered oldest-first
+      and capped at ``limit`` turns total — i.e. up to ``limit / 2``
+      Q/A exchanges. Tool-call traces are not replayed; the final
+      assistant text per turn is sufficient context for follow-ups.
+
+
+
+   .. py:method:: snapshot() -> dict[str, Any]
+
+
+   .. py:method:: update_block(name: str, content: str) -> None
+      :async:
+
+
+
+   .. py:method:: working() -> list[jeevesagent.core.types.MemoryBlock]
+      :async:
+
+
+
+   .. py:attribute:: facts
+      :type:  jeevesagent.memory.facts.FactStore
+
+

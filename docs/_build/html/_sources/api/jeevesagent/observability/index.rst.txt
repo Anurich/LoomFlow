@@ -1,0 +1,65 @@
+jeevesagent.observability
+=========================
+
+.. py:module:: jeevesagent.observability
+
+.. autoapi-nested-parse::
+
+   Observability adapters: tracing, metrics, evals.
+
+   Today: :class:`NoTelemetry` (no-op default) and :class:`OTelTelemetry`
+   (OpenTelemetry-backed). Phase 6 may add inline-evals signals.
+
+
+
+Submodules
+----------
+
+.. toctree::
+   :maxdepth: 1
+
+   /api/jeevesagent/observability/tracing/index
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   jeevesagent.observability.NoTelemetry
+   jeevesagent.observability.OTelTelemetry
+
+
+Package Contents
+----------------
+
+.. py:class:: NoTelemetry
+
+   No-op telemetry. Very cheap; safe to call on every loop step.
+
+
+   .. py:method:: emit_metric(name: str, value: float, **attrs: Any) -> None
+      :async:
+
+
+
+   .. py:method:: trace(name: str, **attrs: Any) -> collections.abc.AsyncIterator[jeevesagent.core.types.Span]
+      :async:
+
+
+
+.. py:class:: OTelTelemetry(*, tracer_provider: Any | None = None, meter_provider: Any | None = None, instrumentation_name: str = 'jeevesagent')
+
+   OpenTelemetry-backed :class:`~jeevesagent.core.protocols.Telemetry`.
+
+
+   .. py:method:: emit_metric(name: str, value: float, **attrs: Any) -> None
+      :async:
+
+
+
+   .. py:method:: trace(name: str, **attrs: Any) -> collections.abc.AsyncIterator[jeevesagent.core.types.Span]
+      :async:
+
+
+

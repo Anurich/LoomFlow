@@ -33,10 +33,33 @@ from dataclasses import dataclass, field
 from typing import Any
 
 __all__ = [
+    "IsolationWarning",
     "RunContext",
     "get_run_context",
     "set_run_context",
 ]
+
+
+class IsolationWarning(UserWarning):
+    """Emitted when a memory query is likely to silently miss data
+    because the caller forgot to pass ``user_id``.
+
+    Concrete trigger: a backend's ``recall`` / ``recall_facts`` runs
+    with ``user_id=None`` against a store whose persisted records
+    include at least one non-None ``user_id`` — the partition is
+    safe (the anonymous bucket and named-user buckets are isolated),
+    but the developer probably wired up multi-tenancy somewhere and
+    forgot to pass ``user_id`` here, so they will see suspiciously
+    empty recall results.
+
+    Subclass of :class:`UserWarning` so it goes through Python's
+    standard ``warnings`` filter machinery — apps can silence,
+    promote-to-error, or log it however they want, e.g.::
+
+        import warnings
+        from jeevesagent import IsolationWarning
+        warnings.simplefilter("error", IsolationWarning)  # raise on hit
+    """
 
 
 class _Sentinel(enum.Enum):

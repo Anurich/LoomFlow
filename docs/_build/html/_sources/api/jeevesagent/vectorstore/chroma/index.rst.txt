@@ -1,0 +1,102 @@
+jeevesagent.vectorstore.chroma
+==============================
+
+.. py:module:: jeevesagent.vectorstore.chroma
+
+.. autoapi-nested-parse::
+
+   Chroma-backed vector store.
+
+   Wraps ``chromadb`` for persistent on-disk or hosted Chroma. Lazy
+   import — install via ``pip install 'jeevesagent[vectorstore-chroma]'``.
+
+   Embeddings come from our framework's :class:`Embedder` protocol so
+   swapping embedders works the same across every vector store. We
+   pass ``None`` as Chroma's ``embedding_function`` and supply
+   embeddings ourselves at ``add`` time.
+
+   Filter operators are translated from our Mongo-style language to
+   Chroma's native ``where`` syntax (which already speaks Mongo-ish
+   ``$eq`` / ``$in`` / ``$gt`` etc., so the translation is mostly
+   direct).
+
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   jeevesagent.vectorstore.chroma.ChromaVectorStore
+
+
+Module Contents
+---------------
+
+.. py:class:: ChromaVectorStore(embedder: jeevesagent.core.protocols.Embedder, *, collection_name: str = 'jeeves_vectors', persist_directory: str | None = None, client: Any = None)
+
+   Vector store backed by ``chromadb``.
+
+
+   .. py:method:: add(chunks: list[jeevesagent.loader.base.Chunk], ids: list[str] | None = None) -> list[str]
+      :async:
+
+
+
+   .. py:method:: count() -> int
+      :async:
+
+
+
+   .. py:method:: delete(ids: list[str]) -> None
+      :async:
+
+
+
+   .. py:method:: from_chunks(chunks: list[jeevesagent.loader.base.Chunk], *, embedder: jeevesagent.core.protocols.Embedder, ids: list[str] | None = None, collection_name: str = 'jeeves_vectors', persist_directory: str | None = None, client: Any = None) -> ChromaVectorStore
+      :classmethod:
+
+      :async:
+
+
+      One-shot: construct a ChromaVectorStore + add ``chunks``.
+
+
+
+   .. py:method:: from_texts(texts: list[str], *, embedder: jeevesagent.core.protocols.Embedder, metadatas: list[dict[str, Any]] | None = None, ids: list[str] | None = None, collection_name: str = 'jeeves_vectors', persist_directory: str | None = None, client: Any = None) -> ChromaVectorStore
+      :classmethod:
+
+      :async:
+
+
+      One-shot: construct a ChromaVectorStore from raw text
+      strings (each becomes a :class:`Chunk` with the matching
+      metadata dict, or empty if ``metadatas`` is None).
+
+
+
+   .. py:method:: get_by_ids(ids: list[str]) -> list[jeevesagent.loader.base.Chunk]
+      :async:
+
+
+
+   .. py:method:: search(query: str, *, k: int = 4, filter: collections.abc.Mapping[str, Any] | None = None, diversity: float | None = None) -> list[jeevesagent.vectorstore.base.SearchResult]
+      :async:
+
+
+
+   .. py:method:: search_by_vector(vector: list[float], *, k: int = 4, filter: collections.abc.Mapping[str, Any] | None = None, diversity: float | None = None) -> list[jeevesagent.vectorstore.base.SearchResult]
+      :async:
+
+
+
+   .. py:property:: embedder
+      :type: jeevesagent.core.protocols.Embedder
+
+
+
+   .. py:attribute:: name
+      :value: 'chroma'
+
+
+

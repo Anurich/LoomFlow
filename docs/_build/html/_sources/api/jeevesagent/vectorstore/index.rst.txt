@@ -1,0 +1,495 @@
+jeevesagent.vectorstore
+=======================
+
+.. py:module:: jeevesagent.vectorstore
+
+.. autoapi-nested-parse::
+
+   Vector stores for semantic search over :class:`Chunk` /
+   :class:`Document` objects.
+
+   Unified async interface (modeled on LangChain's ``VectorStore`` but
+   properly async-first and typed against our :class:`Chunk` /
+   :class:`Document` from :mod:`jeevesagent.loader`):
+
+   * :meth:`add` — embed + store chunks; returns their ids.
+   * :meth:`delete` — remove by id.
+   * :meth:`search` — top-k by cosine similarity + metadata filter.
+   * :meth:`search_by_vector` — same with a precomputed query vector.
+
+   Implementations:
+
+   * :class:`InMemoryVectorStore` — default; zero-deps; cosine over a
+     Python list. Great for dev / tests / small corpora.
+   * :class:`ChromaVectorStore` — wraps ``chromadb`` for persistent
+     on-disk or hosted Chroma. Lazy import.
+   * :class:`PostgresVectorStore` — wraps ``pgvector`` via ``asyncpg``.
+     Production durable. Lazy import.
+   * :class:`FAISSVectorStore` — wraps ``faiss-cpu`` for fast in-memory
+     ANN search over large corpora. Lazy import.
+
+   One-liner usage::
+
+       from jeevesagent import HashEmbedder
+       from jeevesagent.vectorstore import InMemoryVectorStore
+       from jeevesagent.loader import load, MarkdownChunker
+
+       vs = InMemoryVectorStore(embedder=HashEmbedder())
+
+       doc = load("research.pdf")
+       chunks = MarkdownChunker().split(doc.content, source=str(doc.metadata["source"]))
+       await vs.add(chunks)
+
+       results = await vs.search("what is RAG?", k=5)
+       for r in results:
+           print(f"{r.score:.3f}: {r.chunk.content[:100]}")
+
+   Optional dependencies::
+
+       pip install 'jeevesagent[vectorstore-chroma]'
+       pip install 'jeevesagent[vectorstore-postgres]'
+       pip install 'jeevesagent[vectorstore-faiss]'
+       pip install 'jeevesagent[vectorstore]'              # all of the above
+
+
+
+Submodules
+----------
+
+.. toctree::
+   :maxdepth: 1
+
+   /api/jeevesagent/vectorstore/base/index
+   /api/jeevesagent/vectorstore/chroma/index
+   /api/jeevesagent/vectorstore/faiss/index
+   /api/jeevesagent/vectorstore/inmemory/index
+   /api/jeevesagent/vectorstore/postgres/index
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   jeevesagent.vectorstore.ChromaVectorStore
+   jeevesagent.vectorstore.FAISSVectorStore
+   jeevesagent.vectorstore.InMemoryVectorStore
+   jeevesagent.vectorstore.PostgresVectorStore
+   jeevesagent.vectorstore.SearchResult
+   jeevesagent.vectorstore.VectorStore
+
+
+Package Contents
+----------------
+
+.. py:class:: ChromaVectorStore(embedder: jeevesagent.core.protocols.Embedder, *, collection_name: str = 'jeeves_vectors', persist_directory: str | None = None, client: Any = None)
+
+   Vector store backed by ``chromadb``.
+
+
+   .. py:method:: add(chunks: list[jeevesagent.loader.base.Chunk], ids: list[str] | None = None) -> list[str]
+      :async:
+
+
+
+   .. py:method:: count() -> int
+      :async:
+
+
+
+   .. py:method:: delete(ids: list[str]) -> None
+      :async:
+
+
+
+   .. py:method:: from_chunks(chunks: list[jeevesagent.loader.base.Chunk], *, embedder: jeevesagent.core.protocols.Embedder, ids: list[str] | None = None, collection_name: str = 'jeeves_vectors', persist_directory: str | None = None, client: Any = None) -> ChromaVectorStore
+      :classmethod:
+
+      :async:
+
+
+      One-shot: construct a ChromaVectorStore + add ``chunks``.
+
+
+
+   .. py:method:: from_texts(texts: list[str], *, embedder: jeevesagent.core.protocols.Embedder, metadatas: list[dict[str, Any]] | None = None, ids: list[str] | None = None, collection_name: str = 'jeeves_vectors', persist_directory: str | None = None, client: Any = None) -> ChromaVectorStore
+      :classmethod:
+
+      :async:
+
+
+      One-shot: construct a ChromaVectorStore from raw text
+      strings (each becomes a :class:`Chunk` with the matching
+      metadata dict, or empty if ``metadatas`` is None).
+
+
+
+   .. py:method:: get_by_ids(ids: list[str]) -> list[jeevesagent.loader.base.Chunk]
+      :async:
+
+
+
+   .. py:method:: search(query: str, *, k: int = 4, filter: collections.abc.Mapping[str, Any] | None = None, diversity: float | None = None) -> list[jeevesagent.vectorstore.base.SearchResult]
+      :async:
+
+
+
+   .. py:method:: search_by_vector(vector: list[float], *, k: int = 4, filter: collections.abc.Mapping[str, Any] | None = None, diversity: float | None = None) -> list[jeevesagent.vectorstore.base.SearchResult]
+      :async:
+
+
+
+   .. py:property:: embedder
+      :type: jeevesagent.core.protocols.Embedder
+
+
+
+   .. py:attribute:: name
+      :value: 'chroma'
+
+
+
+.. py:class:: FAISSVectorStore(embedder: jeevesagent.core.protocols.Embedder, *, dimension: int | None = None, index_factory_string: str = 'HNSW32', metric: str = 'ip')
+
+   Vector store backed by ``faiss-cpu``.
+
+
+   .. py:method:: add(chunks: list[jeevesagent.loader.base.Chunk], ids: list[str] | None = None) -> list[str]
+      :async:
+
+
+
+   .. py:method:: count() -> int
+      :async:
+
+
+
+   .. py:method:: delete(ids: list[str]) -> None
+      :async:
+
+
+
+   .. py:method:: from_chunks(chunks: list[jeevesagent.loader.base.Chunk], *, embedder: jeevesagent.core.protocols.Embedder, ids: list[str] | None = None, dimension: int | None = None, index_factory_string: str = 'HNSW32', metric: str = 'ip') -> FAISSVectorStore
+      :classmethod:
+
+      :async:
+
+
+      One-shot: construct a FAISSVectorStore + add ``chunks``.
+
+
+
+   .. py:method:: from_texts(texts: list[str], *, embedder: jeevesagent.core.protocols.Embedder, metadatas: list[dict[str, Any]] | None = None, ids: list[str] | None = None, dimension: int | None = None, index_factory_string: str = 'HNSW32', metric: str = 'ip') -> FAISSVectorStore
+      :classmethod:
+
+      :async:
+
+
+      One-shot: construct a FAISSVectorStore from raw text
+      strings (each becomes a :class:`Chunk` with the matching
+      metadata dict, or empty if ``metadatas`` is None).
+
+
+
+   .. py:method:: get_by_ids(ids: list[str]) -> list[jeevesagent.loader.base.Chunk]
+      :async:
+
+
+
+   .. py:method:: search(query: str, *, k: int = 4, filter: collections.abc.Mapping[str, Any] | None = None, diversity: float | None = None) -> list[jeevesagent.vectorstore.base.SearchResult]
+      :async:
+
+
+
+   .. py:method:: search_by_vector(vector: list[float], *, k: int = 4, filter: collections.abc.Mapping[str, Any] | None = None, diversity: float | None = None) -> list[jeevesagent.vectorstore.base.SearchResult]
+      :async:
+
+
+
+   .. py:property:: embedder
+      :type: jeevesagent.core.protocols.Embedder
+
+
+
+   .. py:attribute:: name
+      :value: 'faiss'
+
+
+
+.. py:class:: InMemoryVectorStore(embedder: jeevesagent.core.protocols.Embedder)
+
+   In-process vector store backed by a Python list.
+
+
+   .. py:method:: add(chunks: list[jeevesagent.loader.base.Chunk], ids: list[str] | None = None) -> list[str]
+      :async:
+
+
+
+   .. py:method:: count() -> int
+      :async:
+
+
+
+   .. py:method:: delete(ids: list[str]) -> None
+      :async:
+
+
+
+   .. py:method:: from_chunks(chunks: list[jeevesagent.loader.base.Chunk], *, embedder: jeevesagent.core.protocols.Embedder, ids: list[str] | None = None) -> InMemoryVectorStore
+      :classmethod:
+
+      :async:
+
+
+      One-shot: construct an InMemoryVectorStore + add ``chunks``.
+
+
+
+   .. py:method:: from_texts(texts: list[str], *, embedder: jeevesagent.core.protocols.Embedder, metadatas: list[dict[str, Any]] | None = None, ids: list[str] | None = None) -> InMemoryVectorStore
+      :classmethod:
+
+      :async:
+
+
+      One-shot: construct an InMemoryVectorStore from raw text
+      strings (each becomes a :class:`Chunk` with the matching
+      metadata dict, or empty if ``metadatas`` is None).
+
+
+
+   .. py:method:: get_by_ids(ids: list[str]) -> list[jeevesagent.loader.base.Chunk]
+      :async:
+
+
+
+   .. py:method:: load(path: str | pathlib.Path, *, embedder: jeevesagent.core.protocols.Embedder) -> InMemoryVectorStore
+      :classmethod:
+
+      :async:
+
+
+      Restore a store previously :meth:`save`-d. Pass the same
+      embedder kind/dimensions or queries will produce nonsense
+      scores.
+
+
+
+   .. py:method:: save(path: str | pathlib.Path) -> None
+      :async:
+
+
+      Write the full store (chunks + vectors + ids) to a JSON
+      file. The embedder is NOT serialized — supply the same
+      embedder when calling :meth:`load`.
+
+
+
+   .. py:method:: search(query: str, *, k: int = 4, filter: collections.abc.Mapping[str, Any] | None = None, diversity: float | None = None) -> list[jeevesagent.vectorstore.base.SearchResult]
+      :async:
+
+
+
+   .. py:method:: search_by_vector(vector: list[float], *, k: int = 4, filter: collections.abc.Mapping[str, Any] | None = None, diversity: float | None = None) -> list[jeevesagent.vectorstore.base.SearchResult]
+      :async:
+
+
+
+   .. py:method:: search_hybrid(query: str, *, k: int = 4, filter: collections.abc.Mapping[str, Any] | None = None, alpha: float = 0.5) -> list[jeevesagent.vectorstore.base.SearchResult]
+      :async:
+
+
+      Hybrid lexical (BM25) + vector search via RRF.
+
+      ``alpha`` is in [0, 1]: 0 = pure BM25, 1 = pure vector,
+      0.5 = even weighting (RRF default). Both rankings are
+      computed independently and fused by Reciprocal Rank Fusion,
+      then the top-``k`` survivors are returned.
+
+      Embeddings catch semantic similarity ("automobile" ↔ "car"),
+      BM25 catches exact-term hits (model names, error codes,
+      person names) — together they outperform either alone on
+      most retrieval benchmarks.
+
+
+
+   .. py:property:: embedder
+      :type: jeevesagent.core.protocols.Embedder
+
+
+
+   .. py:attribute:: name
+      :value: 'in-memory'
+
+
+
+.. py:class:: PostgresVectorStore(embedder: jeevesagent.core.protocols.Embedder, *, dsn: str, table: str = 'jeeves_vectors', dimension: int | None = None)
+
+   Vector store backed by Postgres + ``pgvector``.
+
+
+   .. py:method:: add(chunks: list[jeevesagent.loader.base.Chunk], ids: list[str] | None = None) -> list[str]
+      :async:
+
+
+
+   .. py:method:: count() -> int
+      :async:
+
+
+
+   .. py:method:: delete(ids: list[str]) -> None
+      :async:
+
+
+
+   .. py:method:: from_chunks(chunks: list[jeevesagent.loader.base.Chunk], *, embedder: jeevesagent.core.protocols.Embedder, ids: list[str] | None = None, dsn: str, table: str = 'jeeves_vectors', dimension: int | None = None) -> PostgresVectorStore
+      :classmethod:
+
+      :async:
+
+
+      One-shot: construct a PostgresVectorStore + add ``chunks``.
+
+
+
+   .. py:method:: from_texts(texts: list[str], *, embedder: jeevesagent.core.protocols.Embedder, metadatas: list[dict[str, Any]] | None = None, ids: list[str] | None = None, dsn: str, table: str = 'jeeves_vectors', dimension: int | None = None) -> PostgresVectorStore
+      :classmethod:
+
+      :async:
+
+
+      One-shot: construct a PostgresVectorStore from raw text
+      strings (each becomes a :class:`Chunk` with the matching
+      metadata dict, or empty if ``metadatas`` is None).
+
+
+
+   .. py:method:: get_by_ids(ids: list[str]) -> list[jeevesagent.loader.base.Chunk]
+      :async:
+
+
+
+   .. py:method:: init_schema(dimension: int) -> None
+      :async:
+
+
+      Create the table + HNSW index. Idempotent.
+
+
+
+   .. py:method:: search(query: str, *, k: int = 4, filter: collections.abc.Mapping[str, Any] | None = None, diversity: float | None = None) -> list[jeevesagent.vectorstore.base.SearchResult]
+      :async:
+
+
+
+   .. py:method:: search_by_vector(vector: list[float], *, k: int = 4, filter: collections.abc.Mapping[str, Any] | None = None, diversity: float | None = None) -> list[jeevesagent.vectorstore.base.SearchResult]
+      :async:
+
+
+
+   .. py:property:: embedder
+      :type: jeevesagent.core.protocols.Embedder
+
+
+
+   .. py:attribute:: name
+      :value: 'postgres'
+
+
+
+.. py:class:: SearchResult
+
+   One hit from :meth:`VectorStore.search`.
+
+   * ``chunk`` — the matched chunk (with its full metadata).
+   * ``score`` — similarity in [-1, 1] for cosine; backend-
+     specific for other distance metrics. Higher = more similar.
+   * ``id`` — the store-assigned id (so callers can ``delete()``
+     or ``get_by_ids()`` later).
+
+
+   .. py:attribute:: chunk
+      :type:  jeevesagent.loader.base.Chunk
+
+
+   .. py:attribute:: id
+      :type:  str
+
+
+   .. py:attribute:: score
+      :type:  float
+
+
+.. py:class:: VectorStore
+
+   Bases: :py:obj:`Protocol`
+
+
+   Async protocol for vector stores.
+
+   Six methods cover the lifecycle: add (embed + store), delete,
+   search (by query string), search_by_vector (precomputed),
+   count, get_by_ids.
+
+   Backends that aren't natively async (FAISS, Chroma) wrap their
+   sync calls in :func:`anyio.to_thread.run_sync` so they don't
+   block the event loop.
+
+
+   .. py:method:: add(chunks: list[jeevesagent.loader.base.Chunk], ids: list[str] | None = None) -> list[str]
+      :async:
+
+
+      Embed + store ``chunks``. Returns the assigned ids
+      (caller-provided or generated).
+
+
+
+   .. py:method:: count() -> int
+      :async:
+
+
+      Number of chunks currently in the store.
+
+
+
+   .. py:method:: delete(ids: list[str]) -> None
+      :async:
+
+
+      Remove the named chunks. Unknown ids are silently
+      skipped (idempotent).
+
+
+
+   .. py:method:: get_by_ids(ids: list[str]) -> list[jeevesagent.loader.base.Chunk]
+      :async:
+
+
+      Fetch chunks by id, in the same order as ``ids``.
+      Unknown ids are skipped (the result may be shorter than
+      the input).
+
+
+
+   .. py:method:: search(query: str, *, k: int = 4, filter: collections.abc.Mapping[str, Any] | None = None, diversity: float | None = None) -> list[SearchResult]
+      :async:
+
+
+      Embed ``query`` and return the top-``k`` chunks ranked
+      by similarity. ``filter`` (optional) restricts candidates
+      by metadata. ``diversity`` (optional, 0..1) enables MMR
+      reranking for varied results.
+
+
+
+   .. py:method:: search_by_vector(vector: list[float], *, k: int = 4, filter: collections.abc.Mapping[str, Any] | None = None, diversity: float | None = None) -> list[SearchResult]
+      :async:
+
+
+      Same as :meth:`search` but with a precomputed query
+      vector.
+
+
+

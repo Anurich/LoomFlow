@@ -1,0 +1,36 @@
+jeevesagent.loader.html
+=======================
+
+.. py:module:: jeevesagent.loader.html
+
+.. autoapi-nested-parse::
+
+   HTML loader → markdown.
+
+   Uses ``beautifulsoup4`` (lazy import) to walk the DOM and emit
+   markdown that preserves heading + paragraph + list structure.
+   Strips ``<script>`` / ``<style>`` content. Drops most attributes;
+   the goal is to keep the textual structure, not pixel-perfect
+   rendering.
+
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   jeevesagent.loader.html.load_html
+
+
+Module Contents
+---------------
+
+.. py:function:: load_html(path: str | pathlib.Path) -> jeevesagent.loader.base.Document
+
+   Load an HTML file → markdown.
+
+   Requires ``beautifulsoup4``:
+   ``pip install 'jeevesagent[loader-html]'``.
+
+

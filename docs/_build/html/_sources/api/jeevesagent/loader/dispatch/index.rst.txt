@@ -1,0 +1,39 @@
+jeevesagent.loader.dispatch
+===========================
+
+.. py:module:: jeevesagent.loader.dispatch
+
+.. autoapi-nested-parse::
+
+   Auto-detect the right loader from a file's extension.
+
+   ::
+
+       from jeevesagent.loader import load
+       doc = load("report.pdf")        # → load_pdf
+       doc = load("data.xlsx")         # → load_excel
+       doc = load("research.md")       # → load_markdown
+
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   jeevesagent.loader.dispatch.load
+
+
+Module Contents
+---------------
+
+.. py:function:: load(path: str | pathlib.Path) -> jeevesagent.loader.base.Document
+
+   Load a document by auto-detecting its format from the file
+   extension. Supported: ``.pdf``, ``.docx``, ``.xlsx``, ``.xlsm``,
+   ``.csv``, ``.tsv``, ``.md``, ``.markdown``, ``.txt``, ``.html``,
+   ``.htm``.
+
+   Raises :class:`ValueError` for unknown extensions.
+
+

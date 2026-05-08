@@ -1,0 +1,151 @@
+jeevesagent.graph
+=================
+
+.. py:module:: jeevesagent.graph
+
+.. autoapi-nested-parse::
+
+   Agent structure visualization — Mermaid graph generator.
+
+   LangGraph established the de facto pattern: emit a Mermaid text
+   diagram describing the agent's structure, optionally render it to
+   PNG via ``mermaid.ink``. We follow the same shape, extended to
+   walk our nested architectures and surface tool attachments.
+
+   Public surface
+   --------------
+
+   * :func:`build_graph` — walk an :class:`Agent` and return an
+     :class:`AgentGraph` (nodes + edges + subgraphs).
+   * :meth:`AgentGraph.to_mermaid` — render the graph to Mermaid text.
+   * :meth:`Agent.generate_graph` — high-level convenience that walks
+     the tree, renders, and dispatches to disk by file extension:
+
+     * ``.mmd`` — raw Mermaid source
+     * ``.md``  — Markdown with the diagram in a ``mermaid`` fence
+       (renders natively on GitHub, in IDE markdown previews, in
+       Jupyter via ``IPython.display.Markdown``)
+     * ``.png`` / ``.svg`` — fetched from ``https://mermaid.ink`` via
+       ``urllib`` (no extra deps); falls back to writing ``.mmd``
+       next to the requested path if the network call fails
+
+   What's captured
+   ---------------
+
+   * The top-level Agent and its architecture
+   * Every sub-agent declared by the architecture's
+     :meth:`Architecture.declared_workers`
+   * Tool attachments per agent (filesystem tools, custom ``@tool``
+     functions, MCP-bound tools)
+   * Architecture-specific structural relationships:
+
+     * **Supervisor**: coordinator → workers via ``delegate``
+     * **Router**: classifier → routes via ``classifies``
+     * **Swarm**: peer → peer via ``handoff``
+     * **ActorCritic**: actor ⇄ critic loop
+     * **MultiAgentDebate**: debaters → judge
+     * **Blackboard**: agents ↔ shared workspace ↔ decider
+     * **Reflexion**: wraps the base architecture in a retry loop
+
+   * Recursive composition: nested architectures (Reflexion of
+     Supervisor, Supervisor whose worker is itself a Supervisor)
+     render as nested subgraphs.
+
+   Design notes
+   ------------
+
+   * **Pure stdlib.** No httpx / graphviz / playwright dependency.
+     Mermaid is emitted as f-strings; PNG/SVG fetches use ``urllib``.
+   * **Async**, like the rest of the framework, because tool
+     enumeration goes through ``ToolHost.list_tools()`` (the MCP path
+     is async).
+   * **Stable node ids**: a deterministic counter prefixed by node
+     kind (``a0``, ``a1`` for agents, ``t0``, ``t1`` for tools, etc.)
+     so diffing the output across runs is meaningful.
+
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   jeevesagent.graph.AgentGraph
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   jeevesagent.graph.build_graph
+   jeevesagent.graph.write_graph
+
+
+Module Contents
+---------------
+
+.. py:class:: AgentGraph
+
+   Renderable graph of an agent's structure.
+
+
+   .. py:method:: to_mermaid() -> str
+
+      Render to a Mermaid ``flowchart TB`` block.
+
+      Output is plain Mermaid (no ``%%{init}%%`` directives) so it
+      renders consistently across GitHub, IDE previews, and
+      ``mermaid.ink``.
+
+
+
+   .. py:attribute:: edges
+      :type:  list[_Edge]
+      :value: []
+
+
+
+   .. py:attribute:: nodes
+      :type:  list[_Node]
+      :value: []
+
+
+
+   .. py:attribute:: subgraphs
+      :type:  list[_Subgraph]
+      :value: []
+
+
+
+   .. py:attribute:: title
+      :type:  str
+      :value: 'Agent'
+
+
+
+.. py:function:: build_graph(agent: jeevesagent.agent.api.Agent, *, title: str = 'Agent') -> AgentGraph
+   :async:
+
+
+   Walk an :class:`Agent` and return its renderable
+   :class:`AgentGraph`.
+
+
+.. py:function:: write_graph(agent: jeevesagent.agent.api.Agent, path: str | pathlib.Path, *, title: str | None = None) -> str
+   :async:
+
+
+   Walk the agent, render to Mermaid, write to ``path``.
+
+   Extension dispatch:
+
+   * ``.mmd`` — raw Mermaid source
+   * ``.md``  — Markdown with the diagram in a ``mermaid`` fence
+   * ``.png`` / ``.svg`` — fetched from ``mermaid.ink``; on
+     network failure, writes ``.mmd`` next to the requested path
+     and returns the Mermaid text anyway
+
+   Returns the Mermaid text in every case.
+
+

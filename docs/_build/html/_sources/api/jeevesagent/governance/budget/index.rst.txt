@@ -1,0 +1,97 @@
+jeevesagent.governance.budget
+=============================
+
+.. py:module:: jeevesagent.governance.budget
+
+.. autoapi-nested-parse::
+
+   Token / call / cost budgets.
+
+   :class:`StandardBudget` enforces hard limits on tokens, cost, and
+   wall clock; emits a soft warning at a configurable threshold.
+   :class:`NoBudget` is the always-allow stub used when the user has
+   opted out of governance entirely.
+
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   jeevesagent.governance.budget.BudgetConfig
+   jeevesagent.governance.budget.NoBudget
+   jeevesagent.governance.budget.StandardBudget
+
+
+Module Contents
+---------------
+
+.. py:class:: BudgetConfig
+
+   .. py:attribute:: max_cost_usd
+      :type:  float | None
+      :value: None
+
+
+
+   .. py:attribute:: max_input_tokens
+      :type:  int | None
+      :value: None
+
+
+
+   .. py:attribute:: max_output_tokens
+      :type:  int | None
+      :value: None
+
+
+
+   .. py:attribute:: max_tokens
+      :type:  int | None
+      :value: None
+
+
+
+   .. py:attribute:: max_wall_clock
+      :type:  datetime.timedelta | None
+      :value: None
+
+
+
+   .. py:attribute:: soft_warning_at
+      :type:  float
+      :value: 0.8
+
+
+
+.. py:class:: NoBudget
+
+   Never blocks, never warns.
+
+
+   .. py:method:: allows_step() -> jeevesagent.core.types.BudgetStatus
+      :async:
+
+
+
+   .. py:method:: consume(*, tokens_in: int, tokens_out: int, cost_usd: float) -> None
+      :async:
+
+
+
+.. py:class:: StandardBudget(cfg: BudgetConfig | None = None)
+
+   Hard-limited, thread-safe budget tracker.
+
+
+   .. py:method:: allows_step() -> jeevesagent.core.types.BudgetStatus
+      :async:
+
+
+
+   .. py:method:: consume(*, tokens_in: int, tokens_out: int, cost_usd: float) -> None
+      :async:
+
+
+

@@ -520,3 +520,160 @@ async def test_other_user_session_history_not_rehydrated() -> None:
     contents = [m.content for m in second]
     # Alice's content must not appear anywhere in Bob's seed.
     assert all("pizza" not in c for c in contents if isinstance(c, str))
+
+
+# ---------------------------------------------------------------------------
+# M3 — IsolationWarning footgun protection
+# ---------------------------------------------------------------------------
+
+
+async def test_isolation_warning_fires_on_mixed_bucket_recall() -> None:
+    """When a memory contains data for one or more named users and a
+    recall is run with ``user_id=None``, ``IsolationWarning`` must
+    fire — guarding the very common "forgot to pass user_id"
+    mistake."""
+    import warnings
+
+    from jeevesagent import IsolationWarning
+
+    mem = InMemoryMemory()
+    await mem.remember(
+        Episode(session_id="s", user_id="alice", input="hi", output="hello")
+    )
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", IsolationWarning)
+        await mem.recall("hi", user_id=None)
+
+    assert any(issubclass(w.category, IsolationWarning) for w in caught)
+
+
+async def test_isolation_warning_does_not_fire_when_only_anonymous() -> None:
+    """No warning when the store has only anonymous data — the
+    None-bucket query is unambiguously correct in that case."""
+    import warnings
+
+    from jeevesagent import IsolationWarning
+
+    mem = InMemoryMemory()
+    await mem.remember(
+        Episode(session_id="s", user_id=None, input="hi", output="hello")
+    )
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", IsolationWarning)
+        await mem.recall("hi", user_id=None)
+
+    assert not any(
+        issubclass(w.category, IsolationWarning) for w in caught
+    )
+
+
+async def test_isolation_warning_does_not_fire_when_user_id_passed() -> None:
+    """Passing the right ``user_id`` (even one that has no stored
+    data yet) is a clean call — no warning."""
+    import warnings
+
+    from jeevesagent import IsolationWarning
+
+    mem = InMemoryMemory()
+    await mem.remember(
+        Episode(session_id="s", user_id="alice", input="hi", output="hello")
+    )
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", IsolationWarning)
+        # Bob has no episodes; the query is correct even if empty.
+        await mem.recall("hi", user_id="bob")
+
+    assert not any(
+        issubclass(w.category, IsolationWarning) for w in caught
+    )
+
+
+async def test_isolation_warning_can_be_promoted_to_error() -> None:
+    """Apps that want strict isolation enforcement promote the
+    warning to an exception via the standard ``warnings`` filter."""
+    import warnings
+
+    from jeevesagent import IsolationWarning
+
+    mem = InMemoryMemory()
+    await mem.remember(
+        Episode(session_id="s", user_id="alice", input="hi", output="hello")
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", IsolationWarning)
+        with pytest.raises(IsolationWarning):
+            await mem.recall("hi", user_id=None)
+
+
+# ---------------------------------------------------------------------------
+# M3 — Multi-agent context inheritance
+# ---------------------------------------------------------------------------
+
+
+async def test_subagent_inherits_parent_user_id_via_contextvar() -> None:
+    """A sub-agent invoked via ``SubagentInvocation`` (used by every
+    multi-agent architecture) must see the parent's ``user_id``
+    through ``get_run_context()`` without any explicit plumbing."""
+    from jeevesagent.architecture.helpers import SubagentInvocation
+
+    seen: list[str | None] = []
+
+    @tool
+    async def report_user() -> str:
+        ctx = get_run_context()
+        seen.append(ctx.user_id)
+        return ctx.user_id or "anonymous"
+
+    # Sub-agent that calls a tool to check what user_id it sees.
+    sub = Agent(
+        "be brief",
+        model=ScriptedModel([
+            ScriptedTurn(
+                tool_calls=[ToolCall(id="c1", tool="report_user", args={})]
+            ),
+            ScriptedTurn(text="done"),
+        ]),
+        tools=[report_user],
+    )
+
+    # Parent installs the contextvar via set_run_context, then
+    # invokes the sub the way an architecture would.
+    parent_ctx = RunContext(user_id="alice", session_id="parent_session")
+    async with set_run_context(parent_ctx):
+        invocation = SubagentInvocation(sub, "go")
+        async for _ in invocation.events():
+            pass
+
+    assert seen == ["alice"]
+
+
+async def test_subagent_gets_fresh_session_id_when_one_provided() -> None:
+    """``SubagentInvocation(session_id="...")`` must override the
+    parent's session_id so the worker has its own conversation
+    thread, even while inheriting the parent's user_id."""
+    from jeevesagent.architecture.helpers import SubagentInvocation
+
+    sub_mem = InMemoryMemory()
+    sub = Agent(
+        "be brief",
+        model=ScriptedModel([ScriptedTurn(text="hi")]),
+        memory=sub_mem,
+    )
+
+    parent_ctx = RunContext(user_id="alice", session_id="parent_session")
+    async with set_run_context(parent_ctx):
+        invocation = SubagentInvocation(
+            sub, "say hi", session_id="worker_session"
+        )
+        async for _ in invocation.events():
+            pass
+
+    # The sub-agent persisted an episode tagged with worker_session,
+    # NOT parent_session — and with alice's user_id.
+    alice_ep = await sub_mem.recall("hi", user_id="alice")
+    assert len(alice_ep) == 1
+    assert alice_ep[0].session_id == "worker_session"

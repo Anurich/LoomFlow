@@ -1,0 +1,145 @@
+jeevesagent.architecture.router
+===============================
+
+.. py:module:: jeevesagent.architecture.router
+
+.. autoapi-nested-parse::
+
+   Router: classify input → dispatch to one specialist Agent.
+
+   OpenAI Agents SDK March 2026 "Handoff" pattern, plus the
+   classify-and-route shape every framework reinvents (CrewAI sequential,
+   LangGraph conditional edges, ...). The simplest multi-agent pattern.
+
+   Pattern
+   -------
+
+   1. **Classify.** A small fast LLM call decides which route handles
+      the input best.
+   2. **Dispatch.** The chosen specialist :class:`Agent` runs to
+      completion with its own model / memory / tools / architecture.
+   3. **Return.** The specialist's output becomes the Router's output.
+      No cross-specialist synthesis.
+
+   Compared to :class:`Supervisor`:
+
+   * Cheaper (1 classification + 1 specialist; no synthesis pass).
+   * Deterministic (single specialist owns the task).
+   * Less flexible (no multi-domain tasks; routing errors cascade).
+
+   When to use
+   -----------
+   * Customer support (route to billing / tech / sales / general).
+   * Helpdesks where each query has one right specialist.
+   * API-gateway-style intent routing.
+
+   Replay correctness
+   ------------------
+   The specialist's :meth:`Agent.run` is invoked with a deterministic
+   ``session_id`` derived from the parent session and the route name:
+   ``{parent_session_id}__route_{route_name}``. On replay, the same
+   specialist session_id reproduces, and the specialist's own journal
+   (under its own session) takes over from there. The parent's journal
+   caches the classification step — replay flows cleanly through both
+   layers.
+
+   Specialists are full Agents
+   ---------------------------
+   Each route is a fully-constructed :class:`Agent` instance. They are
+   NOT shared dependencies of the parent. If you want shared budget /
+   memory / telemetry, pass the same instances when building the
+   specialists.
+
+
+
+Attributes
+----------
+
+.. autoapisummary::
+
+   jeevesagent.architecture.router.DEFAULT_CLASSIFIER_PROMPT
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   jeevesagent.architecture.router.Router
+   jeevesagent.architecture.router.RouterRoute
+
+
+Module Contents
+---------------
+
+.. py:class:: Router(*, routes: list[RouterRoute], fallback_route: str | None = None, require_confidence_above: float = 0.0, classifier_prompt: str | None = None)
+
+   Classify input → dispatch to ONE specialist :class:`Agent`.
+
+
+   .. py:method:: declared_workers() -> dict[str, jeevesagent.agent.api.Agent]
+
+
+   .. py:method:: run(session: jeevesagent.architecture.base.AgentSession, deps: jeevesagent.architecture.base.Dependencies, prompt: str) -> collections.abc.AsyncIterator[jeevesagent.core.types.Event]
+      :async:
+
+
+
+   .. py:attribute:: name
+      :value: 'router'
+
+
+
+.. py:class:: RouterRoute
+
+   One specialist + classification metadata.
+
+   ``name`` is what the classifier emits in its ``route:`` line and
+   must be unique within a Router. ``description`` is shown to the
+   classifier alongside the name — keep it specific and
+   distinguishing so the classifier picks reliably.
+
+
+   .. py:attribute:: agent
+      :type:  jeevesagent.agent.api.Agent
+
+
+   .. py:attribute:: description
+      :type:  str
+      :value: ''
+
+
+
+   .. py:attribute:: name
+      :type:  str
+
+
+.. py:data:: DEFAULT_CLASSIFIER_PROMPT
+   :value: Multiline-String
+
+   .. raw:: html
+
+      <details><summary>Show Value</summary>
+
+   .. code-block:: python
+
+      """You are a routing classifier. Given the user's request, decide which
+      specialist handles it best.
+      
+      Available routes:
+      {route_descriptions}
+      
+      Output exactly two lines, in this order:
+      route: <one of the route names above>
+      confidence: <number between 0 and 1>
+      
+      Then optionally one line of brief reasoning. The first two lines
+      must match the format exactly so they can be parsed.
+      """
+
+   .. raw:: html
+
+      </details>
+
+
+

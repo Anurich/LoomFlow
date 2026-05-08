@@ -1,0 +1,94 @@
+jeevesagent.memory.vector
+=========================
+
+.. py:module:: jeevesagent.memory.vector
+
+.. autoapi-nested-parse::
+
+   In-memory :class:`Memory` with embedding-based semantic recall.
+
+   Episodes are stored in a dict keyed by id; on :meth:`remember` we
+   compute and attach an embedding (if the caller didn't already supply
+   one). :meth:`recall` embeds the query and ranks all episodes by cosine
+   similarity, with optional time-range filtering.
+
+   This backend doesn't scale past a few thousand episodes — the recall is
+   O(N) over every episode every call. Past that, switch to
+   :class:`PostgresMemory` (HNSW index) or :class:`ChromaMemory`.
+
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   jeevesagent.memory.vector.VectorMemory
+
+
+Module Contents
+---------------
+
+.. py:class:: VectorMemory(*, embedder: jeevesagent.core.protocols.Embedder | None = None, max_episodes: int | None = None, consolidator: jeevesagent.memory.consolidator.Consolidator | None = None, fact_store: jeevesagent.memory.facts.FactStore | None = None)
+
+   Pure-Python embedding-backed :class:`Memory`.
+
+
+   .. py:method:: append_block(name: str, content: str) -> None
+      :async:
+
+
+
+   .. py:method:: consolidate() -> None
+      :async:
+
+
+      Process unconsolidated episodes through the configured
+      :class:`Consolidator`, appending facts to ``self.facts``.
+
+      No-op when no consolidator is configured.
+
+
+
+   .. py:method:: recall(query: str, *, kind: str = 'episodic', limit: int = 5, time_range: tuple[datetime.datetime, datetime.datetime] | None = None, user_id: str | None = None) -> list[jeevesagent.core.types.Episode]
+      :async:
+
+
+
+   .. py:method:: recall_facts(query: str, *, limit: int = 5, valid_at: datetime.datetime | None = None, user_id: str | None = None) -> list[jeevesagent.core.types.Fact]
+      :async:
+
+
+
+   .. py:method:: remember(episode: jeevesagent.core.types.Episode) -> str
+      :async:
+
+
+
+   .. py:method:: session_messages(session_id: str, *, user_id: str | None = None, limit: int = 20) -> list[jeevesagent.core.types.Message]
+      :async:
+
+
+
+   .. py:method:: snapshot() -> dict[str, Any]
+
+
+   .. py:method:: update_block(name: str, content: str) -> None
+      :async:
+
+
+
+   .. py:method:: working() -> list[jeevesagent.core.types.MemoryBlock]
+      :async:
+
+
+
+   .. py:property:: embedder
+      :type: jeevesagent.core.protocols.Embedder
+
+
+
+   .. py:attribute:: facts
+      :type:  jeevesagent.memory.facts.FactStore
+
+

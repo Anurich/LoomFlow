@@ -1,0 +1,83 @@
+jeevesagent.mcp.registry
+========================
+
+.. py:module:: jeevesagent.mcp.registry
+
+.. autoapi-nested-parse::
+
+   ``ToolHost`` backed by N MCP servers.
+
+   The registry connects all clients in parallel through an
+   ``anyio.create_task_group``, builds a name index, and routes calls.
+
+   Tool name collisions across servers are auto-disambiguated:
+
+   * If a tool name is unique across all servers, agents see the bare name
+     (``get_weather``).
+   * If two servers expose the same name, both are registered as
+     ``server.tool`` (``city_api.get_weather``, ``noaa.get_weather``).
+
+   Either form is accepted at call time.
+
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   jeevesagent.mcp.registry.MCPRegistry
+
+
+Module Contents
+---------------
+
+.. py:class:: MCPRegistry(items: list[jeevesagent.mcp.spec.MCPServerSpec | jeevesagent.mcp.client.MCPClient] | None = None)
+
+   Aggregates many :class:`MCPClient` instances into a single ``ToolHost``.
+
+
+   .. py:method:: aclose() -> None
+      :async:
+
+
+
+   .. py:method:: call(tool: str, args: collections.abc.Mapping[str, Any], *, call_id: str = '') -> jeevesagent.core.types.ToolResult
+      :async:
+
+
+
+   .. py:method:: connect() -> None
+      :async:
+
+
+      Connect every client in parallel and rebuild the index.
+
+
+
+   .. py:method:: list_tools(*, query: str | None = None) -> list[jeevesagent.core.types.ToolDef]
+      :async:
+
+
+
+   .. py:method:: refresh() -> None
+      :async:
+
+
+      Re-pull tool lists from every client and rebuild the index.
+
+
+
+   .. py:method:: watch() -> collections.abc.AsyncIterator[jeevesagent.core.types.ToolEvent]
+      :async:
+
+
+      ``listChanged`` notifications. Not yet implemented; yields nothing.
+
+
+
+   .. py:property:: server_names
+      :type: list[str]
+
+
+

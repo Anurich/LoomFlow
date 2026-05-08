@@ -1,0 +1,227 @@
+jeevesagent.architecture.actor_critic
+=====================================
+
+.. py:module:: jeevesagent.architecture.actor_critic
+
+.. autoapi-nested-parse::
+
+   ActorCritic: generator + adversarial critic, asymmetric by design.
+
+   Sutton & Barto 1998 (RL foundations); LLM-era papers Madaan et al.
+   2023 (Self-Refine — same model both roles), Gou et al. 2023 (CRITIC),
+   Sun et al. 2025 (CGI — separate critic model). 2026 production
+   literature recommends ActorCritic for **quality-critical work** —
+   code generation, security review, important written communications.
+
+   The pattern in one line: actor proposes; critic finds problems with a
+   *different prompt and ideally a different model*; actor revises.
+
+   Why a separate :class:`SelfRefine`?
+   -----------------------------------
+   :class:`SelfRefine` runs critic + refiner with the parent's same
+   model and same prompt template. ActorCritic earns its complexity
+   only when the actor and critic have *different blind spots* —
+   typically different models. We require both ``actor`` and
+   ``critic`` :class:`Agent` instances; for same-model self-critique,
+   use :class:`SelfRefine`.
+
+   Pattern
+   -------
+
+   1. **Round 0 (actor).** ``actor.run(prompt)`` produces an initial
+      output.
+   2. **For each round up to ``max_rounds``:**
+
+      a. **Critic.** ``critic.run(critique_prompt)`` produces a
+         structured critique with an explicit ``score`` 0-1.
+      b. **Approval check.** If ``critique.score >=
+         approval_threshold``, terminate as approved.
+      c. **Refine.** ``actor.run(refine_prompt)`` produces a revised
+         output that addresses the critique. The new output replaces
+         the old.
+
+   3. **Max rounds reached without approval.** Return the current
+      output. Best we have.
+
+   Replay correctness
+   ------------------
+   Each actor / critic invocation uses a deterministic session id
+   (``{parent}__actor_<round>`` / ``{parent}__critic_<round>``) so
+   replays of the parent reproduce the same sub-sessions.
+
+   Tuning
+   ------
+   * ``max_rounds=3`` is the production sweet spot for code generation.
+   * ``approval_threshold=0.9`` is strict; lower to 0.85 for friendlier
+     convergence.
+   * Use **different models** for actor and critic. Claude Opus actor +
+     GPT-4o critic (or vice versa) is the canonical asymmetry.
+
+   Composition
+   -----------
+   * Inside :class:`Supervisor`: each worker can be an ActorCritic for
+     per-domain quality control (``coder`` worker uses ActorCritic for
+     code review).
+   * Inside :class:`Reflexion`: cross-session learning of which
+     critique patterns produce real improvements.
+
+
+
+Attributes
+----------
+
+.. autoapisummary::
+
+   jeevesagent.architecture.actor_critic.DEFAULT_CRITIQUE_TEMPLATE
+   jeevesagent.architecture.actor_critic.DEFAULT_REFINE_TEMPLATE
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   jeevesagent.architecture.actor_critic.ActorCritic
+   jeevesagent.architecture.actor_critic.CriticOutput
+
+
+Module Contents
+---------------
+
+.. py:class:: ActorCritic(*, actor: jeevesagent.agent.api.Agent, critic: jeevesagent.agent.api.Agent, max_rounds: int = 3, approval_threshold: float = 0.9, critique_template: str | None = None, refine_template: str | None = None)
+
+   Actor + adversarial critic with optional different models.
+
+   Constructor parameters:
+
+   * ``actor`` (required): the generating :class:`Agent`. Sees the
+     original prompt on round 0 and a refine prompt on subsequent
+     rounds.
+   * ``critic`` (required): the reviewing :class:`Agent`. Sees the
+     original prompt + the actor's current output and produces
+     structured JSON critique.
+   * ``max_rounds``: cap on critique-refine cycles after the
+     initial generation. Default 3.
+   * ``approval_threshold``: terminate when ``critique.score`` is
+     at or above this value. Default 0.9.
+   * ``critique_template`` / ``refine_template``: override the
+     default prompts. Templates use ``{prompt}``, ``{output}``,
+     ``{critique}``, ``{issues_bulleted}``.
+
+
+   .. py:method:: declared_workers() -> dict[str, jeevesagent.agent.api.Agent]
+
+
+   .. py:method:: run(session: jeevesagent.architecture.base.AgentSession, deps: jeevesagent.architecture.base.Dependencies, prompt: str) -> collections.abc.AsyncIterator[jeevesagent.core.types.Event]
+      :async:
+
+
+
+   .. py:attribute:: name
+      :value: 'actor-critic'
+
+
+
+.. py:class:: CriticOutput(/, **data: Any)
+
+   Bases: :py:obj:`pydantic.BaseModel`
+
+
+   Structured critic verdict.
+
+   Parsed from the critic Agent's output. Falls back to a single-
+   issue blob with score 0.0 when JSON parsing fails so the loop
+   keeps making progress instead of crashing on a malformed reply.
+
+   Create a new model by parsing and validating input data from keyword arguments.
+
+   Raises [`ValidationError`][pydantic_core.ValidationError] if the input data cannot be
+   validated to form a valid model.
+
+   `self` is explicitly positional-only to allow `self` as a field name.
+
+
+   .. py:attribute:: issues
+      :type:  list[str]
+      :value: None
+
+
+
+   .. py:attribute:: score
+      :type:  float
+      :value: None
+
+
+
+   .. py:attribute:: summary
+      :type:  str
+      :value: ''
+
+
+
+.. py:data:: DEFAULT_CRITIQUE_TEMPLATE
+   :value: Multiline-String
+
+   .. raw:: html
+
+      <details><summary>Show Value</summary>
+
+   .. code-block:: python
+
+      """You are reviewing the output below against the original task. Find
+      every issue you can: factual errors, missing requirements, edge
+      cases, security holes, unclear language. Be specific — cite the
+      section of the output you're criticizing.
+      
+      Output ONLY a JSON object with this shape:
+      
+      {{"issues": ["...", "..."], "score": 0.0-1.0, "summary": "..."}}
+      
+      The score is your confidence the output fully solves the task:
+      - 1.0 = no issues, ship it
+      - 0.7-0.9 = mostly correct, minor gaps
+      - 0.4-0.6 = real problems, must revise
+      - 0.0-0.3 = wrong or missing core deliverable
+      
+      Original task:
+      {prompt}
+      
+      Output to review:
+      {output}
+      """
+
+   .. raw:: html
+
+      </details>
+
+
+
+.. py:data:: DEFAULT_REFINE_TEMPLATE
+   :value: Multiline-String
+
+   .. raw:: html
+
+      <details><summary>Show Value</summary>
+
+   .. code-block:: python
+
+      """Revise your previous output based on the critique below. Address
+      every point in the critique. Output ONLY the revised version, no
+      preamble or commentary about what changed.
+      
+      Original task:
+      {prompt}
+      
+      Previous output:
+      {output}
+      
+      Critique:
+      {issues_bulleted}
+      """
+
+   .. raw:: html
+
+      </details>
+
+
+

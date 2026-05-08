@@ -1,0 +1,137 @@
+jeevesagent.tools.registry
+==========================
+
+.. py:module:: jeevesagent.tools.registry
+
+.. autoapi-nested-parse::
+
+   In-process tool registry.
+
+   A :class:`Tool` wraps a Python callable with a JSON-Schema-style input
+   description. :func:`tool` is a decorator that derives the schema from
+   type hints. :class:`InProcessToolHost` is the simplest
+   :class:`~jeevesagent.core.protocols.ToolHost`: a dict keyed by tool name.
+
+
+
+Attributes
+----------
+
+.. autoapisummary::
+
+   jeevesagent.tools.registry.ToolCallable
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   jeevesagent.tools.registry.InProcessToolHost
+   jeevesagent.tools.registry.Tool
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   jeevesagent.tools.registry.tool
+
+
+Module Contents
+---------------
+
+.. py:class:: InProcessToolHost(tools: list[Tool | collections.abc.Callable[Ellipsis, Any]] | None = None)
+
+   A dict-backed :class:`~jeevesagent.core.protocols.ToolHost`.
+
+
+   .. py:method:: call(tool: str, args: collections.abc.Mapping[str, Any], *, call_id: str = '') -> jeevesagent.core.types.ToolResult
+      :async:
+
+
+
+   .. py:method:: get(name: str) -> Tool | None
+
+
+   .. py:method:: list_tools(*, query: str | None = None) -> list[jeevesagent.core.types.ToolDef]
+      :async:
+
+
+
+   .. py:method:: register(item: Tool | collections.abc.Callable[Ellipsis, Any]) -> Tool
+
+
+   .. py:method:: unregister(name: str) -> bool
+
+      Remove a tool by name. Returns ``True`` if removed.
+
+
+
+   .. py:method:: watch() -> collections.abc.AsyncIterator[jeevesagent.core.types.ToolEvent]
+      :async:
+
+
+      In-process registry is static; the generator yields nothing.
+
+      Iterating over an empty tuple keeps this an async generator
+      (so the return type is ``AsyncIterator``) without ever producing
+      an event at runtime.
+
+
+
+.. py:class:: Tool
+
+   A registered tool: definition plus the callable that executes it.
+
+
+   .. py:method:: execute(args: collections.abc.Mapping[str, Any]) -> Any
+      :async:
+
+
+      Invoke the underlying callable.
+
+      Async functions are awaited; sync functions are dispatched to a
+      worker thread via :func:`anyio.to_thread.run_sync` so they don't
+      block the event loop.
+
+
+
+   .. py:method:: to_def() -> jeevesagent.core.types.ToolDef
+
+
+   .. py:attribute:: description
+      :type:  str
+
+
+   .. py:attribute:: destructive
+      :type:  bool
+      :value: False
+
+
+
+   .. py:attribute:: fn
+      :type:  collections.abc.Callable[Ellipsis, Any]
+
+
+   .. py:attribute:: input_schema
+      :type:  dict[str, Any]
+
+
+   .. py:attribute:: name
+      :type:  str
+
+
+.. py:function:: tool(fn: collections.abc.Callable[Ellipsis, Any]) -> Tool
+                 tool(*, name: str | None = None, description: str | None = None, destructive: bool = False) -> collections.abc.Callable[[collections.abc.Callable[Ellipsis, Any]], Tool]
+
+   Promote a callable to a :class:`Tool`.
+
+   Use as ``@tool`` (bare) or ``@tool(name=..., description=..., destructive=...)``.
+   The schema is derived from parameter annotations; primitive types map
+   to their JSON-Schema equivalents, anything else falls back to ``string``.
+
+
+.. py:data:: ToolCallable
+

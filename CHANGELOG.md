@@ -7,6 +7,265 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 For development-history detail (per-slice notes, file maps, gate
 counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 
+## [0.10.0] — unreleased
+
+This release turns JeevesAgent from a working agent harness into a
+**production framework**. Five themed milestones (M1–M5) close the
+gaps that separate a demo loop from something you put in front of
+paying users — multi-tenant safety, conversation continuity, typed
+outputs, retry/error taxonomy, and a fast path that skips no-op
+integrations. Plus an audit pass that aligns the public surface,
+a Sphinx docs site, migration guides for LangGraph and the raw
+OpenAI SDK, and a live integration suite that hits paid endpoints.
+
+Every change is **additive**; existing code keeps working unchanged.
+Multi-tenancy and structured outputs are opt-in by passing
+`user_id=` / `output_schema=`. Retry-on-transient is auto-applied
+to in-tree network adapters (OpenAI, Anthropic, LiteLLM); custom
+models opt in.
+
+### Added — Multi-tenancy by default (M1)
+
+* **`RunContext`** (frozen `dataclass(slots=True)`) — typed,
+  immutable per-run scope with `user_id`, `session_id`, `run_id`,
+  and `metadata`. First-class framework primitive, not strings in
+  a `configurable` dict. `with_overrides(...)` for sub-agent
+  inheritance.
+* **`get_run_context()`** — read the live context inside any tool /
+  hook / sub-agent. Backed by a `ContextVar` set in `Agent._loop`;
+  `anyio` task groups propagate it across parallel tool dispatch
+  and spawned sub-agents automatically. Returns the empty default
+  outside an active run — never raises, so direct `@tool` calls in
+  tests keep working.
+* **`set_run_context(ctx)`** — async context manager for installing
+  a context outside an active run (background workers that share
+  tool implementations with the agent).
+* **`Agent.run(user_id=, session_id=, metadata=, context=)`** —
+  flat kwargs; LangGraph-style `config={"configurable": {...}}`
+  nesting deliberately avoided. Same kwargs added to
+  `Agent.stream` and `Agent.resume`.
+* **`Episode.user_id` + `Fact.user_id`** — Pydantic fields, optional.
+  Backends partition on these as a hard namespace boundary:
+  episodes / facts stored under one `user_id` are never visible to
+  a recall scoped to a different one. `None` is its own
+  ("anonymous / single-tenant") bucket.
+* **`Memory.recall(user_id=)`, `Memory.recall_facts(user_id=)`,
+  `FactStore.query(user_id=)`, `FactStore.recall_text(user_id=)`** —
+  partition filter wired through every implementation:
+  `InMemoryMemory`, `VectorMemory`, `ChromaMemory`,
+  `PostgresMemory`, `RedisMemory`, plus all four fact stores.
+  Postgres / SQLite use `IS NOT DISTINCT FROM` for safe
+  NULL-bucket comparisons; Chroma uses native `where` filters;
+  Redis stores `user_id` as a Hash field and post-filters.
+* **Schema migrations** — `episodes` and `facts` Postgres tables
+  gain a `user_id TEXT` column with idempotent
+  `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` for in-place
+  upgrades; SQLite gets the same with a duplicate-column-tolerant
+  `try`/`except`. New `(namespace, user_id, occurred_at DESC)`
+  index on Postgres episodes; `(user_id, subject, predicate)` on
+  the facts tables.
+* **Namespace-scoped supersession** — fact-store supersession (the
+  bi-temporal `valid_until = new.valid_from` write when a new
+  fact replaces an old one) is now scoped by `user_id`: alice's
+  new claim never invalidates bob's currently-valid claim on the
+  same `(subject, predicate)`. Across all four fact-store
+  backends.
+
+### Added — Conversation continuity (M2)
+
+* **`Memory.session_messages(session_id, *, user_id=, limit=)`** —
+  new protocol method returning prior user/assistant turns from
+  the named conversation, scoped to the `user_id` partition,
+  oldest-first. Implemented across all five memory backends.
+* **`_build_seed_messages` rehydration** — when `session_id` was
+  reused, the agent loop loads the prior turns as real `Message`
+  history (proper USER / ASSISTANT roles) before the current
+  prompt. Cross-session episodic recall filters out the current
+  session's episodes to avoid duplication. Reusing the same
+  `session_id` across `agent.run()` calls now genuinely continues
+  the conversation — no reducer protocol, no `add_messages` magic.
+
+### Added — Footgun protection + multi-agent inheritance (M3)
+
+* **`IsolationWarning`** (subclass of `UserWarning`) — fires when
+  `Memory.recall(user_id=None)` runs against a store whose
+  episodes / facts include a non-None `user_id`. The partition is
+  still safe, but the developer probably forgot to pass
+  `user_id=` somewhere; loud failure beats silent confusion. Goes
+  through Python's `warnings` machinery — apps promote to error
+  with `warnings.simplefilter("error", IsolationWarning)`.
+* **Multi-agent context inheritance** — `SubagentInvocation` (used
+  by `Supervisor`, `Debate`, `Swarm`, `Router`, `ActorCritic`,
+  `Blackboard`) now reads `get_run_context()` automatically when
+  no explicit `context=` is passed. The parent's `user_id` and
+  `metadata` propagate to every sub-agent without each
+  architecture having to plumb them by hand. Sub-agents get a
+  fresh `session_id` so each worker has its own thread while
+  inheriting the parent's namespace.
+
+### Added — Structured outputs (M4)
+
+* **`Agent.run(output_schema=, output_validation_retries=)`** —
+  pass any Pydantic `BaseModel` and the framework augments the
+  per-run system prompt with a `STRUCTURED OUTPUT REQUIRED`
+  directive embedding the schema's JSON Schema, parses the final
+  assistant text, and returns a validated typed instance on
+  `RunResult.parsed`. Static `agent._instructions` is not
+  mutated; the augmentation is per-run.
+* **Retry-with-feedback** — on parse failure, the framework gives
+  the model up to `output_validation_retries` (default 1) extra
+  single-shot turns to fix the output, feeding the validation
+  error back as a USER message. After the retry budget is
+  exhausted, raises `OutputValidationError`.
+* **`OutputValidationError`** — carries the raw text (`raw`), the
+  schema being targeted (`schema`), and the underlying Pydantic
+  `ValidationError` (`cause`, also linked via `__cause__`).
+* **`RunResult.parsed: Any | None`** — typed, validated instance
+  when `output_schema=` was supplied; `None` otherwise.
+  `RunResult.output` keeps the raw (cleaned) JSON text for
+  logging / audit.
+* **Markdown-fence tolerance** — strips `` ```json `` / `` ``` ``
+  fences before parsing, since real models occasionally wrap
+  output despite being told not to.
+
+### Added — Resilient model calls (M5)
+
+* **Error taxonomy** — `ModelError` base + `TransientModelError`
+  (retryable; carries `retry_after`) + `RateLimitError` (subclass
+  of transient) + `PermanentModelError` + `AuthenticationError` +
+  `InvalidRequestError` + `ContentFilterError`. All inherit from
+  `JeevesAgentError`; existing `except JeevesAgentError` catches
+  keep working. Each carries a `cause` slot and chains through
+  `__cause__` so debug code can still inspect the raw SDK error.
+* **`RetryPolicy`** (frozen dataclass) — `max_attempts`,
+  `initial_delay_s`, `max_delay_s`, `multiplier`, `jitter`. Plus
+  `RetryPolicy.disabled()` and `RetryPolicy.aggressive()` factories.
+  Sensible default: 3 attempts, 1 → 2 → 4 s with ±10% jitter,
+  capped at 30 s.
+* **`compute_backoff(policy, attempt, retry_after=)`** — exponential
+  growth, capped at `max_delay_s`, jittered. Provider-supplied
+  `Retry-After` is a **floor**: can exceed the cap because the
+  provider is more authoritative than our heuristic.
+* **`classify_model_error(exc)`** — maps OpenAI / Anthropic /
+  httpx exceptions to the taxonomy via lazy imports (no hard
+  dependency on any SDK). Returns `None` for unrecognised
+  exceptions — the framework refuses to silently retry errors it
+  doesn't understand.
+* **`RetryingModel`** — wraps any `Model`; auto-applied to in-tree
+  network adapters (`OpenAIModel`, `AnthropicModel`,
+  `LiteLLMModel`) by default. Custom Models are not auto-wrapped
+  (we can't reason about their error types); pass
+  `retry_policy=RetryPolicy()` to `Agent(...)` to opt in.
+  Streaming retries fire only **before** the first chunk — once
+  tokens are flowing, errors propagate.
+* **`Agent(retry_policy=RetryPolicy.disabled())`** — opt out of
+  retries when handling errors at a higher layer.
+
+### Added — Documentation + migration
+
+* **Sphinx docs site** at <https://jeevesagent.readthedocs.io>
+  (`docs/conf.py`, Furo theme, `sphinx-autoapi` for the full API
+  reference, `myst-parser` so existing `.md` content mounts
+  cleanly). Build locally with `pip install -e ".[docs]"` and
+  `sphinx-build -b html docs docs/_build/html`. ReadTheDocs
+  integration via `.readthedocs.yaml`.
+* **`docs/migrations/from-langgraph.md`** — concrete side-by-side
+  translations: hello world, tools, multi-tenant memory (the
+  `user_id`-as-convention vs `user_id`-as-primitive contrast),
+  session continuity, structured output, streaming, multi-agent.
+  Plus a "things JeevesAgent does NOT have" section.
+* **`docs/migrations/from-openai-sdk.md`** — translation guide for
+  hand-rolled-loop users: tool definitions, multi-turn state,
+  structured output, retries, streaming, parallel tool calls.
+* **`pyproject.toml` `docs` extras** — `sphinx`, `furo`,
+  `sphinx-autoapi`, `myst-parser`, `linkify-it-py`.
+* **Live integration tests** (`tests/test_live_openai.py`) — 9
+  tests, ~16 s wall clock, marked `live` (deselected by default).
+  Run with `pytest -m live` once `OPENAI_API_KEY` is set. Covers
+  the differentiating contracts end-to-end against `gpt-4.1-mini`:
+  basic round-trip, tool dispatch, `user_id` partition, `session_id`
+  continuity, tool reads `user_id` via `get_run_context()`,
+  structured output, structured output retry-on-failure, real
+  auth-error → `AuthenticationError` classification, streaming.
+* **CHANGELOG.md** — version-by-version release notes (this file).
+
+### Added — Examples
+
+* `examples/01_rag_pdf.py` — single-agent RAG over a folder of
+  PDFs. Loader → `RecursiveChunker` → `ChromaVectorStore` →
+  `@tool` retriever → `Agent`.
+* `examples/02_specialist_debate.py` — five domain specialists
+  (IT / physics / medicine / finance / law), each with their own
+  Chroma collection, composed via `Team.debate(...)` with a
+  synthesising judge.
+* `examples/03_multi_user_sessions.py` — live demo of M1+M2 on one
+  shared `Agent` + `InMemoryMemory`. Two users, distinct sessions,
+  no cross-contamination, tool reads `user_id` via
+  `get_run_context()`.
+* `examples/04_structured_outputs.py` — extracts a `MeetingSummary`
+  (with nested `ActionItem` lists, ISO dates, sentiment enum)
+  from a raw transcript.
+
+### Changed — Public API surface
+
+* **`Agent.resume` signature aligned with `Agent.run`** — gained
+  `context=`, `output_schema=`, `output_validation_retries=` kwargs.
+  The three call methods (`run`, `stream`, `resume`) now have the
+  same kwarg surface in the same order.
+* **`OutputValidationError.cause` typed as `BaseException | None`**
+  (was `Exception | None`) to match `ModelError.cause`.
+* **README intro rewritten** — quickstart now demonstrates `user_id`
+  partitioning, `session_id` continuity, and structured outputs in
+  a single ~25-line example. The "Why pick this over LangGraph"
+  framing is preserved but the differentiating bullets reference
+  the actual M1–M5 work.
+* **README "API stability" section** — four-tier table (Stable /
+  Stable backends / Experimental / Internal) so adopters know what
+  they can pin against in production.
+* **`Dependencies.context: RunContext`** — new field on the
+  per-run dependency bundle architectures receive. Existing
+  architectures read `deps.context.user_id` to scope memory recall.
+
+### Performance
+
+* **Fast path by default** — every layer (audit, telemetry,
+  permissions, hooks, runtime, budget) is detected as no-op or
+  production-wired at construction time. The hot path skips the
+  integration when the layer is no-op, so a barebones `Agent`
+  runs at LangChain-class latency (parity ±2 % on tool-using
+  scenarios; see `bench/jeeves_vs_langchain.py`). The moment any
+  of those layers is wired up, the integration becomes active —
+  no flag, no constructor split.
+* **Non-streaming `Model.complete()`** — every model adapter now
+  has a single-shot `complete(...)` method alongside `stream(...)`.
+  `agent.run` (no consumer reading from `stream()`) prefers
+  `complete()` and skips per-chunk yield + Event construction.
+  About 100–200 ms saved per turn on token-heavy responses.
+
+### Quality
+
+* **866 offline tests pass** in ~6 s (5 env-gated integrations
+  skip without `JEEVES_TEST_PG_DSN` / `JEEVES_TEST_REDIS_URL`).
+* **9 live tests pass** against real OpenAI in ~16 s.
+* **mypy `--strict`** clean across **105 production source files**.
+* **ruff** clean across `jeevesagent`, `tests`, `examples`,
+  including `flake8-async` lints.
+
+### Compatibility
+
+* All new fields on `Episode`, `Fact`, `RunResult`, and
+  `Dependencies` are optional with safe defaults. Existing
+  pickled / JSON-serialised records load unchanged.
+* All new kwargs on `Agent.run` / `stream` / `resume` are
+  keyword-only with `None` / sensible defaults. Existing call
+  sites keep working unchanged.
+* All new memory-protocol methods (`session_messages`) ship with
+  default implementations on every shipped backend; custom
+  `Memory` implementations gain a graceful `[]` fallback in
+  `_build_seed_messages` so old backends keep working too.
+
+---
+
 ## [0.3.0] — unreleased
 
 ### Added — Architectures

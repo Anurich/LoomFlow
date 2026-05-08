@@ -1,0 +1,289 @@
+jeevesagent.architecture.base
+=============================
+
+.. py:module:: jeevesagent.architecture.base
+
+.. autoapi-nested-parse::
+
+   Architecture protocol + supporting types.
+
+   Three pieces:
+
+   * :class:`AgentSession` — mutable per-run state shared between
+     :class:`Agent` and the :class:`Architecture`. The architecture
+     reads ``messages`` and writes ``turns``, ``output``,
+     ``cumulative_usage``, ``interrupted``, ``interruption_reason``,
+     and ``metadata`` as iteration progresses. The :class:`Agent` reads
+     the final state to build a :class:`RunResult`.
+
+   * :class:`Dependencies` — every protocol implementation an
+     architecture might need (model, memory, runtime, tools, budget,
+     permissions, hooks, telemetry, audit log, ``max_turns``), bundled
+     into one struct so an architecture's ``run()`` signature stays
+     short. Stable for the lifetime of a run.
+
+   * :class:`Architecture` — the protocol architectures implement. One
+     method (``run``) plus a ``name`` and ``declared_workers`` for
+     introspection.
+
+   Setup events (``Event.started``) and teardown events
+   (``Event.completed``) are emitted by :class:`Agent`, NOT the
+   architecture. Architectures yield the events that happen *during*
+   iteration: per-turn, per-tool, per-step, budget warnings, errors.
+
+   This keeps every architecture's ``run()`` focused on its own
+   strategy without re-implementing setup/teardown plumbing.
+
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   jeevesagent.architecture.base.AgentSession
+   jeevesagent.architecture.base.Architecture
+   jeevesagent.architecture.base.Dependencies
+
+
+Module Contents
+---------------
+
+.. py:class:: AgentSession
+
+   Mutable per-run state shared between :class:`Agent` and an
+   :class:`Architecture`.
+
+   The :class:`Agent` constructs this once per run, the architecture
+   mutates it as iteration progresses, and the :class:`Agent` reads
+   the final state to build a :class:`RunResult`.
+
+   ``metadata`` is a free-form dict architectures use for things
+   that don't deserve their own field — multi-agent architectures
+   stash worker handoff state, planners stash plans, etc.
+
+
+   .. py:attribute:: cumulative_usage
+      :type:  jeevesagent.core.types.Usage
+
+
+   .. py:attribute:: id
+      :type:  str
+
+
+   .. py:attribute:: instructions
+      :type:  str
+
+
+   .. py:attribute:: interrupted
+      :type:  bool
+      :value: False
+
+
+
+   .. py:attribute:: interruption_reason
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: messages
+      :type:  list[jeevesagent.core.types.Message]
+      :value: []
+
+
+
+   .. py:attribute:: metadata
+      :type:  dict[str, Any]
+
+
+   .. py:attribute:: output
+      :type:  str
+      :value: ''
+
+
+
+   .. py:attribute:: turns
+      :type:  int
+      :value: 0
+
+
+
+.. py:class:: Architecture
+
+   Bases: :py:obj:`Protocol`
+
+
+   Strategy interface for driving the agent loop.
+
+   Implementations are async generators: they ``yield`` :class:`Event`
+   values for every milestone they want surfaced (model chunks, tool
+   calls, tool results, budget warnings, errors, architecture-specific
+   progress events).
+
+   See ``Subagent.md`` for the catalogue of architectures and the
+   design rationale behind the protocol shape.
+
+
+   .. py:method:: declared_workers() -> dict[str, jeevesagent.agent.api.Agent]
+
+      Sub-Agents this architecture composes, keyed by role name.
+
+      Used by multi-agent architectures (Supervisor, Actor-Critic,
+      Debate, Router, Blackboard, Swarm) to expose their workers for
+      introspection (logging, telemetry, eval). Single-agent
+      architectures return ``{}``.
+
+
+
+   .. py:method:: run(session: AgentSession, deps: Dependencies, prompt: str) -> collections.abc.AsyncIterator[jeevesagent.core.types.Event]
+
+      Drive iteration; yield events as they happen.
+
+      The architecture mutates ``session`` (turns, output,
+      cumulative_usage, messages, interrupted, interruption_reason,
+      metadata) as it iterates and yields :class:`Event`\ s for the
+      caller to forward (or ignore, in non-streaming runs).
+
+      Implementations are *async generators* — declared
+      ``async def run(...) -> AsyncIterator[Event]:`` with ``yield``
+      statements in the body.
+
+
+
+   .. py:attribute:: name
+      :type:  str
+
+
+.. py:class:: Dependencies
+
+   Bundled protocol implementations passed to every architecture.
+
+   Constructed once per run from the :class:`Agent`'s configured
+   backends. Architectures treat this as read-only — they call
+   methods on the contained protocols but don't mutate the struct
+   itself.
+
+   Multi-agent architectures (Supervisor, Router, etc.) will grow
+   helper methods on this class — ``fresh_session``,
+   ``scope_for_worker``, ``with_extra_tools``, ``spawn_child`` — as
+   they land in v0.5+. v0.3 keeps it as a passive struct.
+
+
+   .. py:attribute:: audit_log
+      :type:  jeevesagent.security.audit.AuditLog | None
+
+
+   .. py:attribute:: budget
+      :type:  jeevesagent.core.protocols.Budget
+
+
+   .. py:attribute:: context
+      :type:  jeevesagent.core.context.RunContext
+
+      Typed scope for the run — ``user_id`` (memory namespace),
+      ``session_id`` (conversation thread), ``run_id`` (this specific
+      invocation), and ``metadata`` (free-form app context). See
+      :class:`~jeevesagent.RunContext` for the per-field semantics.
+
+
+   .. py:attribute:: fast_audit
+      :type:  bool
+      :value: True
+
+
+      Skip ``_audit(...)`` calls when ``audit_log`` is ``None``.
+
+
+   .. py:attribute:: fast_budget
+      :type:  bool
+      :value: True
+
+
+      Skip ``budget.allows_step()`` and ``budget.consume(...)``
+      when budget is ``NoBudget``.
+
+
+   .. py:attribute:: fast_hooks
+      :type:  bool
+      :value: True
+
+
+      Skip ``hooks.pre_tool`` / ``hooks.post_tool`` dispatch when
+      no hooks have been registered.
+
+
+   .. py:attribute:: fast_permissions
+      :type:  bool
+      :value: True
+
+
+      Skip per-tool ``permissions.check(...)`` when permissions is
+      the no-op ``AllowAll``.
+
+
+   .. py:attribute:: fast_runtime
+      :type:  bool
+      :value: True
+
+
+      Inline ``await fn(*args)`` (skipping ``runtime.step(...)``
+      wrapping + idempotency-key derivation) when runtime is
+      ``InProcRuntime``.
+
+
+   .. py:attribute:: fast_telemetry
+      :type:  bool
+      :value: True
+
+
+      Skip ``telemetry.trace(...)`` contextmanagers + ``emit_metric``
+      calls when ``telemetry`` is ``NoTelemetry``.
+
+
+   .. py:attribute:: hooks
+      :type:  jeevesagent.security.hooks.HookRegistry
+
+
+   .. py:attribute:: max_turns
+      :type:  int
+
+
+   .. py:attribute:: memory
+      :type:  jeevesagent.core.protocols.Memory
+
+
+   .. py:attribute:: model
+      :type:  jeevesagent.core.protocols.Model
+
+
+   .. py:attribute:: permissions
+      :type:  jeevesagent.core.protocols.Permissions
+
+
+   .. py:attribute:: runtime
+      :type:  jeevesagent.core.protocols.Runtime
+
+
+   .. py:attribute:: streaming
+      :type:  bool
+      :value: False
+
+
+      Whether a downstream consumer is reading from
+      ``agent.stream()``. When True, architectures should preserve
+      real-time event-arrival semantics so a consumer that breaks
+      out of the iterator triggers prompt cancellation. When False
+      (the default for ``agent.run()``), architectures may batch
+      events for fewer task-group / channel allocations on the
+      hot path.
+
+
+   .. py:attribute:: telemetry
+      :type:  jeevesagent.core.protocols.Telemetry
+
+
+   .. py:attribute:: tools
+      :type:  jeevesagent.core.protocols.ToolHost
+
+

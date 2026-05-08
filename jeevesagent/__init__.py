@@ -32,12 +32,14 @@ from .architecture import (
 )
 from .core import (
     AuditEntry,
+    AuthenticationError,
     Budget,
     BudgetExceeded,
     BudgetStatus,
     CancelledByUser,
     CertifiedValue,
     ConfigError,
+    ContentFilterError,
     Embedder,
     Episode,
     Event,
@@ -45,6 +47,8 @@ from .core import (
     Fact,
     FreshnessError,
     HookHost,
+    InvalidRequestError,
+    IsolationWarning,
     JeevesAgentError,
     LineageError,
     MCPError,
@@ -54,9 +58,13 @@ from .core import (
     Message,
     Model,
     ModelChunk,
+    ModelError,
+    OutputValidationError,
+    PermanentModelError,
     PermissionDecision,
     PermissionDenied,
     Permissions,
+    RateLimitError,
     Role,
     RunContext,
     RunResult,
@@ -74,6 +82,7 @@ from .core import (
     ToolEvent,
     ToolHost,
     ToolResult,
+    TransientModelError,
     Usage,
     deterministic_hash,
     get_run_context,
@@ -81,6 +90,7 @@ from .core import (
     set_run_context,
 )
 from .data import FreshnessPolicy, LineagePolicy
+from .governance import RetryPolicy, classify_model_error
 from .graph import AgentGraph, build_graph, write_graph
 from .jeeves import JeevesConfig, JeevesGateway
 from .mcp import MCPClient, MCPRegistry, MCPServerSpec
@@ -292,6 +302,7 @@ __all__ = [
     "Telemetry",
     "ToolHost",
     # context
+    "IsolationWarning",
     "RunContext",
     "get_run_context",
     "set_run_context",
@@ -302,12 +313,23 @@ __all__ = [
     "FreshnessError",
     "JeevesAgentError",
     "LineageError",
+    "AuthenticationError",
+    "ContentFilterError",
+    "InvalidRequestError",
     "MCPError",
     "MemoryStoreError",
+    "ModelError",
+    "OutputValidationError",
+    "PermanentModelError",
     "PermissionDenied",
+    "RateLimitError",
     "RuntimeJournalError",
     "SandboxError",
     "ToolError",
+    "TransientModelError",
+    # resilience
+    "RetryPolicy",
+    "classify_model_error",
     # ids
     "deterministic_hash",
     "new_id",

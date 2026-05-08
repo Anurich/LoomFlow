@@ -50,6 +50,7 @@ from typing import TYPE_CHECKING
 import anyio
 from anyio.streams.memory import MemoryObjectSendStream
 
+from ..core.context import get_run_context
 from ..core.ids import new_id
 from ..core.types import Event
 from ..tools.registry import Tool
@@ -336,8 +337,14 @@ def _make_delegate_tool(
 
         if event_sink is None:
             # No event sink → fall back to plain run() (events lost).
+            # Inherit the parent's RunContext (user_id + metadata) so
+            # the worker runs in the same namespace partition as the
+            # supervisor; ``session_id`` is the worker-specific one
+            # we just derived, overriding the parent's session.
             result = await agent.run(
-                instructions, session_id=worker_session_id
+                instructions,
+                session_id=worker_session_id,
+                context=get_run_context(),
             )
             output = result.output
             if last_outputs is not None:

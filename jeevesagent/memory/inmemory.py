@@ -8,11 +8,13 @@ for semantic search and tracks bi-temporal facts.
 from __future__ import annotations
 
 import threading
+import warnings
 from datetime import datetime
 from typing import Any
 
 import anyio
 
+from ..core.context import IsolationWarning
 from ..core.types import Episode, Fact, MemoryBlock, Message, Role
 from .consolidator import Consolidator
 from .facts import FactStore, InMemoryFactStore
@@ -99,6 +101,22 @@ class InMemoryMemory:
     ) -> list[Episode]:
         async with self._lock:
             episodes = list(self._episodes.values())
+        # Footgun protection: if the caller forgot ``user_id`` on a
+        # memory that DOES contain named-user data, warn loudly.
+        # The query is still safe (we'll only return None-bucket
+        # rows below), but the dev has almost certainly left a
+        # ``user_id=`` off somewhere and is about to be confused
+        # by suspiciously-empty results.
+        if user_id is None and any(e.user_id is not None for e in episodes):
+            warnings.warn(
+                "Memory.recall called without user_id, but the store "
+                "contains episodes for one or more named users. The "
+                "anonymous bucket is partitioned from named-user "
+                "buckets, so this query will only see anonymous "
+                "episodes. Did you forget to pass user_id=?",
+                IsolationWarning,
+                stacklevel=3,
+            )
         # Hard namespace partition by ``user_id`` — see Episode docstring.
         # ``None`` filters to ``None``; a string filters to that exact
         # value; the buckets never cross.

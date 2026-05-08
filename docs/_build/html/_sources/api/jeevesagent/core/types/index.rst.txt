@@ -1,0 +1,1136 @@
+jeevesagent.core.types
+======================
+
+.. py:module:: jeevesagent.core.types
+
+.. autoapi-nested-parse::
+
+   Pydantic types for messages, events, tools, memory, and runtime state.
+
+   These are the value objects that flow across module boundaries. They are
+   immutable where possible, validated on construction, and free of behavior
+   that requires I/O.
+
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   jeevesagent.core.types.AuditEntry
+   jeevesagent.core.types.BudgetStatus
+   jeevesagent.core.types.CertifiedValue
+   jeevesagent.core.types.Episode
+   jeevesagent.core.types.Event
+   jeevesagent.core.types.EventKind
+   jeevesagent.core.types.Fact
+   jeevesagent.core.types.MemoryBlock
+   jeevesagent.core.types.Message
+   jeevesagent.core.types.ModelChunk
+   jeevesagent.core.types.PermissionDecision
+   jeevesagent.core.types.Role
+   jeevesagent.core.types.RunResult
+   jeevesagent.core.types.Span
+   jeevesagent.core.types.ToolCall
+   jeevesagent.core.types.ToolDef
+   jeevesagent.core.types.ToolEvent
+   jeevesagent.core.types.ToolResult
+   jeevesagent.core.types.Usage
+
+
+Module Contents
+---------------
+
+.. py:class:: AuditEntry(/, **data: Any)
+
+   Bases: :py:obj:`pydantic.BaseModel`
+
+
+   An immutable, signed entry in the audit log.
+
+   Create a new model by parsing and validating input data from keyword arguments.
+
+   Raises [`ValidationError`][pydantic_core.ValidationError] if the input data cannot be
+   validated to form a valid model.
+
+   `self` is explicitly positional-only to allow `self` as a field name.
+
+
+   .. py:attribute:: action
+      :type:  str
+
+
+   .. py:attribute:: actor
+      :type:  str
+
+
+   .. py:attribute:: model_config
+
+      Configuration for the model, should be a dictionary conforming to [`ConfigDict`][pydantic.config.ConfigDict].
+
+
+   .. py:attribute:: payload
+      :type:  dict[str, Any]
+
+
+   .. py:attribute:: seq
+      :type:  int
+
+
+   .. py:attribute:: session_id
+      :type:  str
+
+
+   .. py:attribute:: signature
+      :type:  str
+
+
+   .. py:attribute:: timestamp
+      :type:  datetime.datetime
+
+
+.. py:class:: BudgetStatus(/, **data: Any)
+
+   Bases: :py:obj:`pydantic.BaseModel`
+
+
+   Result of a budget check before each step.
+
+   Create a new model by parsing and validating input data from keyword arguments.
+
+   Raises [`ValidationError`][pydantic_core.ValidationError] if the input data cannot be
+   validated to form a valid model.
+
+   `self` is explicitly positional-only to allow `self` as a field name.
+
+
+   .. py:method:: blocked_(reason: str) -> BudgetStatus
+      :classmethod:
+
+
+
+   .. py:method:: ok_() -> BudgetStatus
+      :classmethod:
+
+
+
+   .. py:method:: warn_(reason: str) -> BudgetStatus
+      :classmethod:
+
+
+
+   .. py:property:: blocked
+      :type: bool
+
+
+
+   .. py:attribute:: model_config
+
+      Configuration for the model, should be a dictionary conforming to [`ConfigDict`][pydantic.config.ConfigDict].
+
+
+   .. py:attribute:: reason
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: state
+      :type:  Literal['ok', 'warn', 'blocked']
+
+
+   .. py:property:: warn
+      :type: bool
+
+
+
+.. py:class:: CertifiedValue(/, **data: Any)
+
+   Bases: :py:obj:`pydantic.BaseModel`
+
+
+   A value carrying provenance metadata for freshness/lineage checks.
+
+   Create a new model by parsing and validating input data from keyword arguments.
+
+   Raises [`ValidationError`][pydantic_core.ValidationError] if the input data cannot be
+   validated to form a valid model.
+
+   `self` is explicitly positional-only to allow `self` as a field name.
+
+
+   .. py:attribute:: fetched_at
+      :type:  datetime.datetime
+
+
+   .. py:attribute:: lineage
+      :type:  tuple[str, Ellipsis]
+      :value: ()
+
+
+
+   .. py:attribute:: model_config
+
+      Configuration for the model, should be a dictionary conforming to [`ConfigDict`][pydantic.config.ConfigDict].
+
+
+   .. py:attribute:: schema_version
+      :type:  str
+      :value: '1'
+
+
+
+   .. py:attribute:: source
+      :type:  str
+
+
+   .. py:attribute:: valid_until
+      :type:  datetime.datetime | None
+      :value: None
+
+
+
+   .. py:attribute:: value
+      :type:  Any
+
+
+.. py:class:: Episode(/, **data: Any)
+
+   Bases: :py:obj:`pydantic.BaseModel`
+
+
+   A single (input, decisions, tool calls, output) tuple from history.
+
+   ``user_id`` is the framework-managed namespace partition. Episodes
+   persisted with one ``user_id`` value are never visible to memory
+   recall queries scoped to a different ``user_id``. ``None`` is its
+   own bucket — the "anonymous / single-tenant" namespace — and does
+   not see episodes belonging to a non-None ``user_id`` (and vice
+   versa). Set automatically from :class:`~jeevesagent.RunContext`
+   by the agent loop; pass explicitly when constructing episodes
+   outside a run.
+
+   Create a new model by parsing and validating input data from keyword arguments.
+
+   Raises [`ValidationError`][pydantic_core.ValidationError] if the input data cannot be
+   validated to form a valid model.
+
+   `self` is explicitly positional-only to allow `self` as a field name.
+
+
+   .. py:method:: format() -> str
+
+
+   .. py:attribute:: embedding
+      :type:  list[float] | None
+      :value: None
+
+
+
+   .. py:attribute:: id
+      :type:  str
+      :value: None
+
+
+
+   .. py:attribute:: input
+      :type:  str
+
+
+   .. py:attribute:: occurred_at
+      :type:  datetime.datetime
+      :value: None
+
+
+
+   .. py:attribute:: output
+      :type:  str
+
+
+   .. py:attribute:: session_id
+      :type:  str
+
+
+   .. py:attribute:: tool_calls
+      :type:  list[ToolCall]
+      :value: None
+
+
+
+   .. py:attribute:: user_id
+      :type:  str | None
+      :value: None
+
+
+
+.. py:class:: Event(/, **data: Any)
+
+   Bases: :py:obj:`pydantic.BaseModel`
+
+
+   A single observable record from a running session.
+
+   Carries a discriminator (``kind``) plus a free-form payload. Construct
+   via the class methods to ensure consistent shapes.
+
+   Create a new model by parsing and validating input data from keyword arguments.
+
+   Raises [`ValidationError`][pydantic_core.ValidationError] if the input data cannot be
+   validated to form a valid model.
+
+   `self` is explicitly positional-only to allow `self` as a field name.
+
+
+   .. py:method:: architecture_event(session_id: str, name: str, **data: Any) -> Event
+      :classmethod:
+
+
+      Generic architecture-progress event.
+
+      ``name`` is a namespaced string identifying the source
+      architecture and the kind of progress
+      (e.g. ``"self_refine.critique"``,
+      ``"reflexion.lesson_persisted"``,
+      ``"router.classified"``). ``data`` is merged into the
+      payload alongside ``name`` so consumers can pattern-match
+      on ``name`` and read structured fields off the rest.
+
+
+
+   .. py:method:: budget_exceeded(session_id: str, status: BudgetStatus) -> Event
+      :classmethod:
+
+
+
+   .. py:method:: budget_warning(session_id: str, status: BudgetStatus) -> Event
+      :classmethod:
+
+
+
+   .. py:method:: completed(session_id: str, result: Any) -> Event
+      :classmethod:
+
+
+
+   .. py:method:: error(session_id: str, exc: BaseException) -> Event
+      :classmethod:
+
+
+
+   .. py:method:: model_chunk(session_id: str, chunk: ModelChunk) -> Event
+      :classmethod:
+
+
+
+   .. py:method:: started(session_id: str, prompt: str) -> Event
+      :classmethod:
+
+
+
+   .. py:method:: tool_call(session_id: str, call: ToolCall) -> Event
+      :classmethod:
+
+
+
+   .. py:method:: tool_result(session_id: str, result: ToolResult) -> Event
+      :classmethod:
+
+
+
+   .. py:attribute:: at
+      :type:  datetime.datetime
+      :value: None
+
+
+
+   .. py:attribute:: kind
+      :type:  EventKind
+
+
+   .. py:attribute:: payload
+      :type:  dict[str, Any]
+      :value: None
+
+
+
+   .. py:attribute:: session_id
+      :type:  str
+
+
+.. py:class:: EventKind
+
+   Bases: :py:obj:`enum.StrEnum`
+
+
+   Enum where members are also (and must be) strings
+
+   Initialize self.  See help(type(self)) for accurate signature.
+
+
+   .. py:attribute:: ARCHITECTURE_EVENT
+      :value: 'architecture_event'
+
+
+      Generic architecture-progress event. Carries a namespaced
+      ``name`` in the payload (e.g. ``"self_refine.critique"``,
+      ``"reflexion.lesson_persisted"``, ``"router.classified"``) so
+      each architecture can stream its own progress signal without
+      expanding :class:`EventKind`.
+
+
+   .. py:attribute:: BUDGET_EXCEEDED
+      :value: 'budget_exceeded'
+
+
+
+   .. py:attribute:: BUDGET_WARNING
+      :value: 'budget_warning'
+
+
+
+   .. py:attribute:: COMPLETED
+      :value: 'completed'
+
+
+
+   .. py:attribute:: ERROR
+      :value: 'error'
+
+
+
+   .. py:attribute:: MEMORY_RECALL
+      :value: 'memory_recall'
+
+
+
+   .. py:attribute:: MEMORY_WRITE
+      :value: 'memory_write'
+
+
+
+   .. py:attribute:: MODEL_CHUNK
+      :value: 'model_chunk'
+
+
+
+   .. py:attribute:: PERMISSION_ASK
+      :value: 'permission_ask'
+
+
+
+   .. py:attribute:: PERMISSION_DECISION
+      :value: 'permission_decision'
+
+
+
+   .. py:attribute:: STARTED
+      :value: 'started'
+
+
+
+   .. py:attribute:: TOOL_CALL
+      :value: 'tool_call'
+
+
+
+   .. py:attribute:: TOOL_RESULT
+      :value: 'tool_result'
+
+
+
+.. py:class:: Fact(/, **data: Any)
+
+   Bases: :py:obj:`pydantic.BaseModel`
+
+
+   A semantic claim extracted from one or more episodes.
+
+   Bi-temporal: ``valid_from``/``valid_until`` tracks when the fact was
+   true in the world; ``recorded_at`` tracks when we learned it.
+
+   ``user_id`` is the framework-managed namespace partition. Facts
+   persisted with one ``user_id`` value are never visible to recall
+   queries scoped to a different ``user_id``. Set automatically from
+   :class:`~jeevesagent.RunContext` by the agent loop / consolidator;
+   pass explicitly when constructing facts outside a run.
+
+   Create a new model by parsing and validating input data from keyword arguments.
+
+   Raises [`ValidationError`][pydantic_core.ValidationError] if the input data cannot be
+   validated to form a valid model.
+
+   `self` is explicitly positional-only to allow `self` as a field name.
+
+
+   .. py:method:: format() -> str
+
+
+   .. py:attribute:: confidence
+      :type:  float
+      :value: 1.0
+
+
+
+   .. py:attribute:: id
+      :type:  str
+      :value: None
+
+
+
+   .. py:attribute:: object
+      :type:  str
+
+
+   .. py:attribute:: predicate
+      :type:  str
+
+
+   .. py:attribute:: recorded_at
+      :type:  datetime.datetime
+      :value: None
+
+
+
+   .. py:attribute:: sources
+      :type:  list[str]
+      :value: None
+
+
+
+   .. py:attribute:: subject
+      :type:  str
+
+
+   .. py:attribute:: user_id
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: valid_from
+      :type:  datetime.datetime
+      :value: None
+
+
+
+   .. py:attribute:: valid_until
+      :type:  datetime.datetime | None
+      :value: None
+
+
+
+.. py:class:: MemoryBlock(/, **data: Any)
+
+   Bases: :py:obj:`pydantic.BaseModel`
+
+
+   An in-context memory block, pinned to every prompt.
+
+   Create a new model by parsing and validating input data from keyword arguments.
+
+   Raises [`ValidationError`][pydantic_core.ValidationError] if the input data cannot be
+   validated to form a valid model.
+
+   `self` is explicitly positional-only to allow `self` as a field name.
+
+
+   .. py:method:: format() -> str
+
+
+   .. py:attribute:: content
+      :type:  str
+
+
+   .. py:attribute:: name
+      :type:  str
+
+
+   .. py:attribute:: pinned_order
+      :type:  int
+      :value: 0
+
+
+
+   .. py:attribute:: updated_at
+      :type:  datetime.datetime
+      :value: None
+
+
+
+.. py:class:: Message(/, **data: Any)
+
+   Bases: :py:obj:`pydantic.BaseModel`
+
+
+   A single chat message in the model's conversation.
+
+   ``tool_calls`` is populated on assistant messages that emitted tool
+   calls in the previous turn — real provider adapters (Anthropic
+   ``tool_use`` blocks, OpenAI ``tool_calls`` array) need to reconstruct
+   the right wire format from this.
+
+   Create a new model by parsing and validating input data from keyword arguments.
+
+   Raises [`ValidationError`][pydantic_core.ValidationError] if the input data cannot be
+   validated to form a valid model.
+
+   `self` is explicitly positional-only to allow `self` as a field name.
+
+
+   .. py:attribute:: content
+      :type:  str
+
+
+   .. py:attribute:: model_config
+
+      Configuration for the model, should be a dictionary conforming to [`ConfigDict`][pydantic.config.ConfigDict].
+
+
+   .. py:attribute:: name
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: role
+      :type:  Role
+
+
+   .. py:attribute:: tool_call_id
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: tool_calls
+      :type:  tuple[ToolCall, Ellipsis]
+      :value: ()
+
+
+
+.. py:class:: ModelChunk(/, **data: Any)
+
+   Bases: :py:obj:`pydantic.BaseModel`
+
+
+   A single chunk from a streaming model call.
+
+   Discriminated by ``kind``. Exactly one of the optional fields is set
+   depending on the kind.
+
+   Create a new model by parsing and validating input data from keyword arguments.
+
+   Raises [`ValidationError`][pydantic_core.ValidationError] if the input data cannot be
+   validated to form a valid model.
+
+   `self` is explicitly positional-only to allow `self` as a field name.
+
+
+   .. py:attribute:: finish_reason
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: kind
+      :type:  Literal['text', 'tool_call', 'finish']
+
+
+   .. py:attribute:: text
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: tool_call
+      :type:  ToolCall | None
+      :value: None
+
+
+
+   .. py:attribute:: usage
+      :type:  Usage | None
+      :value: None
+
+
+
+.. py:class:: PermissionDecision(/, **data: Any)
+
+   Bases: :py:obj:`pydantic.BaseModel`
+
+
+   Outcome of a permission check or pre-tool hook.
+
+   Create a new model by parsing and validating input data from keyword arguments.
+
+   Raises [`ValidationError`][pydantic_core.ValidationError] if the input data cannot be
+   validated to form a valid model.
+
+   `self` is explicitly positional-only to allow `self` as a field name.
+
+
+   .. py:method:: allow_(reason: str | None = None) -> PermissionDecision
+      :classmethod:
+
+
+
+   .. py:method:: ask_(reason: str | None = None) -> PermissionDecision
+      :classmethod:
+
+
+
+   .. py:method:: deny_(reason: str) -> PermissionDecision
+      :classmethod:
+
+
+
+   .. py:property:: allow
+      :type: bool
+
+
+
+   .. py:property:: ask
+      :type: bool
+
+
+
+   .. py:attribute:: decision
+      :type:  Literal['allow', 'deny', 'ask']
+
+
+   .. py:property:: deny
+      :type: bool
+
+
+
+   .. py:attribute:: model_config
+
+      Configuration for the model, should be a dictionary conforming to [`ConfigDict`][pydantic.config.ConfigDict].
+
+
+   .. py:attribute:: reason
+      :type:  str | None
+      :value: None
+
+
+
+.. py:class:: Role
+
+   Bases: :py:obj:`enum.StrEnum`
+
+
+   Enum where members are also (and must be) strings
+
+   Initialize self.  See help(type(self)) for accurate signature.
+
+
+   .. py:attribute:: ASSISTANT
+      :value: 'assistant'
+
+
+
+   .. py:attribute:: SYSTEM
+      :value: 'system'
+
+
+
+   .. py:attribute:: TOOL
+      :value: 'tool'
+
+
+
+   .. py:attribute:: USER
+      :value: 'user'
+
+
+
+.. py:class:: RunResult(/, **data: Any)
+
+   Bases: :py:obj:`pydantic.BaseModel`
+
+
+   Final outcome of an ``Agent.run`` call.
+
+   ``output`` is always the raw assistant text (the JSON itself when
+   a structured-output schema was supplied). ``parsed`` is the
+   validated Pydantic instance — populated only when the caller
+   passed ``output_schema=`` to :meth:`Agent.run`. Use whichever
+   fits the call site::
+
+       # free-form text run
+       result = await agent.run("summarise this PDF")
+       print(result.output)
+
+       # structured-output run
+       result = await agent.run(prompt, output_schema=Invoice)
+       invoice: Invoice = result.parsed   # typed, validated
+
+   Create a new model by parsing and validating input data from keyword arguments.
+
+   Raises [`ValidationError`][pydantic_core.ValidationError] if the input data cannot be
+   validated to form a valid model.
+
+   `self` is explicitly positional-only to allow `self` as a field name.
+
+
+   .. py:attribute:: cost_usd
+      :type:  float
+      :value: 0.0
+
+
+
+   .. py:property:: duration
+      :type: datetime.timedelta
+
+
+      Wall-clock latency between ``started_at`` and ``finished_at``.
+
+
+   .. py:attribute:: finished_at
+      :type:  datetime.datetime
+
+
+   .. py:attribute:: interrupted
+      :type:  bool
+      :value: False
+
+
+
+   .. py:attribute:: interruption_reason
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: model_config
+
+      Configuration for the model, should be a dictionary conforming to [`ConfigDict`][pydantic.config.ConfigDict].
+
+
+   .. py:attribute:: output
+      :type:  str
+
+
+   .. py:attribute:: parsed
+      :type:  Any | None
+      :value: None
+
+
+      The validated Pydantic instance when ``output_schema=`` was
+      supplied to :meth:`Agent.run`; ``None`` otherwise. Typed as
+      ``Any`` to keep the runtime type free; the call site has the
+      schema and can cast or annotate as needed.
+
+
+   .. py:attribute:: session_id
+      :type:  str
+
+
+   .. py:attribute:: started_at
+      :type:  datetime.datetime
+
+
+   .. py:attribute:: tokens_in
+      :type:  int
+      :value: 0
+
+
+
+   .. py:attribute:: tokens_out
+      :type:  int
+      :value: 0
+
+
+
+   .. py:property:: total_tokens
+      :type: int
+
+
+      ``tokens_in + tokens_out``.
+
+      :type: Convenience
+
+
+   .. py:attribute:: turns
+      :type:  int
+
+
+.. py:class:: Span(/, **data: Any)
+
+   Bases: :py:obj:`pydantic.BaseModel`
+
+
+   A trace span handle. Concrete telemetry adapters return their own
+   representation; this is the value-object contract for in-process use.
+
+   Create a new model by parsing and validating input data from keyword arguments.
+
+   Raises [`ValidationError`][pydantic_core.ValidationError] if the input data cannot be
+   validated to form a valid model.
+
+   `self` is explicitly positional-only to allow `self` as a field name.
+
+
+   .. py:attribute:: attributes
+      :type:  dict[str, Any]
+      :value: None
+
+
+
+   .. py:attribute:: name
+      :type:  str
+
+
+   .. py:attribute:: span_id
+      :type:  str
+
+
+   .. py:attribute:: started_at
+      :type:  datetime.datetime
+      :value: None
+
+
+
+   .. py:attribute:: trace_id
+      :type:  str
+
+
+.. py:class:: ToolCall(/, **data: Any)
+
+   Bases: :py:obj:`pydantic.BaseModel`
+
+
+   A model-emitted request to invoke a tool.
+
+   Create a new model by parsing and validating input data from keyword arguments.
+
+   Raises [`ValidationError`][pydantic_core.ValidationError] if the input data cannot be
+   validated to form a valid model.
+
+   `self` is explicitly positional-only to allow `self` as a field name.
+
+
+   .. py:method:: idempotency_key() -> str
+
+
+   .. py:method:: is_destructive() -> bool
+
+
+   .. py:attribute:: args
+      :type:  dict[str, Any]
+      :value: None
+
+
+
+   .. py:attribute:: destructive
+      :type:  bool
+      :value: False
+
+
+
+   .. py:attribute:: id
+      :type:  str
+      :value: None
+
+
+
+   .. py:attribute:: tool
+      :type:  str
+
+
+   .. py:attribute:: tool_def
+      :type:  ToolDef | None
+      :value: None
+
+
+
+.. py:class:: ToolDef(/, **data: Any)
+
+   Bases: :py:obj:`pydantic.BaseModel`
+
+
+   Schema description of a tool the model can call.
+
+   Mirrors the JSON-Schema-flavored shape used across MCP and provider APIs.
+
+   Create a new model by parsing and validating input data from keyword arguments.
+
+   Raises [`ValidationError`][pydantic_core.ValidationError] if the input data cannot be
+   validated to form a valid model.
+
+   `self` is explicitly positional-only to allow `self` as a field name.
+
+
+   .. py:attribute:: description
+      :type:  str
+
+
+   .. py:attribute:: input_schema
+      :type:  dict[str, Any]
+      :value: None
+
+
+
+   .. py:attribute:: model_config
+
+      Configuration for the model, should be a dictionary conforming to [`ConfigDict`][pydantic.config.ConfigDict].
+
+
+   .. py:attribute:: name
+      :type:  str
+
+
+   .. py:attribute:: server
+      :type:  str | None
+      :value: None
+
+
+
+.. py:class:: ToolEvent(/, **data: Any)
+
+   Bases: :py:obj:`pydantic.BaseModel`
+
+
+   Tool registry change notification (MCP listChanged etc.).
+
+   Create a new model by parsing and validating input data from keyword arguments.
+
+   Raises [`ValidationError`][pydantic_core.ValidationError] if the input data cannot be
+   validated to form a valid model.
+
+   `self` is explicitly positional-only to allow `self` as a field name.
+
+
+   .. py:attribute:: at
+      :type:  datetime.datetime
+      :value: None
+
+
+
+   .. py:attribute:: kind
+      :type:  Literal['added', 'removed', 'updated']
+
+
+   .. py:attribute:: server
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: tool
+      :type:  str
+
+
+.. py:class:: ToolResult(/, **data: Any)
+
+   Bases: :py:obj:`pydantic.BaseModel`
+
+
+   Outcome of a tool invocation.
+
+   Create a new model by parsing and validating input data from keyword arguments.
+
+   Raises [`ValidationError`][pydantic_core.ValidationError] if the input data cannot be
+   validated to form a valid model.
+
+   `self` is explicitly positional-only to allow `self` as a field name.
+
+
+   .. py:method:: denied_(call_id: str, reason: str, **kwargs: Any) -> ToolResult
+      :classmethod:
+
+
+
+   .. py:method:: error_(call_id: str, message: str, **kwargs: Any) -> ToolResult
+      :classmethod:
+
+
+
+   .. py:method:: success(call_id: str, output: Any, **kwargs: Any) -> ToolResult
+      :classmethod:
+
+
+
+   .. py:attribute:: call_id
+      :type:  str
+
+
+   .. py:attribute:: denied
+      :type:  bool
+      :value: False
+
+
+
+   .. py:attribute:: duration_ms
+      :type:  float | None
+      :value: None
+
+
+
+   .. py:attribute:: error
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: ok
+      :type:  bool
+
+
+   .. py:attribute:: output
+      :type:  Any
+      :value: None
+
+
+
+   .. py:attribute:: reason
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: started_at
+      :type:  datetime.datetime
+      :value: None
+
+
+
+.. py:class:: Usage(/, **data: Any)
+
+   Bases: :py:obj:`pydantic.BaseModel`
+
+
+   Token and cost accounting for a model call.
+
+   Create a new model by parsing and validating input data from keyword arguments.
+
+   Raises [`ValidationError`][pydantic_core.ValidationError] if the input data cannot be
+   validated to form a valid model.
+
+   `self` is explicitly positional-only to allow `self` as a field name.
+
+
+   .. py:attribute:: cost_usd
+      :type:  float
+      :value: 0.0
+
+
+
+   .. py:attribute:: input_tokens
+      :type:  int
+      :value: 0
+
+
+
+   .. py:attribute:: model_config
+
+      Configuration for the model, should be a dictionary conforming to [`ConfigDict`][pydantic.config.ConfigDict].
+
+
+   .. py:attribute:: output_tokens
+      :type:  int
+      :value: 0
+
+
+

@@ -1,0 +1,162 @@
+jeevesagent.architecture.swarm
+==============================
+
+.. py:module:: jeevesagent.architecture.swarm
+
+.. autoapi-nested-parse::
+
+   Swarm: peer agents pass control via a ``handoff`` tool.
+
+   OpenAI Swarm reference (late 2024, experimental). Anthropic Agent
+   Teams (Feb 2026) is the production answer that improved on the
+   original swarm idea by adding lightweight coordination.
+
+   ⚠ Production warning
+   ---------------------
+   The 2026 production literature is unanimous: swarm has goal-drift
+   and deadlock failure modes that hierarchical / graph topologies
+   don't. Use only for **exploratory or research-mode systems where
+   flow can't be pre-specified**. For production, prefer
+   :class:`Supervisor` (clear authority) or :class:`Router` (single
+   specialist owns the answer).
+
+   Pattern
+   -------
+
+   1. **Setup.** N peer :class:`Agent` instances; one designated as
+      the entry agent (receives the first user message).
+   2. **Active turn.** The active agent runs to completion with one
+      or more handoff tools injected. The model can call them (or
+      not) freely during the turn.
+   3. **Detect handoff.** After the agent's turn ends, Swarm checks
+      whether a handoff tool was called. If yes, switch active agent
+      to the target and continue. If not, the agent's output is the
+      final answer.
+   4. **Cycle / cap protection.** :data:`max_handoffs` caps total
+      handoffs; ``detect_cycles`` watches for ``A→B→A→B`` patterns.
+
+   Tool-shape modes (legacy vs typed)
+   ----------------------------------
+
+   By default, peers given as plain :class:`Agent` instances get a
+   single legacy tool::
+
+       handoff(target: str, message: str = "")
+
+   This is the v0.5 shape — backwards-compatible.
+
+   For typed handoffs (the 2026 best-practice shape per
+   OpenAI Agents SDK), wrap a peer in :class:`Handoff` and supply an
+   ``input_type`` (a Pydantic model). Each typed peer then gets its
+   own per-target tool::
+
+       transfer_to_<name>(field1, field2, ...)   # typed args from the model
+
+   This gives the model a typed schema per target instead of a string
+   ``message`` blob, and lets you supply an ``input_filter`` callback
+   to prune / transform the conversation history that the receiving
+   agent sees.
+
+   Replay correctness
+   ------------------
+   Each peer turn uses a deterministic session id —
+   ``{parent}__swarm_<peer>_<handoff_count>``. Replays of the
+   parent journal cache the per-turn results.
+
+
+
+Attributes
+----------
+
+.. autoapisummary::
+
+   jeevesagent.architecture.swarm.InputFilter
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   jeevesagent.architecture.swarm.Handoff
+   jeevesagent.architecture.swarm.Swarm
+
+
+Module Contents
+---------------
+
+.. py:class:: Handoff
+
+   Per-peer handoff configuration.
+
+   * ``agent`` — the peer :class:`Agent`.
+   * ``input_type`` — optional Pydantic model. When set, the
+     generated handoff tool's input schema mirrors this model's
+     fields, so the calling model gets a typed schema (instead of
+     a string ``message``). The validated payload is exposed to
+     ``input_filter`` and surfaces in the ``swarm.handoff`` event.
+   * ``input_filter`` — optional callback ``(history, payload)
+     → prompt`` for selective context forwarding. Default behavior
+     respects the Swarm's ``pass_full_history`` flag.
+   * ``description`` — override the generated tool's description.
+     Useful when the agent's name is opaque ("billing_v2") but
+     the description should be user-friendly.
+   * ``tool_name`` — override the auto-generated tool name. Default
+     is ``"transfer_to_<key>"`` where ``<key>`` is the peer's key
+     in the swarm's ``agents`` dict.
+
+
+   .. py:attribute:: agent
+      :type:  jeevesagent.agent.api.Agent
+
+
+   .. py:attribute:: description
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: input_filter
+      :type:  InputFilter | None
+      :value: None
+
+
+
+   .. py:attribute:: input_type
+      :type:  type[pydantic.BaseModel] | None
+      :value: None
+
+
+
+   .. py:attribute:: tool_name
+      :type:  str | None
+      :value: None
+
+
+
+.. py:class:: Swarm(*, agents: dict[str, jeevesagent.agent.api.Agent | Handoff], entry_agent: str, max_handoffs: int = 8, detect_cycles: bool = True, pass_full_history: bool = True, handoff_tool_name: str = 'handoff')
+
+   Peer agents passing control through handoff tools.
+
+
+   .. py:method:: declared_workers() -> dict[str, jeevesagent.agent.api.Agent]
+
+
+   .. py:method:: run(session: jeevesagent.architecture.base.AgentSession, deps: jeevesagent.architecture.base.Dependencies, prompt: str) -> collections.abc.AsyncIterator[jeevesagent.core.types.Event]
+      :async:
+
+
+
+   .. py:attribute:: name
+      :value: 'swarm'
+
+
+
+.. py:data:: InputFilter
+
+   ``(history, payload) -> prompt_string``. Receives the full
+   running history (list of message strings — agent outputs plus
+   transition markers) and the validated handoff payload, returns
+   the prompt the receiving agent should see. Use this to prune
+   context, summarize past turns, or strip private metadata.
+

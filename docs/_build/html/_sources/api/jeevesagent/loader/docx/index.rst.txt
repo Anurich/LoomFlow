@@ -1,0 +1,38 @@
+jeevesagent.loader.docx
+=======================
+
+.. py:module:: jeevesagent.loader.docx
+
+.. autoapi-nested-parse::
+
+   DOCX loader → markdown.
+
+   Uses ``python-docx`` (lazy import). Walks the document body and
+   emits markdown:
+
+   * ``Heading 1`` / ``Heading 2`` / ... → ``#``, ``##``, ...
+   * Lists → ``-`` items
+   * Plain paragraphs → text
+   * Tables → markdown tables
+
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   jeevesagent.loader.docx.load_docx
+
+
+Module Contents
+---------------
+
+.. py:function:: load_docx(path: str | pathlib.Path) -> jeevesagent.loader.base.Document
+
+   Load a ``.docx`` file → markdown.
+
+   Requires ``python-docx``:
+   ``pip install 'jeevesagent[loader-docx]'``.
+
+

@@ -1,0 +1,74 @@
+jeevesagent.architecture.tool_host_wrappers
+===========================================
+
+.. py:module:: jeevesagent.architecture.tool_host_wrappers
+
+.. autoapi-nested-parse::
+
+   Tool-host wrappers used by multi-agent architectures.
+
+   A :class:`~jeevesagent.core.protocols.ToolHost` is a black box from
+   the agent's point of view. Architectures that need to inject extra
+   tools per run (Supervisor's ``delegate``, Swarm's ``handoff``, the
+   ``Agent.run(extra_tools=...)`` per-run kwarg) build an
+   :class:`ExtendedToolHost` that combines a base host with a fixed
+   list of extra :class:`Tool` instances.
+
+   Why a wrapper rather than mutating the base host?
+
+   * User-provided agents stay untouched — running an agent inside a
+     supervisor doesn't permanently add a ``delegate`` tool to that
+     agent's host.
+   * Additive only — extras coexist with the base's tools; conflicts
+     resolve in favour of the extras (the architecture's tool wins
+     over a same-named user tool, which is what the architecture wants).
+   * Same shape as the :class:`ToolHost` protocol — drop-in.
+
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   jeevesagent.architecture.tool_host_wrappers.ExtendedToolHost
+
+
+Module Contents
+---------------
+
+.. py:class:: ExtendedToolHost(base: jeevesagent.core.protocols.ToolHost, extras: list[jeevesagent.tools.registry.Tool])
+
+   Combine a base :class:`ToolHost` with N extra :class:`Tool`\ s.
+
+   ``list_tools`` returns the base's defs plus the extras' defs.
+   ``call`` dispatches to the matching extra by name; falls through
+   to the base for everything else. Extras win on name conflict.
+
+
+   .. py:method:: call(tool: str, args: collections.abc.Mapping[str, Any], *, call_id: str = '') -> jeevesagent.core.types.ToolResult
+      :async:
+
+
+
+   .. py:method:: list_tools(*, query: str | None = None) -> list[jeevesagent.core.types.ToolDef]
+      :async:
+
+
+
+   .. py:method:: register(item: jeevesagent.tools.registry.Tool) -> jeevesagent.tools.registry.Tool
+
+      Mutably append a Tool to the extras pool.
+
+      Mirrors :meth:`InProcessToolHost.register` so callers
+      (notably the skills system, which lazy-registers Tools when
+      ``load_skill`` fires) can add to either host kind without
+      special-casing.
+
+
+
+   .. py:method:: watch() -> collections.abc.AsyncIterator[jeevesagent.core.types.ToolEvent]
+      :async:
+
+
+

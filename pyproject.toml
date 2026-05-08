@@ -63,6 +63,13 @@ dev = [
     "import-linter>=2.0",
     "bump-my-version>=0.30",
 ]
+docs = [
+    "sphinx>=7.0",
+    "furo>=2024.0",
+    "sphinx-autoapi>=3.0",
+    "myst-parser>=2.0",
+    "linkify-it-py>=2.0",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["jeevesagent"]
@@ -108,9 +115,14 @@ warn_unreachable = true
 disallow_untyped_decorators = false  # pydantic decorators
 
 [tool.pytest.ini_options]
-addopts = "--strict-markers"
+# ``live`` tests hit paid endpoints and are deselected by default;
+# run them explicitly with ``pytest -m live`` once OPENAI_API_KEY
+# is set. Everything else runs offline against ScriptedModel /
+# in-process fakes.
+addopts = "--strict-markers -m 'not live'"
 markers = [
     "anyio: mark test as async (anyio backend)",
+    "live: hits a paid model endpoint; opt-in via -m live",
 ]
 
 # ---------------------------------------------------------------------------

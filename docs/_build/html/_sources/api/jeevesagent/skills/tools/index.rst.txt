@@ -1,0 +1,53 @@
+jeevesagent.skills.tools
+========================
+
+.. py:module:: jeevesagent.skills.tools
+
+.. autoapi-nested-parse::
+
+   Tool factories that surface skills to the agent's model.
+
+   We inject ONE tool — ``load_skill(name)`` — into the agent's tool
+   host whenever a non-empty :class:`SkillRegistry` is configured. The
+   tool's input schema enumerates the registered skill names as an
+   ``enum`` so:
+
+   * Strict-schema providers (Anthropic / OpenAI strict mode) reject
+     hallucinated skill names at the API boundary
+   * The model sees every available skill name in the schema docs
+   * Typos return a tool error with the valid set listed
+
+   The tool's *description* also lists every skill with its short
+   description, giving the model the full catalog at metadata cost
+   without loading any bodies.
+
+   When a skill ships pending Tools (Mode B from ``tools.py`` or
+   Mode C from frontmatter ``tools:`` manifest), ``load_skill`` ALSO
+   registers those Tools with the agent's tool host on the first call.
+   The model sees the new tools in its toolset on the next turn.
+
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   jeevesagent.skills.tools.make_load_skill_tool
+
+
+Module Contents
+---------------
+
+.. py:function:: make_load_skill_tool(registry: jeevesagent.skills.registry.SkillRegistry, *, host: jeevesagent.core.protocols.ToolHost | None = None, tool_name: str = 'load_skill') -> jeevesagent.tools.registry.Tool
+
+   Build the ``load_skill`` tool for a given registry.
+
+   When ``host`` is provided, the tool will register a skill's
+   pending Tools (from Mode B / Mode C) with the host on first
+   load — making them callable on subsequent turns. Without a
+   host, ``load_skill`` only returns the body (skill brings no
+   tools, or the framework integration handles registration
+   elsewhere).
+
+

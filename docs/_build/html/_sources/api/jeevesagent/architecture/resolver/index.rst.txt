@@ -1,0 +1,55 @@
+jeevesagent.architecture.resolver
+=================================
+
+.. py:module:: jeevesagent.architecture.resolver
+
+.. autoapi-nested-parse::
+
+   Resolve architecture specs (string or instance) to a concrete
+   :class:`Architecture` instance.
+
+   In v0.3, only ``"react"`` is shipped as a known string. The resolver
+   also accepts any object that satisfies the :class:`Architecture`
+   protocol — most user-facing flows just pass an instance like
+   ``ReAct(max_turns=20)`` directly.
+
+   Future: entry-point discovery so third-party packages can register
+   custom architectures via ``[project.entry-points."jeevesagent.architecture"]``
+   and be referenced by string from user code without imports.
+
+
+
+Attributes
+----------
+
+.. autoapisummary::
+
+   jeevesagent.architecture.resolver.KNOWN
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   jeevesagent.architecture.resolver.resolve_architecture
+
+
+Module Contents
+---------------
+
+.. py:function:: resolve_architecture(spec: jeevesagent.architecture.base.Architecture | str | None) -> jeevesagent.architecture.base.Architecture
+
+   Coerce ``spec`` to a concrete :class:`Architecture`.
+
+   * ``None`` → :class:`ReAct` (the default)
+   * ``str`` → looked up in :data:`KNOWN` (only ``"react"`` in v0.3)
+   * Architecture instance → returned as-is
+
+   Unknown strings raise :class:`ConfigError` with a list of known
+   names.
+
+
+.. py:data:: KNOWN
+   :type:  dict[str, type[jeevesagent.architecture.base.Architecture]]
+

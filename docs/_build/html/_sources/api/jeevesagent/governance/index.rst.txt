@@ -1,0 +1,211 @@
+jeevesagent.governance
+======================
+
+.. py:module:: jeevesagent.governance
+
+.. autoapi-nested-parse::
+
+   Resource governance: budgets, quotas, retry/backoff.
+
+
+
+Submodules
+----------
+
+.. toctree::
+   :maxdepth: 1
+
+   /api/jeevesagent/governance/budget/index
+   /api/jeevesagent/governance/retry/index
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   jeevesagent.governance.NoBudget
+   jeevesagent.governance.RetryPolicy
+   jeevesagent.governance.StandardBudget
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   jeevesagent.governance.classify_model_error
+   jeevesagent.governance.compute_backoff
+
+
+Package Contents
+----------------
+
+.. py:class:: NoBudget
+
+   Never blocks, never warns.
+
+
+   .. py:method:: allows_step() -> jeevesagent.core.types.BudgetStatus
+      :async:
+
+
+
+   .. py:method:: consume(*, tokens_in: int, tokens_out: int, cost_usd: float) -> None
+      :async:
+
+
+
+.. py:class:: RetryPolicy
+
+   Exponential-backoff-with-jitter retry schedule.
+
+   The default is sensible for production: up to **3 attempts**
+   (one initial + two retries), starting at 1 s, doubling each
+   attempt, capped at 30 s, with ±10% jitter so synchronised
+   clients don't reform a thundering herd.
+
+   Examples::
+
+       # default — sensible for most apps
+       RetryPolicy()
+
+       # disable retries (fail fast)
+       RetryPolicy.disabled()
+
+       # aggressive — survives long provider blips
+       RetryPolicy.aggressive()
+
+       # tuned to a specific SLO
+       RetryPolicy(max_attempts=4, initial_delay_s=0.5, max_delay_s=15)
+
+   The schedule applies *between* attempts: the first call has no
+   delay, the second is delayed by ``initial_delay_s`` (± jitter),
+   the third by ``initial_delay_s * multiplier`` (± jitter), etc.,
+   each capped at ``max_delay_s``. Provider-supplied
+   ``Retry-After`` hints (carried on
+   :class:`~jeevesagent.RateLimitError.retry_after`) override the
+   computed delay when they ask for *more* time — we never sleep
+   less than the provider asked for.
+
+
+   .. py:method:: aggressive() -> RetryPolicy
+      :classmethod:
+
+
+      Up to 6 attempts, faster initial backoff, longer cap.
+      Use when the underlying provider is known-flaky and the
+      caller prefers slow success over fast failure.
+
+
+
+   .. py:method:: disabled() -> RetryPolicy
+      :classmethod:
+
+
+      Single attempt, no retries — fail fast on any error.
+
+
+
+   .. py:method:: is_enabled() -> bool
+
+      ``True`` when the policy permits at least one retry.
+
+
+
+   .. py:attribute:: initial_delay_s
+      :type:  float
+      :value: 1.0
+
+
+      Backoff before the FIRST retry (i.e. between attempts 1 and 2).
+      Subsequent retries use ``initial_delay_s * multiplier**n``.
+
+
+   .. py:attribute:: jitter
+      :type:  float
+      :value: 0.1
+
+
+      Fractional ±jitter applied to each computed delay. ``0.1`` =
+      ±10%. Set to ``0`` for deterministic backoff (useful in tests).
+
+
+   .. py:attribute:: max_attempts
+      :type:  int
+      :value: 3
+
+
+      Maximum total attempts including the first call. ``1`` means
+      no retries; the call either succeeds or raises immediately. The
+      minimum-meaningful retry policy is therefore ``max_attempts=2``.
+
+
+   .. py:attribute:: max_delay_s
+      :type:  float
+      :value: 30.0
+
+
+      Cap on any single backoff. Prevents runaway sleeps when
+      ``multiplier`` is large or ``max_attempts`` is high.
+
+
+   .. py:attribute:: multiplier
+      :type:  float
+      :value: 2.0
+
+
+      Geometric growth between successive retries. ``2.0`` doubles
+      each time; ``1.0`` makes the policy linear (fixed-interval).
+
+
+.. py:class:: StandardBudget(cfg: BudgetConfig | None = None)
+
+   Hard-limited, thread-safe budget tracker.
+
+
+   .. py:method:: allows_step() -> jeevesagent.core.types.BudgetStatus
+      :async:
+
+
+
+   .. py:method:: consume(*, tokens_in: int, tokens_out: int, cost_usd: float) -> None
+      :async:
+
+
+
+.. py:function:: classify_model_error(exc: BaseException) -> jeevesagent.core.errors.ModelError | None
+
+   Map an exception from any model SDK to the framework's taxonomy.
+
+   Returns ``None`` when the exception is not recognised as a
+   model-call failure — let callers decide whether to wrap it in
+   something else or propagate. Returns an instance of one of
+   :class:`~jeevesagent.TransientModelError` /
+   :class:`~jeevesagent.RateLimitError` /
+   :class:`~jeevesagent.AuthenticationError` /
+   :class:`~jeevesagent.InvalidRequestError` /
+   :class:`~jeevesagent.ContentFilterError` /
+   :class:`~jeevesagent.PermanentModelError` otherwise.
+
+   SDK imports are lazy — having e.g. the ``anthropic`` package
+   installed is not required for OpenAI classification to work,
+   and vice versa.
+
+
+.. py:function:: compute_backoff(policy: RetryPolicy, attempt: int, *, retry_after: float | None = None, rng: random.Random | None = None) -> float
+
+   Backoff (seconds) before retry number ``attempt`` (1-indexed).
+
+   ``attempt=1`` is the delay before the first *retry* (i.e. between
+   attempts 1 and 2 of ``max_attempts``). Returns ``0`` when
+   ``policy`` is disabled.
+
+   ``retry_after`` (provider hint, e.g. from a 429 ``Retry-After``
+   header) acts as a *floor*: we never wait less than the provider
+   asked for, but we still cap at ``policy.max_delay_s``. This
+   means a provider-supplied 60-second hint paired with a 30-second
+   cap is honoured at 60 seconds (exceeding the cap on purpose —
+   the provider is more authoritative than our heuristic).
+
+

@@ -1,0 +1,98 @@
+jeevesagent.memory.postgres_facts
+=================================
+
+.. py:module:: jeevesagent.memory.postgres_facts
+
+.. autoapi-nested-parse::
+
+   Postgres + pgvector :class:`FactStore`.
+
+   Schema (created by :meth:`init_schema`):
+
+   * ``facts(id, subject, predicate, object, confidence, valid_from,
+     valid_until, recorded_at, sources, embedding vector(N))`` with
+     optional HNSW index on ``embedding`` (only when an embedder is
+     configured at construction time — the dimension is fixed in the
+     column type).
+
+   The ``vector(N)`` dimension is locked at table-creation time. Switching
+   embedders later requires migrating the table.
+
+   Lazy ``asyncpg`` + ``pgvector.asyncpg`` imports inside :meth:`connect`
+   mirror the pattern in :mod:`memory.postgres`.
+
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   jeevesagent.memory.postgres_facts.PostgresFactStore
+
+
+Module Contents
+---------------
+
+.. py:class:: PostgresFactStore(pool: Any, *, embedder: jeevesagent.core.protocols.Embedder | None = None)
+
+   Postgres-backed bi-temporal fact store.
+
+
+   .. py:method:: aclose() -> None
+      :async:
+
+
+
+   .. py:method:: all_facts() -> list[jeevesagent.core.types.Fact]
+      :async:
+
+
+
+   .. py:method:: append(fact: jeevesagent.core.types.Fact) -> str
+      :async:
+
+
+
+   .. py:method:: append_many(facts: collections.abc.Iterable[jeevesagent.core.types.Fact]) -> list[str]
+      :async:
+
+
+
+   .. py:method:: connect(dsn: str, *, embedder: jeevesagent.core.protocols.Embedder | None = None, min_size: int = 1, max_size: int = 10) -> PostgresFactStore
+      :classmethod:
+
+      :async:
+
+
+
+   .. py:method:: init_schema() -> None
+      :async:
+
+
+
+   .. py:method:: query(*, subject: str | None = None, predicate: str | None = None, object_: str | None = None, valid_at: datetime.datetime | None = None, limit: int = 10, user_id: str | None = None) -> list[jeevesagent.core.types.Fact]
+      :async:
+
+
+
+   .. py:method:: recall_text(query: str, *, limit: int = 5, valid_at: datetime.datetime | None = None, user_id: str | None = None) -> list[jeevesagent.core.types.Fact]
+      :async:
+
+
+
+   .. py:method:: schema_sql() -> list[str]
+
+      Return the DDL for this fact store's schema.
+
+      Exposed so tests can assert on the SQL strings, and so
+      migration scripts can apply the schema in their own
+      transaction.
+
+
+
+   .. py:property:: embedder
+      :type: jeevesagent.core.protocols.Embedder | None
+
+
+

@@ -1,0 +1,155 @@
+jeevesagent.memory.facts
+========================
+
+.. py:module:: jeevesagent.memory.facts
+
+.. autoapi-nested-parse::
+
+   Bi-temporal fact store.
+
+   The store holds :class:`Fact` instances — semantic ``(subject,
+   predicate, object)`` claims extracted from episodes by a
+   :class:`Consolidator`.
+
+   Bi-temporal contract:
+
+   * ``valid_from`` / ``valid_until`` are when the fact was true *in the
+     world*. ``valid_until = None`` means "still valid now".
+   * ``recorded_at`` is when *we* learned the fact (when the consolidator
+     ran).
+
+   On :meth:`InMemoryFactStore.append`, conflicts are resolved by
+   *supersession*: if there's an existing currently-valid fact with the
+   same ``(subject, predicate)`` but different ``object``, its
+   ``valid_until`` is set to the new fact's ``valid_from``. This is the
+   Zep-style temporal graph behaviour — old beliefs aren't deleted, they
+   get "closed off" so we can still reason about what was true at any
+   historical moment.
+
+   Today's only backend is :class:`InMemoryFactStore`. Postgres / sqlite
+   fact stores are a follow-up — the protocol is stable.
+
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   jeevesagent.memory.facts.FactStore
+   jeevesagent.memory.facts.InMemoryFactStore
+
+
+Module Contents
+---------------
+
+.. py:class:: FactStore
+
+   Bases: :py:obj:`Protocol`
+
+
+   Storage surface for bi-temporal facts.
+
+
+   .. py:method:: aclose() -> None
+      :async:
+
+
+
+   .. py:method:: all_facts() -> list[jeevesagent.core.types.Fact]
+      :async:
+
+
+
+   .. py:method:: append(fact: jeevesagent.core.types.Fact) -> str
+      :async:
+
+
+
+   .. py:method:: query(*, subject: str | None = None, predicate: str | None = None, object_: str | None = None, valid_at: datetime.datetime | None = None, limit: int = 10, user_id: str | None = None) -> list[jeevesagent.core.types.Fact]
+      :async:
+
+
+
+   .. py:method:: recall_text(query: str, *, limit: int = 5, valid_at: datetime.datetime | None = None, user_id: str | None = None) -> list[jeevesagent.core.types.Fact]
+      :async:
+
+
+
+.. py:class:: InMemoryFactStore(*, embedder: jeevesagent.core.protocols.Embedder | None = None)
+
+   Dict-backed bi-temporal fact store.
+
+   All operations are coordinated by an :class:`anyio.Lock` so
+   concurrent appends from the consolidator and reads from the agent
+   loop don't tear the index.
+
+   When an ``embedder`` is supplied, every appended fact's triple
+   (``"subject predicate object"``) is embedded and stored alongside
+   the fact, and :meth:`recall_text` ranks by cosine similarity
+   against the query's embedding. When no embedder is given,
+   :meth:`recall_text` falls back to token-overlap matching.
+
+
+   .. py:method:: aclose() -> None
+      :async:
+
+
+
+   .. py:method:: all_facts() -> list[jeevesagent.core.types.Fact]
+      :async:
+
+
+
+   .. py:method:: append(fact: jeevesagent.core.types.Fact) -> str
+      :async:
+
+
+      Append a fact, invalidating any superseded predecessors.
+
+      Supersession rule: any existing fact with matching subject +
+      predicate, currently valid (``valid_until is None``), and a
+      different ``object`` gets its ``valid_until`` set to the new
+      fact's ``valid_from``.
+
+
+
+   .. py:method:: append_many(facts: collections.abc.Iterable[jeevesagent.core.types.Fact]) -> list[str]
+      :async:
+
+
+      Append a batch of facts. Embedder calls are coalesced via
+      :meth:`Embedder.embed_batch` when an embedder is configured —
+      one network round-trip for the batch instead of N.
+
+
+
+   .. py:method:: query(*, subject: str | None = None, predicate: str | None = None, object_: str | None = None, valid_at: datetime.datetime | None = None, limit: int = 10, user_id: str | None = None) -> list[jeevesagent.core.types.Fact]
+      :async:
+
+
+
+   .. py:method:: recall_text(query: str, *, limit: int = 5, valid_at: datetime.datetime | None = None, user_id: str | None = None) -> list[jeevesagent.core.types.Fact]
+      :async:
+
+
+      Rank facts against ``query``.
+
+      With an embedder configured: cosine-similarity over the query's
+      embedding vs each fact triple's stored embedding. Without one:
+      token-overlap with a small stop-word list (longer overlaps
+      win, ties break by shorter haystack = more specific match).
+
+      ``user_id`` partitions the candidate set as a hard namespace
+      boundary — see :class:`Fact` for semantics.
+
+
+
+   .. py:method:: snapshot() -> dict[str, jeevesagent.core.types.Fact]
+
+
+   .. py:property:: embedder
+      :type: jeevesagent.core.protocols.Embedder | None
+
+
+
