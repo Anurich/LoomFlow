@@ -32,13 +32,31 @@ otel = [
     "opentelemetry-api>=1.24.0",
     "opentelemetry-sdk>=1.24.0",
 ]
-loader-pdf = ["pypdf>=4.0"]
+# PDF loader has two interchangeable backends, picked at load
+# time via `backend="unstructured" | "docling"`. Both produce the
+# same `Document` shape so downstream code doesn't care which
+# was used.
+#
+#   - unstructured (Apache 2.0): default. Element-level parsing
+#     (Title / NarrativeText / Table / ListItem / Image) with
+#     per-page metadata; what LangChain's UnstructuredPDFLoader
+#     wraps. Three strategy modes: "fast" (pdfminer.six, default),
+#     "hi_res" (YOLO layout model), "ocr_only" (Tesseract).
+#   - docling (MIT, IBM Research): 2026 best-in-class on native
+#     PDFs per published benchmarks. Slightly slower first run
+#     (downloads layout model on first use, then cached).
+#
+# Either path is a strict upgrade over the pypdf-backed loader
+# that shipped through 0.10 — pypdf's "lower-half pages render
+# as `(no extractable text)`" footgun is gone in both.
+loader-pdf = ["unstructured[pdf]>=0.15"]
+loader-pdf-docling = ["docling>=2.0"]
 loader-docx = ["python-docx>=1.0"]
 loader-excel = ["openpyxl>=3.1"]
 loader-html = ["beautifulsoup4>=4.12"]
 loader-token = ["tiktoken>=0.7"]
 loader = [
-    "pypdf>=4.0",
+    "unstructured[pdf]>=0.15",
     "python-docx>=1.0",
     "openpyxl>=3.1",
     "beautifulsoup4>=4.12",

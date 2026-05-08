@@ -108,60 +108,98 @@ def test_load_csv_empty_file(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _make_pdf(path: Path, pages: list[str]) -> None:
-    """Create a small PDF using pypdf for testing."""
-    pytest.importorskip("pypdf")
-    from pypdf import PdfWriter
-    from pypdf.generic import (
-        ArrayObject,
-        ContentStream,
-        DictionaryObject,
-        FloatObject,
-        IndirectObject,
-        NameObject,
-        NumberObject,
-        TextStringObject,
+def _make_pdf(path: Path, pages: list[str], *, title: str = "Test PDF Title") -> None:
+    """Create a small text-bearing PDF for testing.
+
+    Uses ``reportlab`` so the PDF actually carries an extractable
+    text layer — important now that the loader is backed by
+    ``unstructured`` and we want to assert on real content, not
+    just structural metadata.
+    """
+    pytest.importorskip("reportlab")
+    from reportlab.lib.pagesizes import LETTER
+    from reportlab.pdfgen import canvas
+
+    c = canvas.Canvas(str(path), pagesize=LETTER)
+    c.setTitle(title)
+    width, height = LETTER
+    for body in pages:
+        text = c.beginText(72, height - 72)
+        text.setFont("Helvetica", 11)
+        for line in body.split("\n"):
+            text.textLine(line)
+        c.drawText(text)
+        c.showPage()
+    c.save()
+
+
+def test_load_pdf_extracts_per_page_content(tmp_path: Path) -> None:
+    """The default ``unstructured`` backend should produce a
+    markdown ``Document`` with a ``# title``, per-page ``## Page N``
+    sections, and the actual extracted text from EVERY page —
+    including the last. The pypdf-backed loader silently dropped
+    pages on extraction errors, which was the source of the
+    lower-half-of-PDF retrieval miss."""
+    f = tmp_path / "small.pdf"
+    _make_pdf(
+        f,
+        pages=[
+            "Founding facts.\nAcme was founded in 2008 in Berlin.",
+            "Operating facts.\nAcme's CEO is Mira Castellanos.",
+        ],
+        title="Acme Handbook",
     )
-
-    writer = PdfWriter()
-    for _text in pages:
-        writer.add_blank_page(width=612, height=792)
-
-    # Add metadata title
-    writer.add_metadata({"/Title": "Test PDF Title"})
-
-    with path.open("wb") as fh:
-        writer.write(fh)
-
-    # Use a more reliable approach — re-open and write text via reportlab?
-    # Simpler: just create a basic PDF with reportlab if present, else
-    # use pypdf-with-text via a minimal approach.
-
-    # For test purposes, we'll just verify the loader handles a PDF
-    # at all; text extraction quality is pypdf's job.
-    _ = pages  # noqa
-    _ = ArrayObject  # noqa: keep imports to avoid lint
-    _ = ContentStream
-    _ = DictionaryObject
-    _ = FloatObject
-    _ = IndirectObject
-    _ = NameObject
-    _ = NumberObject
-    _ = TextStringObject
-
-
-def test_load_pdf_handles_blank_document(tmp_path: Path) -> None:
-    """Even with no extractable text, the loader should produce a
-    valid Document with page-count metadata and "(no extractable
-    text)" placeholders."""
-    f = tmp_path / "blank.pdf"
-    _make_pdf(f, ["page one", "page two"])
     doc = load_pdf(f)
+
     assert isinstance(doc, Document)
     assert doc.metadata["format"] == "pdf"
     assert doc.metadata["page_count"] == 2
+    assert doc.metadata["backend"] == "unstructured"
+    assert doc.metadata["strategy"] == "fast"
     assert "## Page 1" in doc.content
     assert "## Page 2" in doc.content
+    assert "Acme was founded in 2008" in doc.content
+    assert "Mira Castellanos" in doc.content
+    assert "(no extractable text)" not in doc.content
+
+
+def test_load_pdf_rejects_unknown_backend(tmp_path: Path) -> None:
+    f = tmp_path / "x.pdf"
+    _make_pdf(f, pages=["hi"], title="x")
+    with pytest.raises(ValueError, match="unknown backend"):
+        load_pdf(f, backend="bogus")
+
+
+def test_load_pdf_raises_for_missing_file(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError):
+        load_pdf(tmp_path / "does_not_exist.pdf")
+
+
+def test_load_pdf_docling_backend_extracts_content(tmp_path: Path) -> None:
+    """The docling backend produces the same ``Document`` shape as
+    the unstructured one — same ``page_count``, same ``title``,
+    same per-page sections — but uses Docling's ML-based
+    extraction underneath. Skipped when docling isn't installed,
+    since it brings heavy ML deps."""
+    pytest.importorskip("docling")
+    f = tmp_path / "small.pdf"
+    _make_pdf(
+        f,
+        pages=[
+            "Founding facts.\nAcme was founded in 2008 in Berlin.",
+            "Operating facts.\nAcme's CEO is Mira Castellanos.",
+        ],
+        title="Acme Handbook",
+    )
+    doc = load_pdf(f, backend="docling")
+
+    assert isinstance(doc, Document)
+    assert doc.metadata["format"] == "pdf"
+    assert doc.metadata["backend"] == "docling"
+    assert doc.metadata["page_count"] >= 1
+    # Same content contract: real text from every page surfaces.
+    assert "Acme was founded in 2008" in doc.content
+    assert "Mira Castellanos" in doc.content
 
 
 # ---------------------------------------------------------------------------

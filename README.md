@@ -137,11 +137,13 @@ Three principles govern every line of code:
 pip install jeevesagent
 
 # Pick the extras you need:
-pip install 'jeevesagent[anthropic]'    # Claude
-pip install 'jeevesagent[openai]'       # GPT
-pip install 'jeevesagent[postgres]'     # PostgresMemory + facts
-pip install 'jeevesagent[mcp]'          # real MCP client
-pip install 'jeevesagent[otel]'         # OpenTelemetry exporters
+pip install 'jeevesagent[anthropic]'           # Claude
+pip install 'jeevesagent[openai]'              # GPT
+pip install 'jeevesagent[postgres]'            # PostgresMemory + facts
+pip install 'jeevesagent[mcp]'                 # real MCP client
+pip install 'jeevesagent[otel]'                # OpenTelemetry exporters
+pip install 'jeevesagent[loader-pdf]'          # PDF loader (unstructured, default)
+pip install 'jeevesagent[loader-pdf-docling]'  # alt PDF backend (docling, IBM)
 
 # Or install everything for development:
 pip install -e '.[dev,anthropic,openai,mcp,postgres,otel]'
@@ -1142,7 +1144,7 @@ End-to-end demo: [`examples/03_multi_user_sessions.py`](examples/03_multi_user_s
 | **Architecture protocol** | Pluggable agent-loop strategy: 12 architectures shipped | `Architecture`, `ReAct`, `SelfRefine`, `Reflexion`, `TreeOfThoughts`, `PlanAndExecute`, `ReWOO`, `Router`, `Supervisor`, `ActorCritic`, `MultiAgentDebate`, `Swarm`, `BlackboardArchitecture` |
 | **Team facade** | Sibling-style builders (`Team.supervisor`, `Team.swarm`, `Team.router`, `Team.debate`, `Team.actor_critic`, `Team.blackboard`) for the common multi-agent shapes | `Team`, `Handoff`, `run_architecture` |
 | **Vector store** | `add` / `search` / `delete` with Mongo-style filters, MMR diversity, BM25 hybrid search, save/load | `InMemoryVectorStore`, `ChromaVectorStore`, `PostgresVectorStore`, `FAISSVectorStore`, `SearchResult` |
-| **Document loader** | One-line load for PDF / DOCX / Excel / CSV / HTML / Markdown into chunks | `jeevesagent.loader.load`, `MarkdownChunker`, `RecursiveChunker`, `SentenceChunker`, `TokenChunker` |
+| **Document loader** | One-line load for PDF / DOCX / Excel / CSV / HTML / Markdown into markdown chunks. PDF supports two interchangeable backends: `unstructured` (default, Apache 2.0, what LangChain wraps) with `fast` / `hi_res` / `ocr_only` strategies, or `docling` (MIT, IBM Research, 2026 benchmark winner on native PDFs). Per-page extraction failures emit a `RuntimeWarning` — no more silent empty pages. | `jeevesagent.loader.load`, `load_pdf(path, *, backend=, strategy=)`, `MarkdownChunker`, `RecursiveChunker`, `SentenceChunker`, `TokenChunker` |
 | **Built-in tools** | `read` / `write` / `edit` / `bash` factories with sandbox-aware workdirs | `read_tool`, `write_tool`, `edit_tool`, `bash_tool`, `default_workdir` |
 | **Skills (Anthropic-compatible)** | Packaged playbooks loaded on demand. Three modes coexist: pure markdown, frontmatter-declared subprocess tools (any language), and `tools.py` with `@tool` (Python, in-process). Layered sources with last-wins override. | `Skill`, `SkillRegistry`, `SkillSource`, `SkillMetadata`, `SkillError`, `Agent(skills=...)` |
 | **Model adapters** | Anthropic, OpenAI, LiteLLM (~100 providers), Echo (zero-key), Scripted (tests) | `jeevesagent.AnthropicModel`, `OpenAIModel`, `LiteLLMModel`, `EchoModel`, `ScriptedModel` |
@@ -1224,7 +1226,7 @@ need it promoted.
 
 ## Status
 
-* **919 tests pass** offline in ~6 seconds; **10 live tests pass**
+* **983 tests pass** offline in ~18 seconds; **10 live tests pass**
   against real OpenAI in ~30 seconds (5 env-gated integrations
   skip without `JEEVES_TEST_PG_DSN` / `JEEVES_TEST_REDIS_URL`)
 * **mypy `--strict`** clean across 112 production source files
