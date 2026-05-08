@@ -45,8 +45,11 @@ except ImportError:
     pass
 
 if not os.environ.get("OPENAI_API_KEY"):
-    print("\n  ✗ Set OPENAI_API_KEY in your environment or .env file.\n")
-    sys.exit(1)
+    print(
+        "\n  ⊘ Skipping: OPENAI_API_KEY is not set. "
+        "Export it (or add it to .env) to run this example.\n"
+    )
+    sys.exit(0)
 
 
 # --------------------------------------------------------------------

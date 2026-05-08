@@ -73,10 +73,18 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e '.[dev]'
 
-      - name: Run examples
+      - name: Compile-check examples
+        # Validates that every example is syntactically valid Python
+        # and imports cleanly without exercising the real network /
+        # API-key path. CI doesn't have OPENAI_API_KEY, so a full run
+        # would always skip; py_compile catches the failure modes we
+        # actually care about (broken syntax, missing imports, stale
+        # references after a public-API rename) without spending
+        # tokens. Run examples locally with the env var set to
+        # exercise them end-to-end.
         run: |
           set -e
           for f in examples/0*.py; do
-            echo "=== $f ==="
-            python "$f"
+            echo "=== compile-check $f ==="
+            python -m py_compile "$f"
           done
