@@ -203,6 +203,116 @@ def test_load_pdf_docling_backend_extracts_content(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Regression: "lower-half pages have no answers" symptom
+# ---------------------------------------------------------------------------
+#
+# The historical pypdf-backed loader silently swallowed per-page
+# extraction errors with ``except Exception: text = ""``, producing
+# the symptom where questions about content near the END of a PDF
+# went unanswered while content from the start surfaced cleanly.
+# These tests build an 8-page PDF with deterministic, distinctive
+# content per page and assert every page's marker survives the
+# round-trip — proving both backends fix the regression.
+
+
+_LOWER_HALF_PAGES: list[tuple[str, str]] = [
+    ("PAGE_ONE_MARKER",   "On page one we mention CONST_ALPHA explicitly."),
+    ("PAGE_TWO_MARKER",   "On page two we mention CONST_BRAVO explicitly."),
+    ("PAGE_THREE_MARKER", "On page three we mention CONST_CHARLIE explicitly."),
+    ("PAGE_FOUR_MARKER",  "On page four we mention CONST_DELTA explicitly."),
+    ("PAGE_FIVE_MARKER",  "On page five we mention CONST_ECHO explicitly."),
+    ("PAGE_SIX_MARKER",   "On page six we mention CONST_FOXTROT explicitly."),
+    ("PAGE_SEVEN_MARKER", "On page seven we mention CONST_GOLF explicitly."),
+    ("PAGE_EIGHT_MARKER", "On page eight we mention CONST_HOTEL explicitly."),
+]
+
+
+def _make_eight_page_pdf(path: Path) -> None:
+    """Build the 8-page deterministic-content PDF used by the
+    lower-half regression tests."""
+    bodies = [
+        f"{marker}\n\n{sentence}\n\n"
+        f"This is filler so the page has body text.\n"
+        f"Search phrase: find_me_on_{marker.lower()}."
+        for marker, sentence in _LOWER_HALF_PAGES
+    ]
+    _make_pdf(path, bodies, title="Eight Page Reference")
+
+
+def test_load_pdf_unstructured_recovers_every_page(tmp_path: Path) -> None:
+    """Regression test for the "lower-half pages drop content"
+    symptom. Every page's unique marker AND its unique constant
+    name MUST appear in the loaded markdown. If pypdf-style silent
+    drops creep back in, this fails with a clear "PAGE_X_MARKER
+    missing" assertion."""
+    f = tmp_path / "eight.pdf"
+    _make_eight_page_pdf(f)
+    doc = load_pdf(f, backend="unstructured")
+
+    assert doc.metadata["page_count"] == 8
+    # Every page-section header is present in arrival order.
+    for n in range(1, 9):
+        assert f"## Page {n}" in doc.content, f"missing section header for page {n}"
+    # Every per-page marker AND its unique constant survive.
+    for marker, sentence in _LOWER_HALF_PAGES:
+        const = sentence.split("CONST_")[1].split(" ")[0]
+        assert marker in doc.content, f"{marker} missing from extracted content"
+        assert f"CONST_{const}" in doc.content, (
+            f"CONST_{const} missing — page content was dropped"
+        )
+    # No silent-empty placeholders.
+    assert "(no extractable text)" not in doc.content
+
+
+def test_load_pdf_docling_recovers_every_page(tmp_path: Path) -> None:
+    """Same regression contract under the docling backend. Skipped
+    when docling isn't installed, since the deps are heavy."""
+    pytest.importorskip("docling")
+    f = tmp_path / "eight.pdf"
+    _make_eight_page_pdf(f)
+    doc = load_pdf(f, backend="docling")
+
+    # Docling's page_count comes from the ``DoclingDocument``
+    # object; both 8-and-positive accepted (some docling versions
+    # expose num_pages differently, but the content assertions
+    # below are the contract that matters).
+    assert doc.metadata["page_count"] >= 1
+    for marker, sentence in _LOWER_HALF_PAGES:
+        const = sentence.split("CONST_")[1].split(" ")[0]
+        assert marker in doc.content, (
+            f"{marker} missing from docling-extracted content"
+        )
+        assert f"CONST_{const}" in doc.content, (
+            f"CONST_{const} missing under docling — page content dropped"
+        )
+
+
+def test_load_pdf_chunks_cover_all_pages(tmp_path: Path) -> None:
+    """End-to-end RAG-shaped check: load → chunk → search. The
+    user-reported symptom was that questions about page 8 content
+    came back blank. After the loader fix, a recursive chunker at
+    600/80 (the user's reported config) emits chunks covering
+    every page, including the last."""
+    from jeevesagent.loader.chunking import RecursiveChunker
+
+    f = tmp_path / "eight.pdf"
+    _make_eight_page_pdf(f)
+    doc = load_pdf(f, backend="unstructured")
+
+    chunker = RecursiveChunker(chunk_size=600, chunk_overlap=80)
+    chunks = chunker.split(doc.content, source=str(f))
+
+    # At least one chunk must contain each page's unique constant —
+    # otherwise the retriever would never see that page's content.
+    joined = " || ".join(c.content for c in chunks)
+    for _marker, sentence in _LOWER_HALF_PAGES:
+        const = sentence.split("CONST_")[1].split(" ")[0]
+        assert f"CONST_{const}" in joined, (
+            f"chunker dropped page content (CONST_{const} not in any chunk)"
+        )
+
+
+# ---------------------------------------------------------------------------
 # DOCX
 # ---------------------------------------------------------------------------
 

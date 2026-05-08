@@ -46,6 +46,7 @@ empty pages with zero log signal — the silent footgun behind the
 from __future__ import annotations
 
 import logging
+import re
 import warnings
 from collections.abc import Iterable
 from pathlib import Path
@@ -56,6 +57,21 @@ from .base import Document
 _log = logging.getLogger("jeevesagent.loader.pdf")
 
 _BACKENDS = ("unstructured", "docling")
+
+# Docling escapes markdown special chars in body text (so an
+# identifier like ``PAGE_ONE`` ends up as ``PAGE\_ONE`` in its
+# markdown output). That's technically correct markdown but bad
+# for RAG: embeddings degrade on backslash-escaped tokens, and
+# substring-search retrieval misses identifiers entirely. We strip
+# the escapes back out — body text doesn't need markdown emphasis
+# markers preserved, just plain content.
+_MD_ESCAPE_RE = re.compile(r"\\([_*#<>\[\]()!`~|\\])")
+
+
+def _unescape_markdown(text: str) -> str:
+    """Reverse markdown-special-char backslash-escaping in text.
+    Used to clean Docling's overcautious output before chunking."""
+    return _MD_ESCAPE_RE.sub(r"\1", text)
 
 
 def load_pdf(
@@ -275,9 +291,9 @@ def _load_via_docling(p: Path) -> Document:
     # sections, tables, lists, etc.). We prepend a per-page section
     # header so the output shape matches the unstructured backend's
     # ``# title`` + ``## Page N`` convention.
-    title = _extract_title_docling(document) or p.stem
+    title = _unescape_markdown(_extract_title_docling(document) or p.stem)
     page_count = _docling_page_count(document)
-    body = document.export_to_markdown()
+    body = _unescape_markdown(document.export_to_markdown())
 
     parts: list[str] = []
     parts.append(f"# {title}\n")
@@ -285,7 +301,9 @@ def _load_via_docling(p: Path) -> Document:
         # Docling's per-page export keeps section structure; if we
         # have multiple pages, render them as ``## Page N`` blocks.
         for page_no in range(1, page_count + 1):
-            page_md = _docling_page_markdown(document, page_no)
+            page_md = _unescape_markdown(
+                _docling_page_markdown(document, page_no)
+            )
             parts.append(f"## Page {page_no}\n")
             parts.append(page_md or "(no extractable text)")
             parts.append("")

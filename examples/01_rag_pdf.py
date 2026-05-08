@@ -5,8 +5,8 @@ End-to-end pipeline using only JeevesAgent's own building blocks:
     PDFs in a folder
        │
        ▼
-    jeevesagent.loader.load(pdf_path)            ← built-in PDF loader
-       │  → Document(content=markdown, metadata)
+    load_pdf(pdf_path, backend=...)              ← built-in PDF loader
+       │  → Document(content=markdown, metadata)   (unstructured | docling)
        ▼
     RecursiveChunker.split(content)              ← built-in chunker
        │  → list[Chunk]
@@ -25,15 +25,32 @@ End-to-end pipeline using only JeevesAgent's own building blocks:
 Run::
 
     OPENAI_API_KEY=sk-... python examples/01_rag_pdf.py
+    OPENAI_API_KEY=sk-... python examples/01_rag_pdf.py --backend docling
 
 The first run generates four sample PDFs in ``examples/data/general/``
 (via ``reportlab``) and indexes them into a persistent Chroma
-collection. Re-runs reuse the on-disk index, so only the agent loop
-re-runs against OpenAI.
+collection (one collection per backend so swapping backends doesn't
+require manual cache busting). Re-runs reuse the on-disk index, so
+only the agent loop re-runs against OpenAI.
+
+PDF backends:
+
+* ``unstructured`` (default) — Apache 2.0, what LangChain wraps.
+  Element-level parsing (Title / NarrativeText / Table / ListItem)
+  with per-page metadata. ``pip install 'jeevesagent[loader-pdf]'``.
+* ``docling`` — IBM Research, MIT, ML-based, 2026 best-in-class on
+  native PDFs per published benchmarks. Slower first run (downloads
+  layout model on first use). ``pip install 'jeevesagent[loader-pdf-docling]'``.
+
+Both replace the historical ``pypdf`` backend whose silent per-page
+extraction failures produced the "questions about content near the
+end of the PDF go unanswered" symptom — locked out as a regression
+test in ``tests/test_loader.py``.
 """
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import os
 import sys
@@ -157,32 +174,45 @@ def _wrap(text: str, width: int) -> list[str]:
 # --------------------------------------------------------------------
 
 from jeevesagent import Agent, tool  # noqa: E402
-from jeevesagent.loader import RecursiveChunker, load  # noqa: E402
+from jeevesagent.loader import RecursiveChunker  # noqa: E402
+from jeevesagent.loader.pdf import load_pdf  # noqa: E402
 from jeevesagent.memory.embedder import OpenAIEmbedder  # noqa: E402
 from jeevesagent.vectorstore import ChromaVectorStore  # noqa: E402
 
-INDEX_DIR = Path(__file__).resolve().parent / "data" / ".chroma_general"
+# One persistent Chroma directory per backend — chunks differ
+# slightly between unstructured and docling output, so a single
+# shared index would silently mix them. Suffixing the dir with the
+# backend name busts the cache automatically when you swap.
+INDEX_ROOT = Path(__file__).resolve().parent / "data"
 
 
-async def build_or_load_index() -> ChromaVectorStore:
+async def build_or_load_index(backend: str) -> ChromaVectorStore:
     pdf_dir = _ensure_sample_pdfs()
     embedder = OpenAIEmbedder("text-embedding-3-small")
+    index_dir = INDEX_ROOT / f".chroma_general_{backend}"
     store = ChromaVectorStore(
         embedder=embedder,
-        collection_name="general_docs",
-        persist_directory=str(INDEX_DIR),
+        collection_name=f"general_docs_{backend}",
+        persist_directory=str(index_dir),
     )
 
     # Skip re-indexing if the collection already has rows on disk.
     existing = store._collection.count()  # type: ignore[attr-defined]
     if existing:
-        print(f"  Reusing on-disk Chroma index with {existing} chunks.")
+        print(
+            f"  Reusing on-disk Chroma index ({backend}) with "
+            f"{existing} chunks."
+        )
         return store
 
+    print(f"  Building index using backend={backend!r}...")
     chunker = RecursiveChunker(chunk_size=600, chunk_overlap=80)
     all_chunks = []
     for pdf in sorted(pdf_dir.glob("*.pdf")):
-        doc = load(pdf)
+        # Explicit ``load_pdf(..., backend=)`` so the example
+        # surfaces the choice. ``load(pdf)`` (the dispatcher) also
+        # works and uses the unstructured default.
+        doc = load_pdf(pdf, backend=backend)
         chunks = chunker.split(doc.content, source=str(pdf))
         for ch in chunks:
             ch.metadata["source_file"] = pdf.name
@@ -190,7 +220,10 @@ async def build_or_load_index() -> ChromaVectorStore:
         print(f"  {pdf.name:30s} → {len(chunks)} chunks")
 
     await store.add(all_chunks)
-    print(f"  Indexed {len(all_chunks)} chunks into Chroma.")
+    print(
+        f"  Indexed {len(all_chunks)} chunks into Chroma "
+        f"({backend} backend)."
+    )
     return store
 
 
@@ -226,9 +259,10 @@ def make_retriever(store: ChromaVectorStore):
 # --------------------------------------------------------------------
 
 
-async def main() -> None:
-    print("\n  Example 1 — RAG over a folder of PDFs\n")
-    store = await build_or_load_index()
+async def main(backend: str) -> None:
+    print("\n  Example 1 — RAG over a folder of PDFs")
+    print(f"  PDF backend: {backend}\n")
+    store = await build_or_load_index(backend)
     retriever = make_retriever(store)
 
     agent = Agent(
@@ -257,4 +291,18 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser.add_argument(
+        "--backend",
+        choices=("unstructured", "docling"),
+        default="unstructured",
+        help=(
+            "PDF extraction backend. 'unstructured' (default) is "
+            "Apache 2.0, fast, what LangChain wraps. 'docling' is "
+            "MIT, IBM Research, ML-based, 2026 best-in-class on "
+            "native PDFs (slower first run while the layout model "
+            "downloads)."
+        ),
+    )
+    args = parser.parse_args()
+    asyncio.run(main(args.backend))
