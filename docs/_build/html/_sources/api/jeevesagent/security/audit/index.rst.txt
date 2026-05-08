@@ -55,13 +55,18 @@ Module Contents
 
    The append-only signed log surface.
 
+   ``user_id`` (M9) is a top-level field on every entry, populated
+   from the live :class:`~jeevesagent.RunContext`. Backends MUST
+   accept the kwarg on ``append`` and the ``query`` filter so
+   multi-tenant audit queries work without payload-digging.
 
-   .. py:method:: append(*, session_id: str, actor: str, action: str, payload: dict[str, Any]) -> jeevesagent.core.types.AuditEntry
+
+   .. py:method:: append(*, session_id: str, actor: str, action: str, payload: dict[str, Any], user_id: str | None = None) -> jeevesagent.core.types.AuditEntry
       :async:
 
 
 
-   .. py:method:: query(*, session_id: str | None = None, action: str | None = None) -> list[jeevesagent.core.types.AuditEntry]
+   .. py:method:: query(*, session_id: str | None = None, action: str | None = None, user_id: str | None = None) -> list[jeevesagent.core.types.AuditEntry]
       :async:
 
 
@@ -75,12 +80,12 @@ Module Contents
    off.
 
 
-   .. py:method:: append(*, session_id: str, actor: str, action: str, payload: dict[str, Any]) -> jeevesagent.core.types.AuditEntry
+   .. py:method:: append(*, session_id: str, actor: str, action: str, payload: dict[str, Any], user_id: str | None = None) -> jeevesagent.core.types.AuditEntry
       :async:
 
 
 
-   .. py:method:: query(*, session_id: str | None = None, action: str | None = None) -> list[jeevesagent.core.types.AuditEntry]
+   .. py:method:: query(*, session_id: str | None = None, action: str | None = None, user_id: str | None = None) -> list[jeevesagent.core.types.AuditEntry]
       :async:
 
 
@@ -100,12 +105,12 @@ Module Contents
 
 
 
-   .. py:method:: append(*, session_id: str, actor: str, action: str, payload: dict[str, Any]) -> jeevesagent.core.types.AuditEntry
+   .. py:method:: append(*, session_id: str, actor: str, action: str, payload: dict[str, Any], user_id: str | None = None) -> jeevesagent.core.types.AuditEntry
       :async:
 
 
 
-   .. py:method:: query(*, session_id: str | None = None, action: str | None = None) -> list[jeevesagent.core.types.AuditEntry]
+   .. py:method:: query(*, session_id: str | None = None, action: str | None = None, user_id: str | None = None) -> list[jeevesagent.core.types.AuditEntry]
       :async:
 
 

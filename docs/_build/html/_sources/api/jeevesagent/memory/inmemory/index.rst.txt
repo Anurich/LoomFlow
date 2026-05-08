@@ -29,7 +29,7 @@ Module Contents
    Dict-backed implementation of :class:`Memory`.
 
 
-   .. py:method:: append_block(name: str, content: str) -> None
+   .. py:method:: append_block(name: str, content: str, *, user_id: str | None = None) -> None
       :async:
 
 
@@ -91,12 +91,12 @@ Module Contents
    .. py:method:: snapshot() -> dict[str, Any]
 
 
-   .. py:method:: update_block(name: str, content: str) -> None
+   .. py:method:: update_block(name: str, content: str, *, user_id: str | None = None) -> None
       :async:
 
 
 
-   .. py:method:: working() -> list[jeevesagent.core.types.MemoryBlock]
+   .. py:method:: working(*, user_id: str | None = None) -> list[jeevesagent.core.types.MemoryBlock]
       :async:
 
 

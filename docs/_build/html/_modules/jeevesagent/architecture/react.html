@@ -481,7 +481,15 @@
             <span class="c1"># time — when ``fast_budget`` is True we skip the call</span>
             <span class="c1"># entirely.</span>
             <span class="k">if</span> <span class="ow">not</span> <span class="n">deps</span><span class="o">.</span><span class="n">fast_budget</span><span class="p">:</span>
-                <span class="n">status</span> <span class="o">=</span> <span class="k">await</span> <span class="n">deps</span><span class="o">.</span><span class="n">budget</span><span class="o">.</span><span class="n">allows_step</span><span class="p">()</span>
+                <span class="c1"># Pass user_id so per-user budget caps fire</span>
+                <span class="c1"># correctly. Older budget impls without the kwarg</span>
+                <span class="c1"># fall back via the ``except TypeError``.</span>
+                <span class="k">try</span><span class="p">:</span>
+                    <span class="n">status</span> <span class="o">=</span> <span class="k">await</span> <span class="n">deps</span><span class="o">.</span><span class="n">budget</span><span class="o">.</span><span class="n">allows_step</span><span class="p">(</span>
+                        <span class="n">user_id</span><span class="o">=</span><span class="n">deps</span><span class="o">.</span><span class="n">context</span><span class="o">.</span><span class="n">user_id</span>
+                    <span class="p">)</span>
+                <span class="k">except</span> <span class="ne">TypeError</span><span class="p">:</span>
+                    <span class="n">status</span> <span class="o">=</span> <span class="k">await</span> <span class="n">deps</span><span class="o">.</span><span class="n">budget</span><span class="o">.</span><span class="n">allows_step</span><span class="p">()</span>
                 <span class="k">if</span> <span class="n">status</span><span class="o">.</span><span class="n">blocked</span><span class="p">:</span>
                     <span class="n">session</span><span class="o">.</span><span class="n">interrupted</span> <span class="o">=</span> <span class="kc">True</span>
                     <span class="n">session</span><span class="o">.</span><span class="n">interruption_reason</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">&quot;budget:</span><span class="si">{</span><span class="n">status</span><span class="o">.</span><span class="n">reason</span><span class="si">}</span><span class="s2">&quot;</span>
@@ -601,11 +609,21 @@
 
                 <span class="c1"># 2b. Update budget + telemetry + cumulative usage.</span>
                 <span class="k">if</span> <span class="ow">not</span> <span class="n">deps</span><span class="o">.</span><span class="n">fast_budget</span><span class="p">:</span>
-                    <span class="k">await</span> <span class="n">deps</span><span class="o">.</span><span class="n">budget</span><span class="o">.</span><span class="n">consume</span><span class="p">(</span>
-                        <span class="n">tokens_in</span><span class="o">=</span><span class="n">usage</span><span class="o">.</span><span class="n">input_tokens</span><span class="p">,</span>
-                        <span class="n">tokens_out</span><span class="o">=</span><span class="n">usage</span><span class="o">.</span><span class="n">output_tokens</span><span class="p">,</span>
-                        <span class="n">cost_usd</span><span class="o">=</span><span class="n">usage</span><span class="o">.</span><span class="n">cost_usd</span><span class="p">,</span>
-                    <span class="p">)</span>
+                    <span class="k">try</span><span class="p">:</span>
+                        <span class="k">await</span> <span class="n">deps</span><span class="o">.</span><span class="n">budget</span><span class="o">.</span><span class="n">consume</span><span class="p">(</span>
+                            <span class="n">tokens_in</span><span class="o">=</span><span class="n">usage</span><span class="o">.</span><span class="n">input_tokens</span><span class="p">,</span>
+                            <span class="n">tokens_out</span><span class="o">=</span><span class="n">usage</span><span class="o">.</span><span class="n">output_tokens</span><span class="p">,</span>
+                            <span class="n">cost_usd</span><span class="o">=</span><span class="n">usage</span><span class="o">.</span><span class="n">cost_usd</span><span class="p">,</span>
+                            <span class="n">user_id</span><span class="o">=</span><span class="n">deps</span><span class="o">.</span><span class="n">context</span><span class="o">.</span><span class="n">user_id</span><span class="p">,</span>
+                        <span class="p">)</span>
+                    <span class="k">except</span> <span class="ne">TypeError</span><span class="p">:</span>
+                        <span class="c1"># Legacy budget impls without the user_id</span>
+                        <span class="c1"># kwarg — keep working.</span>
+                        <span class="k">await</span> <span class="n">deps</span><span class="o">.</span><span class="n">budget</span><span class="o">.</span><span class="n">consume</span><span class="p">(</span>
+                            <span class="n">tokens_in</span><span class="o">=</span><span class="n">usage</span><span class="o">.</span><span class="n">input_tokens</span><span class="p">,</span>
+                            <span class="n">tokens_out</span><span class="o">=</span><span class="n">usage</span><span class="o">.</span><span class="n">output_tokens</span><span class="p">,</span>
+                            <span class="n">cost_usd</span><span class="o">=</span><span class="n">usage</span><span class="o">.</span><span class="n">cost_usd</span><span class="p">,</span>
+                        <span class="p">)</span>
                 <span class="k">if</span> <span class="ow">not</span> <span class="n">deps</span><span class="o">.</span><span class="n">fast_telemetry</span><span class="p">:</span>
                     <span class="k">await</span> <span class="n">deps</span><span class="o">.</span><span class="n">telemetry</span><span class="o">.</span><span class="n">emit_metric</span><span class="p">(</span>
                         <span class="s2">&quot;jeeves.tokens.input&quot;</span><span class="p">,</span>
@@ -741,7 +759,14 @@
         <span class="n">Message</span><span class="p">(</span><span class="n">role</span><span class="o">=</span><span class="n">Role</span><span class="o">.</span><span class="n">SYSTEM</span><span class="p">,</span> <span class="n">content</span><span class="o">=</span><span class="n">instructions</span><span class="p">),</span>
     <span class="p">]</span>
 
-    <span class="n">blocks</span> <span class="o">=</span> <span class="k">await</span> <span class="n">deps</span><span class="o">.</span><span class="n">memory</span><span class="o">.</span><span class="n">working</span><span class="p">()</span>
+    <span class="c1"># Working blocks are user-partitioned (M9) — pass the run&#39;s</span>
+    <span class="c1"># user_id so alice&#39;s pinned context never bleeds into bob&#39;s</span>
+    <span class="c1"># seed prompt. Fall back gracefully for legacy custom Memory</span>
+    <span class="c1"># implementations whose ``working()`` predates the kwarg.</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">blocks</span> <span class="o">=</span> <span class="k">await</span> <span class="n">deps</span><span class="o">.</span><span class="n">memory</span><span class="o">.</span><span class="n">working</span><span class="p">(</span><span class="n">user_id</span><span class="o">=</span><span class="n">user_id</span><span class="p">)</span>
+    <span class="k">except</span> <span class="ne">TypeError</span><span class="p">:</span>
+        <span class="n">blocks</span> <span class="o">=</span> <span class="k">await</span> <span class="n">deps</span><span class="o">.</span><span class="n">memory</span><span class="o">.</span><span class="n">working</span><span class="p">()</span>
     <span class="k">if</span> <span class="n">blocks</span><span class="p">:</span>
         <span class="n">block_text</span> <span class="o">=</span> <span class="s2">&quot;</span><span class="se">\n\n</span><span class="s2">&quot;</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">b</span><span class="o">.</span><span class="n">format</span><span class="p">()</span> <span class="k">for</span> <span class="n">b</span> <span class="ow">in</span> <span class="n">blocks</span><span class="p">)</span>
         <span class="n">messages</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">Message</span><span class="p">(</span><span class="n">role</span><span class="o">=</span><span class="n">Role</span><span class="o">.</span><span class="n">SYSTEM</span><span class="p">,</span> <span class="n">content</span><span class="o">=</span><span class="n">block_text</span><span class="p">))</span>
@@ -843,6 +868,7 @@
                         <span class="s2">&quot;destructive&quot;</span><span class="p">:</span> <span class="n">call</span><span class="o">.</span><span class="n">destructive</span><span class="p">,</span>
                         <span class="s2">&quot;turn&quot;</span><span class="p">:</span> <span class="n">session</span><span class="o">.</span><span class="n">turns</span><span class="p">,</span>
                     <span class="p">},</span>
+                    <span class="n">user_id</span><span class="o">=</span><span class="n">deps</span><span class="o">.</span><span class="n">context</span><span class="o">.</span><span class="n">user_id</span><span class="p">,</span>
                 <span class="p">)</span>
             <span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">_run_single_tool</span><span class="p">(</span>
                 <span class="n">deps</span><span class="p">,</span> <span class="n">call</span><span class="p">,</span> <span class="n">turn</span><span class="o">=</span><span class="n">session</span><span class="o">.</span><span class="n">turns</span><span class="p">,</span> <span class="n">slot</span><span class="o">=</span><span class="n">slot</span>
@@ -863,6 +889,7 @@
                         <span class="s2">&quot;reason&quot;</span><span class="p">:</span> <span class="n">result</span><span class="o">.</span><span class="n">reason</span><span class="p">,</span>
                         <span class="s2">&quot;turn&quot;</span><span class="p">:</span> <span class="n">session</span><span class="o">.</span><span class="n">turns</span><span class="p">,</span>
                     <span class="p">},</span>
+                    <span class="n">user_id</span><span class="o">=</span><span class="n">deps</span><span class="o">.</span><span class="n">context</span><span class="o">.</span><span class="n">user_id</span><span class="p">,</span>
                 <span class="p">)</span>
             <span class="k">await</span> <span class="n">sender</span><span class="o">.</span><span class="n">send</span><span class="p">(</span><span class="n">Event</span><span class="o">.</span><span class="n">tool_result</span><span class="p">(</span><span class="n">session</span><span class="o">.</span><span class="n">id</span><span class="p">,</span> <span class="n">result</span><span class="p">))</span>
 
@@ -902,6 +929,7 @@
                 <span class="s2">&quot;destructive&quot;</span><span class="p">:</span> <span class="n">call</span><span class="o">.</span><span class="n">destructive</span><span class="p">,</span>
                 <span class="s2">&quot;turn&quot;</span><span class="p">:</span> <span class="n">session</span><span class="o">.</span><span class="n">turns</span><span class="p">,</span>
             <span class="p">},</span>
+            <span class="n">user_id</span><span class="o">=</span><span class="n">deps</span><span class="o">.</span><span class="n">context</span><span class="o">.</span><span class="n">user_id</span><span class="p">,</span>
         <span class="p">)</span>
     <span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">_run_single_tool</span><span class="p">(</span><span class="n">deps</span><span class="p">,</span> <span class="n">call</span><span class="p">,</span> <span class="n">turn</span><span class="o">=</span><span class="n">session</span><span class="o">.</span><span class="n">turns</span><span class="p">,</span> <span class="n">slot</span><span class="o">=</span><span class="n">slot</span><span class="p">)</span>
     <span class="n">results</span><span class="p">[</span><span class="n">slot</span><span class="p">]</span> <span class="o">=</span> <span class="n">result</span>
@@ -920,6 +948,7 @@
                 <span class="s2">&quot;reason&quot;</span><span class="p">:</span> <span class="n">result</span><span class="o">.</span><span class="n">reason</span><span class="p">,</span>
                 <span class="s2">&quot;turn&quot;</span><span class="p">:</span> <span class="n">session</span><span class="o">.</span><span class="n">turns</span><span class="p">,</span>
             <span class="p">},</span>
+            <span class="n">user_id</span><span class="o">=</span><span class="n">deps</span><span class="o">.</span><span class="n">context</span><span class="o">.</span><span class="n">user_id</span><span class="p">,</span>
         <span class="p">)</span>
     <span class="n">event_buffer</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">Event</span><span class="o">.</span><span class="n">tool_result</span><span class="p">(</span><span class="n">session</span><span class="o">.</span><span class="n">id</span><span class="p">,</span> <span class="n">result</span><span class="p">))</span>
 
@@ -951,10 +980,17 @@
     <span class="p">)</span>
 
     <span class="k">async</span> <span class="k">with</span> <span class="n">tool_trace</span><span class="p">:</span>
+        <span class="n">run_user_id</span> <span class="o">=</span> <span class="n">deps</span><span class="o">.</span><span class="n">context</span><span class="o">.</span><span class="n">user_id</span>
         <span class="k">if</span> <span class="n">deps</span><span class="o">.</span><span class="n">fast_hooks</span><span class="p">:</span>
             <span class="n">hook_decision</span><span class="p">:</span> <span class="n">PermissionDecision</span> <span class="o">=</span> <span class="n">PermissionDecision</span><span class="o">.</span><span class="n">allow_</span><span class="p">()</span>
         <span class="k">else</span><span class="p">:</span>
-            <span class="n">hook_decision</span> <span class="o">=</span> <span class="k">await</span> <span class="n">deps</span><span class="o">.</span><span class="n">hooks</span><span class="o">.</span><span class="n">pre_tool</span><span class="p">(</span><span class="n">call</span><span class="p">)</span>
+            <span class="k">try</span><span class="p">:</span>
+                <span class="n">hook_decision</span> <span class="o">=</span> <span class="k">await</span> <span class="n">deps</span><span class="o">.</span><span class="n">hooks</span><span class="o">.</span><span class="n">pre_tool</span><span class="p">(</span>
+                    <span class="n">call</span><span class="p">,</span> <span class="n">user_id</span><span class="o">=</span><span class="n">run_user_id</span>
+                <span class="p">)</span>
+            <span class="k">except</span> <span class="ne">TypeError</span><span class="p">:</span>
+                <span class="c1"># Legacy HookHost without the kwarg.</span>
+                <span class="n">hook_decision</span> <span class="o">=</span> <span class="k">await</span> <span class="n">deps</span><span class="o">.</span><span class="n">hooks</span><span class="o">.</span><span class="n">pre_tool</span><span class="p">(</span><span class="n">call</span><span class="p">)</span>
 
         <span class="k">if</span> <span class="n">hook_decision</span><span class="o">.</span><span class="n">deny</span><span class="p">:</span>
             <span class="n">result</span> <span class="o">=</span> <span class="n">ToolResult</span><span class="o">.</span><span class="n">denied_</span><span class="p">(</span>
@@ -965,7 +1001,13 @@
                 <span class="c1"># AllowAll always allows — skip the dataclass round-trip.</span>
                 <span class="n">perm</span><span class="p">:</span> <span class="n">PermissionDecision</span> <span class="o">=</span> <span class="n">PermissionDecision</span><span class="o">.</span><span class="n">allow_</span><span class="p">()</span>
             <span class="k">else</span><span class="p">:</span>
-                <span class="n">perm</span> <span class="o">=</span> <span class="k">await</span> <span class="n">deps</span><span class="o">.</span><span class="n">permissions</span><span class="o">.</span><span class="n">check</span><span class="p">(</span><span class="n">call</span><span class="p">,</span> <span class="n">context</span><span class="o">=</span><span class="p">{})</span>
+                <span class="k">try</span><span class="p">:</span>
+                    <span class="n">perm</span> <span class="o">=</span> <span class="k">await</span> <span class="n">deps</span><span class="o">.</span><span class="n">permissions</span><span class="o">.</span><span class="n">check</span><span class="p">(</span>
+                        <span class="n">call</span><span class="p">,</span> <span class="n">context</span><span class="o">=</span><span class="p">{},</span> <span class="n">user_id</span><span class="o">=</span><span class="n">run_user_id</span>
+                    <span class="p">)</span>
+                <span class="k">except</span> <span class="ne">TypeError</span><span class="p">:</span>
+                    <span class="c1"># Legacy Permissions without the kwarg.</span>
+                    <span class="n">perm</span> <span class="o">=</span> <span class="k">await</span> <span class="n">deps</span><span class="o">.</span><span class="n">permissions</span><span class="o">.</span><span class="n">check</span><span class="p">(</span><span class="n">call</span><span class="p">,</span> <span class="n">context</span><span class="o">=</span><span class="p">{})</span>
             <span class="k">if</span> <span class="n">perm</span><span class="o">.</span><span class="n">deny</span><span class="p">:</span>
                 <span class="n">result</span> <span class="o">=</span> <span class="n">ToolResult</span><span class="o">.</span><span class="n">denied_</span><span class="p">(</span>
                     <span class="n">call</span><span class="o">.</span><span class="n">id</span><span class="p">,</span> <span class="n">perm</span><span class="o">.</span><span class="n">reason</span> <span class="ow">or</span> <span class="s2">&quot;denied by policy&quot;</span>
@@ -996,7 +1038,12 @@
                     <span class="n">result</span> <span class="o">=</span> <span class="n">ToolResult</span><span class="o">.</span><span class="n">error_</span><span class="p">(</span><span class="n">call</span><span class="o">.</span><span class="n">id</span><span class="p">,</span> <span class="nb">str</span><span class="p">(</span><span class="n">exc</span><span class="p">))</span>
 
                 <span class="k">if</span> <span class="ow">not</span> <span class="n">deps</span><span class="o">.</span><span class="n">fast_hooks</span><span class="p">:</span>
-                    <span class="k">await</span> <span class="n">deps</span><span class="o">.</span><span class="n">hooks</span><span class="o">.</span><span class="n">post_tool</span><span class="p">(</span><span class="n">call</span><span class="p">,</span> <span class="n">result</span><span class="p">)</span>
+                    <span class="k">try</span><span class="p">:</span>
+                        <span class="k">await</span> <span class="n">deps</span><span class="o">.</span><span class="n">hooks</span><span class="o">.</span><span class="n">post_tool</span><span class="p">(</span>
+                            <span class="n">call</span><span class="p">,</span> <span class="n">result</span><span class="p">,</span> <span class="n">user_id</span><span class="o">=</span><span class="n">run_user_id</span>
+                        <span class="p">)</span>
+                    <span class="k">except</span> <span class="ne">TypeError</span><span class="p">:</span>
+                        <span class="k">await</span> <span class="n">deps</span><span class="o">.</span><span class="n">hooks</span><span class="o">.</span><span class="n">post_tool</span><span class="p">(</span><span class="n">call</span><span class="p">,</span> <span class="n">result</span><span class="p">)</span>
 
     <span class="k">if</span> <span class="ow">not</span> <span class="n">deps</span><span class="o">.</span><span class="n">fast_telemetry</span><span class="p">:</span>
         <span class="n">elapsed_ms</span> <span class="o">=</span> <span class="p">(</span><span class="n">anyio</span><span class="o">.</span><span class="n">current_time</span><span class="p">()</span> <span class="o">-</span> <span class="n">started</span><span class="p">)</span> <span class="o">*</span> <span class="mi">1000</span>
@@ -1016,15 +1063,27 @@
     <span class="n">actor</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
     <span class="n">action</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
     <span class="n">payload</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">],</span>
+    <span class="o">*</span><span class="p">,</span>
+    <span class="n">user_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
 <span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
     <span class="k">if</span> <span class="n">audit_log</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
         <span class="k">return</span>
-    <span class="k">await</span> <span class="n">audit_log</span><span class="o">.</span><span class="n">append</span><span class="p">(</span>
-        <span class="n">session_id</span><span class="o">=</span><span class="n">session_id</span><span class="p">,</span>
-        <span class="n">actor</span><span class="o">=</span><span class="n">actor</span><span class="p">,</span>
-        <span class="n">action</span><span class="o">=</span><span class="n">action</span><span class="p">,</span>
-        <span class="n">payload</span><span class="o">=</span><span class="n">payload</span><span class="p">,</span>
-    <span class="p">)</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="k">await</span> <span class="n">audit_log</span><span class="o">.</span><span class="n">append</span><span class="p">(</span>
+            <span class="n">session_id</span><span class="o">=</span><span class="n">session_id</span><span class="p">,</span>
+            <span class="n">actor</span><span class="o">=</span><span class="n">actor</span><span class="p">,</span>
+            <span class="n">action</span><span class="o">=</span><span class="n">action</span><span class="p">,</span>
+            <span class="n">payload</span><span class="o">=</span><span class="n">payload</span><span class="p">,</span>
+            <span class="n">user_id</span><span class="o">=</span><span class="n">user_id</span><span class="p">,</span>
+        <span class="p">)</span>
+    <span class="k">except</span> <span class="ne">TypeError</span><span class="p">:</span>
+        <span class="c1"># Legacy AuditLog impls without the user_id kwarg.</span>
+        <span class="k">await</span> <span class="n">audit_log</span><span class="o">.</span><span class="n">append</span><span class="p">(</span>
+            <span class="n">session_id</span><span class="o">=</span><span class="n">session_id</span><span class="p">,</span>
+            <span class="n">actor</span><span class="o">=</span><span class="n">actor</span><span class="p">,</span>
+            <span class="n">action</span><span class="o">=</span><span class="n">action</span><span class="p">,</span>
+            <span class="n">payload</span><span class="o">=</span><span class="n">payload</span><span class="p">,</span>
+        <span class="p">)</span>
 
 
 <span class="k">def</span><span class="w"> </span><span class="nf">_format_tool_message</span><span class="p">(</span><span class="n">result</span><span class="p">:</span> <span class="n">ToolResult</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>

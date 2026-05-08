@@ -437,8 +437,19 @@
 
 <div class="viewcode-block" id="HookRegistry.pre_tool">
 <a class="viewcode-back" href="../../../api/jeevesagent/security/index.html#jeevesagent.HookRegistry.pre_tool">[docs]</a>
-    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">pre_tool</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">call</span><span class="p">:</span> <span class="n">ToolCall</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">PermissionDecision</span><span class="p">:</span>
-<span class="w">        </span><span class="sd">&quot;&quot;&quot;Run all pre-tool hooks. First deny wins; otherwise allow.&quot;&quot;&quot;</span>
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">pre_tool</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span> <span class="n">call</span><span class="p">:</span> <span class="n">ToolCall</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">user_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">PermissionDecision</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Run all pre-tool hooks. First deny wins; otherwise allow.</span>
+
+<span class="sd">        The ``user_id`` kwarg is forwarded for protocol parity (M9);</span>
+<span class="sd">        the bundled :class:`HookRegistry` doesn&#39;t itself dispatch</span>
+<span class="sd">        per-user, but custom :class:`HookHost` implementations can</span>
+<span class="sd">        route on it. Individual hook callables continue to receive</span>
+<span class="sd">        only ``(call,)`` to keep the existing decorator API stable;</span>
+<span class="sd">        hooks that need the user_id can call</span>
+<span class="sd">        :func:`get_run_context` themselves.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
         <span class="k">for</span> <span class="n">hook</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">pre_tool_hooks</span><span class="p">:</span>
             <span class="n">decision</span><span class="p">:</span> <span class="n">PermissionDecision</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
             <span class="k">with</span> <span class="n">anyio</span><span class="o">.</span><span class="n">move_on_after</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">hook_timeout_s</span><span class="p">):</span>
@@ -450,9 +461,17 @@
 
 <div class="viewcode-block" id="HookRegistry.post_tool">
 <a class="viewcode-back" href="../../../api/jeevesagent/security/index.html#jeevesagent.HookRegistry.post_tool">[docs]</a>
-    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">post_tool</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">call</span><span class="p">:</span> <span class="n">ToolCall</span><span class="p">,</span> <span class="n">result</span><span class="p">:</span> <span class="n">ToolResult</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">post_tool</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="n">call</span><span class="p">:</span> <span class="n">ToolCall</span><span class="p">,</span>
+        <span class="n">result</span><span class="p">:</span> <span class="n">ToolResult</span><span class="p">,</span>
+        <span class="o">*</span><span class="p">,</span>
+        <span class="n">user_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;Best-effort post-tool callbacks. Failures and timeouts are</span>
-<span class="sd">        absorbed so they cannot affect the result the loop returns.&quot;&quot;&quot;</span>
+<span class="sd">        absorbed so they cannot affect the result the loop returns.</span>
+<span class="sd">        ``user_id`` follows the same forwarded-but-not-required</span>
+<span class="sd">        pattern as :meth:`pre_tool`.&quot;&quot;&quot;</span>
         <span class="k">for</span> <span class="n">hook</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">post_tool_hooks</span><span class="p">:</span>
             <span class="k">with</span> <span class="n">anyio</span><span class="o">.</span><span class="n">move_on_after</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">hook_timeout_s</span><span class="p">):</span>
                 <span class="k">try</span><span class="p">:</span>

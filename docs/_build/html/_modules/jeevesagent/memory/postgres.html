@@ -531,13 +531,24 @@
             <span class="p">(</span>
                 <span class="s2">&quot;CREATE TABLE IF NOT EXISTS memory_blocks (&quot;</span>
                 <span class="s2">&quot;  namespace TEXT NOT NULL,&quot;</span>
+                <span class="c1"># ``user_id`` cannot be NULL inside a PK in Postgres,</span>
+                <span class="c1"># so the anonymous bucket is the empty string on the</span>
+                <span class="c1"># wire; the application layer round-trips it back to</span>
+                <span class="c1"># ``None`` on reads.</span>
+                <span class="s2">&quot;  user_id TEXT NOT NULL DEFAULT &#39;&#39;,&quot;</span>
                 <span class="s2">&quot;  name TEXT NOT NULL,&quot;</span>
                 <span class="s2">&quot;  content TEXT NOT NULL,&quot;</span>
                 <span class="s2">&quot;  pinned_order INT NOT NULL DEFAULT 0,&quot;</span>
                 <span class="s2">&quot;  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),&quot;</span>
-                <span class="s2">&quot;  PRIMARY KEY (namespace, name)&quot;</span>
+                <span class="s2">&quot;  PRIMARY KEY (namespace, user_id, name)&quot;</span>
                 <span class="s2">&quot;);&quot;</span>
             <span class="p">),</span>
+            <span class="c1"># Idempotent ALTER for upgrades from pre-M9 schemas. The</span>
+            <span class="c1"># default &#39;&#39; ensures existing rows migrate cleanly into</span>
+            <span class="c1"># the anonymous bucket, and the new PK constraint can</span>
+            <span class="c1"># then be enforced.</span>
+            <span class="s2">&quot;ALTER TABLE memory_blocks ADD COLUMN IF NOT EXISTS &quot;</span>
+            <span class="s2">&quot;user_id TEXT NOT NULL DEFAULT &#39;&#39;;&quot;</span><span class="p">,</span>
             <span class="p">(</span>
                 <span class="sa">f</span><span class="s2">&quot;CREATE TABLE IF NOT EXISTS episodes (&quot;</span>
                 <span class="sa">f</span><span class="s2">&quot;  id TEXT PRIMARY KEY,&quot;</span>
@@ -586,13 +597,19 @@
 
 <div class="viewcode-block" id="PostgresMemory.working">
 <a class="viewcode-back" href="../../../api/jeevesagent/memory/postgres/index.html#jeevesagent.PostgresMemory.working">[docs]</a>
-    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">working</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="n">MemoryBlock</span><span class="p">]:</span>
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">working</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">user_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="n">MemoryBlock</span><span class="p">]:</span>
+        <span class="c1"># Empty string is the anonymous bucket on the wire (Postgres</span>
+        <span class="c1"># PK can&#39;t carry NULL); round-trip back to ``None`` here.</span>
         <span class="k">async</span> <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">_pool</span><span class="o">.</span><span class="n">acquire</span><span class="p">()</span> <span class="k">as</span> <span class="n">conn</span><span class="p">:</span>
             <span class="n">rows</span> <span class="o">=</span> <span class="k">await</span> <span class="n">conn</span><span class="o">.</span><span class="n">fetch</span><span class="p">(</span>
                 <span class="s2">&quot;SELECT name, content, updated_at, pinned_order &quot;</span>
                 <span class="s2">&quot;FROM memory_blocks WHERE namespace = $1 &quot;</span>
+                <span class="s2">&quot;AND user_id = $2 &quot;</span>
                 <span class="s2">&quot;ORDER BY pinned_order ASC&quot;</span><span class="p">,</span>
                 <span class="bp">self</span><span class="o">.</span><span class="n">_namespace</span><span class="p">,</span>
+                <span class="n">user_id</span> <span class="ow">or</span> <span class="s2">&quot;&quot;</span><span class="p">,</span>
             <span class="p">)</span>
         <span class="k">return</span> <span class="p">[</span>
             <span class="n">MemoryBlock</span><span class="p">(</span>
@@ -607,14 +624,17 @@
 
 <div class="viewcode-block" id="PostgresMemory.update_block">
 <a class="viewcode-back" href="../../../api/jeevesagent/memory/postgres/index.html#jeevesagent.PostgresMemory.update_block">[docs]</a>
-    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">update_block</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">content</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">update_block</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">content</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">user_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
         <span class="k">async</span> <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">_pool</span><span class="o">.</span><span class="n">acquire</span><span class="p">()</span> <span class="k">as</span> <span class="n">conn</span><span class="p">:</span>
             <span class="k">await</span> <span class="n">conn</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span>
-                <span class="s2">&quot;INSERT INTO memory_blocks(namespace, name, content) &quot;</span>
-                <span class="s2">&quot;VALUES ($1, $2, $3) &quot;</span>
-                <span class="s2">&quot;ON CONFLICT (namespace, name) DO UPDATE &quot;</span>
+                <span class="s2">&quot;INSERT INTO memory_blocks(namespace, user_id, name, content) &quot;</span>
+                <span class="s2">&quot;VALUES ($1, $2, $3, $4) &quot;</span>
+                <span class="s2">&quot;ON CONFLICT (namespace, user_id, name) DO UPDATE &quot;</span>
                 <span class="s2">&quot;SET content = EXCLUDED.content, updated_at = NOW();&quot;</span><span class="p">,</span>
                 <span class="bp">self</span><span class="o">.</span><span class="n">_namespace</span><span class="p">,</span>
+                <span class="n">user_id</span> <span class="ow">or</span> <span class="s2">&quot;&quot;</span><span class="p">,</span>
                 <span class="n">name</span><span class="p">,</span>
                 <span class="n">content</span><span class="p">,</span>
             <span class="p">)</span></div>
@@ -622,15 +642,18 @@
 
 <div class="viewcode-block" id="PostgresMemory.append_block">
 <a class="viewcode-back" href="../../../api/jeevesagent/memory/postgres/index.html#jeevesagent.PostgresMemory.append_block">[docs]</a>
-    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">append_block</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">content</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">append_block</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">content</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">user_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
         <span class="k">async</span> <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">_pool</span><span class="o">.</span><span class="n">acquire</span><span class="p">()</span> <span class="k">as</span> <span class="n">conn</span><span class="p">:</span>
             <span class="k">await</span> <span class="n">conn</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span>
-                <span class="s2">&quot;INSERT INTO memory_blocks(namespace, name, content) &quot;</span>
-                <span class="s2">&quot;VALUES ($1, $2, $3) &quot;</span>
-                <span class="s2">&quot;ON CONFLICT (namespace, name) DO UPDATE &quot;</span>
+                <span class="s2">&quot;INSERT INTO memory_blocks(namespace, user_id, name, content) &quot;</span>
+                <span class="s2">&quot;VALUES ($1, $2, $3, $4) &quot;</span>
+                <span class="s2">&quot;ON CONFLICT (namespace, user_id, name) DO UPDATE &quot;</span>
                 <span class="s2">&quot;SET content = memory_blocks.content || EXCLUDED.content, &quot;</span>
                 <span class="s2">&quot;    updated_at = NOW();&quot;</span><span class="p">,</span>
                 <span class="bp">self</span><span class="o">.</span><span class="n">_namespace</span><span class="p">,</span>
+                <span class="n">user_id</span> <span class="ow">or</span> <span class="s2">&quot;&quot;</span><span class="p">,</span>
                 <span class="n">name</span><span class="p">,</span>
                 <span class="n">content</span><span class="p">,</span>
             <span class="p">)</span></div>

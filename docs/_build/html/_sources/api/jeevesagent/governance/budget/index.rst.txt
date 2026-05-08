@@ -12,6 +12,15 @@ jeevesagent.governance.budget
    :class:`NoBudget` is the always-allow stub used when the user has
    opted out of governance entirely.
 
+   **Multi-tenant accounting (M9).** ``StandardBudget`` tracks usage
+   per-``user_id`` so one user can't exhaust another's quota. Pass
+   ``per_user_max_tokens`` / ``per_user_max_cost_usd`` /
+   ``per_user_max_wall_clock`` in the :class:`BudgetConfig` to enforce
+   per-user caps in addition to (or instead of) the global ones. The
+   agent loop forwards ``user_id`` from the live :class:`RunContext`
+   into every ``allows_step`` / ``consume`` call automatically;
+   direct callers pass it explicitly via the keyword.
+
 
 
 Classes
@@ -28,6 +37,26 @@ Module Contents
 ---------------
 
 .. py:class:: BudgetConfig
+
+   Global + per-user budget caps.
+
+   Every ``max_*`` field has a global counterpart and a
+   ``per_user_*`` counterpart. The global cap applies to the whole
+   Agent (all users combined); the per-user cap applies to each
+   user_id's bucket independently. A run is blocked when *either*
+   its user's cap or the global cap is exceeded — whichever fires
+   first.
+
+   Use one or both depending on what you want to enforce:
+
+   * ``max_tokens=200_000`` — Agent-wide total. Caps the whole tenant.
+   * ``per_user_max_tokens=10_000`` — Per user. Caps each user.
+   * Both — one user can't hog the global, and the global stops
+     runaway aggregate usage.
+
+   The warning threshold (``soft_warning_at``) is shared across
+   global and per-user caps.
+
 
    .. py:attribute:: max_cost_usd
       :type:  float | None
@@ -59,6 +88,36 @@ Module Contents
 
 
 
+   .. py:attribute:: per_user_max_cost_usd
+      :type:  float | None
+      :value: None
+
+
+
+   .. py:attribute:: per_user_max_input_tokens
+      :type:  int | None
+      :value: None
+
+
+
+   .. py:attribute:: per_user_max_output_tokens
+      :type:  int | None
+      :value: None
+
+
+
+   .. py:attribute:: per_user_max_tokens
+      :type:  int | None
+      :value: None
+
+
+
+   .. py:attribute:: per_user_max_wall_clock
+      :type:  datetime.timedelta | None
+      :value: None
+
+
+
    .. py:attribute:: soft_warning_at
       :type:  float
       :value: 0.8
@@ -70,28 +129,44 @@ Module Contents
    Never blocks, never warns.
 
 
-   .. py:method:: allows_step() -> jeevesagent.core.types.BudgetStatus
+   .. py:method:: allows_step(*, user_id: str | None = None) -> jeevesagent.core.types.BudgetStatus
       :async:
 
 
 
-   .. py:method:: consume(*, tokens_in: int, tokens_out: int, cost_usd: float) -> None
+   .. py:method:: consume(*, tokens_in: int, tokens_out: int, cost_usd: float, user_id: str | None = None) -> None
       :async:
 
 
 
 .. py:class:: StandardBudget(cfg: BudgetConfig | None = None)
 
-   Hard-limited, thread-safe budget tracker.
+   Hard-limited, thread-safe budget tracker with per-user
+   accounting.
+
+   Tracks usage globally AND per-user-id; either limit can fire.
+   Multi-tenant production agents should pass ``user_id`` to every
+   ``allows_step`` / ``consume`` call (the agent loop does this
+   automatically from the live :class:`~jeevesagent.RunContext`).
+   Single-tenant code can omit it; the framework treats unspecified
+   user_id as the anonymous bucket.
 
 
-   .. py:method:: allows_step() -> jeevesagent.core.types.BudgetStatus
+   .. py:method:: allows_step(*, user_id: str | None = None) -> jeevesagent.core.types.BudgetStatus
       :async:
 
 
 
-   .. py:method:: consume(*, tokens_in: int, tokens_out: int, cost_usd: float) -> None
+   .. py:method:: consume(*, tokens_in: int, tokens_out: int, cost_usd: float, user_id: str | None = None) -> None
       :async:
+
+
+
+   .. py:method:: usage_for(user_id: str | None) -> dict[str, float]
+
+      Snapshot one user's running totals — for telemetry / ops
+      dashboards. Returns an empty bucket for a user who hasn't
+      consumed anything yet.
 
 
 

@@ -457,22 +457,37 @@
 
 <div class="viewcode-block" id="Memory.working">
 <a class="viewcode-back" href="../../../api/jeevesagent/index.html#jeevesagent.core.Memory.working">[docs]</a>
-    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">working</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="n">MemoryBlock</span><span class="p">]:</span>
-<span class="w">        </span><span class="sd">&quot;&quot;&quot;All in-context blocks. Pinned to every prompt.&quot;&quot;&quot;</span>
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">working</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">user_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="n">MemoryBlock</span><span class="p">]:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;All in-context blocks for ``user_id``. Pinned to every prompt.</span>
+
+<span class="sd">        Like every other memory primitive, working blocks are</span>
+<span class="sd">        user-partitioned: blocks set under one ``user_id`` are</span>
+<span class="sd">        invisible to a query scoped to a different one. Backends</span>
+<span class="sd">        MUST honour this — passing alice&#39;s user_id never returns</span>
+<span class="sd">        bob&#39;s pinned blocks.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
         <span class="o">...</span></div>
 
 
 <div class="viewcode-block" id="Memory.update_block">
 <a class="viewcode-back" href="../../../api/jeevesagent/index.html#jeevesagent.core.Memory.update_block">[docs]</a>
-    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">update_block</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">content</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
-<span class="w">        </span><span class="sd">&quot;&quot;&quot;Replace the contents of a named block.&quot;&quot;&quot;</span>
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">update_block</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">content</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">user_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Replace the contents of a named block in ``user_id``&#39;s</span>
+<span class="sd">        namespace. ``None`` is the anonymous bucket.&quot;&quot;&quot;</span>
         <span class="o">...</span></div>
 
 
 <div class="viewcode-block" id="Memory.append_block">
 <a class="viewcode-back" href="../../../api/jeevesagent/index.html#jeevesagent.core.Memory.append_block">[docs]</a>
-    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">append_block</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">content</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
-<span class="w">        </span><span class="sd">&quot;&quot;&quot;Append to a named block, creating it if absent.&quot;&quot;&quot;</span>
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">append_block</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">content</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">user_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Append to a named block in ``user_id``&#39;s namespace,</span>
+<span class="sd">        creating it if absent.&quot;&quot;&quot;</span>
         <span class="o">...</span></div>
 
 
@@ -768,12 +783,24 @@
 <div class="viewcode-block" id="Permissions">
 <a class="viewcode-back" href="../../../api/jeevesagent/index.html#jeevesagent.core.Permissions">[docs]</a>
 <span class="k">class</span><span class="w"> </span><span class="nc">Permissions</span><span class="p">(</span><span class="n">Protocol</span><span class="p">):</span>
-<span class="w">    </span><span class="sd">&quot;&quot;&quot;Decides whether a tool call is allowed.&quot;&quot;&quot;</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Decides whether a tool call is allowed.</span>
+
+<span class="sd">    ``user_id`` (M9): the agent loop forwards the live</span>
+<span class="sd">    :class:`~jeevesagent.RunContext`&#39;s user_id so multi-tenant</span>
+<span class="sd">    permission impls (e.g. :class:`~jeevesagent.PerUserPermissions`)</span>
+<span class="sd">    can route to per-user policies. Implementations that don&#39;t</span>
+<span class="sd">    care about the user can ignore the kwarg; the framework&#39;s</span>
+<span class="sd">    fallback ``except TypeError`` covers legacy impls.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
 
 <div class="viewcode-block" id="Permissions.check">
 <a class="viewcode-back" href="../../../api/jeevesagent/index.html#jeevesagent.core.Permissions.check">[docs]</a>
     <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">check</span><span class="p">(</span>
-        <span class="bp">self</span><span class="p">,</span> <span class="n">call</span><span class="p">:</span> <span class="n">ToolCall</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">context</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="n">call</span><span class="p">:</span> <span class="n">ToolCall</span><span class="p">,</span>
+        <span class="o">*</span><span class="p">,</span>
+        <span class="n">context</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">],</span>
+        <span class="n">user_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
     <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">PermissionDecision</span><span class="p">:</span>
         <span class="o">...</span></div>
 </div>
@@ -783,11 +810,19 @@
 <div class="viewcode-block" id="HookHost">
 <a class="viewcode-back" href="../../../api/jeevesagent/index.html#jeevesagent.core.HookHost">[docs]</a>
 <span class="k">class</span><span class="w"> </span><span class="nc">HookHost</span><span class="p">(</span><span class="n">Protocol</span><span class="p">):</span>
-<span class="w">    </span><span class="sd">&quot;&quot;&quot;Aggregator over user-registered lifecycle callbacks.&quot;&quot;&quot;</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Aggregator over user-registered lifecycle callbacks.</span>
+
+<span class="sd">    ``user_id`` (M9): same contract as :class:`Permissions` —</span>
+<span class="sd">    forwarded from the live RunContext so per-user hooks can</span>
+<span class="sd">    route. Legacy hook impls without the kwarg fall back via</span>
+<span class="sd">    ``except TypeError`` in the agent loop.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
 
 <div class="viewcode-block" id="HookHost.pre_tool">
 <a class="viewcode-back" href="../../../api/jeevesagent/index.html#jeevesagent.core.HookHost.pre_tool">[docs]</a>
-    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">pre_tool</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">call</span><span class="p">:</span> <span class="n">ToolCall</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">PermissionDecision</span><span class="p">:</span>
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">pre_tool</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span> <span class="n">call</span><span class="p">:</span> <span class="n">ToolCall</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">user_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">PermissionDecision</span><span class="p">:</span>
         <span class="o">...</span></div>
 
 
@@ -808,11 +843,21 @@
 <div class="viewcode-block" id="Budget">
 <a class="viewcode-back" href="../../../api/jeevesagent/index.html#jeevesagent.core.Budget">[docs]</a>
 <span class="k">class</span><span class="w"> </span><span class="nc">Budget</span><span class="p">(</span><span class="n">Protocol</span><span class="p">):</span>
-<span class="w">    </span><span class="sd">&quot;&quot;&quot;Resource governance — tokens, calls, cost, wall clock.&quot;&quot;&quot;</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Resource governance — tokens, calls, cost, wall clock.</span>
+
+<span class="sd">    ``user_id`` (M9): the agent loop forwards the live</span>
+<span class="sd">    :class:`~jeevesagent.RunContext`&#39;s user_id into every</span>
+<span class="sd">    ``allows_step`` and ``consume`` call so multi-tenant budget</span>
+<span class="sd">    impls can enforce per-user caps. Implementations that don&#39;t</span>
+<span class="sd">    track per-user usage may ignore the kwarg; the framework</span>
+<span class="sd">    falls back gracefully when the kwarg isn&#39;t accepted.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
 
 <div class="viewcode-block" id="Budget.allows_step">
 <a class="viewcode-back" href="../../../api/jeevesagent/index.html#jeevesagent.core.Budget.allows_step">[docs]</a>
-    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">allows_step</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">BudgetStatus</span><span class="p">:</span>
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">allows_step</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">user_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">BudgetStatus</span><span class="p">:</span>
         <span class="o">...</span></div>
 
 
@@ -824,6 +869,7 @@
         <span class="n">tokens_in</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span>
         <span class="n">tokens_out</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span>
         <span class="n">cost_usd</span><span class="p">:</span> <span class="nb">float</span><span class="p">,</span>
+        <span class="n">user_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
     <span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
         <span class="o">...</span></div>
 </div>

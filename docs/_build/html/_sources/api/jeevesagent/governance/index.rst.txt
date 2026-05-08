@@ -46,12 +46,12 @@ Package Contents
    Never blocks, never warns.
 
 
-   .. py:method:: allows_step() -> jeevesagent.core.types.BudgetStatus
+   .. py:method:: allows_step(*, user_id: str | None = None) -> jeevesagent.core.types.BudgetStatus
       :async:
 
 
 
-   .. py:method:: consume(*, tokens_in: int, tokens_out: int, cost_usd: float) -> None
+   .. py:method:: consume(*, tokens_in: int, tokens_out: int, cost_usd: float, user_id: str | None = None) -> None
       :async:
 
 
@@ -161,16 +161,32 @@ Package Contents
 
 .. py:class:: StandardBudget(cfg: BudgetConfig | None = None)
 
-   Hard-limited, thread-safe budget tracker.
+   Hard-limited, thread-safe budget tracker with per-user
+   accounting.
+
+   Tracks usage globally AND per-user-id; either limit can fire.
+   Multi-tenant production agents should pass ``user_id`` to every
+   ``allows_step`` / ``consume`` call (the agent loop does this
+   automatically from the live :class:`~jeevesagent.RunContext`).
+   Single-tenant code can omit it; the framework treats unspecified
+   user_id as the anonymous bucket.
 
 
-   .. py:method:: allows_step() -> jeevesagent.core.types.BudgetStatus
+   .. py:method:: allows_step(*, user_id: str | None = None) -> jeevesagent.core.types.BudgetStatus
       :async:
 
 
 
-   .. py:method:: consume(*, tokens_in: int, tokens_out: int, cost_usd: float) -> None
+   .. py:method:: consume(*, tokens_in: int, tokens_out: int, cost_usd: float, user_id: str | None = None) -> None
       :async:
+
+
+
+   .. py:method:: usage_for(user_id: str | None) -> dict[str, float]
+
+      Snapshot one user's running totals — for telemetry / ops
+      dashboards. Returns an empty bucket for a user who hasn't
+      consumed anything yet.
 
 
 

@@ -113,7 +113,7 @@ Package Contents
    no-op.
 
 
-   .. py:method:: append_block(name: str, content: str) -> None
+   .. py:method:: append_block(name: str, content: str, *, user_id: str | None = None) -> None
       :async:
 
 
@@ -166,12 +166,12 @@ Package Contents
 
 
 
-   .. py:method:: update_block(name: str, content: str) -> None
+   .. py:method:: update_block(name: str, content: str, *, user_id: str | None = None) -> None
       :async:
 
 
 
-   .. py:method:: working() -> list[jeevesagent.core.types.MemoryBlock]
+   .. py:method:: working(*, user_id: str | None = None) -> list[jeevesagent.core.types.MemoryBlock]
       :async:
 
 
@@ -246,7 +246,7 @@ Package Contents
    :meth:`ephemeral` for a process-local in-memory client.
 
 
-   .. py:method:: append_block(name: str, content: str) -> None
+   .. py:method:: append_block(name: str, content: str, *, user_id: str | None = None) -> None
       :async:
 
 
@@ -311,12 +311,12 @@ Package Contents
 
 
 
-   .. py:method:: update_block(name: str, content: str) -> None
+   .. py:method:: update_block(name: str, content: str, *, user_id: str | None = None) -> None
       :async:
 
 
 
-   .. py:method:: working() -> list[jeevesagent.core.types.MemoryBlock]
+   .. py:method:: working(*, user_id: str | None = None) -> list[jeevesagent.core.types.MemoryBlock]
       :async:
 
 
@@ -580,7 +580,7 @@ Package Contents
    Dict-backed implementation of :class:`Memory`.
 
 
-   .. py:method:: append_block(name: str, content: str) -> None
+   .. py:method:: append_block(name: str, content: str, *, user_id: str | None = None) -> None
       :async:
 
 
@@ -642,12 +642,12 @@ Package Contents
    .. py:method:: snapshot() -> dict[str, Any]
 
 
-   .. py:method:: update_block(name: str, content: str) -> None
+   .. py:method:: update_block(name: str, content: str, *, user_id: str | None = None) -> None
       :async:
 
 
 
-   .. py:method:: working() -> list[jeevesagent.core.types.MemoryBlock]
+   .. py:method:: working(*, user_id: str | None = None) -> list[jeevesagent.core.types.MemoryBlock]
       :async:
 
 
@@ -679,7 +679,7 @@ Package Contents
 
 
 
-   .. py:method:: append_block(name: str, content: str) -> None
+   .. py:method:: append_block(name: str, content: str, *, user_id: str | None = None) -> None
       :async:
 
 
@@ -724,12 +724,12 @@ Package Contents
 
 
 
-   .. py:method:: update_block(name: str, content: str) -> None
+   .. py:method:: update_block(name: str, content: str, *, user_id: str | None = None) -> None
       :async:
 
 
 
-   .. py:method:: working() -> list[jeevesagent.core.types.MemoryBlock]
+   .. py:method:: working(*, user_id: str | None = None) -> list[jeevesagent.core.types.MemoryBlock]
       :async:
 
 
@@ -874,7 +874,7 @@ Package Contents
 
 
 
-   .. py:method:: append_block(name: str, content: str) -> None
+   .. py:method:: append_block(name: str, content: str, *, user_id: str | None = None) -> None
       :async:
 
 
@@ -954,12 +954,12 @@ Package Contents
 
 
 
-   .. py:method:: update_block(name: str, content: str) -> None
+   .. py:method:: update_block(name: str, content: str, *, user_id: str | None = None) -> None
       :async:
 
 
 
-   .. py:method:: working() -> list[jeevesagent.core.types.MemoryBlock]
+   .. py:method:: working(*, user_id: str | None = None) -> list[jeevesagent.core.types.MemoryBlock]
       :async:
 
 
@@ -1032,7 +1032,7 @@ Package Contents
 
 
 
-   .. py:method:: append_block(name: str, content: str) -> None
+   .. py:method:: append_block(name: str, content: str, *, user_id: str | None = None) -> None
       :async:
 
 
@@ -1102,12 +1102,12 @@ Package Contents
 
 
 
-   .. py:method:: update_block(name: str, content: str) -> None
+   .. py:method:: update_block(name: str, content: str, *, user_id: str | None = None) -> None
       :async:
 
 
 
-   .. py:method:: working() -> list[jeevesagent.core.types.MemoryBlock]
+   .. py:method:: working(*, user_id: str | None = None) -> list[jeevesagent.core.types.MemoryBlock]
       :async:
 
 
@@ -1194,7 +1194,7 @@ Package Contents
 
 
 
-   .. py:method:: append_block(name: str, content: str) -> None
+   .. py:method:: append_block(name: str, content: str, *, user_id: str | None = None) -> None
       :async:
 
 
@@ -1239,12 +1239,12 @@ Package Contents
 
 
 
-   .. py:method:: update_block(name: str, content: str) -> None
+   .. py:method:: update_block(name: str, content: str, *, user_id: str | None = None) -> None
       :async:
 
 
 
-   .. py:method:: working() -> list[jeevesagent.core.types.MemoryBlock]
+   .. py:method:: working(*, user_id: str | None = None) -> list[jeevesagent.core.types.MemoryBlock]
       :async:
 
 
@@ -1264,7 +1264,7 @@ Package Contents
    Pure-Python embedding-backed :class:`Memory`.
 
 
-   .. py:method:: append_block(name: str, content: str) -> None
+   .. py:method:: append_block(name: str, content: str, *, user_id: str | None = None) -> None
       :async:
 
 
@@ -1318,12 +1318,12 @@ Package Contents
    .. py:method:: snapshot() -> dict[str, Any]
 
 
-   .. py:method:: update_block(name: str, content: str) -> None
+   .. py:method:: update_block(name: str, content: str, *, user_id: str | None = None) -> None
       :async:
 
 
 
-   .. py:method:: working() -> list[jeevesagent.core.types.MemoryBlock]
+   .. py:method:: working(*, user_id: str | None = None) -> list[jeevesagent.core.types.MemoryBlock]
       :async:
 
 

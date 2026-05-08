@@ -47,13 +47,20 @@ Module Contents
 
    Resource governance — tokens, calls, cost, wall clock.
 
+   ``user_id`` (M9): the agent loop forwards the live
+   :class:`~jeevesagent.RunContext`'s user_id into every
+   ``allows_step`` and ``consume`` call so multi-tenant budget
+   impls can enforce per-user caps. Implementations that don't
+   track per-user usage may ignore the kwarg; the framework
+   falls back gracefully when the kwarg isn't accepted.
 
-   .. py:method:: allows_step() -> jeevesagent.core.types.BudgetStatus
+
+   .. py:method:: allows_step(*, user_id: str | None = None) -> jeevesagent.core.types.BudgetStatus
       :async:
 
 
 
-   .. py:method:: consume(*, tokens_in: int, tokens_out: int, cost_usd: float) -> None
+   .. py:method:: consume(*, tokens_in: int, tokens_out: int, cost_usd: float, user_id: str | None = None) -> None
       :async:
 
 
@@ -91,6 +98,11 @@ Module Contents
 
    Aggregator over user-registered lifecycle callbacks.
 
+   ``user_id`` (M9): same contract as :class:`Permissions` —
+   forwarded from the live RunContext so per-user hooks can
+   route. Legacy hook impls without the kwarg fall back via
+   ``except TypeError`` in the agent loop.
+
 
    .. py:method:: on_event(event: jeevesagent.core.types.Event) -> None
       :async:
@@ -102,7 +114,7 @@ Module Contents
 
 
 
-   .. py:method:: pre_tool(call: jeevesagent.core.types.ToolCall) -> jeevesagent.core.types.PermissionDecision
+   .. py:method:: pre_tool(call: jeevesagent.core.types.ToolCall, *, user_id: str | None = None) -> jeevesagent.core.types.PermissionDecision
       :async:
 
 
@@ -115,11 +127,12 @@ Module Contents
    Tiered memory: working blocks, episodic store, semantic graph.
 
 
-   .. py:method:: append_block(name: str, content: str) -> None
+   .. py:method:: append_block(name: str, content: str, *, user_id: str | None = None) -> None
       :async:
 
 
-      Append to a named block, creating it if absent.
+      Append to a named block in ``user_id``'s namespace,
+      creating it if absent.
 
 
 
@@ -253,19 +266,26 @@ Module Contents
 
 
 
-   .. py:method:: update_block(name: str, content: str) -> None
+   .. py:method:: update_block(name: str, content: str, *, user_id: str | None = None) -> None
       :async:
 
 
-      Replace the contents of a named block.
+      Replace the contents of a named block in ``user_id``'s
+      namespace. ``None`` is the anonymous bucket.
 
 
 
-   .. py:method:: working() -> list[jeevesagent.core.types.MemoryBlock]
+   .. py:method:: working(*, user_id: str | None = None) -> list[jeevesagent.core.types.MemoryBlock]
       :async:
 
 
-      All in-context blocks. Pinned to every prompt.
+      All in-context blocks for ``user_id``. Pinned to every prompt.
+
+      Like every other memory primitive, working blocks are
+      user-partitioned: blocks set under one ``user_id`` are
+      invisible to a query scoped to a different one. Backends
+      MUST honour this — passing alice's user_id never returns
+      bob's pinned blocks.
 
 
 
@@ -303,8 +323,15 @@ Module Contents
 
    Decides whether a tool call is allowed.
 
+   ``user_id`` (M9): the agent loop forwards the live
+   :class:`~jeevesagent.RunContext`'s user_id so multi-tenant
+   permission impls (e.g. :class:`~jeevesagent.PerUserPermissions`)
+   can route to per-user policies. Implementations that don't
+   care about the user can ignore the kwarg; the framework's
+   fallback ``except TypeError`` covers legacy impls.
 
-   .. py:method:: check(call: jeevesagent.core.types.ToolCall, *, context: collections.abc.Mapping[str, Any]) -> jeevesagent.core.types.PermissionDecision
+
+   .. py:method:: check(call: jeevesagent.core.types.ToolCall, *, context: collections.abc.Mapping[str, Any], user_id: str | None = None) -> jeevesagent.core.types.PermissionDecision
       :async:
 
 

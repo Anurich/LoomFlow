@@ -876,15 +876,29 @@
         <span class="n">actor</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
         <span class="n">action</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
         <span class="n">payload</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">],</span>
+        <span class="n">user_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
     <span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
         <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_audit_log</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
             <span class="k">return</span>
-        <span class="k">await</span> <span class="bp">self</span><span class="o">.</span><span class="n">_audit_log</span><span class="o">.</span><span class="n">append</span><span class="p">(</span>
-            <span class="n">session_id</span><span class="o">=</span><span class="n">session_id</span><span class="p">,</span>
-            <span class="n">actor</span><span class="o">=</span><span class="n">actor</span><span class="p">,</span>
-            <span class="n">action</span><span class="o">=</span><span class="n">action</span><span class="p">,</span>
-            <span class="n">payload</span><span class="o">=</span><span class="n">payload</span><span class="p">,</span>
-        <span class="p">)</span>
+        <span class="c1"># Forward user_id as a top-level field. Older AuditLog</span>
+        <span class="c1"># impls without the kwarg fall back via the</span>
+        <span class="c1"># ``except TypeError`` so the agent never breaks on a</span>
+        <span class="c1"># legacy custom log.</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="k">await</span> <span class="bp">self</span><span class="o">.</span><span class="n">_audit_log</span><span class="o">.</span><span class="n">append</span><span class="p">(</span>
+                <span class="n">session_id</span><span class="o">=</span><span class="n">session_id</span><span class="p">,</span>
+                <span class="n">actor</span><span class="o">=</span><span class="n">actor</span><span class="p">,</span>
+                <span class="n">action</span><span class="o">=</span><span class="n">action</span><span class="p">,</span>
+                <span class="n">payload</span><span class="o">=</span><span class="n">payload</span><span class="p">,</span>
+                <span class="n">user_id</span><span class="o">=</span><span class="n">user_id</span><span class="p">,</span>
+            <span class="p">)</span>
+        <span class="k">except</span> <span class="ne">TypeError</span><span class="p">:</span>
+            <span class="k">await</span> <span class="bp">self</span><span class="o">.</span><span class="n">_audit_log</span><span class="o">.</span><span class="n">append</span><span class="p">(</span>
+                <span class="n">session_id</span><span class="o">=</span><span class="n">session_id</span><span class="p">,</span>
+                <span class="n">actor</span><span class="o">=</span><span class="n">actor</span><span class="p">,</span>
+                <span class="n">action</span><span class="o">=</span><span class="n">action</span><span class="p">,</span>
+                <span class="n">payload</span><span class="o">=</span><span class="n">payload</span><span class="p">,</span>
+            <span class="p">)</span>
 
     <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">_validate_output_with_retry</span><span class="p">(</span>
         <span class="bp">self</span><span class="p">,</span>
@@ -1416,6 +1430,7 @@
             <span class="k">if</span> <span class="ow">not</span> <span class="n">fast_audit</span><span class="p">:</span>
                 <span class="k">await</span> <span class="bp">self</span><span class="o">.</span><span class="n">_audit</span><span class="p">(</span>
                     <span class="n">session_id</span><span class="o">=</span><span class="n">session_id</span><span class="p">,</span>
+                    <span class="n">user_id</span><span class="o">=</span><span class="n">run_ctx</span><span class="o">.</span><span class="n">user_id</span><span class="p">,</span>
                     <span class="n">actor</span><span class="o">=</span><span class="s2">&quot;user&quot;</span><span class="p">,</span>
                     <span class="n">action</span><span class="o">=</span><span class="s2">&quot;run_started&quot;</span><span class="p">,</span>
                     <span class="n">payload</span><span class="o">=</span><span class="p">{</span>
@@ -1423,7 +1438,6 @@
                         <span class="s2">&quot;model&quot;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">_model</span><span class="o">.</span><span class="n">name</span><span class="p">,</span>
                         <span class="s2">&quot;max_turns&quot;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">_max_turns</span><span class="p">,</span>
                         <span class="s2">&quot;architecture&quot;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">_architecture</span><span class="o">.</span><span class="n">name</span><span class="p">,</span>
-                        <span class="s2">&quot;user_id&quot;</span><span class="p">:</span> <span class="n">run_ctx</span><span class="o">.</span><span class="n">user_id</span><span class="p">,</span>
                     <span class="p">},</span>
                 <span class="p">)</span>
             <span class="k">await</span> <span class="n">emit</span><span class="p">(</span><span class="n">Event</span><span class="o">.</span><span class="n">started</span><span class="p">(</span><span class="n">session_id</span><span class="p">,</span> <span class="n">prompt</span><span class="p">))</span>
@@ -1555,6 +1569,7 @@
             <span class="k">if</span> <span class="ow">not</span> <span class="n">fast_audit</span><span class="p">:</span>
                 <span class="k">await</span> <span class="bp">self</span><span class="o">.</span><span class="n">_audit</span><span class="p">(</span>
                     <span class="n">session_id</span><span class="o">=</span><span class="n">session_id</span><span class="p">,</span>
+                    <span class="n">user_id</span><span class="o">=</span><span class="n">run_ctx</span><span class="o">.</span><span class="n">user_id</span><span class="p">,</span>
                     <span class="n">actor</span><span class="o">=</span><span class="s2">&quot;system&quot;</span><span class="p">,</span>
                     <span class="n">action</span><span class="o">=</span><span class="s2">&quot;run_completed&quot;</span><span class="p">,</span>
                     <span class="n">payload</span><span class="o">=</span><span class="p">{</span>

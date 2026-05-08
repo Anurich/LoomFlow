@@ -44,20 +44,30 @@ Module Contents
 
 
 
-   .. py:method:: post_tool(call: jeevesagent.core.types.ToolCall, result: jeevesagent.core.types.ToolResult) -> None
+   .. py:method:: post_tool(call: jeevesagent.core.types.ToolCall, result: jeevesagent.core.types.ToolResult, *, user_id: str | None = None) -> None
       :async:
 
 
       Best-effort post-tool callbacks. Failures and timeouts are
       absorbed so they cannot affect the result the loop returns.
+      ``user_id`` follows the same forwarded-but-not-required
+      pattern as :meth:`pre_tool`.
 
 
 
-   .. py:method:: pre_tool(call: jeevesagent.core.types.ToolCall) -> jeevesagent.core.types.PermissionDecision
+   .. py:method:: pre_tool(call: jeevesagent.core.types.ToolCall, *, user_id: str | None = None) -> jeevesagent.core.types.PermissionDecision
       :async:
 
 
       Run all pre-tool hooks. First deny wins; otherwise allow.
+
+      The ``user_id`` kwarg is forwarded for protocol parity (M9);
+      the bundled :class:`HookRegistry` doesn't itself dispatch
+      per-user, but custom :class:`HookHost` implementations can
+      route on it. Individual hook callables continue to receive
+      only ``(call,)`` to keep the existing decorator API stable;
+      hooks that need the user_id can call
+      :func:`get_run_context` themselves.
 
 
 

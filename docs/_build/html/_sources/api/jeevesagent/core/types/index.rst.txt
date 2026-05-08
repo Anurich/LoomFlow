@@ -51,6 +51,12 @@ Module Contents
 
    An immutable, signed entry in the audit log.
 
+   ``user_id`` (M9) is a top-level field for multi-tenant audit
+   queries — `query(user_id="alice")` returns Alice's entries
+   cleanly, no JSON-payload digging. Optional for back-compat
+   with single-tenant deployments; populated automatically by the
+   agent loop from the live :class:`~jeevesagent.RunContext`.
+
    Create a new model by parsing and validating input data from keyword arguments.
 
    Raises [`ValidationError`][pydantic_core.ValidationError] if the input data cannot be
@@ -90,6 +96,12 @@ Module Contents
 
    .. py:attribute:: timestamp
       :type:  datetime.datetime
+
+
+   .. py:attribute:: user_id
+      :type:  str | None
+      :value: None
+
 
 
 .. py:class:: BudgetStatus(/, **data: Any)

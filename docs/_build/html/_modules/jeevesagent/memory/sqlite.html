@@ -451,12 +451,24 @@
 
 <span class="n">_BLOCKS_DDL</span> <span class="o">=</span> <span class="s2">&quot;&quot;&quot;</span>
 <span class="s2">CREATE TABLE IF NOT EXISTS working_blocks (</span>
-<span class="s2">    name         TEXT PRIMARY KEY,</span>
+<span class="s2">    user_id      TEXT,</span>
+<span class="s2">    name         TEXT NOT NULL,</span>
 <span class="s2">    content      TEXT NOT NULL,</span>
 <span class="s2">    pinned_order INTEGER NOT NULL DEFAULT 0,</span>
-<span class="s2">    updated_at   REAL NOT NULL</span>
+<span class="s2">    updated_at   REAL NOT NULL,</span>
+<span class="s2">    PRIMARY KEY (user_id, name)</span>
 <span class="s2">)</span>
 <span class="s2">&quot;&quot;&quot;</span>
+
+<span class="c1"># Idempotent migration: pre-M9 schemas had ``name`` as the PRIMARY</span>
+<span class="c1"># KEY (no user_id column). Adding ``user_id`` mid-flight requires a</span>
+<span class="c1"># table rebuild because SQLite can&#39;t add a PK column. We detect the</span>
+<span class="c1"># old shape and migrate by copying every row into a temp table that</span>
+<span class="c1"># uses the new schema, then renaming.</span>
+<span class="n">_BLOCKS_MIGRATE_CHECK</span> <span class="o">=</span> <span class="p">(</span>
+    <span class="s2">&quot;SELECT COUNT(*) FROM pragma_table_info(&#39;working_blocks&#39;) &quot;</span>
+    <span class="s2">&quot;WHERE name = &#39;user_id&#39;&quot;</span>
+<span class="p">)</span>
 
 <span class="n">_EPISODES_DDL</span> <span class="o">=</span> <span class="s2">&quot;&quot;&quot;</span>
 <span class="s2">CREATE TABLE IF NOT EXISTS episodes (</span>
@@ -568,10 +580,16 @@
 
     <span class="k">def</span><span class="w"> </span><span class="nf">_init_schema</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
         <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">_connect</span><span class="p">()</span> <span class="k">as</span> <span class="n">conn</span><span class="p">:</span>
+            <span class="c1"># Working blocks: migrate from the pre-M9 single-PK</span>
+            <span class="c1"># ``(name)`` shape to the partitioned ``(user_id, name)``</span>
+            <span class="c1"># shape if needed. SQLite can&#39;t ADD COLUMN to a PK</span>
+            <span class="c1"># unfortunately — we have to detect the old shape and</span>
+            <span class="c1"># rebuild the table.</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_migrate_working_blocks</span><span class="p">(</span><span class="n">conn</span><span class="p">)</span>
             <span class="n">conn</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="n">_BLOCKS_DDL</span><span class="p">)</span>
             <span class="n">conn</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="n">_EPISODES_DDL</span><span class="p">)</span>
             <span class="c1"># Best-effort migration for legacy schemas that predate</span>
-            <span class="c1"># ``user_id``.</span>
+            <span class="c1"># ``user_id`` on episodes.</span>
             <span class="k">try</span><span class="p">:</span>
                 <span class="n">conn</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="n">_EPISODES_ADD_USER_ID</span><span class="p">)</span>
             <span class="k">except</span> <span class="n">sqlite3</span><span class="o">.</span><span class="n">OperationalError</span> <span class="k">as</span> <span class="n">exc</span><span class="p">:</span>
@@ -581,90 +599,146 @@
             <span class="n">conn</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="n">_EPISODES_USER_OCCURRED_INDEX</span><span class="p">)</span>
             <span class="n">conn</span><span class="o">.</span><span class="n">commit</span><span class="p">()</span>
 
+    <span class="k">def</span><span class="w"> </span><span class="nf">_migrate_working_blocks</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">conn</span><span class="p">:</span> <span class="n">sqlite3</span><span class="o">.</span><span class="n">Connection</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Bring a legacy ``working_blocks`` table to the M9 schema.</span>
+
+<span class="sd">        Pre-M9: ``(name PRIMARY KEY, content, pinned_order, updated_at)``.</span>
+<span class="sd">        M9+:   ``(user_id, name, content, pinned_order, updated_at,</span>
+<span class="sd">                  PRIMARY KEY (user_id, name))``.</span>
+
+<span class="sd">        SQLite forbids ALTER TABLE on a PK, so we detect the old</span>
+<span class="sd">        shape, copy rows into a fresh table with the new schema,</span>
+<span class="sd">        and rename. Idempotent: a clean DB or an already-migrated</span>
+<span class="sd">        DB skips the rebuild.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="n">existing</span> <span class="o">=</span> <span class="n">conn</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span>
+            <span class="s2">&quot;SELECT name FROM sqlite_master &quot;</span>
+            <span class="s2">&quot;WHERE type = &#39;table&#39; AND name = &#39;working_blocks&#39;&quot;</span>
+        <span class="p">)</span><span class="o">.</span><span class="n">fetchone</span><span class="p">()</span>
+        <span class="k">if</span> <span class="n">existing</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="c1"># Fresh DB — nothing to migrate; the CREATE TABLE</span>
+            <span class="c1"># IF NOT EXISTS in ``_init_schema`` will install the</span>
+            <span class="c1"># new shape.</span>
+            <span class="k">return</span>
+        <span class="n">has_user_id</span> <span class="o">=</span> <span class="p">(</span>
+            <span class="n">conn</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="n">_BLOCKS_MIGRATE_CHECK</span><span class="p">)</span><span class="o">.</span><span class="n">fetchone</span><span class="p">()[</span><span class="mi">0</span><span class="p">]</span> <span class="o">&gt;</span> <span class="mi">0</span>
+        <span class="p">)</span>
+        <span class="k">if</span> <span class="n">has_user_id</span><span class="p">:</span>
+            <span class="k">return</span>  <span class="c1"># already migrated</span>
+        <span class="c1"># Rebuild path: legacy ``working_blocks`` with name-as-PK.</span>
+        <span class="c1"># Copy rows into a fresh new-schema table, then rename.</span>
+        <span class="n">conn</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="s2">&quot;ALTER TABLE working_blocks RENAME TO _wb_legacy&quot;</span><span class="p">)</span>
+        <span class="n">conn</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="n">_BLOCKS_DDL</span><span class="p">)</span>
+        <span class="n">conn</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span>
+            <span class="s2">&quot;INSERT INTO working_blocks (user_id, name, content, &quot;</span>
+            <span class="s2">&quot;pinned_order, updated_at) &quot;</span>
+            <span class="s2">&quot;SELECT NULL, name, content, pinned_order, updated_at &quot;</span>
+            <span class="s2">&quot;FROM _wb_legacy&quot;</span>
+        <span class="p">)</span>
+        <span class="n">conn</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="s2">&quot;DROP TABLE _wb_legacy&quot;</span><span class="p">)</span>
+
     <span class="c1"># ---- working blocks --------------------------------------------------</span>
 
 <div class="viewcode-block" id="SqliteMemory.working">
 <a class="viewcode-back" href="../../../api/jeevesagent/memory/sqlite/index.html#jeevesagent.SqliteMemory.working">[docs]</a>
-    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">working</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="n">MemoryBlock</span><span class="p">]:</span>
-        <span class="n">rows</span> <span class="o">=</span> <span class="k">await</span> <span class="n">anyio</span><span class="o">.</span><span class="n">to_thread</span><span class="o">.</span><span class="n">run_sync</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_working_sync</span><span class="p">)</span>
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">working</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">user_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="n">MemoryBlock</span><span class="p">]:</span>
+        <span class="n">rows</span> <span class="o">=</span> <span class="k">await</span> <span class="n">anyio</span><span class="o">.</span><span class="n">to_thread</span><span class="o">.</span><span class="n">run_sync</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_working_sync</span><span class="p">,</span> <span class="n">user_id</span><span class="p">)</span>
         <span class="k">return</span> <span class="p">[</span><span class="n">_row_to_block</span><span class="p">(</span><span class="n">r</span><span class="p">)</span> <span class="k">for</span> <span class="n">r</span> <span class="ow">in</span> <span class="n">rows</span><span class="p">]</span></div>
 
 
-    <span class="k">def</span><span class="w"> </span><span class="nf">_working_sync</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="nb">tuple</span><span class="p">[</span><span class="n">Any</span><span class="p">,</span> <span class="o">...</span><span class="p">]]:</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">_working_sync</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span> <span class="n">user_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="nb">tuple</span><span class="p">[</span><span class="n">Any</span><span class="p">,</span> <span class="o">...</span><span class="p">]]:</span>
         <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">_connect</span><span class="p">()</span> <span class="k">as</span> <span class="n">conn</span><span class="p">:</span>
             <span class="n">cursor</span> <span class="o">=</span> <span class="n">conn</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span>
                 <span class="s2">&quot;SELECT name, content, pinned_order, updated_at &quot;</span>
                 <span class="s2">&quot;FROM working_blocks &quot;</span>
-                <span class="s2">&quot;ORDER BY pinned_order ASC&quot;</span>
+                <span class="s2">&quot;WHERE user_id IS ? &quot;</span>
+                <span class="s2">&quot;ORDER BY pinned_order ASC&quot;</span><span class="p">,</span>
+                <span class="p">(</span><span class="n">user_id</span><span class="p">,),</span>
             <span class="p">)</span>
             <span class="k">return</span> <span class="n">cursor</span><span class="o">.</span><span class="n">fetchall</span><span class="p">()</span>
 
 <div class="viewcode-block" id="SqliteMemory.update_block">
 <a class="viewcode-back" href="../../../api/jeevesagent/memory/sqlite/index.html#jeevesagent.SqliteMemory.update_block">[docs]</a>
-    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">update_block</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">content</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">update_block</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">content</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">user_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
         <span class="k">async</span> <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">_async_lock</span><span class="p">:</span>
             <span class="k">await</span> <span class="n">anyio</span><span class="o">.</span><span class="n">to_thread</span><span class="o">.</span><span class="n">run_sync</span><span class="p">(</span>
-                <span class="bp">self</span><span class="o">.</span><span class="n">_update_block_sync</span><span class="p">,</span> <span class="n">name</span><span class="p">,</span> <span class="n">content</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_update_block_sync</span><span class="p">,</span> <span class="n">name</span><span class="p">,</span> <span class="n">content</span><span class="p">,</span> <span class="n">user_id</span>
             <span class="p">)</span></div>
 
 
-    <span class="k">def</span><span class="w"> </span><span class="nf">_update_block_sync</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">content</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">_update_block_sync</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">content</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">user_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
         <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">_connect</span><span class="p">()</span> <span class="k">as</span> <span class="n">conn</span><span class="p">:</span>
-            <span class="c1"># Upsert: keep existing pinned_order if the row exists,</span>
-            <span class="c1"># else assign the next slot.</span>
+            <span class="c1"># Upsert keyed by (user_id, name): keep existing</span>
+            <span class="c1"># pinned_order if the row exists in this user&#39;s bucket,</span>
+            <span class="c1"># else assign the next slot scoped to that user.</span>
             <span class="n">existing</span> <span class="o">=</span> <span class="n">conn</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span>
-                <span class="s2">&quot;SELECT pinned_order FROM working_blocks WHERE name = ?&quot;</span><span class="p">,</span>
-                <span class="p">(</span><span class="n">name</span><span class="p">,),</span>
+                <span class="s2">&quot;SELECT pinned_order FROM working_blocks &quot;</span>
+                <span class="s2">&quot;WHERE user_id IS ? AND name = ?&quot;</span><span class="p">,</span>
+                <span class="p">(</span><span class="n">user_id</span><span class="p">,</span> <span class="n">name</span><span class="p">),</span>
             <span class="p">)</span><span class="o">.</span><span class="n">fetchone</span><span class="p">()</span>
             <span class="k">if</span> <span class="n">existing</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
                 <span class="n">conn</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span>
                     <span class="s2">&quot;UPDATE working_blocks SET content = ?, updated_at = ? &quot;</span>
-                    <span class="s2">&quot;WHERE name = ?&quot;</span><span class="p">,</span>
-                    <span class="p">(</span><span class="n">content</span><span class="p">,</span> <span class="n">_now_epoch</span><span class="p">(),</span> <span class="n">name</span><span class="p">),</span>
+                    <span class="s2">&quot;WHERE user_id IS ? AND name = ?&quot;</span><span class="p">,</span>
+                    <span class="p">(</span><span class="n">content</span><span class="p">,</span> <span class="n">_now_epoch</span><span class="p">(),</span> <span class="n">user_id</span><span class="p">,</span> <span class="n">name</span><span class="p">),</span>
                 <span class="p">)</span>
             <span class="k">else</span><span class="p">:</span>
                 <span class="n">count</span> <span class="o">=</span> <span class="n">conn</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span>
-                    <span class="s2">&quot;SELECT COUNT(*) FROM working_blocks&quot;</span>
+                    <span class="s2">&quot;SELECT COUNT(*) FROM working_blocks WHERE user_id IS ?&quot;</span><span class="p">,</span>
+                    <span class="p">(</span><span class="n">user_id</span><span class="p">,),</span>
                 <span class="p">)</span><span class="o">.</span><span class="n">fetchone</span><span class="p">()[</span><span class="mi">0</span><span class="p">]</span>
                 <span class="n">conn</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span>
                     <span class="s2">&quot;INSERT INTO working_blocks &quot;</span>
-                    <span class="s2">&quot;(name, content, pinned_order, updated_at) &quot;</span>
-                    <span class="s2">&quot;VALUES (?, ?, ?, ?)&quot;</span><span class="p">,</span>
-                    <span class="p">(</span><span class="n">name</span><span class="p">,</span> <span class="n">content</span><span class="p">,</span> <span class="n">count</span><span class="p">,</span> <span class="n">_now_epoch</span><span class="p">()),</span>
+                    <span class="s2">&quot;(user_id, name, content, pinned_order, updated_at) &quot;</span>
+                    <span class="s2">&quot;VALUES (?, ?, ?, ?, ?)&quot;</span><span class="p">,</span>
+                    <span class="p">(</span><span class="n">user_id</span><span class="p">,</span> <span class="n">name</span><span class="p">,</span> <span class="n">content</span><span class="p">,</span> <span class="n">count</span><span class="p">,</span> <span class="n">_now_epoch</span><span class="p">()),</span>
                 <span class="p">)</span>
             <span class="n">conn</span><span class="o">.</span><span class="n">commit</span><span class="p">()</span>
 
 <div class="viewcode-block" id="SqliteMemory.append_block">
 <a class="viewcode-back" href="../../../api/jeevesagent/memory/sqlite/index.html#jeevesagent.SqliteMemory.append_block">[docs]</a>
-    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">append_block</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">content</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">append_block</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">content</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">user_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
         <span class="k">async</span> <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">_async_lock</span><span class="p">:</span>
             <span class="k">await</span> <span class="n">anyio</span><span class="o">.</span><span class="n">to_thread</span><span class="o">.</span><span class="n">run_sync</span><span class="p">(</span>
-                <span class="bp">self</span><span class="o">.</span><span class="n">_append_block_sync</span><span class="p">,</span> <span class="n">name</span><span class="p">,</span> <span class="n">content</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_append_block_sync</span><span class="p">,</span> <span class="n">name</span><span class="p">,</span> <span class="n">content</span><span class="p">,</span> <span class="n">user_id</span>
             <span class="p">)</span></div>
 
 
-    <span class="k">def</span><span class="w"> </span><span class="nf">_append_block_sync</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">content</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">_append_block_sync</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">content</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">user_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
         <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">_connect</span><span class="p">()</span> <span class="k">as</span> <span class="n">conn</span><span class="p">:</span>
             <span class="n">existing</span> <span class="o">=</span> <span class="n">conn</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span>
                 <span class="s2">&quot;SELECT content, pinned_order FROM working_blocks &quot;</span>
-                <span class="s2">&quot;WHERE name = ?&quot;</span><span class="p">,</span>
-                <span class="p">(</span><span class="n">name</span><span class="p">,),</span>
+                <span class="s2">&quot;WHERE user_id IS ? AND name = ?&quot;</span><span class="p">,</span>
+                <span class="p">(</span><span class="n">user_id</span><span class="p">,</span> <span class="n">name</span><span class="p">),</span>
             <span class="p">)</span><span class="o">.</span><span class="n">fetchone</span><span class="p">()</span>
             <span class="k">if</span> <span class="n">existing</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
                 <span class="n">count</span> <span class="o">=</span> <span class="n">conn</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span>
-                    <span class="s2">&quot;SELECT COUNT(*) FROM working_blocks&quot;</span>
+                    <span class="s2">&quot;SELECT COUNT(*) FROM working_blocks WHERE user_id IS ?&quot;</span><span class="p">,</span>
+                    <span class="p">(</span><span class="n">user_id</span><span class="p">,),</span>
                 <span class="p">)</span><span class="o">.</span><span class="n">fetchone</span><span class="p">()[</span><span class="mi">0</span><span class="p">]</span>
                 <span class="n">conn</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span>
                     <span class="s2">&quot;INSERT INTO working_blocks &quot;</span>
-                    <span class="s2">&quot;(name, content, pinned_order, updated_at) &quot;</span>
-                    <span class="s2">&quot;VALUES (?, ?, ?, ?)&quot;</span><span class="p">,</span>
-                    <span class="p">(</span><span class="n">name</span><span class="p">,</span> <span class="n">content</span><span class="p">,</span> <span class="n">count</span><span class="p">,</span> <span class="n">_now_epoch</span><span class="p">()),</span>
+                    <span class="s2">&quot;(user_id, name, content, pinned_order, updated_at) &quot;</span>
+                    <span class="s2">&quot;VALUES (?, ?, ?, ?, ?)&quot;</span><span class="p">,</span>
+                    <span class="p">(</span><span class="n">user_id</span><span class="p">,</span> <span class="n">name</span><span class="p">,</span> <span class="n">content</span><span class="p">,</span> <span class="n">count</span><span class="p">,</span> <span class="n">_now_epoch</span><span class="p">()),</span>
                 <span class="p">)</span>
             <span class="k">else</span><span class="p">:</span>
                 <span class="n">conn</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span>
                     <span class="s2">&quot;UPDATE working_blocks SET content = ?, updated_at = ? &quot;</span>
-                    <span class="s2">&quot;WHERE name = ?&quot;</span><span class="p">,</span>
-                    <span class="p">(</span><span class="n">existing</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">+</span> <span class="n">content</span><span class="p">,</span> <span class="n">_now_epoch</span><span class="p">(),</span> <span class="n">name</span><span class="p">),</span>
+                    <span class="s2">&quot;WHERE user_id IS ? AND name = ?&quot;</span><span class="p">,</span>
+                    <span class="p">(</span><span class="n">existing</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">+</span> <span class="n">content</span><span class="p">,</span> <span class="n">_now_epoch</span><span class="p">(),</span> <span class="n">user_id</span><span class="p">,</span> <span class="n">name</span><span class="p">),</span>
                 <span class="p">)</span>
             <span class="n">conn</span><span class="o">.</span><span class="n">commit</span><span class="p">()</span>
 

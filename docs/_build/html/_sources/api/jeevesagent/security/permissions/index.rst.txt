@@ -32,6 +32,7 @@ Classes
 
    jeevesagent.security.permissions.AllowAll
    jeevesagent.security.permissions.Mode
+   jeevesagent.security.permissions.PerUserPermissions
    jeevesagent.security.permissions.StandardPermissions
 
 
@@ -45,7 +46,7 @@ Module Contents
    The default for :class:`Agent` when no permissions are configured.
 
 
-   .. py:method:: check(call: jeevesagent.core.types.ToolCall, *, context: collections.abc.Mapping[str, Any]) -> jeevesagent.core.types.PermissionDecision
+   .. py:method:: check(call: jeevesagent.core.types.ToolCall, *, context: collections.abc.Mapping[str, Any], user_id: str | None = None) -> jeevesagent.core.types.PermissionDecision
       :async:
 
 
@@ -75,12 +76,51 @@ Module Contents
 
 
 
+.. py:class:: PerUserPermissions(*, policies: collections.abc.Mapping[str | None, Any], default: Any)
+
+   Map ``user_id`` to a different permission policy.
+
+   The common multi-tenant shape: admins get one policy, paid
+   users get another, free users get a third. Construct with a
+   mapping of ``user_id -> Permissions`` plus a ``default``
+   fallback for unmapped users (including ``None``)::
+
+       from jeevesagent import (
+           PerUserPermissions, StandardPermissions, Mode,
+       )
+
+       permissions = PerUserPermissions(
+           policies={
+               "admin_alice": StandardPermissions(mode=Mode.BYPASS),
+               "paid_user_42": StandardPermissions(
+                   mode=Mode.ACCEPT_EDITS,
+               ),
+           },
+           default=StandardPermissions(
+               mode=Mode.DEFAULT,
+               denied_tools=["bash", "delete_user"],
+           ),
+       )
+       agent = Agent("...", permissions=permissions)
+
+   Each ``check`` call routes to the policy keyed by ``user_id``
+   (the live :class:`~jeevesagent.RunContext`'s value, threaded
+   through by the agent loop). When no policy matches, the
+   ``default`` decides — most apps want a strict default and add
+   permissive policies for trusted users.
+
+
+   .. py:method:: check(call: jeevesagent.core.types.ToolCall, *, context: collections.abc.Mapping[str, Any], user_id: str | None = None) -> jeevesagent.core.types.PermissionDecision
+      :async:
+
+
+
 .. py:class:: StandardPermissions(*, mode: Mode = Mode.DEFAULT, allowed_tools: list[str] | None = None, denied_tools: list[str] | None = None)
 
    Mode + allow/deny-list permission policy.
 
 
-   .. py:method:: check(call: jeevesagent.core.types.ToolCall, *, context: collections.abc.Mapping[str, Any]) -> jeevesagent.core.types.PermissionDecision
+   .. py:method:: check(call: jeevesagent.core.types.ToolCall, *, context: collections.abc.Mapping[str, Any], user_id: str | None = None) -> jeevesagent.core.types.PermissionDecision
       :async:
 
 

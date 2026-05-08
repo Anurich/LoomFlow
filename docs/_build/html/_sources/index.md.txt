@@ -73,6 +73,13 @@ api/jeevesagent/index
 migration_0.1_to_0.2
 ```
 
+> **Hosting note** — this site renders correctly when built
+> locally (`sphinx-build -b html docs docs/_build/html`) and is
+> wired up for ReadTheDocs via `.readthedocs.yaml`. To make it
+> publicly accessible, import the repo at
+> <https://readthedocs.org/> (one-time setup; subsequent pushes
+> auto-rebuild).
+
 ## Indices
 
 * {ref}`genindex`

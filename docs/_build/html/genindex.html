@@ -1475,11 +1475,17 @@
 </li>
           <li><a href="api/jeevesagent/index.html#jeevesagent.Permissions.check">(jeevesagent.Permissions method)</a>
 </li>
+          <li><a href="api/jeevesagent/index.html#jeevesagent.PerUserPermissions.check">(jeevesagent.PerUserPermissions method)</a>
+</li>
           <li><a href="api/jeevesagent/security/index.html#jeevesagent.security.AllowAll.check">(jeevesagent.security.AllowAll method)</a>
 </li>
           <li><a href="api/jeevesagent/security/permissions/index.html#jeevesagent.security.permissions.AllowAll.check">(jeevesagent.security.permissions.AllowAll method)</a>
 </li>
+          <li><a href="api/jeevesagent/security/permissions/index.html#jeevesagent.security.permissions.PerUserPermissions.check">(jeevesagent.security.permissions.PerUserPermissions method)</a>
+</li>
           <li><a href="api/jeevesagent/security/permissions/index.html#jeevesagent.security.permissions.StandardPermissions.check">(jeevesagent.security.permissions.StandardPermissions method)</a>
+</li>
+          <li><a href="api/jeevesagent/security/index.html#jeevesagent.security.PerUserPermissions.check">(jeevesagent.security.PerUserPermissions method)</a>
 </li>
           <li><a href="api/jeevesagent/security/index.html#jeevesagent.security.StandardPermissions.check">(jeevesagent.security.StandardPermissions method)</a>
 </li>
@@ -1664,14 +1670,14 @@
           <li><a href="api/jeevesagent/index.html#jeevesagent.Event.completed">(jeevesagent.Event class method)</a>
 </li>
         </ul></li>
+    </ul></td>
+    <td style="width: 33%; vertical-align: top;"><ul>
         <li><a href="api/jeevesagent/governance/index.html#jeevesagent.governance.compute_backoff">compute_backoff() (in module jeevesagent.governance)</a>
 
         <ul>
           <li><a href="api/jeevesagent/governance/retry/index.html#jeevesagent.governance.retry.compute_backoff">(in module jeevesagent.governance.retry)</a>
 </li>
         </ul></li>
-    </ul></td>
-    <td style="width: 33%; vertical-align: top;"><ul>
         <li><a href="api/jeevesagent/core/index.html#jeevesagent.core.Fact.confidence">confidence (jeevesagent.core.Fact attribute)</a>
 
         <ul>
@@ -5985,6 +5991,16 @@
           <li><a href="api/jeevesagent/index.html#jeevesagent.FreshnessPolicy.per_source">(jeevesagent.FreshnessPolicy attribute)</a>
 </li>
         </ul></li>
+        <li><a href="api/jeevesagent/governance/budget/index.html#jeevesagent.governance.budget.BudgetConfig.per_user_max_cost_usd">per_user_max_cost_usd (jeevesagent.governance.budget.BudgetConfig attribute)</a>
+</li>
+        <li><a href="api/jeevesagent/governance/budget/index.html#jeevesagent.governance.budget.BudgetConfig.per_user_max_input_tokens">per_user_max_input_tokens (jeevesagent.governance.budget.BudgetConfig attribute)</a>
+</li>
+        <li><a href="api/jeevesagent/governance/budget/index.html#jeevesagent.governance.budget.BudgetConfig.per_user_max_output_tokens">per_user_max_output_tokens (jeevesagent.governance.budget.BudgetConfig attribute)</a>
+</li>
+        <li><a href="api/jeevesagent/governance/budget/index.html#jeevesagent.governance.budget.BudgetConfig.per_user_max_tokens">per_user_max_tokens (jeevesagent.governance.budget.BudgetConfig attribute)</a>
+</li>
+        <li><a href="api/jeevesagent/governance/budget/index.html#jeevesagent.governance.budget.BudgetConfig.per_user_max_wall_clock">per_user_max_wall_clock (jeevesagent.governance.budget.BudgetConfig attribute)</a>
+</li>
         <li><a href="api/jeevesagent/core/errors/index.html#jeevesagent.core.errors.PermanentModelError">PermanentModelError</a>, <a href="api/jeevesagent/core/index.html#jeevesagent.core.PermanentModelError">[1]</a>, <a href="api/jeevesagent/index.html#jeevesagent.PermanentModelError">[2]</a>
 </li>
         <li><a href="api/jeevesagent/core/index.html#jeevesagent.core.EventKind.PERMISSION_ASK">PERMISSION_ASK (jeevesagent.core.EventKind attribute)</a>
@@ -6033,6 +6049,14 @@
           <li><a href="api/jeevesagent/architecture/index.html#jeevesagent.architecture.Dependencies.permissions">(jeevesagent.architecture.Dependencies attribute)</a>
 </li>
           <li><a href="api/jeevesagent/index.html#jeevesagent.Dependencies.permissions">(jeevesagent.Dependencies attribute)</a>
+</li>
+        </ul></li>
+        <li><a href="api/jeevesagent/index.html#jeevesagent.PerUserPermissions">PerUserPermissions (class in jeevesagent)</a>
+
+        <ul>
+          <li><a href="api/jeevesagent/security/index.html#jeevesagent.security.PerUserPermissions">(class in jeevesagent.security)</a>
+</li>
+          <li><a href="api/jeevesagent/security/permissions/index.html#jeevesagent.security.permissions.PerUserPermissions">(class in jeevesagent.security.permissions)</a>
 </li>
         </ul></li>
         <li><a href="api/jeevesagent/core/index.html#jeevesagent.core.MemoryBlock.pinned_order">pinned_order (jeevesagent.core.MemoryBlock attribute)</a>
@@ -6091,6 +6115,8 @@
           <li><a href="api/jeevesagent/security/hooks/index.html#jeevesagent.security.hooks.HookRegistry.post_tool">(jeevesagent.security.hooks.HookRegistry method)</a>
 </li>
         </ul></li>
+    </ul></td>
+    <td style="width: 33%; vertical-align: top;"><ul>
         <li><a href="api/jeevesagent/index.html#jeevesagent.HookRegistry.post_tool_hooks">post_tool_hooks (jeevesagent.HookRegistry attribute)</a>
 
         <ul>
@@ -6107,8 +6133,6 @@
           <li><a href="api/jeevesagent/memory/postgres_facts/index.html#jeevesagent.memory.postgres_facts.PostgresFactStore">(class in jeevesagent.memory.postgres_facts)</a>
 </li>
         </ul></li>
-    </ul></td>
-    <td style="width: 33%; vertical-align: top;"><ul>
         <li><a href="api/jeevesagent/index.html#jeevesagent.PostgresJournalStore">PostgresJournalStore (class in jeevesagent)</a>
 
         <ul>
@@ -8467,8 +8491,6 @@
           <li><a href="api/jeevesagent/index.html#jeevesagent.MemoryBlock.updated_at">(jeevesagent.MemoryBlock attribute)</a>
 </li>
         </ul></li>
-    </ul></td>
-    <td style="width: 33%; vertical-align: top;"><ul>
         <li><a href="api/jeevesagent/mcp/index.html#jeevesagent.mcp.MCPServerSpec.url">url (jeevesagent.mcp.MCPServerSpec attribute)</a>
 
         <ul>
@@ -8477,6 +8499,8 @@
           <li><a href="api/jeevesagent/index.html#jeevesagent.MCPServerSpec.url">(jeevesagent.MCPServerSpec attribute)</a>
 </li>
         </ul></li>
+    </ul></td>
+    <td style="width: 33%; vertical-align: top;"><ul>
         <li><a href="api/jeevesagent/index.html#jeevesagent.Usage">Usage (class in jeevesagent)</a>
 
         <ul>
@@ -8499,6 +8523,12 @@
           <li><a href="api/jeevesagent/index.html#jeevesagent.ScriptedTurn.usage">(jeevesagent.ScriptedTurn attribute)</a>
 </li>
         </ul></li>
+        <li><a href="api/jeevesagent/governance/budget/index.html#jeevesagent.governance.budget.StandardBudget.usage_for">usage_for() (jeevesagent.governance.budget.StandardBudget method)</a>
+
+        <ul>
+          <li><a href="api/jeevesagent/governance/index.html#jeevesagent.governance.StandardBudget.usage_for">(jeevesagent.governance.StandardBudget method)</a>
+</li>
+        </ul></li>
         <li><a href="api/jeevesagent/core/index.html#jeevesagent.core.Role.USER">USER (jeevesagent.core.Role attribute)</a>
 
         <ul>
@@ -8507,9 +8537,13 @@
           <li><a href="api/jeevesagent/index.html#jeevesagent.Role.USER">(jeevesagent.Role attribute)</a>
 </li>
         </ul></li>
-        <li><a href="api/jeevesagent/core/context/index.html#jeevesagent.core.context.RunContext.user_id">user_id (jeevesagent.core.context.RunContext attribute)</a>
+        <li><a href="api/jeevesagent/index.html#jeevesagent.AuditEntry.user_id">user_id (jeevesagent.AuditEntry attribute)</a>
 
         <ul>
+          <li><a href="api/jeevesagent/core/index.html#jeevesagent.core.AuditEntry.user_id">(jeevesagent.core.AuditEntry attribute)</a>
+</li>
+          <li><a href="api/jeevesagent/core/context/index.html#jeevesagent.core.context.RunContext.user_id">(jeevesagent.core.context.RunContext attribute)</a>
+</li>
           <li><a href="api/jeevesagent/core/index.html#jeevesagent.core.Episode.user_id">(jeevesagent.core.Episode attribute)</a>
 </li>
           <li><a href="api/jeevesagent/core/index.html#jeevesagent.core.Fact.user_id">(jeevesagent.core.Fact attribute)</a>
@@ -8519,6 +8553,8 @@
           <li><a href="api/jeevesagent/core/index.html#jeevesagent.core.MemoryProfile.user_id">(jeevesagent.core.MemoryProfile attribute)</a>
 </li>
           <li><a href="api/jeevesagent/core/index.html#jeevesagent.core.RunContext.user_id">(jeevesagent.core.RunContext attribute)</a>
+</li>
+          <li><a href="api/jeevesagent/core/types/index.html#jeevesagent.core.types.AuditEntry.user_id">(jeevesagent.core.types.AuditEntry attribute)</a>
 </li>
           <li><a href="api/jeevesagent/core/types/index.html#jeevesagent.core.types.Episode.user_id">(jeevesagent.core.types.Episode attribute)</a>
 </li>

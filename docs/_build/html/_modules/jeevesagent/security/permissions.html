@@ -425,7 +425,11 @@
 <div class="viewcode-block" id="AllowAll.check">
 <a class="viewcode-back" href="../../../api/jeevesagent/security/permissions/index.html#jeevesagent.AllowAll.check">[docs]</a>
     <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">check</span><span class="p">(</span>
-        <span class="bp">self</span><span class="p">,</span> <span class="n">call</span><span class="p">:</span> <span class="n">ToolCall</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">context</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="n">call</span><span class="p">:</span> <span class="n">ToolCall</span><span class="p">,</span>
+        <span class="o">*</span><span class="p">,</span>
+        <span class="n">context</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">],</span>
+        <span class="n">user_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
     <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">PermissionDecision</span><span class="p">:</span>
         <span class="k">return</span> <span class="n">PermissionDecision</span><span class="o">.</span><span class="n">allow_</span><span class="p">()</span></div>
 </div>
@@ -451,7 +455,11 @@
 <div class="viewcode-block" id="StandardPermissions.check">
 <a class="viewcode-back" href="../../../api/jeevesagent/security/permissions/index.html#jeevesagent.StandardPermissions.check">[docs]</a>
     <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">check</span><span class="p">(</span>
-        <span class="bp">self</span><span class="p">,</span> <span class="n">call</span><span class="p">:</span> <span class="n">ToolCall</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">context</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="n">call</span><span class="p">:</span> <span class="n">ToolCall</span><span class="p">,</span>
+        <span class="o">*</span><span class="p">,</span>
+        <span class="n">context</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">],</span>
+        <span class="n">user_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
     <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">PermissionDecision</span><span class="p">:</span>
         <span class="k">if</span> <span class="n">call</span><span class="o">.</span><span class="n">tool</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_denied</span><span class="p">:</span>
             <span class="k">return</span> <span class="n">PermissionDecision</span><span class="o">.</span><span class="n">deny_</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">call</span><span class="o">.</span><span class="n">tool</span><span class="si">}</span><span class="s2">: denied by policy&quot;</span><span class="p">)</span>
@@ -472,6 +480,80 @@
     <span class="k">def</span><span class="w"> </span><span class="nf">strict</span><span class="p">(</span><span class="bp">cls</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">StandardPermissions</span><span class="p">:</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;Convenience: default-mode permissions with no overrides.&quot;&quot;&quot;</span>
         <span class="k">return</span> <span class="bp">cls</span><span class="p">(</span><span class="n">mode</span><span class="o">=</span><span class="n">Mode</span><span class="o">.</span><span class="n">DEFAULT</span><span class="p">)</span></div>
+</div>
+
+
+
+<div class="viewcode-block" id="PerUserPermissions">
+<a class="viewcode-back" href="../../../api/jeevesagent/security/permissions/index.html#jeevesagent.PerUserPermissions">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">PerUserPermissions</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Map ``user_id`` to a different permission policy.</span>
+
+<span class="sd">    The common multi-tenant shape: admins get one policy, paid</span>
+<span class="sd">    users get another, free users get a third. Construct with a</span>
+<span class="sd">    mapping of ``user_id -&gt; Permissions`` plus a ``default``</span>
+<span class="sd">    fallback for unmapped users (including ``None``)::</span>
+
+<span class="sd">        from jeevesagent import (</span>
+<span class="sd">            PerUserPermissions, StandardPermissions, Mode,</span>
+<span class="sd">        )</span>
+
+<span class="sd">        permissions = PerUserPermissions(</span>
+<span class="sd">            policies={</span>
+<span class="sd">                &quot;admin_alice&quot;: StandardPermissions(mode=Mode.BYPASS),</span>
+<span class="sd">                &quot;paid_user_42&quot;: StandardPermissions(</span>
+<span class="sd">                    mode=Mode.ACCEPT_EDITS,</span>
+<span class="sd">                ),</span>
+<span class="sd">            },</span>
+<span class="sd">            default=StandardPermissions(</span>
+<span class="sd">                mode=Mode.DEFAULT,</span>
+<span class="sd">                denied_tools=[&quot;bash&quot;, &quot;delete_user&quot;],</span>
+<span class="sd">            ),</span>
+<span class="sd">        )</span>
+<span class="sd">        agent = Agent(&quot;...&quot;, permissions=permissions)</span>
+
+<span class="sd">    Each ``check`` call routes to the policy keyed by ``user_id``</span>
+<span class="sd">    (the live :class:`~jeevesagent.RunContext`&#39;s value, threaded</span>
+<span class="sd">    through by the agent loop). When no policy matches, the</span>
+<span class="sd">    ``default`` decides — most apps want a strict default and add</span>
+<span class="sd">    permissive policies for trusted users.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="o">*</span><span class="p">,</span>
+        <span class="n">policies</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span><span class="p">,</span> <span class="n">Any</span><span class="p">],</span>
+        <span class="n">default</span><span class="p">:</span> <span class="n">Any</span><span class="p">,</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="c1"># ``Any`` for the policy values because the exact shape is</span>
+        <span class="c1"># the :class:`~jeevesagent.Permissions` protocol — narrowing</span>
+        <span class="c1"># to a specific class would lock out custom impls.</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_policies</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">(</span><span class="n">policies</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_default</span> <span class="o">=</span> <span class="n">default</span>
+
+<div class="viewcode-block" id="PerUserPermissions.check">
+<a class="viewcode-back" href="../../../api/jeevesagent/security/permissions/index.html#jeevesagent.PerUserPermissions.check">[docs]</a>
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">check</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="n">call</span><span class="p">:</span> <span class="n">ToolCall</span><span class="p">,</span>
+        <span class="o">*</span><span class="p">,</span>
+        <span class="n">context</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">],</span>
+        <span class="n">user_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">PermissionDecision</span><span class="p">:</span>
+        <span class="n">policy</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_policies</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">user_id</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_default</span><span class="p">)</span>
+        <span class="c1"># Forward both the call + context + user_id to the underlying</span>
+        <span class="c1"># policy. Older Permissions impls without the user_id kwarg</span>
+        <span class="c1"># fall back via the ``except TypeError`` so the framework</span>
+        <span class="c1"># never breaks on a legacy custom policy embedded inside a</span>
+        <span class="c1"># PerUserPermissions mapping.</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="k">return</span> <span class="k">await</span> <span class="n">policy</span><span class="o">.</span><span class="n">check</span><span class="p">(</span>  <span class="c1"># type: ignore[no-any-return]</span>
+                <span class="n">call</span><span class="p">,</span> <span class="n">context</span><span class="o">=</span><span class="n">context</span><span class="p">,</span> <span class="n">user_id</span><span class="o">=</span><span class="n">user_id</span>
+            <span class="p">)</span>
+        <span class="k">except</span> <span class="ne">TypeError</span><span class="p">:</span>
+            <span class="k">return</span> <span class="k">await</span> <span class="n">policy</span><span class="o">.</span><span class="n">check</span><span class="p">(</span>  <span class="c1"># type: ignore[no-any-return]</span>
+                <span class="n">call</span><span class="p">,</span> <span class="n">context</span><span class="o">=</span><span class="n">context</span>
+            <span class="p">)</span></div>
 </div>
 
 </pre></div>
