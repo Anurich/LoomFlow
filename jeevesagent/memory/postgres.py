@@ -38,6 +38,35 @@ from .embedder import HashEmbedder
 
 DEFAULT_NAMESPACE = "default"
 
+# Postgres can't carry NULL inside a primary key column, so the
+# anonymous bucket needs a non-NULL representation on the wire.
+# Earlier versions used the empty string ``''`` for this — that
+# silently conflicts with anyone who passes ``""`` as a real
+# user_id and looks like a hack in the schema. M10 replaces it
+# with this reserved sentinel that's guaranteed not to collide
+# with any sane real user_id (the double-underscore-jeeves prefix
+# is a hard rule callers must not violate; we raise if they try).
+_ANON_USER_ID = "__jeeves_anon_user__"
+
+
+def _encode_user_id(user_id: str | None) -> str:
+    """Map Python ``user_id`` (``None`` for anonymous) to the
+    on-wire representation. Rejects callers who try to use the
+    sentinel value as a real user_id — that would let one user
+    silently impersonate the anonymous bucket."""
+    if user_id == _ANON_USER_ID:
+        raise ValueError(
+            f"user_id {_ANON_USER_ID!r} is reserved by JeevesAgent for "
+            "the anonymous bucket; choose a different identifier."
+        )
+    return user_id if user_id is not None else _ANON_USER_ID
+
+
+def _decode_user_id(wire_value: str) -> str | None:
+    """Inverse of :func:`_encode_user_id`: reverse the sentinel
+    back to ``None`` for the in-memory model."""
+    return None if wire_value == _ANON_USER_ID else wire_value
+
 
 class PostgresMemory:
     """Postgres-backed :class:`Memory`.
@@ -143,10 +172,13 @@ class PostgresMemory:
                 "CREATE TABLE IF NOT EXISTS memory_blocks ("
                 "  namespace TEXT NOT NULL,"
                 # ``user_id`` cannot be NULL inside a PK in Postgres,
-                # so the anonymous bucket is the empty string on the
-                # wire; the application layer round-trips it back to
-                # ``None`` on reads.
-                "  user_id TEXT NOT NULL DEFAULT '',"
+                # so the anonymous bucket gets a reserved sentinel
+                # on the wire (round-tripped to ``None`` in code).
+                # The default also uses the sentinel so legacy
+                # callers that don't set the column land in the
+                # anonymous bucket — same behaviour as Python's
+                # ``user_id=None`` default elsewhere.
+                f"  user_id TEXT NOT NULL DEFAULT '{_ANON_USER_ID}',"
                 "  name TEXT NOT NULL,"
                 "  content TEXT NOT NULL,"
                 "  pinned_order INT NOT NULL DEFAULT 0,"
@@ -155,11 +187,20 @@ class PostgresMemory:
                 ");"
             ),
             # Idempotent ALTER for upgrades from pre-M9 schemas. The
-            # default '' ensures existing rows migrate cleanly into
-            # the anonymous bucket, and the new PK constraint can
-            # then be enforced.
+            # default '' was used by 0.9.x; 0.10+ uses the sentinel.
+            # Both ALTERs are no-ops if the column already exists at
+            # the right shape.
             "ALTER TABLE memory_blocks ADD COLUMN IF NOT EXISTS "
-            "user_id TEXT NOT NULL DEFAULT '';",
+            f"user_id TEXT NOT NULL DEFAULT '{_ANON_USER_ID}';",
+            # Migrate 0.9.x-era empty-string rows to the sentinel.
+            # No-op once already migrated.
+            "UPDATE memory_blocks SET user_id = "
+            f"'{_ANON_USER_ID}' WHERE user_id = '';",
+            # Update the column default so freshly-inserted rows
+            # without an explicit user_id (legacy callers) land in
+            # the sentinel bucket too.
+            "ALTER TABLE memory_blocks ALTER COLUMN user_id "
+            f"SET DEFAULT '{_ANON_USER_ID}';",
             (
                 f"CREATE TABLE IF NOT EXISTS episodes ("
                 f"  id TEXT PRIMARY KEY,"
@@ -205,8 +246,9 @@ class PostgresMemory:
     async def working(
         self, *, user_id: str | None = None
     ) -> list[MemoryBlock]:
-        # Empty string is the anonymous bucket on the wire (Postgres
-        # PK can't carry NULL); round-trip back to ``None`` here.
+        # Encode None → sentinel for the wire (Postgres PK can't
+        # carry NULL); the row's user_id never appears in the
+        # returned MemoryBlock so no decode needed here.
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 "SELECT name, content, updated_at, pinned_order "
@@ -214,7 +256,7 @@ class PostgresMemory:
                 "AND user_id = $2 "
                 "ORDER BY pinned_order ASC",
                 self._namespace,
-                user_id or "",
+                _encode_user_id(user_id),
             )
         return [
             MemoryBlock(
@@ -236,7 +278,7 @@ class PostgresMemory:
                 "ON CONFLICT (namespace, user_id, name) DO UPDATE "
                 "SET content = EXCLUDED.content, updated_at = NOW();",
                 self._namespace,
-                user_id or "",
+                _encode_user_id(user_id),
                 name,
                 content,
             )
@@ -252,7 +294,7 @@ class PostgresMemory:
                 "SET content = memory_blocks.content || EXCLUDED.content, "
                 "    updated_at = NOW();",
                 self._namespace,
-                user_id or "",
+                _encode_user_id(user_id),
                 name,
                 content,
             )

@@ -141,6 +141,8 @@ from .runtime import (
 from .security import (
     AllowAll,
     AuditLog,
+    DictSecrets,
+    EnvSecrets,
     FileAuditLog,
     FilesystemSandbox,
     HookRegistry,
@@ -226,6 +228,8 @@ __all__ = [
     "TreeOfThoughts",
     "resolve_architecture",
     "AllowAll",
+    "DictSecrets",
+    "EnvSecrets",
     "PerUserPermissions",
     "StandardPermissions",
     "HookRegistry",

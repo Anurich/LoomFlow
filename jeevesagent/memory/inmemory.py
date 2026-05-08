@@ -14,6 +14,7 @@ from typing import Any
 
 import anyio
 
+from ..core._eviction import BoundedDict
 from ..core.context import IsolationWarning
 from ..core.types import (
     Episode,
@@ -27,21 +28,45 @@ from ..core.types import (
 from .consolidator import Consolidator
 from .facts import FactStore, InMemoryFactStore
 
+_DEFAULT_MAX_USERS = 100_000
+_DEFAULT_USER_TTL_SECONDS = 24 * 3600  # 24h idle
+
 
 class InMemoryMemory:
-    """Dict-backed implementation of :class:`Memory`."""
+    """Dict-backed implementation of :class:`Memory`.
+
+    Multi-tenant accounting (M10): per-user working-block state is
+    held in a bounded LRU + TTL container so a runaway tenant or
+    one-shot user_id explosion can't grow the in-process dict
+    without limit. Defaults: ``max_users=100_000`` and
+    ``user_idle_ttl_seconds=86_400`` (24h). Pass ``None`` to
+    disable bounding for single-tenant or fixed-tenant deployments.
+    Eviction *drops* a user's working blocks; callers needing
+    durable spill-to-disk should use :class:`SqliteMemory` or a
+    SQL-backed memory instead.
+    """
 
     def __init__(
         self,
         *,
         consolidator: Consolidator | None = None,
         fact_store: FactStore | None = None,
+        max_users: int | None = _DEFAULT_MAX_USERS,
+        user_idle_ttl_seconds: float | None = _DEFAULT_USER_TTL_SECONDS,
     ) -> None:
         # Working blocks are partitioned by ``user_id`` to keep one
-        # tenant's pinned context invisible to another. Storage key
-        # is ``(user_id, name)``; ``user_id=None`` is its own bucket
-        # (anonymous / single-tenant).
-        self._blocks: dict[tuple[str | None, str], MemoryBlock] = {}
+        # tenant's pinned context invisible to another. Outer key is
+        # the user_id (so eviction drops ALL of a user's blocks
+        # together — the right unit). Inner dict is name -> block.
+        # ``user_id=None`` is its own bucket (anonymous /
+        # single-tenant) and isn't subject to TTL eviction unless it
+        # also goes idle.
+        self._blocks: BoundedDict[str | None, dict[str, MemoryBlock]] = (
+            BoundedDict(
+                max_keys=max_users,
+                ttl_seconds=user_idle_ttl_seconds,
+            )
+        )
         self._episodes: dict[str, Episode] = {}
         self._consolidator = consolidator
         self.facts: FactStore = (
@@ -61,43 +86,40 @@ class InMemoryMemory:
         self, *, user_id: str | None = None
     ) -> list[MemoryBlock]:
         async with self._lock:
-            scoped = [
-                b for (uid, _name), b in self._blocks.items() if uid == user_id
-            ]
+            user_blocks = self._blocks.get(user_id, {})
+            scoped = list(user_blocks.values())
         return sorted(scoped, key=lambda b: b.pinned_order)
 
     async def update_block(
         self, name: str, content: str, *, user_id: str | None = None
     ) -> None:
-        key = (user_id, name)
         async with self._lock:
-            existing = self._blocks.get(key)
-            # Pinned-order is per-user: count blocks already in this
-            # user's bucket when assigning a slot to a new block.
-            user_count = sum(
-                1 for (uid, _) in self._blocks if uid == user_id
+            user_blocks = self._blocks.setdefault(user_id, {})
+            existing = user_blocks.get(name)
+            # New block's slot is the count BEFORE insertion;
+            # update keeps the existing slot so order is stable.
+            new_order = (
+                existing.pinned_order if existing is not None
+                else len(user_blocks)
             )
-            self._blocks[key] = MemoryBlock(
+            user_blocks[name] = MemoryBlock(
                 name=name,
                 content=content,
-                pinned_order=existing.pinned_order if existing else user_count,
+                pinned_order=new_order,
             )
 
     async def append_block(
         self, name: str, content: str, *, user_id: str | None = None
     ) -> None:
-        key = (user_id, name)
         async with self._lock:
-            existing = self._blocks.get(key)
+            user_blocks = self._blocks.setdefault(user_id, {})
+            existing = user_blocks.get(name)
             if existing is None:
-                user_count = sum(
-                    1 for (uid, _) in self._blocks if uid == user_id
-                )
-                self._blocks[key] = MemoryBlock(
-                    name=name, content=content, pinned_order=user_count
+                user_blocks[name] = MemoryBlock(
+                    name=name, content=content, pinned_order=len(user_blocks)
                 )
             else:
-                self._blocks[key] = MemoryBlock(
+                user_blocks[name] = MemoryBlock(
                     name=name,
                     content=existing.content + content,
                     pinned_order=existing.pinned_order,
@@ -337,13 +359,14 @@ class InMemoryMemory:
     # ---- introspection (test helpers) -----------------------------------
 
     def snapshot(self) -> dict[str, Any]:
-        # Block keys are now ``(user_id, name)`` tuples; flatten to
-        # a string key for JSON-friendly snapshots so test
-        # introspection keeps working without per-tuple keys.
+        # Flatten the nested ``user_id -> name -> block`` shape into
+        # JSON-friendly ``"<user_id>::<name>"`` keys for test
+        # introspection.
+        flat: dict[str, Any] = {}
+        for uid, user_blocks in self._blocks.items():
+            for name, v in user_blocks.items():
+                flat[f"{uid or ''}::{name}"] = v.model_dump()
         return {
-            "blocks": {
-                f"{uid or ''}::{name}": v.model_dump()
-                for (uid, name), v in self._blocks.items()
-            },
+            "blocks": flat,
             "episodes": {k: v.model_dump() for k, v in self._episodes.items()},
         }

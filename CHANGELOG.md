@@ -128,6 +128,69 @@ models opt in.
   fences before parsing, since real models occasionally wrap
   output despite being told not to.
 
+### Added — Production hardening (M10)
+
+The "best-in-class" pass: closes seven holes a Google reviewer
+called out (unbounded per-user state, Postgres empty-string-for-
+NULL hack, silent auto-extract, silent ``ask`` bypass, missing
+deprecation infrastructure, hard-coded API-key resolution, no
+multi-tenant load proof). Every change is additive; default
+behaviour is preserved unless a caller opts in.
+
+* **Bounded per-user state (M10.1).** ``StandardBudget._by_user``
+  and ``InMemoryMemory._blocks`` now use a new
+  :class:`jeevesagent.core._eviction.BoundedDict` with LRU +
+  idle-TTL eviction. Defaults: ``max_users=100_000``,
+  ``user_idle_ttl_seconds=86_400`` (24h). Pass ``None`` to
+  either constructor kwarg to disable bounding for single-tenant
+  deployments. Eviction *drops* a user's bucket — callers needing
+  durable spill-to-disk should pick :class:`SqliteMemory` /
+  :class:`PostgresMemory` instead of relying on the in-process
+  bound.
+* **Postgres anonymous-bucket sentinel (M10.2).** The empty-
+  string-for-NULL hack on ``memory_blocks.user_id`` is replaced
+  with a reserved sentinel ``__jeeves_anon_user__``. Schema DDL
+  includes an idempotent migration that rewrites legacy ``''``
+  rows. Callers that try to use the sentinel as a real
+  ``user_id`` get a ``ValueError`` — defense against impersonating
+  the anonymous bucket.
+* **Auto-extract observability (M10.3).** :class:`AutoExtractMemory`
+  now emits ``jeeves.auto_extract.duration_ms`` (histogram) and
+  ``jeeves.auto_extract.invocations`` (counter) per extraction,
+  tagged with ``user_id`` and ``status``. A one-time-per-process
+  ``INFO`` log notice fires when the wrapper is enabled by the
+  default-on heuristic, so ops teams learn about it before the
+  LLM bill arrives.
+* **Permission "ask" approval handler (M10.4).**
+  ``Agent(approval_handler=callable)`` resolves
+  ``Decision.ask_(...)`` outcomes from the permissions layer.
+  Without one, ``ask`` falls back to deny — closes a security
+  hole where the fast-hooks default-allow was silently bypassing
+  the approval gate.
+* **Deprecation infrastructure (M10.5).** New
+  :class:`JeevesDeprecationWarning` subclass + ``warn_legacy_
+  protocol(...)`` helper; every protocol-evolution
+  ``except TypeError`` shim now warns once-per-process pointing
+  at the v1.0 removal target so callers can migrate.
+* **Secrets protocol wired into model resolution (M10.6).** New
+  concrete :class:`EnvSecrets` (default) and
+  :class:`DictSecrets` impls plus a ``lookup_sync(ref)`` method
+  on the Secrets protocol. ``Agent(secrets=...)`` flows through
+  to model adapters; ``OpenAIModel`` / ``AnthropicModel`` /
+  ``LiteLLMModel`` resolve API keys via ``api_key=`` →
+  ``secrets.lookup_sync`` → ``os.environ`` precedence.
+  ``redact()`` masks common API-key shapes (OpenAI / Anthropic /
+  AWS / GitHub) so audit logs don't leak credentials.
+* **Multi-tenant load benchmark (M10.7).** New
+  ``bench/multi_tenant.py`` simulates N concurrent users × M turns
+  on one shared Agent and reports p50 / p99 latency, RSS growth,
+  isolation violations, budget mismatches. Smoke-test variant in
+  ``tests/test_multi_tenant_load.py`` runs as part of the regular
+  suite.
+* **Tests + docs.** 980 tests pass (up from 933 at the start of
+  M10); mypy ``--strict`` clean across 112 source files; ruff
+  clean. CHANGELOG entry, capability matrix updated.
+
 ### Added — Multi-tenant by default *everywhere* (M9)
 
 Closes the remaining gaps so every stateful primitive partitions by

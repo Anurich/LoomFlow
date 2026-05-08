@@ -47,6 +47,7 @@ class AnthropicModel:
         client: Any = None,
         api_key: str | None = None,
         max_tokens: int = DEFAULT_MAX_TOKENS,
+        secrets: Any | None = None,
     ) -> None:
         self.name = model
         self._max_tokens = max_tokens
@@ -60,8 +61,15 @@ class AnthropicModel:
                     "Anthropic SDK not installed. "
                     "Install with: pip install 'jeevesagent[anthropic]'"
                 ) from exc
-            key = api_key or os.environ.get("ANTHROPIC_API_KEY")
-            self._client = AsyncAnthropic(api_key=key)
+            # Resolution order: api_key= → secrets.lookup_sync →
+            # os.environ. Same precedence as OpenAIModel — see the
+            # comment there for rationale.
+            resolved_key = api_key
+            if resolved_key is None and secrets is not None:
+                resolved_key = secrets.lookup_sync("ANTHROPIC_API_KEY")
+            if resolved_key is None:
+                resolved_key = os.environ.get("ANTHROPIC_API_KEY")
+            self._client = AsyncAnthropic(api_key=resolved_key)
 
     async def complete(
         self,

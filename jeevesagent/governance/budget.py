@@ -17,13 +17,16 @@ direct callers pass it explicitly via the keyword.
 
 from __future__ import annotations
 
-from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 import anyio
 
+from ..core._eviction import BoundedDict
 from ..core.types import BudgetStatus
+
+_DEFAULT_MAX_USERS = 100_000
+_DEFAULT_USER_TTL_SECONDS = 24 * 3600  # 24h idle
 
 
 class NoBudget:
@@ -109,18 +112,34 @@ class StandardBudget:
     user_id as the anonymous bucket.
     """
 
-    def __init__(self, cfg: BudgetConfig | None = None) -> None:
+    def __init__(
+        self,
+        cfg: BudgetConfig | None = None,
+        *,
+        max_users: int | None = _DEFAULT_MAX_USERS,
+        user_idle_ttl_seconds: float | None = _DEFAULT_USER_TTL_SECONDS,
+    ) -> None:
         self._cfg = cfg or BudgetConfig()
         # Global counters.
         self._tokens_in = 0
         self._tokens_out = 0
         self._cost = 0.0
         self._started_at = datetime.now(UTC)
-        # Per-user counters. ``defaultdict`` lazy-initialises a fresh
-        # bucket on first reference; ``started_at`` is set on first
-        # consume() so a user's wall-clock cap measures from their
-        # first activity, not the Agent's birth.
-        self._by_user: dict[str | None, _UserUsage] = defaultdict(_UserUsage)
+        # Per-user counters. Bounded so a runaway tenant or
+        # adversarial caller can't grow this dict without limit
+        # (process OOM is the only ceiling otherwise). LRU evicts
+        # the least-recently-touched user when ``max_users`` is
+        # exceeded; idle TTL drops users who haven't consumed in
+        # ``user_idle_ttl_seconds`` (default 24h). Evicting a
+        # bucket *resets* that user's running totals — appropriate
+        # for in-process accounting where the alternative is
+        # unbounded growth. Pass ``max_users=None`` /
+        # ``user_idle_ttl_seconds=None`` to disable bounding for
+        # single-tenant or small fixed-tenant deployments.
+        self._by_user: BoundedDict[str | None, _UserUsage] = BoundedDict(
+            max_keys=max_users,
+            ttl_seconds=user_idle_ttl_seconds,
+        )
         self._lock = anyio.Lock()
 
     async def allows_step(
@@ -147,7 +166,7 @@ class StandardBudget:
             self._tokens_in += tokens_in
             self._tokens_out += tokens_out
             self._cost += cost_usd
-            bucket = self._by_user[user_id]
+            bucket = self._by_user.setdefault(user_id, _UserUsage())
             if bucket.started_at is None:
                 bucket.started_at = datetime.now(UTC)
             bucket.tokens_in += tokens_in

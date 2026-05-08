@@ -42,6 +42,7 @@ class OpenAIModel:
         client: Any = None,
         api_key: str | None = None,
         base_url: str | None = None,
+        secrets: Any | None = None,
     ) -> None:
         self.name = model
         if client is not None:
@@ -54,8 +55,19 @@ class OpenAIModel:
                     "OpenAI SDK not installed. "
                     "Install with: pip install 'jeevesagent[openai]'"
                 ) from exc
+            # Resolution order for the API key:
+            #   1. Explicit ``api_key=`` argument
+            #   2. ``secrets.lookup_sync("OPENAI_API_KEY")`` if a
+            #      Secrets backend is wired (vault / dict-based)
+            #   3. ``os.environ["OPENAI_API_KEY"]`` as the bare
+            #      fallback for unconfigured callers
+            resolved_key = api_key
+            if resolved_key is None and secrets is not None:
+                resolved_key = secrets.lookup_sync("OPENAI_API_KEY")
+            if resolved_key is None:
+                resolved_key = os.environ.get("OPENAI_API_KEY")
             self._client = AsyncOpenAI(
-                api_key=api_key or os.environ.get("OPENAI_API_KEY"),
+                api_key=resolved_key,
                 base_url=base_url,
             )
 

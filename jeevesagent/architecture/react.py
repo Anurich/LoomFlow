@@ -18,11 +18,13 @@ Behaviour is identical; the refactor only changes the shape.
 from __future__ import annotations
 
 import contextlib
+import logging
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any
 
 import anyio
 
+from ..core._deprecation import warn_legacy_protocol
 from ..core.types import (
     Event,
     Message,
@@ -601,7 +603,9 @@ async def _run_single_tool(
                     call, user_id=run_user_id
                 )
             except TypeError:
-                # Legacy HookHost without the kwarg.
+                # Legacy HookHost without the kwarg. Warn once
+                # per-process so callers know to add it.
+                warn_legacy_protocol("HookHost", "pre_tool")
                 hook_decision = await deps.hooks.pre_tool(call)
 
         if hook_decision.deny:
@@ -618,18 +622,49 @@ async def _run_single_tool(
                         call, context={}, user_id=run_user_id
                     )
                 except TypeError:
-                    # Legacy Permissions without the kwarg.
+                    # Legacy Permissions without the kwarg. Warn
+                    # once per-process so callers know to add it.
+                    warn_legacy_protocol("Permissions", "check")
                     perm = await deps.permissions.check(call, context={})
+            # Decide whether to execute, then either set a deny
+            # result here or fall into the execute-and-post-hook
+            # block below. ``execute_call`` stays True only when
+            # every gate (deny / ask) approved.
+            execute_call = True
+            # When ``deps.fast_hooks`` is True we never actually
+            # ran a hook — the ``allow_()`` we pre-set above is a
+            # default, not an explicit approval. Distinguish so an
+            # ``ask`` from permissions doesn't get silently bypassed
+            # by the absence of a hook layer.
+            hook_explicitly_allowed = (
+                (not deps.fast_hooks) and hook_decision.allow
+            )
             if perm.deny:
                 result = ToolResult.denied_(
                     call.id, perm.reason or "denied by policy"
                 )
-            elif perm.ask and not hook_decision.allow:
-                result = ToolResult.denied_(
-                    call.id,
-                    perm.reason or "approval required; no approver",
+                execute_call = False
+            elif perm.ask and not hook_explicitly_allowed:
+                # Permissions returned ``ask`` — route the decision
+                # through the configured approval handler. When no
+                # handler is wired, fall back to a deny so the agent
+                # never silently bypasses the approval gate.
+                approved = await _resolve_ask_decision(
+                    call,
+                    deps.approval_handler,
+                    run_user_id,
                 )
-            else:
+                if not approved:
+                    result = ToolResult.denied_(
+                        call.id,
+                        perm.reason or (
+                            "approval required; no approver"
+                            if deps.approval_handler is None
+                            else "approval declined"
+                        ),
+                    )
+                    execute_call = False
+            if execute_call:
                 try:
                     if deps.fast_runtime:
                         result = await deps.tools.call(
@@ -655,6 +690,7 @@ async def _run_single_tool(
                             call, result, user_id=run_user_id
                         )
                     except TypeError:
+                        warn_legacy_protocol("HookHost", "post_tool")
                         await deps.hooks.post_tool(call, result)
 
     if not deps.fast_telemetry:
@@ -667,6 +703,35 @@ async def _run_single_tool(
             denied=result.denied,
         )
     return result
+
+
+async def _resolve_ask_decision(
+    call: ToolCall,
+    handler: Any,  # ApprovalHandler | None — Any keeps the import flat
+    user_id: str | None,
+) -> bool:
+    """Translate a ``Decision.ask_`` permissions outcome into an
+    allow/deny by invoking the registered approval handler.
+
+    Returns ``True`` when the handler approves the call, ``False``
+    when it declines, when no handler is wired, or when the handler
+    raises. A raising handler is treated as a deny (and logged) so
+    a buggy approval flow never silently green-lights a tool the
+    policy explicitly wanted gated.
+    """
+    if handler is None:
+        return False
+    try:
+        return bool(await handler(call, user_id))
+    except Exception as exc:  # noqa: BLE001 — defensive: handlers
+        # may raise from UI plumbing / network failures. We must
+        # not turn a buggy approval flow into a permissive one.
+        logging.getLogger("jeevesagent.architecture.react").warning(
+            "approval_handler raised for tool=%s; treating as deny: %s",
+            call.tool,
+            exc,
+        )
+        return False
 
 
 async def _audit(
@@ -690,6 +755,7 @@ async def _audit(
         )
     except TypeError:
         # Legacy AuditLog impls without the user_id kwarg.
+        warn_legacy_protocol("AuditLog", "append")
         await audit_log.append(
             session_id=session_id,
             actor=actor,

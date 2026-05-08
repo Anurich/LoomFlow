@@ -33,11 +33,12 @@ isn't applied.
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import Any
 
-from ..core.protocols import Memory
+from ..core.protocols import Memory, Telemetry
 from ..core.types import (
     Episode,
     Fact,
@@ -52,6 +53,33 @@ __all__ = ["AutoExtractMemory"]
 
 
 _log = logging.getLogger("jeevesagent.memory.auto_extract")
+
+# Process-wide flag — the "default-on" startup notice only fires
+# once no matter how many AutoExtractMemory instances are created
+# (multi-Agent processes don't spam the log).
+_DEFAULT_ON_NOTICE_EMITTED = False
+
+
+def _maybe_emit_default_on_notice() -> None:
+    """Log a one-shot info-level notice when auto-extract gets
+    turned on by default. Production-deployment readers needed
+    this — it was happening silently before and ops only noticed
+    when fact extraction calls showed up in their LLM bills.
+
+    Idempotent across the whole process; safe to call from every
+    AutoExtractMemory constructor on the default-picked path.
+    """
+    global _DEFAULT_ON_NOTICE_EMITTED
+    if _DEFAULT_ON_NOTICE_EMITTED:
+        return
+    _DEFAULT_ON_NOTICE_EMITTED = True
+    _log.info(
+        "AutoExtractMemory enabled by default for this model class. "
+        "Each remembered episode triggers a small extraction call "
+        "to pull (subject, predicate, object) facts. Pass "
+        "Agent(auto_extract=False) to disable, or "
+        "Agent(auto_extract=True) to silence this notice."
+    )
 
 
 class AutoExtractMemory:
@@ -72,10 +100,15 @@ class AutoExtractMemory:
         consolidator: Consolidator,
         *,
         on_extract_error: Callable[[BaseException], Awaitable[None]] | None = None,
+        telemetry: Telemetry | None = None,
+        auto_picked: bool = False,
     ) -> None:
         self._inner = inner
         self._consolidator = consolidator
         self._on_extract_error = on_extract_error
+        self._telemetry = telemetry
+        if auto_picked:
+            _maybe_emit_default_on_notice()
 
     @property
     def inner(self) -> Memory:
@@ -123,13 +156,26 @@ class AutoExtractMemory:
     async def _maybe_extract(self, episode: Episode) -> None:
         """Run the consolidator on a single episode. Catches every
         exception — auto-extract is a best-effort enhancement, never
-        a critical-path dependency."""
+        a critical-path dependency.
+
+        Emits two telemetry signals when telemetry is configured:
+
+        * ``jeeves.auto_extract.duration_ms`` (histogram) — wall time
+          spent inside the consolidator, in milliseconds. Tagged with
+          ``user_id`` and ``status`` (ok / error) so dashboards can
+          slice by tenant or by failure rate.
+        * ``jeeves.auto_extract.invocations`` (counter) — incremented
+          once per extraction attempt, with the same tags.
+        """
         store = self.facts
         if store is None:
             return
+        started = time.perf_counter()
+        status = "ok"
         try:
             await self._consolidator.consolidate([episode], store=store)
         except Exception as exc:  # noqa: BLE001 — best-effort by design
+            status = "error"
             _log.warning(
                 "auto-extract failed for episode %s (user_id=%s): %s",
                 episode.id,
@@ -142,6 +188,27 @@ class AutoExtractMemory:
                 except Exception:  # noqa: BLE001
                     # Even the error-callback is best-effort. We
                     # already logged; don't cascade.
+                    pass
+        finally:
+            if self._telemetry is not None:
+                duration_ms = (time.perf_counter() - started) * 1000.0
+                # Telemetry emit is best-effort too — a broken
+                # exporter must not turn a successful extract into a
+                # failed remember(). Swallow and log instead.
+                try:
+                    await self._telemetry.emit_metric(
+                        "jeeves.auto_extract.duration_ms",
+                        duration_ms,
+                        user_id=episode.user_id,
+                        status=status,
+                    )
+                    await self._telemetry.emit_metric(
+                        "jeeves.auto_extract.invocations",
+                        1,
+                        user_id=episode.user_id,
+                        status=status,
+                    )
+                except Exception:  # noqa: BLE001
                     pass
 
     async def recall(

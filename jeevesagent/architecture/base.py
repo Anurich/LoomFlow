@@ -30,7 +30,7 @@ strategy without re-implementing setup/teardown plumbing.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
@@ -44,12 +44,21 @@ from ..core.protocols import (
     Telemetry,
     ToolHost,
 )
-from ..core.types import Event, Message, Usage
+from ..core.types import Event, Message, ToolCall, Usage
 from ..security.audit import AuditLog
 from ..security.hooks import HookRegistry
 
 if TYPE_CHECKING:
     from ..agent.api import Agent
+
+# An approval handler is the bridge between a permissions policy
+# returning ``Decision.ask_(...)`` and an actual decision. The
+# framework calls the handler with the pending tool call and the
+# resolved ``user_id`` for the run; the handler returns ``True``
+# to allow the call or ``False`` to deny. Handlers are async so
+# they can await UI prompts, Slack approvals, ticketing systems,
+# etc. without blocking the agent loop.
+ApprovalHandler = Callable[[ToolCall, str | None], Awaitable[bool]]
 
 
 @dataclass
@@ -102,6 +111,12 @@ class Dependencies:
     telemetry: Telemetry
     audit_log: AuditLog | None
     max_turns: int
+    approval_handler: ApprovalHandler | None = None
+    """Resolves :class:`Decision.ask_` outcomes from the permissions
+    layer. When unset, an ``ask`` decision is treated as a deny —
+    historical behaviour preserved so single-tenant code without an
+    approval flow still works. When set, the architecture calls
+    this handler and uses the returned bool as the decision."""
     streaming: bool = False
     """Whether a downstream consumer is reading from
     ``agent.stream()``. When True, architectures should preserve

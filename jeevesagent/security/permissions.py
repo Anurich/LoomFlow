@@ -150,6 +150,8 @@ class PerUserPermissions:
                 call, context=context, user_id=user_id
             )
         except TypeError:
+            from ..core._deprecation import warn_legacy_protocol
+            warn_legacy_protocol("Permissions", "check")
             return await policy.check(  # type: ignore[no-any-return]
                 call, context=context
             )

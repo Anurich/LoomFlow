@@ -86,6 +86,7 @@ class LiteLLMModel(OpenAIModel):
         *,
         api_key: str | None = None,
         client: Any | None = None,
+        secrets: Any | None = None,
         **litellm_kwargs: Any,
     ) -> None:
         if client is None:
@@ -98,8 +99,19 @@ class LiteLLMModel(OpenAIModel):
                 ) from exc
 
             defaults: dict[str, Any] = dict(litellm_kwargs)
-            if api_key is not None:
-                defaults["api_key"] = api_key
+            # Try the Secrets backend before letting LiteLLM fall
+            # back to its own ``os.environ`` lookup. We try the
+            # provider-prefixed env var first (Mistral, Cohere,
+            # Bedrock, ...) and stop at the first match.
+            resolved_key = api_key
+            if resolved_key is None and secrets is not None:
+                for env_var in _candidate_env_vars(model):
+                    candidate = secrets.lookup_sync(env_var)
+                    if candidate is not None:
+                        resolved_key = candidate
+                        break
+            if resolved_key is not None:
+                defaults["api_key"] = resolved_key
             client = _LiteLLMClient(**defaults)
 
         # Skip OpenAIModel's openai-SDK import path by passing the
@@ -108,3 +120,30 @@ class LiteLLMModel(OpenAIModel):
         # picks up provider-specific keys from environment variables
         # or the ``api_key=`` we shoved into the defaults above.
         super().__init__(model, client=client, api_key=api_key)
+
+
+def _candidate_env_vars(model_spec: str) -> list[str]:
+    """Map a LiteLLM model spec to the env-var names it would
+    look up by default. Returned in priority order — caller stops
+    at first hit. Conservative: when in doubt we just return
+    ``[]`` and let LiteLLM's own resolution kick in."""
+    spec_lower = model_spec.lower()
+    if spec_lower.startswith("mistral-"):
+        return ["MISTRAL_API_KEY"]
+    if spec_lower.startswith("command-"):
+        return ["COHERE_API_KEY"]
+    if spec_lower.startswith("bedrock/"):
+        return ["AWS_ACCESS_KEY_ID"]
+    if spec_lower.startswith("vertex_ai/"):
+        return ["GOOGLE_APPLICATION_CREDENTIALS"]
+    if spec_lower.startswith("gemini/"):
+        return ["GEMINI_API_KEY", "GOOGLE_API_KEY"]
+    if spec_lower.startswith("groq/"):
+        return ["GROQ_API_KEY"]
+    if spec_lower.startswith("together_ai/"):
+        return ["TOGETHER_API_KEY", "TOGETHERAI_API_KEY"]
+    if spec_lower.startswith("replicate/"):
+        return ["REPLICATE_API_KEY", "REPLICATE_API_TOKEN"]
+    if spec_lower.startswith("azure/"):
+        return ["AZURE_OPENAI_API_KEY", "AZURE_API_KEY"]
+    return []

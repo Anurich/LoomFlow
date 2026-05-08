@@ -412,7 +412,19 @@ class Embedder(Protocol):
 
 
 class Secrets(Protocol):
-    """Resolution and redaction of named secrets."""
+    """Resolution and redaction of named secrets.
+
+    ``resolve`` / ``store`` are async because most production secrets
+    backends (Vault, AWS Secrets Manager, GCP Secret Manager) talk
+    over the network. ``lookup_sync`` exists for the
+    *constructor-time* path: when the framework needs to wire an
+    API key into a model adapter before any event loop is running
+    (e.g. ``OpenAIModel(...)`` from inside ``Agent.__init__``).
+    Concrete impls returning ``None`` from ``lookup_sync`` for refs
+    that can't be resolved synchronously are fine — callers should
+    fall back to ``os.environ`` or to the explicit ``api_key=``
+    argument.
+    """
 
     async def resolve(self, ref: str) -> str:
         ...
@@ -421,4 +433,12 @@ class Secrets(Protocol):
         ...
 
     def redact(self, text: str) -> str:
+        ...
+
+    def lookup_sync(self, ref: str) -> str | None:
+        """Synchronous best-effort lookup, for constructor-time
+        callers that can't await. Returns ``None`` when the ref
+        isn't available synchronously (e.g. the impl needs a
+        network round-trip). Default impls in :mod:`jeevesagent.
+        security.secrets` cover env-var and in-memory lookups."""
         ...

@@ -18,7 +18,12 @@ import pytest
 
 from jeevesagent.core.types import Episode
 from jeevesagent.memory.embedder import HashEmbedder
-from jeevesagent.memory.postgres import PostgresMemory
+from jeevesagent.memory.postgres import (
+    _ANON_USER_ID,
+    PostgresMemory,
+    _decode_user_id,
+    _encode_user_id,
+)
 
 pytestmark = pytest.mark.anyio
 
@@ -41,6 +46,97 @@ def test_schema_sql_includes_pgvector_and_hnsw_index() -> None:
 def test_schema_sql_dimensions_track_embedder() -> None:
     mem = PostgresMemory(pool=None, embedder=HashEmbedder(dimensions=128))
     assert any("vector(128)" in s for s in mem.schema_sql())
+
+
+# ---------------------------------------------------------------------------
+# M10.2 — anonymous-bucket sentinel (no more empty-string hack)
+# ---------------------------------------------------------------------------
+
+
+def test_encode_user_id_maps_none_to_sentinel() -> None:
+    assert _encode_user_id(None) == _ANON_USER_ID
+    assert _encode_user_id("alice") == "alice"
+    # Empty string is now a valid (if odd) user_id, NOT silently
+    # the anonymous bucket.
+    assert _encode_user_id("") == ""
+
+
+def test_encode_user_id_rejects_sentinel_collision() -> None:
+    """Callers must not be allowed to pass the reserved sentinel
+    as their user_id — that would let one user impersonate the
+    anonymous bucket on the wire."""
+    with pytest.raises(ValueError, match="reserved"):
+        _encode_user_id(_ANON_USER_ID)
+
+
+def test_decode_user_id_round_trips() -> None:
+    assert _decode_user_id(_ANON_USER_ID) is None
+    assert _decode_user_id("alice") == "alice"
+    assert _decode_user_id("") == ""
+
+
+def test_schema_uses_sentinel_default_and_migrates_legacy_rows() -> None:
+    """Schema DDL must:
+
+    * Use the sentinel as the column default (not ``''``).
+    * Include the migration UPDATE that rewrites legacy ``''`` rows.
+    * Set the column DEFAULT to the sentinel via ALTER (idempotent).
+    """
+    mem = PostgresMemory(pool=None, embedder=HashEmbedder(dimensions=64))
+    sql = "\n".join(mem.schema_sql())
+    assert _ANON_USER_ID in sql
+    assert f"DEFAULT '{_ANON_USER_ID}'" in sql
+    # The migration step is what fixes deployments that lived on
+    # 0.9.x with empty-string anonymous buckets.
+    assert (
+        f"UPDATE memory_blocks SET user_id = '{_ANON_USER_ID}'"
+        in sql
+    )
+    assert "WHERE user_id = ''" in sql
+
+
+async def test_update_block_writes_sentinel_for_anonymous() -> None:
+    """``user_id=None`` lands as the sentinel on the wire — never
+    the empty string."""
+    store = _FakeStore()
+    pool = _FakePool(store)
+    mem = PostgresMemory(pool=pool, embedder=HashEmbedder(dimensions=32))
+    await mem.update_block("prefs", "anon prefs", user_id=None)
+    sql, args = store.executed[0]
+    assert "INSERT INTO memory_blocks" in sql
+    assert args[1] == _ANON_USER_ID  # never ""
+
+
+async def test_update_block_writes_real_user_id_unchanged() -> None:
+    store = _FakeStore()
+    pool = _FakePool(store)
+    mem = PostgresMemory(pool=pool, embedder=HashEmbedder(dimensions=32))
+    await mem.update_block("prefs", "alice prefs", user_id="alice")
+    _, args = store.executed[0]
+    assert args[1] == "alice"
+
+
+async def test_update_block_rejects_sentinel_as_real_user_id() -> None:
+    """A real call passing the sentinel must raise — defense
+    against impersonation of the anonymous bucket."""
+    store = _FakeStore()
+    pool = _FakePool(store)
+    mem = PostgresMemory(pool=pool, embedder=HashEmbedder(dimensions=32))
+    with pytest.raises(ValueError, match="reserved"):
+        await mem.update_block("prefs", "x", user_id=_ANON_USER_ID)
+
+
+async def test_working_query_filters_by_sentinel_for_anonymous() -> None:
+    """``working(user_id=None)`` must filter on the sentinel value
+    on the wire, otherwise it'd return zero rows under the new
+    schema where anonymous rows live as the sentinel."""
+    store = _FakeStore()
+    pool = _FakePool(store)
+    mem = PostgresMemory(pool=pool, embedder=HashEmbedder(dimensions=32))
+    store.next_rows = []
+    await mem.working(user_id=None)
+    _, args = store.queried[0]
+    assert args[1] == _ANON_USER_ID
 
 
 # ---------------------------------------------------------------------------

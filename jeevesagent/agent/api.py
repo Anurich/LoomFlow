@@ -113,6 +113,8 @@ class Agent:
         skills: list[Any] | None = None,
         retry_policy: RetryPolicy | None = None,
         auto_extract: bool | None = None,
+        approval_handler: Any | None = None,
+        secrets: Any | None = None,
     ) -> None:
         # Skills — packaged on-disk playbooks loaded on demand.
         # Build the registry first so frontmatter validation fires
@@ -148,7 +150,15 @@ class Agent:
         # tests / dev fakes (no retry needed); real network-backed
         # models (OpenAI, Anthropic, LiteLLM) get the sensible
         # default unless the caller passed ``RetryPolicy.disabled()``.
-        self._model: Model = _resolve_model(model)
+        # Default to ``EnvSecrets`` so today's behaviour is
+        # preserved (API keys come from ``os.environ``); callers
+        # who want a vault / dict-backed lookup pass an explicit
+        # ``secrets=`` instance.
+        if secrets is None:
+            from ..security.secrets import EnvSecrets
+            secrets = EnvSecrets()
+        self._secrets = secrets
+        self._model: Model = _resolve_model(model, secrets=self._secrets)
         self._retry_policy: RetryPolicy = (
             retry_policy
             if retry_policy is not None
@@ -161,6 +171,12 @@ class Agent:
             )
         else:
             self._wrapped_model = self._model
+        # Telemetry is initialised *before* the memory wrapping so
+        # the AutoExtractMemory wrapper (below) can take a reference
+        # and emit duration / extraction-count metrics.
+        self._telemetry: Telemetry = (
+            telemetry if telemetry is not None else NoTelemetry()
+        )
         # Resolve ``memory=`` into a concrete :class:`Memory`.
         # The resolver handles None (default in-memory), strings
         # ("sqlite:./bot.db", "postgres://..."), config dicts
@@ -188,6 +204,12 @@ class Agent:
         # produce canned output that confuses the Consolidator
         # and make tests non-deterministic. Pass ``auto_extract=
         # True/False`` to override.
+        # Track whether auto_extract was explicitly chosen by the
+        # caller or default-picked from the model class — the
+        # AutoExtractMemory wrapper uses this to decide whether to
+        # emit a one-time-per-process startup notice (ops visibility
+        # for the default-on path).
+        auto_extract_was_default = auto_extract is None
         if auto_extract is None:
             auto_extract = _default_auto_extract_for(self._model)
         if auto_extract:
@@ -195,7 +217,10 @@ class Agent:
             from ..memory.consolidator import Consolidator
             consolidator = Consolidator(model=self._model)
             self._wrapped_memory: Memory = AutoExtractMemory(
-                self._memory, consolidator
+                self._memory,
+                consolidator,
+                telemetry=self._telemetry,
+                auto_picked=auto_extract_was_default,
             )
         else:
             self._wrapped_memory = self._memory
@@ -223,12 +248,16 @@ class Agent:
             host.register(load_tool)
         self._tool_host: ToolHost = host
 
-        self._telemetry: Telemetry = (
-            telemetry if telemetry is not None else NoTelemetry()
-        )
+        # ``self._telemetry`` already initialised above (before the
+        # memory-wrap step so AutoExtractMemory can take a reference).
         self._audit_log: AuditLog | None = audit_log
         self._max_turns = max_turns
         self._auto_consolidate = auto_consolidate
+        # Approval handler resolves :class:`Decision.ask_` outcomes
+        # from the permissions layer. Without one, ``ask`` falls
+        # back to deny — see ``_resolve_ask_decision`` in
+        # ``architecture/react.py``.
+        self._approval_handler = approval_handler
         self._architecture: Architecture = resolve_architecture(architecture)
 
     # ---- hook decorators (user-facing sugar) ----------------------------
@@ -485,6 +514,8 @@ class Agent:
                 user_id=user_id,
             )
         except TypeError:
+            from ..core._deprecation import warn_legacy_protocol
+            warn_legacy_protocol("AuditLog", "append")
             await self._audit_log.append(
                 session_id=session_id,
                 actor=actor,
@@ -1062,6 +1093,7 @@ class Agent:
                 telemetry=self._telemetry,
                 audit_log=self._audit_log,
                 max_turns=self._max_turns,
+                approval_handler=self._approval_handler,
                 # Architectures consult this to pick fast (buffered)
                 # vs streaming (channel) paths for parallel work.
                 streaming=emit is not _noop_emit,
@@ -1301,7 +1333,9 @@ _LITELLM_PREFIXES: tuple[str, ...] = (
 )
 
 
-def _resolve_model(spec: Model | str | None) -> Model:
+def _resolve_model(
+    spec: Model | str | None, *, secrets: Any | None = None
+) -> Model:
     """Resolve a string spec or instance to a concrete :class:`Model`.
 
     Strings dispatch by prefix:
@@ -1342,10 +1376,10 @@ def _resolve_model(spec: Model | str | None) -> Model:
         return spec
     if spec.startswith("claude-"):
         from ..model.anthropic import AnthropicModel
-        return AnthropicModel(spec)
+        return AnthropicModel(spec, secrets=secrets)
     if spec.startswith(("gpt-", "o1-", "o3-")):
         from ..model.openai import OpenAIModel
-        return OpenAIModel(spec)
+        return OpenAIModel(spec, secrets=secrets)
     if spec == "echo":
         return EchoModel()
     if spec.startswith(_LITELLM_PREFIXES):
@@ -1353,7 +1387,7 @@ def _resolve_model(spec: Model | str | None) -> Model:
 
         # ``litellm/<inner>`` strips the explicit-opt-in prefix.
         inner = spec[len("litellm/"):] if spec.startswith("litellm/") else spec
-        return LiteLLMModel(inner)
+        return LiteLLMModel(inner, secrets=secrets)
     raise ConfigError(
         f"unknown model spec: {spec!r}. Recognised prefixes:\n"
         "  claude-*, gpt-*, o1-*, o3-* (direct adapters)\n"
