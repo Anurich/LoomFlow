@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "jeevesagent"
-version = "0.9.4"
+version = "0.9.5"
 description = "Model-agnostic, MCP-native agent harness"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -137,7 +137,7 @@ markers = [
 # release BUMP=patch|minor|major`` is the explicit "this is a release"
 # flag — see the Makefile for usage.
 [tool.bumpversion]
-current_version = "0.9.4"
+current_version = "0.9.5"
 parse = """(?x)
     (?P<major>0|[1-9]\\d*)\\.(?P<minor>0|[1-9]\\d*)\\.(?P<patch>0|[1-9]\\d*)
     (?:\\.(?P<dev_label>dev)(?P<dev_n>\\d+))?
