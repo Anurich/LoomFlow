@@ -109,8 +109,17 @@ async def test_explicit_tool_object_is_accepted() -> None:
 
 
 async def test_parallel_tool_calls_run_concurrently() -> None:
-    """Two slow tools in one turn finish in ~one tool's latency, not two."""
-    SLEEP = 0.10
+    """Two slow tools in one turn finish in ~one tool's latency, not two.
+
+    Uses a deliberately long ``SLEEP`` (300ms) so the scheduler /
+    framework overhead — which is ~constant — is a small fraction
+    of the budget. Earlier the sleep was 100ms with a 1.8× threshold,
+    which left only ~80ms of headroom and went red on loaded CI
+    runners (saw 186ms). The signal we care about is "well below
+    serial (2×SLEEP)"; with SLEEP=300ms a 1.5× midpoint threshold
+    is 450ms vs serial 600ms — robust margin in either direction.
+    """
+    SLEEP = 0.30
 
     @tool
     async def slow_a() -> str:
@@ -140,9 +149,10 @@ async def test_parallel_tool_calls_run_concurrently() -> None:
     elapsed = time.monotonic() - started
 
     assert result.output == "done"
-    # If serial, elapsed >= 2 * SLEEP. We allow generous slack to account
-    # for scheduler jitter; the key check is "well below 2*SLEEP".
-    assert elapsed < SLEEP * 1.8, f"expected concurrent dispatch, got {elapsed:.3f}s"
+    # Serial would be 2*SLEEP = 600ms; concurrent is ~SLEEP + overhead.
+    # The 1.5× midpoint cleanly distinguishes the two without being
+    # tight enough to flake on CI scheduler jitter.
+    assert elapsed < SLEEP * 1.5, f"expected concurrent dispatch, got {elapsed:.3f}s"
 
 
 # ---------------------------------------------------------------------------
