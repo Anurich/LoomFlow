@@ -417,6 +417,11 @@ def _schema_as_tool(output_schema: Any | None) -> dict[str, Any] | None:
     """
     if output_schema is None:
         return None
+    # Tagged unions are handled by prompt-augmentation + validate-
+    # with-retry in the agent loop. Native forced-tool-call pattern
+    # only fits a single concrete schema.
+    if not (isinstance(output_schema, type) and hasattr(output_schema, "model_json_schema")):
+        return None
     schema_method = getattr(output_schema, "model_json_schema", None)
     if not callable(schema_method):
         return None

@@ -127,6 +127,23 @@ models opt in.
 * **Markdown-fence tolerance** — strips `` ```json `` / `` ``` ``
   fences before parsing, since real models occasionally wrap
   output despite being told not to.
+* **`RunResult.value`** — smart accessor that returns `parsed`
+  when a schema validated, else the raw `output` string. Removes
+  the `result.output` vs `result.parsed` "did the schema even
+  fire?" footgun: `result.value` is always "the answer" in the
+  shape the caller expects. The original `parsed` / `output`
+  fields stay untouched for code that reads them directly.
+* **`Agent(output_schema=...)`** — agent-bound default schema.
+  Pass it once on construction and every `agent.run()` /
+  `agent.stream()` applies it; a per-call `output_schema=` still
+  overrides for one-off shapes. Mirrors Pydantic AI's
+  `output_type=` ergonomics.
+* **Tagged-union output schemas** — `output_schema=A | B` (or
+  `Union[A, B]`) lets an agent return one of multiple shapes per
+  call. Validation tries each member in declaration order and
+  accepts the first that fits, so callers can model
+  "valid result vs structured error" without a discriminator
+  field.
 
 ### Added — Production hardening (M10)
 

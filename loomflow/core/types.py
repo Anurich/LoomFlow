@@ -453,19 +453,32 @@ class Event(BaseModel):
 class RunResult(BaseModel):
     """Final outcome of an ``Agent.run`` call.
 
-    ``output`` is always the raw assistant text (the JSON itself when
-    a structured-output schema was supplied). ``parsed`` is the
-    validated Pydantic instance — populated only when the caller
-    passed ``output_schema=`` to :meth:`Agent.run`. Use whichever
-    fits the call site::
+    Three accessors for the model's output, picked by what fits
+    the call site:
 
-        # free-form text run
+    * ``result.value`` — **recommended for most code**. Smart
+      accessor: returns the parsed Pydantic instance when an
+      ``output_schema`` was supplied AND validation succeeded;
+      falls through to the raw text otherwise. One name, right
+      type, no surprise on the schema vs no-schema split.
+    * ``result.parsed`` — explicit "give me the typed object or
+      ``None``". Only populated when ``output_schema=`` was set
+      and the model produced something that validated.
+    * ``result.output`` — always a string. The raw text the model
+      emitted (the JSON itself when a schema was supplied). Use
+      for logging, audit, debugging — when you want to see what
+      the model actually said, not the parsed view.
+
+    Examples::
+
+        # free-form text run — value === output (string)
         result = await agent.run("summarise this PDF")
-        print(result.output)
+        print(result.value)         # the summary text
 
-        # structured-output run
+        # structured-output run — value IS the typed instance
         result = await agent.run(prompt, output_schema=Invoice)
-        invoice: Invoice = result.parsed   # typed, validated
+        invoice: Invoice = result.value     # typed, validated
+        raw_json: str = result.output       # the JSON the model emitted
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -485,6 +498,18 @@ class RunResult(BaseModel):
     finished_at: datetime
     interrupted: bool = False
     interruption_reason: str | None = None
+
+    @property
+    def value(self) -> Any:
+        """Smart accessor: ``parsed`` when set, else ``output``.
+
+        For schema-typed runs this is the typed Pydantic instance.
+        For free-form text runs it's the same string as
+        ``result.output``. The recommended way to read the result
+        in 90% of code — you don't have to branch on whether a
+        schema was passed.
+        """
+        return self.parsed if self.parsed is not None else self.output
 
     @property
     def total_tokens(self) -> int:

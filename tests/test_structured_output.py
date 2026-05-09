@@ -222,3 +222,143 @@ async def test_validation_failure_after_exhausted_retries_raises() -> None:
         await agent.run(
             "...", output_schema=CompanyInfo, output_validation_retries=1
         )
+
+
+# ---------------------------------------------------------------------------
+# RunResult.value — smart accessor for "the answer", parsed when set
+# ---------------------------------------------------------------------------
+
+
+async def test_result_value_returns_parsed_when_schema_succeeds() -> None:
+    """``result.value`` is the recommended accessor: when the model
+    emitted schema-valid JSON, you get the typed Pydantic instance
+    directly — no need to remember whether to use ``.parsed`` or
+    ``.output``. This was the ergonomic wart that sent users to
+    ``type(result.output) -> str`` and made them think the schema
+    was ignored."""
+    payload = {"name": "Acme", "founded_year": 2008, "headquarters": "Berlin"}
+    model = ScriptedModel([ScriptedTurn(text=json.dumps(payload))])
+    agent = Agent("...", model=model)
+
+    result = await agent.run("...", output_schema=CompanyInfo)
+
+    assert isinstance(result.value, CompanyInfo)
+    assert result.value is result.parsed
+    # ``output`` is still the raw string for logging / display.
+    assert isinstance(result.output, str)
+
+
+async def test_result_value_falls_back_to_output_without_schema() -> None:
+    """No ``output_schema`` means no ``.parsed``; ``.value`` then
+    returns the raw string so existing call sites that read
+    ``result.value`` keep working in both modes."""
+    model = ScriptedModel([ScriptedTurn(text="just text")])
+    agent = Agent("...", model=model)
+
+    result = await agent.run("...")
+
+    assert result.parsed is None
+    assert result.value == "just text"
+    assert result.value == result.output
+
+
+# ---------------------------------------------------------------------------
+# Agent(output_schema=...) — agent-bound default schema
+# ---------------------------------------------------------------------------
+
+
+async def test_agent_default_output_schema_applied_to_run() -> None:
+    """``Agent(output_schema=Receipt)`` applies the schema to every
+    ``agent.run()`` without per-call repetition. Pydantic AI calls
+    this ``output_type=`` on Agent; we keep the same kwarg name on
+    both ``Agent.__init__`` and ``run()`` so users only learn one."""
+    payload = {"name": "Acme", "founded_year": 2008, "headquarters": "Berlin"}
+    model = ScriptedModel([ScriptedTurn(text=json.dumps(payload))])
+    agent = Agent("...", model=model, output_schema=CompanyInfo)
+
+    result = await agent.run("...")
+
+    assert isinstance(result.parsed, CompanyInfo)
+    assert result.parsed.name == "Acme"
+
+
+async def test_per_call_output_schema_overrides_agent_default() -> None:
+    """A per-call ``output_schema=`` on ``run()`` wins over the
+    agent's default. Lets users have a "usual" schema on the agent
+    but switch shapes for one-off calls."""
+
+    class Other(BaseModel):
+        flag: bool
+
+    payload = {"flag": True}
+    model = ScriptedModel([ScriptedTurn(text=json.dumps(payload))])
+    agent = Agent("...", model=model, output_schema=CompanyInfo)
+
+    result = await agent.run("...", output_schema=Other)
+
+    assert isinstance(result.parsed, Other)
+    assert result.parsed.flag is True
+
+
+# ---------------------------------------------------------------------------
+# Tagged unions — ``output_schema=A | B``
+# ---------------------------------------------------------------------------
+
+
+class _Success(BaseModel):
+    kind: str = "success"
+    value: int
+
+
+class _Failure(BaseModel):
+    kind: str = "failure"
+    reason: str
+
+
+async def test_tagged_union_picks_first_matching_member() -> None:
+    """``output_schema=A | B`` lets the agent return one of multiple
+    shapes per call. Validation tries each member in declaration
+    order and accepts the first that fits — so the model can decide
+    "valid result vs structured error" at decode time without the
+    framework needing a discriminator field."""
+    payload = {"kind": "success", "value": 42}
+    model = ScriptedModel([ScriptedTurn(text=json.dumps(payload))])
+    agent = Agent("...", model=model)
+
+    result = await agent.run("...", output_schema=_Success | _Failure)
+
+    assert isinstance(result.parsed, _Success)
+    assert result.parsed.value == 42
+
+
+async def test_tagged_union_falls_back_to_second_member() -> None:
+    """When the first member doesn't fit, the second is tried.
+    ``_Success`` requires ``value: int``; the failure-shaped payload
+    fails on _Success and validates against _Failure."""
+    payload = {"kind": "failure", "reason": "boom"}
+    model = ScriptedModel([ScriptedTurn(text=json.dumps(payload))])
+    agent = Agent("...", model=model)
+
+    result = await agent.run("...", output_schema=_Success | _Failure)
+
+    assert isinstance(result.parsed, _Failure)
+    assert result.parsed.reason == "boom"
+
+
+async def test_tagged_union_failure_after_retries_raises() -> None:
+    """If neither member validates, ``OutputValidationError`` is
+    still raised — unions widen the accepted shape, they don't
+    suppress validation."""
+    bad = json.dumps({"unrelated": "shape"})
+    model = ScriptedModel([
+        ScriptedTurn(text=bad),
+        ScriptedTurn(text=bad),
+    ])
+    agent = Agent("...", model=model)
+
+    with pytest.raises(OutputValidationError):
+        await agent.run(
+            "...",
+            output_schema=_Success | _Failure,
+            output_validation_retries=1,
+        )

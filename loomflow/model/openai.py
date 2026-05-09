@@ -392,6 +392,13 @@ def _build_response_format(output_schema: Any | None) -> dict[str, Any] | None:
     """
     if output_schema is None:
         return None
+    # Tagged unions (``A | B``) — OpenAI strict mode requires the
+    # root schema to be a single ``type: object``, so we can't use
+    # native response_format here. The agent loop's prompt-
+    # augmentation + validate-with-retry path handles unions
+    # correctly; returning ``None`` opts into that fallback.
+    if not (isinstance(output_schema, type) and hasattr(output_schema, "model_json_schema")):
+        return None
     schema_method = getattr(output_schema, "model_json_schema", None)
     if not callable(schema_method):
         return None

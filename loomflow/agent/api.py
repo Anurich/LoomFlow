@@ -115,6 +115,7 @@ class Agent:
         auto_extract: bool | None = None,
         approval_handler: Any | None = None,
         secrets: Any | None = None,
+        output_schema: type[BaseModel] | Any | None = None,
     ) -> None:
         # Skills — packaged on-disk playbooks loaded on demand.
         # Build the registry first so frontmatter validation fires
@@ -258,6 +259,12 @@ class Agent:
         # back to deny — see ``_resolve_ask_decision`` in
         # ``architecture/react.py``.
         self._approval_handler = approval_handler
+        # Default ``output_schema`` for runs that don't supply one.
+        # ``Agent(output_schema=Receipt)`` makes "this agent always
+        # returns a Receipt" the contract; per-call ``run(...,
+        # output_schema=)`` still wins for callers that want to
+        # override on a per-prompt basis.
+        self._default_output_schema: Any | None = output_schema
         self._architecture: Architecture = resolve_architecture(architecture)
 
     # ---- hook decorators (user-facing sugar) ----------------------------
@@ -527,12 +534,19 @@ class Agent:
         self,
         *,
         session: AgentSession,
-        schema: type[BaseModel],
+        schema: Any,
         retries: int,
         deps: Dependencies,
     ) -> BaseModel:
         """Validate ``session.output`` against ``schema``; on failure,
         give the model up to ``retries`` follow-up turns to fix it.
+
+        ``schema`` may be a single ``BaseModel`` subclass or a tagged
+        union (``A | B`` / ``Union[A, B]``). For unions we try each
+        member in order and accept the first that validates — letting
+        an agent return one of several shapes per call (e.g. a
+        ``Receipt`` on success or a structured ``Error`` on
+        failure).
 
         Retry turns are single-shot model calls (no tools, no full
         ReAct loop) because the architecture has already terminated
@@ -546,74 +560,84 @@ class Agent:
         """
         from ..architecture.helpers import add_usage
 
+        types = _extract_schema_types(schema)
+        if not types:
+            raise OutputValidationError(
+                "output_schema must be a Pydantic BaseModel subclass or a "
+                "Union of BaseModel subclasses.",
+                raw=session.output,
+                schema=schema,
+                cause=None,
+            )
+
         last_error: ValidationError | None = None
         for attempt in range(retries + 1):
             text = _strip_json_fences(session.output)
-            try:
-                parsed = schema.model_validate_json(text)
+            parsed, last_error = _try_validate_union(text, types)
+            if parsed is not None:
                 # Stash the cleaned text so the persisted episode
                 # has parseable JSON, not the fenced version.
                 session.output = text
                 return parsed
-            except ValidationError as exc:
-                last_error = exc
-                if attempt >= retries:
-                    break
+            if attempt >= retries:
+                break
 
-                # Re-prompt: tell the model what was wrong and ask
-                # for a clean JSON re-emission.
-                error_summary = _summarise_validation_error(exc)
-                schema_json = json.dumps(
-                    schema.model_json_schema(), separators=(",", ":")
-                )
-                retry_prompt = (
-                    "Your previous response failed schema validation:\n"
-                    f"{error_summary}\n\n"
-                    "Return a corrected response — ONLY a single valid "
-                    "JSON object that matches this schema, with no "
-                    "prose, no markdown fences, no explanation:\n"
-                    f"{schema_json}"
-                )
-                session.messages.append(
-                    Message(role=Role.USER, content=retry_prompt)
-                )
+            # Re-prompt: tell the model what was wrong and ask
+            # for a clean JSON re-emission.
+            assert last_error is not None
+            error_summary = _summarise_validation_error(last_error)
+            schema_json = json.dumps(
+                _union_json_schema(types), separators=(",", ":")
+            )
+            retry_prompt = (
+                "Your previous response failed schema validation:\n"
+                f"{error_summary}\n\n"
+                "Return a corrected response — ONLY a single valid "
+                "JSON object that matches this schema, with no "
+                "prose, no markdown fences, no explanation:\n"
+                f"{schema_json}"
+            )
+            session.messages.append(
+                Message(role=Role.USER, content=retry_prompt)
+            )
 
-                # Single-shot model call. Use ``complete`` when
-                # available (no streaming overhead); fall back to
-                # consuming ``stream`` otherwise.
-                if hasattr(deps.model, "complete"):
-                    new_text, _calls, usage, _finish = (
-                        await deps.model.complete(
-                            session.messages, tools=None
-                        )
-                    )
-                else:
-                    parts: list[str] = []
-                    usage = Usage()
-                    async for chunk in deps.model.stream(
+            # Single-shot model call. Use ``complete`` when
+            # available (no streaming overhead); fall back to
+            # consuming ``stream`` otherwise.
+            if hasattr(deps.model, "complete"):
+                new_text, _calls, usage, _finish = (
+                    await deps.model.complete(
                         session.messages, tools=None
+                    )
+                )
+            else:
+                parts: list[str] = []
+                usage = Usage()
+                async for chunk in deps.model.stream(
+                    session.messages, tools=None
+                ):
+                    if chunk.kind == "text" and chunk.text:
+                        parts.append(chunk.text)
+                    elif (
+                        chunk.kind == "finish"
+                        and chunk.usage is not None
                     ):
-                        if chunk.kind == "text" and chunk.text:
-                            parts.append(chunk.text)
-                        elif (
-                            chunk.kind == "finish"
-                            and chunk.usage is not None
-                        ):
-                            usage = chunk.usage
-                    new_text = "".join(parts)
+                        usage = chunk.usage
+                new_text = "".join(parts)
 
-                session.messages.append(
-                    Message(role=Role.ASSISTANT, content=new_text)
-                )
-                session.output = new_text
-                session.cumulative_usage = add_usage(
-                    session.cumulative_usage, usage
-                )
-                session.turns += 1
+            session.messages.append(
+                Message(role=Role.ASSISTANT, content=new_text)
+            )
+            session.output = new_text
+            session.cumulative_usage = add_usage(
+                session.cumulative_usage, usage
+            )
+            session.turns += 1
 
         assert last_error is not None  # we only break above on a failure
+        type_names = " | ".join(t.__name__ for t in types)
         raise OutputValidationError(
-            f"Model output did not validate against {schema.__name__} "
+            f"Model output did not validate against {type_names} "
             f"after {retries} retry attempt(s).",
             raw=session.output,
             schema=schema,
@@ -772,7 +796,7 @@ class Agent:
         context: RunContext | None = None,
         extra_tools: list[Tool] | None = None,
         emit: Emit | None = None,
-        output_schema: type[BaseModel] | None = None,
+        output_schema: type[BaseModel] | Any | None = None,
         output_validation_retries: int = 1,
     ) -> RunResult:
         """Run the agent to completion and return its :class:`RunResult`.
@@ -843,7 +867,14 @@ class Agent:
             metadata=metadata,
             context=context,
             extra_tools=extra_tools,
-            output_schema=output_schema,
+            # Per-call schema wins; fall back to the agent's default
+            # so ``Agent(output_schema=Receipt)`` doesn't need to be
+            # repeated on every ``run()``.
+            output_schema=(
+                output_schema
+                if output_schema is not None
+                else self._default_output_schema
+            ),
             output_validation_retries=output_validation_retries,
         )
 
@@ -857,7 +888,7 @@ class Agent:
         context: RunContext | None = None,
         extra_tools: list[Tool] | None = None,
         emit: Emit | None = None,
-        output_schema: type[BaseModel] | None = None,
+        output_schema: type[BaseModel] | Any | None = None,
         output_validation_retries: int = 1,
     ) -> RunResult:
         """Resume a previously-interrupted run from its journal.
@@ -890,7 +921,7 @@ class Agent:
         metadata: Mapping[str, Any] | None = None,
         context: RunContext | None = None,
         extra_tools: list[Tool] | None = None,
-        output_schema: type[BaseModel] | None = None,
+        output_schema: type[BaseModel] | Any | None = None,
         output_validation_retries: int = 1,
     ) -> AsyncIterator[Event]:
         """Stream :class:`Event`\\ s as the loop produces them.
@@ -906,6 +937,14 @@ class Agent:
             max_buffer_size=DEFAULT_STREAM_BUFFER
         )
 
+        # Same fallback as ``run``: per-call schema wins; agent's
+        # default is used otherwise.
+        effective_schema = (
+            output_schema
+            if output_schema is not None
+            else self._default_output_schema
+        )
+
         async def _produce() -> None:
             try:
                 await self._loop(
@@ -916,7 +955,7 @@ class Agent:
                     metadata=metadata,
                     context=context,
                     extra_tools=extra_tools,
-                    output_schema=output_schema,
+                    output_schema=effective_schema,
                     output_validation_retries=output_validation_retries,
                 )
             except Exception as exc:  # noqa: BLE001 — surface as ERROR + re-raise
@@ -947,7 +986,7 @@ class Agent:
         metadata: Mapping[str, Any] | None = None,
         context: RunContext | None = None,
         extra_tools: list[Tool] | None = None,
-        output_schema: type[BaseModel] | None = None,
+        output_schema: type[BaseModel] | Any | None = None,
         output_validation_retries: int = 1,
     ) -> RunResult:
         """Setup → delegate iteration to the architecture → teardown.
@@ -1270,21 +1309,104 @@ with Pydantic and reject any extra text.
 
 
 def _augment_instructions_for_schema(
-    base_instructions: str, schema: type[BaseModel]
+    base_instructions: str, schema: Any
 ) -> str:
     """Build the run-scoped system prompt when ``output_schema`` is
     requested. Appends a clear, schema-specific directive to the
     agent's static instructions so the model knows it must emit JSON
-    matching the schema."""
+    matching the schema. Tagged unions (``A | B``) become a single
+    ``anyOf`` schema so the model sees all valid shapes at once."""
+    types = _extract_schema_types(schema)
     schema_json = json.dumps(
-        schema.model_json_schema(), indent=2, sort_keys=True
+        _union_json_schema(types), indent=2, sort_keys=True
     )
     return base_instructions.rstrip() + _SCHEMA_DIRECTIVE_TEMPLATE.format(
         schema_json=schema_json
     )
 
 
+def _union_json_schema(types: list[type[BaseModel]]) -> dict[str, Any]:
+    """Build a single JSON Schema spanning one or more Pydantic models.
+
+    * Single type: returns that model's ``model_json_schema()``.
+    * Multiple types: returns an ``anyOf`` whose branches are the
+      member schemas, with their ``$defs`` merged into a single
+      top-level ``$defs`` so ``$ref`` resolution stays valid.
+    """
+    if len(types) == 1:
+        return types[0].model_json_schema()
+    branches: list[dict[str, Any]] = []
+    merged_defs: dict[str, Any] = {}
+    for t in types:
+        s = dict(t.model_json_schema())
+        # Hoist nested $defs to the union root so cross-branch refs
+        # remain resolvable. Last writer wins on name collisions —
+        # that's acceptable since identical model names should
+        # have identical schemas.
+        nested = s.pop("$defs", None)
+        if isinstance(nested, dict):
+            merged_defs.update(nested)
+        branches.append(s)
+    out: dict[str, Any] = {"anyOf": branches}
+    if merged_defs:
+        out["$defs"] = merged_defs
+    return out
+
+
+def _try_validate_union(
+    text: str, types: list[type[BaseModel]]
+) -> tuple[BaseModel | None, ValidationError | None]:
+    """Try each Pydantic type in order; return the first that
+    validates. When all fail, return ``(None, last_error)`` for the
+    retry path. The order of ``types`` is the order the user wrote
+    them (``A | B`` → ``[A, B]``), so callers can put the more
+    specific / preferred type first."""
+    last_error: ValidationError | None = None
+    for t in types:
+        try:
+            return t.model_validate_json(text), None
+        except ValidationError as exc:
+            last_error = exc
+    return None, last_error
+
+
 _FENCE_RE_PREFIX = "```"
+
+
+def _extract_schema_types(schema: Any) -> list[type[BaseModel]]:
+    """Normalise an ``output_schema`` argument into a list of
+    Pydantic model types.
+
+    Accepts:
+      * A single ``BaseModel`` subclass — returns ``[schema]``.
+      * A ``Union[A, B]`` or ``A | B`` (PEP 604) of ``BaseModel``
+        subclasses — returns ``[A, B]`` (with non-Pydantic members
+        like ``None`` filtered out).
+      * Anything else — returns ``[]``.
+
+    Tagged-union outputs let an agent return one of multiple
+    types: ``output_schema=Invoice | Error`` lets the model pick
+    "valid invoice" vs "structured error" per call. The framework
+    builds an ``anyOf`` JSON schema, asks the model for one,
+    and tries each member type during validation.
+    """
+    import types as _typing_types
+    from typing import Union, get_args, get_origin
+
+    if schema is None:
+        return []
+    # Single Pydantic model.
+    if isinstance(schema, type) and issubclass(schema, BaseModel):
+        return [schema]
+    # Union or PEP 604 union (X | Y).
+    origin = get_origin(schema)
+    if origin is Union or isinstance(schema, _typing_types.UnionType):
+        members: list[type[BaseModel]] = []
+        for arg in get_args(schema):
+            if isinstance(arg, type) and issubclass(arg, BaseModel):
+                members.append(arg)
+        return members
+    return []
 
 
 def _strip_json_fences(text: str) -> str:
