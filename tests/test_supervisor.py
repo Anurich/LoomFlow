@@ -208,7 +208,7 @@ async def test_supervisor_composes_user_instructions_with_template() -> None:
     class _CaptureSystemModel:
         name = "capture"
 
-        async def stream(self, messages, *, tools=None):  # type: ignore[no-untyped-def]
+        async def stream(self, messages, *, tools=None, **kwargs):  # type: ignore[no-untyped-def]
             from loomflow.core.types import ModelChunk, Usage
 
             for m in messages:

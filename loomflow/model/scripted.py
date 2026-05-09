@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from typing import Any
 
 from ..core.types import Message, ModelChunk, ToolCall, ToolDef, Usage
 
@@ -41,6 +42,7 @@ class ScriptedModel:
         tools: list[ToolDef] | None = None,
         temperature: float = 1.0,
         max_tokens: int | None = None,
+        output_schema: Any | None = None,
     ) -> tuple[str, list[ToolCall], Usage, str]:
         """Single-shot replay of the next scripted turn.
 
@@ -48,6 +50,10 @@ class ScriptedModel:
         tool_calls + usage in one tuple. Used by the non-streaming
         hot path (``agent.run()``); ``agent.stream()`` keeps using
         :meth:`stream` for per-chunk replay.
+
+        ``output_schema`` is accepted for protocol compatibility
+        but ignored — Scripted is a deterministic test fake; turns
+        are pre-baked, not constrained at decode time.
         """
         if self._idx >= len(self._turns):
             return "", [], Usage(), "stop"
@@ -68,6 +74,7 @@ class ScriptedModel:
         tools: list[ToolDef] | None = None,
         temperature: float = 1.0,
         max_tokens: int | None = None,
+        output_schema: Any | None = None,
     ) -> AsyncIterator[ModelChunk]:
         if self._idx >= len(self._turns):
             yield ModelChunk(kind="text", text="")

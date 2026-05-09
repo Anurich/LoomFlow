@@ -1094,6 +1094,11 @@ class Agent:
                 audit_log=self._audit_log,
                 max_turns=self._max_turns,
                 approval_handler=self._approval_handler,
+                # Forward the per-call output_schema so architectures
+                # can hand it to model.complete()/.stream(); adapters
+                # with native structured-output APIs use it to
+                # constrain the model and skip the validation retry.
+                output_schema=output_schema,
                 # Architectures consult this to pick fast (buffered)
                 # vs streaming (channel) paths for parallel work.
                 streaming=emit is not _noop_emit,

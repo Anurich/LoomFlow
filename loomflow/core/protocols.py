@@ -59,8 +59,21 @@ class Model(Protocol):
         tools: list[ToolDef] | None = None,
         temperature: float = 1.0,
         max_tokens: int | None = None,
+        output_schema: Any | None = None,
     ) -> AsyncIterator[ModelChunk]:
-        """Stream completion chunks. Each chunk is text, tool_call, or finish."""
+        """Stream completion chunks. Each chunk is text, tool_call, or finish.
+
+        ``output_schema`` is an optional Pydantic ``BaseModel`` subclass
+        (typed loosely as ``Any`` to keep the protocol pydantic-free).
+        Adapters that support a provider-native structured-output API
+        (OpenAI's ``response_format=json_schema``, Anthropic's forced
+        tool-call pattern, LiteLLM's passthrough) translate the schema
+        into the provider's local idiom so the model is constrained to
+        produce valid JSON matching it. Adapters without native support
+        ignore the kwarg silently — the agent loop's prompt-augmentation
+        path still produces JSON, just with retry-on-validation-fail
+        instead of hard guarantees.
+        """
         ...
 
 

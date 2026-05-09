@@ -81,6 +81,7 @@ class RetryingModel:
         tools: list[ToolDef] | None = None,
         temperature: float = 1.0,
         max_tokens: int | None = None,
+        output_schema: Any | None = None,
     ) -> tuple[str, list[ToolCall], Usage, str]:
         """Single-shot completion with retry on transient failures."""
 
@@ -91,6 +92,7 @@ class RetryingModel:
                     tools=tools,
                     temperature=temperature,
                     max_tokens=max_tokens,
+                    output_schema=output_schema,
                 )
             )
             return result
@@ -107,6 +109,7 @@ class RetryingModel:
         tools: list[ToolDef] | None = None,
         temperature: float = 1.0,
         max_tokens: int | None = None,
+        output_schema: Any | None = None,
     ) -> AsyncIterator[ModelChunk]:
         """Streaming completion with retry-before-first-chunk.
 
@@ -123,6 +126,7 @@ class RetryingModel:
                     tools=tools,
                     temperature=temperature,
                     max_tokens=max_tokens,
+                    output_schema=output_schema,
                 )
                 # First chunk — if this raises we can still retry.
                 first_chunk: ModelChunk | None = None

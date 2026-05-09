@@ -85,6 +85,7 @@ async def main() -> None:
         raw_input, user_id="alice", session_id="req-2026-001"
     )
 
+
     print(f"  output : {result.output}")
     print(f"  visited: {' → '.join(result.visited)}")
     print()

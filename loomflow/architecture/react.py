@@ -173,6 +173,7 @@ class ReAct:
                                 await deps.model.complete(
                                     session.messages,
                                     tools=tool_defs or None,
+                                    output_schema=deps.output_schema,
                                 )
                             )
                         else:
@@ -182,6 +183,7 @@ class ReAct:
                                     deps.model.complete,
                                     session.messages,
                                     tools=tool_defs or None,
+                                    output_schema=deps.output_schema,
                                 )
                             )
                 else:
@@ -202,6 +204,7 @@ class ReAct:
                             chunks = deps.model.stream(
                                 session.messages,
                                 tools=tool_defs or None,
+                                output_schema=deps.output_schema,
                             )
                         else:
                             chunks = deps.runtime.stream_step(
@@ -209,6 +212,7 @@ class ReAct:
                                 deps.model.stream,
                                 session.messages,
                                 tools=tool_defs or None,
+                                output_schema=deps.output_schema,
                             )
                         async for chunk in chunks:
                             yield Event.model_chunk(session.id, chunk)

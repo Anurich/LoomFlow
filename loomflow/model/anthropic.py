@@ -78,6 +78,7 @@ class AnthropicModel:
         tools: list[ToolDef] | None = None,
         temperature: float = 1.0,
         max_tokens: int | None = None,
+        output_schema: Any | None = None,
     ) -> tuple[str, list[ToolCall], Usage, str]:
         """Single-shot non-streaming completion.
 
@@ -89,12 +90,28 @@ class AnthropicModel:
         (``agent.run()``); ``agent.stream()`` keeps using
         :meth:`stream`.
 
+        ``output_schema`` (when set) is implemented via the
+        forced-tool-call pattern Anthropic recommends for structured
+        output: a synthetic ``__output__`` tool is appended to the
+        tool list with the schema as its ``input_schema``, and
+        ``tool_choice`` forces the model to invoke it. The model's
+        constrained tool-args are extracted and returned as the
+        message ``text`` (a JSON string the agent loop can parse).
+
         Falls back to consuming :meth:`stream` if the underlying
         client raises (test fakes that only support streaming, or
         transports that don't honour single-shot creation).
         """
         system, anth_messages = _to_anthropic_messages(messages)
         anth_tools = [_to_anthropic_tool(t) for t in (tools or [])]
+
+        # Structured output: synthesize a forced tool call.
+        synthetic_tool_name = ""
+        if output_schema is not None:
+            synthetic = _schema_as_tool(output_schema)
+            if synthetic is not None:
+                anth_tools.append(synthetic)
+                synthetic_tool_name = synthetic["name"]
 
         kwargs: dict[str, Any] = {
             "model": self.name,
@@ -106,6 +123,14 @@ class AnthropicModel:
             kwargs["system"] = system
         if anth_tools:
             kwargs["tools"] = anth_tools
+        if synthetic_tool_name:
+            # Force the model to invoke the structured-output tool.
+            # The model can still chain real-tool calls before it,
+            # but its terminal response MUST be the synthetic one.
+            kwargs["tool_choice"] = {
+                "type": "tool",
+                "name": synthetic_tool_name,
+            }
 
         try:
             response = await self._client.messages.create(**kwargs)
@@ -116,6 +141,7 @@ class AnthropicModel:
                     tools=tools,
                     temperature=temperature,
                     max_tokens=max_tokens,
+                    output_schema=output_schema,
                 )
             )
 
@@ -128,6 +154,7 @@ class AnthropicModel:
                     tools=tools,
                     temperature=temperature,
                     max_tokens=max_tokens,
+                    output_schema=output_schema,
                 )
             )
 
@@ -138,14 +165,22 @@ class AnthropicModel:
             if btype == "text":
                 text_parts.append(getattr(block, "text", "") or "")
             elif btype == "tool_use":
+                tool_name = getattr(block, "name", "") or ""
                 args_raw = getattr(block, "input", None)
                 args: dict[str, Any] = (
                     dict(args_raw) if isinstance(args_raw, dict) else {}
                 )
+                # Synthetic structured-output tool: the args ARE the
+                # schema-validated output. Surface as text so the
+                # agent loop's parser sees a JSON string and the
+                # validate-with-retry path succeeds first try.
+                if synthetic_tool_name and tool_name == synthetic_tool_name:
+                    text_parts.append(json.dumps(args))
+                    continue
                 tool_calls.append(
                     ToolCall(
                         id=getattr(block, "id", "") or "",
-                        tool=getattr(block, "name", "") or "",
+                        tool=tool_name,
                         args=args,
                     )
                 )
@@ -167,9 +202,16 @@ class AnthropicModel:
         tools: list[ToolDef] | None = None,
         temperature: float = 1.0,
         max_tokens: int | None = None,
+        output_schema: Any | None = None,
     ) -> AsyncIterator[ModelChunk]:
         system, anth_messages = _to_anthropic_messages(messages)
         anth_tools = [_to_anthropic_tool(t) for t in (tools or [])]
+        synthetic_tool_name = ""
+        if output_schema is not None:
+            synthetic = _schema_as_tool(output_schema)
+            if synthetic is not None:
+                anth_tools.append(synthetic)
+                synthetic_tool_name = synthetic["name"]
 
         kwargs: dict[str, Any] = {
             "model": self.name,
@@ -179,6 +221,11 @@ class AnthropicModel:
         }
         if system:
             kwargs["system"] = system
+        if synthetic_tool_name:
+            kwargs["tool_choice"] = {
+                "type": "tool",
+                "name": synthetic_tool_name,
+            }
         if anth_tools:
             kwargs["tools"] = anth_tools
 
@@ -351,4 +398,34 @@ def _to_anthropic_tool(t: ToolDef) -> dict[str, Any]:
         "name": t.name,
         "description": t.description,
         "input_schema": t.input_schema or {"type": "object", "properties": {}},
+    }
+
+
+def _schema_as_tool(output_schema: Any | None) -> dict[str, Any] | None:
+    """Translate a Pydantic ``BaseModel`` into a synthetic Anthropic
+    tool whose ``input_schema`` IS the requested output schema.
+
+    Combined with ``tool_choice={"type": "tool", "name": ...}`` on
+    the request, this forces the model to emit a single tool_use
+    block whose ``input`` is a JSON object matching the schema —
+    Anthropic's idiomatic structured-output pattern. The agent loop
+    parses that JSON via the existing validate-with-retry path,
+    which now almost never has to retry.
+
+    Returns ``None`` when the supplied object isn't a Pydantic
+    model (defensive — the protocol types this loosely as ``Any``).
+    """
+    if output_schema is None:
+        return None
+    schema_method = getattr(output_schema, "model_json_schema", None)
+    if not callable(schema_method):
+        return None
+    return {
+        "name": "__output__",
+        "description": (
+            "Emit the final response. The provided arguments must be "
+            "a JSON object matching the schema; this is your only "
+            "way to return a result for this turn."
+        ),
+        "input_schema": schema_method(),
     }

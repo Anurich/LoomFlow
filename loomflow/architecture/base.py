@@ -117,6 +117,15 @@ class Dependencies:
     historical behaviour preserved so single-tenant code without an
     approval flow still works. When set, the architecture calls
     this handler and uses the returned bool as the decision."""
+    output_schema: Any | None = None
+    """Pydantic ``BaseModel`` subclass requested via
+    ``Agent.run(output_schema=...)``. Forwarded by the architecture
+    to ``model.complete()`` / ``model.stream()`` so adapters with
+    native structured-output support (OpenAI ``response_format``,
+    Anthropic forced-tool-call, LiteLLM passthrough) can constrain
+    the model to produce valid JSON. Adapters without native support
+    ignore it silently and the prompt-augmentation path (system
+    prompt carries the schema) still applies."""
     streaming: bool = False
     """Whether a downstream consumer is reading from
     ``agent.stream()``. When True, architectures should preserve

@@ -8,6 +8,7 @@ with a synthetic usage record.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from typing import Any
 
 import anyio
 
@@ -37,10 +38,16 @@ class EchoModel:
         tools: list[ToolDef] | None = None,
         temperature: float = 1.0,
         max_tokens: int | None = None,
+        output_schema: Any | None = None,
     ) -> tuple[str, list[ToolCall], Usage, str]:
         """Single-shot echo. Returns the echoed user prompt as one
         string with synthetic usage. No per-token chunking — used by
-        the non-streaming hot path (``agent.run()``)."""
+        the non-streaming hot path (``agent.run()``).
+
+        ``output_schema`` is accepted for protocol compatibility but
+        ignored — Echo is a zero-key dev fake; structured-output
+        constraints don't apply.
+        """
         last_user = next(
             (m for m in reversed(messages) if m.role == Role.USER),
             None,
@@ -63,6 +70,7 @@ class EchoModel:
         tools: list[ToolDef] | None = None,
         temperature: float = 1.0,
         max_tokens: int | None = None,
+        output_schema: Any | None = None,
     ) -> AsyncIterator[ModelChunk]:
         last_user = next(
             (m for m in reversed(messages) if m.role == Role.USER),

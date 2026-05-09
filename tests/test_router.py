@@ -328,7 +328,7 @@ async def test_router_uses_deterministic_specialist_session_id() -> None:
     class _CaptureModel:
         name = "capture"
 
-        async def stream(self, messages, *, tools=None):  # type: ignore[no-untyped-def]
+        async def stream(self, messages, *, tools=None, **kwargs):  # type: ignore[no-untyped-def]
             from loomflow.core.types import ModelChunk, Usage
 
             yield ModelChunk(

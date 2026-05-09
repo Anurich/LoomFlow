@@ -78,6 +78,7 @@ class OpenAIModel:
         tools: list[ToolDef] | None = None,
         temperature: float = 1.0,
         max_tokens: int | None = None,
+        output_schema: Any | None = None,
     ) -> tuple[str, list[ToolCall], Usage, str]:
         """Single-shot completion (no per-chunk yields).
 
@@ -89,6 +90,12 @@ class OpenAIModel:
         fallback still saves the per-chunk yield + Event
         construction overhead on the architecture side because
         ReAct calls ``complete`` with a single ``await``.
+
+        ``output_schema`` (when set) is translated to OpenAI's
+        ``response_format=json_schema`` with ``strict=True``. The
+        model is then constrained at decode time to emit valid JSON
+        matching the schema, eliminating the need for the agent
+        loop's validation-retry round-trip on the happy path.
         """
         oai_messages = _to_openai_messages(messages)
         oai_tools = [_to_openai_tool(t) for t in (tools or [])]
@@ -104,6 +111,9 @@ class OpenAIModel:
             kwargs["max_tokens"] = max_tokens
         if oai_tools:
             kwargs["tools"] = oai_tools
+        rf = _build_response_format(output_schema)
+        if rf is not None:
+            kwargs["response_format"] = rf
 
         try:
             response = await self._client.chat.completions.create(**kwargs)
@@ -114,6 +124,7 @@ class OpenAIModel:
                     tools=tools,
                     temperature=temperature,
                     max_tokens=max_tokens,
+                    output_schema=output_schema,
                 )
             )
 
@@ -174,6 +185,7 @@ class OpenAIModel:
         tools: list[ToolDef] | None = None,
         temperature: float = 1.0,
         max_tokens: int | None = None,
+        output_schema: Any | None = None,
     ) -> AsyncIterator[ModelChunk]:
         oai_messages = _to_openai_messages(messages)
         oai_tools = [_to_openai_tool(t) for t in (tools or [])]
@@ -190,6 +202,9 @@ class OpenAIModel:
             kwargs["max_tokens"] = max_tokens
         if oai_tools:
             kwargs["tools"] = oai_tools
+        rf = _build_response_format(output_schema)
+        if rf is not None:
+            kwargs["response_format"] = rf
 
         partials: dict[int, _OAIPartial] = {}
         usage = Usage()
@@ -348,5 +363,37 @@ def _to_openai_tool(t: ToolDef) -> dict[str, Any]:
             "name": t.name,
             "description": t.description,
             "parameters": t.input_schema or {"type": "object", "properties": {}},
+        },
+    }
+
+
+def _build_response_format(output_schema: Any | None) -> dict[str, Any] | None:
+    """Translate a Pydantic ``BaseModel`` subclass into OpenAI's
+    ``response_format=json_schema`` payload.
+
+    Returns ``None`` when the caller didn't request structured
+    output, or when the supplied object isn't a Pydantic model
+    (defensive — the protocol types this loosely as ``Any``).
+
+    The ``strict=True`` flag tells OpenAI to enforce the schema at
+    decode time. The model is constrained to emit valid JSON
+    matching the schema, which means the agent loop's
+    validation-with-retry path becomes a fallback that almost
+    never fires. Supported on ``gpt-4o``, ``gpt-4o-mini``,
+    ``gpt-4.1`` and newer; older models silently fall back to
+    prompt-augmentation behaviour at the OpenAI side.
+    """
+    if output_schema is None:
+        return None
+    schema_method = getattr(output_schema, "model_json_schema", None)
+    if not callable(schema_method):
+        return None
+    name = getattr(output_schema, "__name__", "Output")
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": name,
+            "schema": schema_method(),
+            "strict": True,
         },
     }
