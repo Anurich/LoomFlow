@@ -91,7 +91,7 @@ layer because every cross-layer call goes through a Protocol from
 1. `Agent.run()` → `_loop(prompt, emit=_noop_emit)`.
 2. **Open runtime session**: `async with self._runtime.session(session_id):`
    sets a contextvar that journaled runtimes use to key their cache.
-3. **Open root span**: `async with self._telemetry.trace("jeeves.run"):`.
+3. **Open root span**: `async with self._telemetry.trace("loom.run"):`.
 4. **Audit**: write `run_started` entry.
 5. **Seed context**: pull working blocks, recall recent episodes,
    recall facts (when memory exposes `.facts`), build the

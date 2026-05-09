@@ -100,14 +100,14 @@ async def test_emits_duration_metric_with_user_id_and_ok_status() -> None:
     )
 
     names = [m[0] for m in tel.metrics]
-    assert "jeeves.auto_extract.duration_ms" in names
-    assert "jeeves.auto_extract.invocations" in names
+    assert "loom.auto_extract.duration_ms" in names
+    assert "loom.auto_extract.invocations" in names
 
     duration = next(
-        m for m in tel.metrics if m[0] == "jeeves.auto_extract.duration_ms"
+        m for m in tel.metrics if m[0] == "loom.auto_extract.duration_ms"
     )
     invocation = next(
-        m for m in tel.metrics if m[0] == "jeeves.auto_extract.invocations"
+        m for m in tel.metrics if m[0] == "loom.auto_extract.invocations"
     )
     assert duration[1] >= 0.0  # wall time in ms, non-negative
     assert duration[2]["user_id"] == "alice"

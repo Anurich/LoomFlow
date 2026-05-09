@@ -302,7 +302,7 @@ def step(
                 return await f(*args, **kwargs)
 
             async with telemetry.trace(
-                "jeeves.workflow.step",
+                "loom.workflow.step",
                 step=step_name,
                 user_id=ctx.user_id,
                 session_id=ctx.session_id,
@@ -576,7 +576,7 @@ class Workflow:
                 # under this span automatically.
                 tel = self._telemetry or NoTelemetry()
                 async with tel.trace(
-                    "jeeves.workflow.step",
+                    "loom.workflow.step",
                     step=current,
                     user_id=user_id,
                     session_id=sid,

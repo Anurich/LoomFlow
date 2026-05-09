@@ -1,8 +1,9 @@
 # Loom
 
-**Production-ready async agent harness. Multi-tenant by default,
-typed outputs, retries on transient errors, model-agnostic,
-MCP-native.**
+**Production workflow + agent framework. Two peer primitives —
+``Workflow`` (developer-controlled DAG) and ``Agent`` (LLM-driven
+loop) — that compose freely. Multi-tenant by default, typed
+outputs, retries on transient errors, model-agnostic, MCP-native.**
 
 ```python
 import asyncio

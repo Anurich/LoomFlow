@@ -111,7 +111,7 @@ class ReAct:
                     session.interruption_reason = f"budget:{status.reason}"
                     if not deps.fast_telemetry:
                         await deps.telemetry.emit_metric(
-                            "jeeves.budget.exceeded",
+                            "loom.budget.exceeded",
                             1,
                             session_id=session.id,
                             reason=status.reason,
@@ -127,7 +127,7 @@ class ReAct:
                 _NULL_CTX
                 if deps.fast_telemetry
                 else deps.telemetry.trace(
-                    "jeeves.turn",
+                    "loom.turn",
                     turn=session.turns,
                     session_id=session.id,
                 )
@@ -156,7 +156,7 @@ class ReAct:
                         _NULL_CTX
                         if deps.fast_telemetry
                         else deps.telemetry.trace(
-                            "jeeves.model.complete",
+                            "loom.model.complete",
                             model=deps.model.name,
                             turn=session.turns,
                             session_id=session.id,
@@ -190,7 +190,7 @@ class ReAct:
                         _NULL_CTX
                         if deps.fast_telemetry
                         else deps.telemetry.trace(
-                            "jeeves.model.stream",
+                            "loom.model.stream",
                             model=deps.model.name,
                             turn=session.turns,
                             session_id=session.id,
@@ -242,20 +242,20 @@ class ReAct:
                         )
                 if not deps.fast_telemetry:
                     await deps.telemetry.emit_metric(
-                        "jeeves.tokens.input",
+                        "loom.tokens.input",
                         usage.input_tokens,
                         session_id=session.id,
                         model=deps.model.name,
                     )
                     await deps.telemetry.emit_metric(
-                        "jeeves.tokens.output",
+                        "loom.tokens.output",
                         usage.output_tokens,
                         session_id=session.id,
                         model=deps.model.name,
                     )
                     if usage.cost_usd:
                         await deps.telemetry.emit_metric(
-                            "jeeves.cost.usd",
+                            "loom.cost.usd",
                             usage.cost_usd,
                             session_id=session.id,
                             model=deps.model.name,
@@ -586,7 +586,7 @@ async def _run_single_tool(
         _NULL_CTX
         if deps.fast_telemetry
         else deps.telemetry.trace(
-            "jeeves.tool",
+            "loom.tool",
             tool=call.tool,
             call_id=call.id,
             turn=turn,
@@ -696,7 +696,7 @@ async def _run_single_tool(
     if not deps.fast_telemetry:
         elapsed_ms = (anyio.current_time() - started) * 1000
         await deps.telemetry.emit_metric(
-            "jeeves.tool.duration_ms",
+            "loom.tool.duration_ms",
             elapsed_ms,
             tool=call.tool,
             ok=result.ok,

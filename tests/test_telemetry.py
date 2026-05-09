@@ -79,8 +79,8 @@ async def test_no_telemetry_trace_yields_a_span_object() -> None:
 async def test_no_telemetry_emit_metric_is_a_noop() -> None:
     tel = NoTelemetry()
     # Just confirms it doesn't raise; nothing to assert on.
-    await tel.emit_metric("jeeves.foo", 1)
-    await tel.emit_metric("jeeves.foo_ms", 100)
+    await tel.emit_metric("loom.foo", 1)
+    await tel.emit_metric("loom.foo_ms", 100)
 
 
 # ---------------------------------------------------------------------------
@@ -164,20 +164,20 @@ async def test_agent_run_emits_run_turn_and_model_spans() -> None:
     await agent.run("hello world")
 
     names = [s.name for s in exporter.get_finished_spans()]
-    assert "jeeves.run" in names
-    assert "jeeves.turn" in names
+    assert "loom.run" in names
+    assert "loom.turn" in names
     # ReAct emits ``jeeves.model.complete`` on the non-streaming hot
     # path (agent.run) and ``jeeves.model.stream`` when consuming
     # via agent.stream. Either span name is correct.
     assert (
-        "jeeves.model.complete" in names
-        or "jeeves.model.stream" in names
+        "loom.model.complete" in names
+        or "loom.model.stream" in names
     )
 
     metrics = _metrics_by_name(reader)
-    assert "jeeves.tokens.input" in metrics
-    assert "jeeves.tokens.output" in metrics
-    assert "jeeves.session.duration_ms" in metrics
+    assert "loom.tokens.input" in metrics
+    assert "loom.tokens.output" in metrics
+    assert "loom.session.duration_ms" in metrics
 
 
 async def test_run_span_has_session_id_and_model_attributes() -> None:
@@ -186,7 +186,7 @@ async def test_run_span_has_session_id_and_model_attributes() -> None:
     result = await agent.run("anything")
 
     run_span = next(
-        s for s in exporter.get_finished_spans() if s.name == "jeeves.run"
+        s for s in exporter.get_finished_spans() if s.name == "loom.run"
     )
     assert run_span.attributes["session_id"] == result.session_id
     assert run_span.attributes["model"] == "echo"
@@ -199,8 +199,8 @@ async def test_turn_span_is_a_child_of_run_span() -> None:
 
     spans = exporter.get_finished_spans()
     by_name = {s.name: s for s in spans}
-    run = by_name["jeeves.run"]
-    turn = by_name["jeeves.turn"]
+    run = by_name["loom.run"]
+    turn = by_name["loom.turn"]
     # The turn span's parent must be the run span.
     assert turn.parent is not None
     assert turn.parent.span_id == run.context.span_id
@@ -225,15 +225,15 @@ async def test_tool_span_emitted_with_tool_attribute_and_duration_metric() -> No
     await agent.run("ping?")
 
     tool_spans = [
-        s for s in exporter.get_finished_spans() if s.name == "jeeves.tool"
+        s for s in exporter.get_finished_spans() if s.name == "loom.tool"
     ]
     assert len(tool_spans) == 1
     assert tool_spans[0].attributes["tool"] == "ping"
     assert tool_spans[0].attributes["call_id"] == "c1"
 
     metrics = _metrics_by_name(reader)
-    assert "jeeves.tool.duration_ms" in metrics
-    pt = metrics["jeeves.tool.duration_ms"][0]
+    assert "loom.tool.duration_ms" in metrics
+    pt = metrics["loom.tool.duration_ms"][0]
     # Histogram entry exists with expected attributes.
     assert pt.count == 1
     attrs = dict(pt.attributes)
@@ -266,7 +266,7 @@ async def test_parallel_tool_calls_emit_independent_tool_spans() -> None:
     await agent.run("...")
 
     tool_spans = [
-        s for s in exporter.get_finished_spans() if s.name == "jeeves.tool"
+        s for s in exporter.get_finished_spans() if s.name == "loom.tool"
     ]
     tools = {s.attributes["tool"] for s in tool_spans}
     assert tools == {"alpha", "beta"}
@@ -281,8 +281,8 @@ async def test_budget_exceeded_increments_metric_and_completes_run() -> None:
     assert result.interrupted
 
     metrics = _metrics_by_name(reader)
-    assert "jeeves.budget.exceeded" in metrics
-    pt = metrics["jeeves.budget.exceeded"][0]
+    assert "loom.budget.exceeded" in metrics
+    pt = metrics["loom.budget.exceeded"][0]
     assert pt.value == 1
 
 
@@ -293,7 +293,7 @@ async def test_session_duration_metric_recorded_once_per_run() -> None:
     await agent.run("second")
 
     metrics = _metrics_by_name(reader)
-    histo_pts = metrics["jeeves.session.duration_ms"]
+    histo_pts = metrics["loom.session.duration_ms"]
     assert len(histo_pts) >= 1
     total_count = sum(pt.count for pt in histo_pts)
     assert total_count == 2

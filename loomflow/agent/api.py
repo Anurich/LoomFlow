@@ -1022,7 +1022,7 @@ class Agent:
             _NULL_CTX
             if fast_telemetry
             else self._telemetry.trace(
-                "jeeves.run",
+                "loom.run",
                 session_id=session_id,
                 max_turns=self._max_turns,
                 model=self._model.name,
@@ -1158,7 +1158,7 @@ class Agent:
             elapsed_ms = (anyio.current_time() - loop_started) * 1000
             if not fast_telemetry:
                 await self._telemetry.emit_metric(
-                    "jeeves.session.duration_ms",
+                    "loom.session.duration_ms",
                     elapsed_ms,
                     session_id=session_id,
                     interrupted=session.interrupted,
