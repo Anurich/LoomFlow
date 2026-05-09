@@ -90,12 +90,12 @@ def test_stdio_spec_construction() -> None:
 
 def test_http_spec_construction_with_headers() -> None:
     s = Spec.http(
-        "jeeves",
-        "https://jeeves.works/mcp/x",
+        "remote",
+        "https://example.com/mcp",
         headers={"X-Custom": "1"},
     )
     assert s.transport == "http"
-    assert s.url == "https://jeeves.works/mcp/x"
+    assert s.url == "https://example.com/mcp"
     assert ("X-Custom", "1") in s.headers
 
 

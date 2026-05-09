@@ -157,31 +157,7 @@ Tool name conflicts across servers are auto-disambiguated:
 `git.commit` and `github.commit` if both servers expose `commit`;
 just `commit` if only one does. Either form is accepted at call time.
 
-## 6. Jeeves Gateway (one line)
-
-```python
-from loomflow import Agent
-from loomflow.jeeves import JeevesGateway
-
-agent = Agent(
-    "You are a productivity assistant.",
-    model="claude-opus-4-7",
-    tools=JeevesGateway.from_env(),  # reads JEEVES_API_KEY
-)
-```
-
-Compose with other MCP servers:
-
-```python
-gateway = JeevesGateway.from_env()
-registry = MCPRegistry([
-    gateway.as_mcp_server(),
-    MCPServerSpec.stdio("git", "uvx", ["mcp-server-git"]),
-])
-agent = Agent("...", tools=registry)
-```
-
-## 7. Memory: pick a backend
+## 6. Memory: pick a backend
 
 The simplest way is the **`memory=` resolver** — pass a URL and the
 framework picks the backend:
@@ -248,7 +224,7 @@ memory = ChromaMemory.local(
 agent = Agent("...", memory=memory)
 ```
 
-## 8. Auto fact extraction (default ON)
+## 7. Auto fact extraction (default ON)
 
 Every `agent.run()` against a real model auto-extracts structured
 `(subject, predicate, object)` facts from the conversation into the
@@ -322,7 +298,7 @@ facts_at_jan_2026 = await memory.facts.query(
 )
 ```
 
-## 9. Durable replay
+## 8. Durable replay
 
 ```python
 from loomflow import Agent
@@ -360,7 +336,7 @@ result = await agent.resume("my-task-2026-05-01", "complex task")
 `resume(session_id, prompt)` is just sugar for
 `run(prompt, session_id=session_id)`.
 
-## 10. Telemetry (OpenTelemetry)
+## 9. Telemetry (OpenTelemetry)
 
 ```python
 from loomflow import Agent
@@ -387,7 +363,7 @@ Spans emitted: `jeeves.run`, `jeeves.turn`, `jeeves.model.stream`,
 
 Wire any OTel exporter (Honeycomb, Datadog, LangSmith, OTLP, ...).
 
-## 11. Audit log
+## 10. Audit log
 
 ```python
 from loomflow import Agent
@@ -404,7 +380,7 @@ await agent.run("anything")
 entries = await audit.query(session_id="sess_...")
 ```
 
-## 12. Permissions + hooks
+## 11. Permissions + hooks
 
 ```python
 from loomflow import Agent, Mode, StandardPermissions
@@ -451,7 +427,7 @@ A handler that raises is treated as deny + logged. See
 [Production hardening](production_hardening.md#approval-handler-for-decisionask_)
 for the full failure-mode contract.
 
-## 13. Sandbox (filesystem)
+## 12. Sandbox (filesystem)
 
 ```python
 from loomflow import Agent, tool
@@ -471,7 +447,7 @@ agent = Agent("...", tools=sandbox)
 # Now any path arg outside ~/safe-workspace is denied (symlinks resolved).
 ```
 
-## 14. Budget
+## 13. Budget
 
 ```python
 from datetime import timedelta
@@ -500,16 +476,11 @@ When the budget is exceeded, the run terminates cleanly with
 import asyncio
 from datetime import timedelta
 
-from loomflow import (
-    Agent,
-    FileAuditLog,
-    JeevesGateway,
-    Mode,
-    OTelTelemetry,
-    SqliteRuntime,
-    StandardPermissions,
-)
-from loomflow.governance.budget import BudgetConfig, StandardBudget
+from loomflow import Agent, BudgetConfig, Mode, StandardBudget, StandardPermissions
+from loomflow.mcp import MCPRegistry, MCPServerSpec
+from loomflow.observability import OTelTelemetry
+from loomflow.runtime import SqliteRuntime
+from loomflow.security import FileAuditLog
 
 async def main():
     agent = Agent(
@@ -517,9 +488,11 @@ async def main():
         model="claude-opus-4-7",
         # One string picks the backend; the resolver wires up the
         # bi-temporal fact store + auto-picks an embedder.
-        memory="postgres://user:pw@db.internal/jeeves",
+        memory="postgres://user:pw@db.internal/loom",
         runtime=SqliteRuntime("./journal.db"),
-        tools=JeevesGateway.from_env(),
+        tools=MCPRegistry([
+            MCPServerSpec.stdio("git", "uvx", ["mcp-server-git"]),
+        ]),
         permissions=StandardPermissions(mode=Mode.DEFAULT),
         budget=StandardBudget(BudgetConfig(
             max_tokens=200_000,

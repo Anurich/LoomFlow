@@ -60,8 +60,6 @@ loomflow/
     spec.py          # MCPServerSpec
     client.py        # MCPClient (lazy mcp SDK)
     registry.py      # MCPRegistry implementing ToolHost
-  jeeves/
-    client.py        # JeevesGateway (Jeeves MCP gateway wrapper)
 ```
 
 ## Layer rules

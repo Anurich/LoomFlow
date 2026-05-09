@@ -20,7 +20,7 @@ tokens consumed (if the framework reports them).
 Run::
 
     pip install langchain langchain-openai langchain-core
-    OPENAI_API_KEY=sk-... python bench/jeeves_vs_langchain.py
+    OPENAI_API_KEY=sk-... python bench/loom_vs_langchain.py
 
 Optional flags::
 
@@ -75,24 +75,24 @@ PROMPT_TWO_TOOLS = (
 
 
 from loomflow import Agent as Loom  # noqa: E402
-from loomflow import tool as jeeves_tool  # noqa: E402
+from loomflow import tool as loom_tool  # noqa: E402
 
 
-@jeeves_tool(name="get_weather")
-async def _jeeves_get_weather(city: str) -> str:
+@loom_tool(name="get_weather")
+async def _loom_get_weather(city: str) -> str:
     """Look up the current weather for a city."""
     return f"It's sunny and 72°F in {city}."
 
 
-def _build_jeeves_agent() -> Loom:
+def _build_loom_agent() -> Loom:
     return Loom(
         "You are a helpful assistant. Be concise.",
         model=MODEL_ID,
-        tools=[_jeeves_get_weather],
+        tools=[_loom_get_weather],
     )
 
 
-async def _run_jeeves(agent: Loom, prompt: str) -> tuple[str, int, int]:
+async def _run_loom(agent: Loom, prompt: str) -> tuple[str, int, int]:
     """Run Loom end to end. Returns (output, tokens_in, tokens_out)."""
     result = await agent.run(prompt)
     return result.output, result.tokens_in, result.tokens_out
@@ -188,10 +188,10 @@ class ScenarioStats:
         return statistics.median(r.tokens_out for r in self.runs)
 
 
-async def _time_jeeves(prompt: str) -> RunResult:
-    agent = _build_jeeves_agent()
+async def _time_loom(prompt: str) -> RunResult:
+    agent = _build_loom_agent()
     t0 = time.perf_counter()
-    output, t_in, t_out = await _run_jeeves(agent, prompt)
+    output, t_in, t_out = await _run_loom(agent, prompt)
     elapsed = time.perf_counter() - t0
     return RunResult(
         seconds=elapsed,
@@ -254,7 +254,7 @@ async def main() -> None:
 
     if args.warmup:
         print("\nWarmup (1 call each, not timed)...")
-        await _time_jeeves("Say hi.")
+        await _time_loom("Say hi.")
         await _time_lc("Say hi.")
 
     all_stats: list[ScenarioStats] = []
@@ -265,7 +265,7 @@ async def main() -> None:
         print(f"   Prompt: {prompt[:70]}{'...' if len(prompt) > 70 else ''}")
 
         for framework_name, runner in [
-            ("Jeeves", _time_jeeves),
+            ("Loom", _time_loom),
             ("LangChain", _time_lc),
         ]:
             stats = ScenarioStats(name=scenario_name, framework=framework_name)
@@ -309,15 +309,15 @@ async def main() -> None:
             )
         # Delta line
         if len(group) == 2:
-            j, lc = (s for s in group if s.framework == "Jeeves"), (
+            j, lc = (s for s in group if s.framework == "Loom"), (
                 s for s in group if s.framework == "LangChain"
             )
-            jeeves = next(j)
+            loom = next(j)
             langchain = next(lc)
-            delta_ms = (langchain.median_s - jeeves.median_s) * 1000
-            faster = "Jeeves" if delta_ms > 0 else "LangChain"
+            delta_ms = (langchain.median_s - loom.median_s) * 1000
+            faster = "Loom" if delta_ms > 0 else "LangChain"
             pct = abs(delta_ms) / max(
-                langchain.median_s * 1000, jeeves.median_s * 1000
+                langchain.median_s * 1000, loom.median_s * 1000
             ) * 100
             print(
                 f"{'':20s} {'Δ':12s} "

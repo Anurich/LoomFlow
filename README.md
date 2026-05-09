@@ -104,9 +104,9 @@ multi-tenancy / structured outputs / retries by hand.
   `model="claude-opus-4-7"`, `"gpt-4.1-mini"`, `"mistral-large"`, …
 * **Pluggable architectures** — twelve shipped, same `Agent`
   surface, one kwarg switches the iteration strategy.
-* **MCP-native** — MCP is the tool spine, not an integration. Jeeves
-  Gateway / Composio / any MCP server plugs into a single
-  `MCPRegistry`.
+* **MCP-native** — MCP is the tool spine, not an integration. Any
+  MCP server (Composio, custom hosted gateways, local stdio
+  servers) plugs into a single `MCPRegistry`.
 * **Memory done right** — five backends (in-memory / vector /
   Chroma / Postgres+pgvector / Redis), pluggable embedders, and
   **bi-temporal facts** that track when claims were true in the
@@ -1160,7 +1160,6 @@ End-to-end demo: [`examples/03_multi_user_sessions.py`](examples/03_multi_user_s
 | **String model resolver** | `model="claude-opus-4-7"`, `"gpt-4o"`, `"mistral-large"`, `"command-r"`, `"echo"`, `"litellm/<any>"` | `Agent.__init__` |
 | **Tools** | `@tool` decorator with auto-schema, sync + async; `agent.with_tool` decorator; `add_tool` / `remove_tool` / `tools_list` | `tool`, `Tool` (top-level) |
 | **MCP servers** | stdio + Streamable HTTP, multi-server registry, name disambiguation | `from loomflow.mcp import MCPClient, MCPRegistry, MCPServerSpec` |
-| **Jeeves Gateway** | One-line: `tools=JeevesGateway.from_env()` | `from loomflow.jeeves import JeevesGateway, JeevesConfig` |
 | **Memory backends** | In-memory dict, vector cosine, Chroma, Postgres+pgvector, Redis, single-file SQLite | `InMemoryMemory` (top-level); `from loomflow.memory.{sqlite,chroma,postgres,redis,vector} import {SqliteMemory, ChromaMemory, PostgresMemory, RedisMemory, VectorMemory}` |
 | **Embedders** | HashEmbedder (deterministic, zero deps), OpenAIEmbedder, VoyageEmbedder, CohereEmbedder | `HashEmbedder` (top-level); `from loomflow.memory import OpenAIEmbedder, VoyageEmbedder, CohereEmbedder` |
 | **Bi-temporal facts** | All five memory backends. LLM-driven `Consolidator`. Auto-consolidate, plus `ConsolidationWorker` for long-lived agents. | `Fact` (top-level); `from loomflow.memory import Consolidator, ConsolidationWorker, FactStore` |
@@ -1229,7 +1228,7 @@ The package is split into **two import tiers**:
 |---|---|---|
 | **Stable top-level** | `Agent`, `Workflow`, `WorkflowResult`, `step`, `START`, `END`, `tool`, `Tool`, `RunContext`, `RunResult`, `get_run_context`, `set_run_context`, common types (`Message`, `Episode`, `Fact`, `Role`, `Event`, `Usage`, `MemoryBlock`, `MemoryProfile`, `MemoryExport`, `BudgetStatus`, `PermissionDecision`, `ToolCall`, `ToolDef`, `ToolResult`), core protocols (`Memory`, `Model`, `Permissions`, `Budget`, `HookHost`, `Sandbox`, `Telemetry`, `ToolHost`, `Runtime`, `Embedder`, `Secrets`, `AuditLog`, `Architecture`), default backends (`InMemoryMemory`, `InMemoryAuditLog`, `NoBudget`, `NoTelemetry`, `NoSandbox`, `AllowAll`, `Mode`, `StandardPermissions`, `HookRegistry`, `StandardBudget`, `BudgetConfig`, `InProcRuntime`, `ReAct`, `HashEmbedder`), `resolve_memory`, test fakes (`EchoModel`, `ScriptedModel`, `ScriptedTurn`), common errors (`LoomError`, `OutputValidationError`, `IsolationWarning`, `BudgetExceeded`, `ConfigError`, `LoomDeprecationWarning`), `new_id` | `from loomflow import Agent, Workflow, step, tool` |
 | **Stable submodule** | All backend-specific concrete classes — they live in their submodule and are intentionally NOT re-exported at top level. `PostgresMemory`, `ChromaMemory`, `RedisMemory`, `SqliteMemory`, `VectorMemory`, `LazyMemory`, `AutoExtractMemory`, `OpenAIModel`, `AnthropicModel`, `LiteLLMModel`, `SqliteRuntime`, `PostgresRuntime`, `JournaledRuntime`, `PerUserPermissions`, `EnvSecrets`, `DictSecrets`, `FilesystemSandbox`, `SubprocessSandbox`, `FileAuditLog`, `OTelTelemetry`, all vector stores, all embedders, all Anthropic-cookbook architectures (`SelfRefine`, `Reflexion`, `TreeOfThoughts`, `PlanAndExecute`, `ReWOO`, `Supervisor`, `Swarm`, `Router`, `MultiAgentDebate`, `BlackboardArchitecture`, `ActorCritic`), built-in tools (`read_tool`, `write_tool`, `bash_tool`, `edit_tool`), `Team`, `Skill`, `MCPClient`, `MCPRegistry` | `from loomflow.memory.postgres import PostgresMemory`<br>`from loomflow.model.openai import OpenAIModel`<br>`from loomflow.architecture import SelfRefine`<br>`from loomflow.security import PerUserPermissions, EnvSecrets`<br>`from loomflow.observability import OTelTelemetry`<br>`from loomflow.team import Team` |
-| **Experimental** | `agent.generate_graph()`, `JeevesGateway`, the `Team.*` builders | Useful, tested, but newer — internals may change. |
+| **Experimental** | `agent.generate_graph()`, the `Team.*` builders | Useful, tested, but newer — internals may change. |
 | **Internal** | `_loop`, `_wrapped_model`, `_wrapped_memory`, `Dependencies`, `AgentSession`, anything starting with `_` | No stability promise. Subject to change without notice. |
 
 If a symbol isn't listed, it's experimental by default. Open an

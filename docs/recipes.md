@@ -8,7 +8,7 @@ the recipe, swap the bits that vary, ship.
 1. [Customer-support bot with persistent facts](#1-customer-support-bot-with-persistent-facts)
 2. [Coding assistant with sandboxed filesystem access](#2-coding-assistant-with-sandboxed-filesystem-access)
 3. [Long-running research agent with durable replay](#3-long-running-research-agent-with-durable-replay)
-4. [Multi-server MCP setup (Jeeves + git + filesystem)](#4-multi-server-mcp-setup)
+4. [Multi-server MCP setup (hosted + git + filesystem)](#4-multi-server-mcp-setup)
 5. [Custom embedder](#5-custom-embedder)
 6. [Custom permissions policy](#6-custom-permissions-policy)
 7. [Streaming UI integration](#7-streaming-ui-integration)
@@ -135,12 +135,11 @@ you left off.
 
 ```python
 import asyncio
-from loomflow import Agent
-from loomflow.jeeves import JeevesGateway
-from loomflow.model import AnthropicModel
-from loomflow.runtime import SqliteRuntime
 from datetime import timedelta
-from loomflow.governance.budget import BudgetConfig, StandardBudget
+from loomflow import Agent, BudgetConfig, StandardBudget
+from loomflow.mcp import MCPRegistry, MCPServerSpec
+from loomflow.model.anthropic import AnthropicModel
+from loomflow.runtime import SqliteRuntime
 
 async def main():
     runtime = SqliteRuntime("./research_journal.db")
@@ -149,7 +148,9 @@ async def main():
         "execute each step with the available tools, then summarize.",
         model=AnthropicModel("claude-opus-4-7"),
         runtime=runtime,
-        tools=JeevesGateway.from_env(),
+        tools=MCPRegistry([
+            MCPServerSpec.stdio("git", "uvx", ["mcp-server-git"]),
+        ]),
         budget=StandardBudget(BudgetConfig(
             max_tokens=500_000,
             max_cost_usd=20.0,
@@ -177,16 +178,20 @@ layer.)
 
 ## 4. Multi-server MCP setup
 
-Compose Jeeves Gateway with a local git server and a filesystem
-server. Tool name conflicts get auto-disambiguated.
+Compose multiple MCP servers — a hosted HTTP server plus local
+stdio servers. Tool name conflicts get auto-disambiguated.
 
 ```python
-from loomflow import (
-    Agent, JeevesGateway, MCPClient, MCPRegistry, MCPServerSpec,
-)
+import os
+from loomflow import Agent
+from loomflow.mcp import MCPRegistry, MCPServerSpec
 
 registry = MCPRegistry([
-    JeevesGateway.from_env().as_mcp_server(),
+    MCPServerSpec.http(
+        name="hosted",
+        url="https://your-gateway.example.com/mcp",
+        headers={"Authorization": f"Bearer {os.environ['HOSTED_MCP_TOKEN']}"},
+    ),
     MCPServerSpec.stdio(
         name="git",
         command="uvx",
