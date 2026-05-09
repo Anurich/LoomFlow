@@ -55,6 +55,7 @@ asyncio.run(main())
 quickstart
 recipes
 architecture
+workflow_vs_agent
 ```
 
 ```{toctree}

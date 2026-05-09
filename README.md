@@ -658,8 +658,11 @@ agent = Agent(
 ```
 
 See the [`examples/`](examples/) directory for runnable end-to-end
-samples that exercise the loader, vector store, retriever-as-tool
-pattern, and multi-agent debate.
+samples — RAG over PDFs, multi-agent debate, structured outputs,
+multi-user/session continuity, every memory backend behind one
+parameter, and the full Workflow composition story (chain, route,
+cycles, workflow-as-tool, agent architectures inside workflows,
+custom-step prompt formatting).
 
 ---
 
@@ -1142,6 +1145,7 @@ End-to-end demo: [`examples/03_multi_user_sessions.py`](examples/03_multi_user_s
 | **Structured outputs** | Pass `output_schema=` to get a typed, validated Pydantic instance back. Framework augments the system prompt with the schema, parses + validates, retries with feedback on failure | `Agent.run(output_schema=)`, `RunResult.parsed`, `OutputValidationError` |
 | **Resilient model calls** | Network adapters auto-wrapped with retry-on-transient (rate limit, 5xx, network blip). Typed error taxonomy. Provider `Retry-After` honoured. | `RetryPolicy`, `RetryPolicy.disabled/aggressive`, `ModelError`, `TransientModelError`, `RateLimitError`, `PermanentModelError`, `AuthenticationError`, `InvalidRequestError`, `ContentFilterError`, `classify_model_error` |
 | **Architecture protocol** | Pluggable agent-loop strategy: 12 architectures shipped | `Architecture`, `ReAct`, `SelfRefine`, `Reflexion`, `TreeOfThoughts`, `PlanAndExecute`, `ReWOO`, `Router`, `Supervisor`, `ActorCritic`, `MultiAgentDebate`, `Swarm`, `BlackboardArchitecture` |
+| **Workflow primitive** | Developer-controlled DAG — peer of `Agent`, not a subtype. Use when you can draw the path on a whiteboard before writing code (`Workflow.chain` for sequences, `Workflow.route` for classify-then-dispatch, `Workflow.parallel` for fan-out + merge, explicit graph builder for custom shapes including cycles). Both composition directions are first-class: drop an `Agent` in as a workflow node, or expose a `Workflow` as an `Agent` tool via `wf.as_tool()`. Same observability spine as `Agent` — telemetry, audit log, `user_id` partition. Cycles supported with `max_visits_per_node` / `max_steps` safety caps. See [`docs/workflow_vs_agent.md`](docs/workflow_vs_agent.md) for the rubric. | `Workflow`, `WorkflowResult`, `step`, `START`, `END` |
 | **Team facade** | Sibling-style builders (`Team.supervisor`, `Team.swarm`, `Team.router`, `Team.debate`, `Team.actor_critic`, `Team.blackboard`) for the common multi-agent shapes | `Team`, `Handoff`, `run_architecture` |
 | **Vector store** | `add` / `search` / `delete` with Mongo-style filters, MMR diversity, BM25 hybrid search, save/load | `InMemoryVectorStore`, `ChromaVectorStore`, `PostgresVectorStore`, `FAISSVectorStore`, `SearchResult` |
 | **Document loader** | One-line load for PDF / DOCX / Excel / CSV / HTML / Markdown into markdown chunks. PDF supports two interchangeable backends: `unstructured` (default, Apache 2.0, what LangChain wraps) with `fast` / `hi_res` / `ocr_only` strategies, or `docling` (MIT, IBM Research, 2026 benchmark winner on native PDFs). Per-page extraction failures emit a `RuntimeWarning` — no more silent empty pages. | `jeevesagent.loader.load`, `load_pdf(path, *, backend=, strategy=)`, `MarkdownChunker`, `RecursiveChunker`, `SentenceChunker`, `TokenChunker` |
@@ -1201,7 +1205,7 @@ In-tree starting points:
 | [`Subagent.md`](Subagent.md) | Architecture-protocol design rationale; full 14-architecture catalogue (the 5 shipped, the 9 candidates) |
 | [`project.md`](project.md) | The full engineering plan (the design doc) |
 | [`BUILD_LOG.md`](BUILD_LOG.md) | Slice-by-slice changelog |
-| [`examples/`](examples/) | Four runnable end-to-end samples: `01_rag_pdf.py`, `02_specialist_debate.py`, `03_multi_user_sessions.py`, `04_structured_outputs.py` |
+| [`examples/`](examples/) | Eleven runnable end-to-end samples. Agent + retrieval + memory: [`01_rag_pdf.py`](examples/01_rag_pdf.py) (PDF RAG with `unstructured` / `docling` backends), [`02_specialist_debate.py`](examples/02_specialist_debate.py) (multi-agent debate), [`03_multi_user_sessions.py`](examples/03_multi_user_sessions.py) (multi-tenant + session continuity), [`04_structured_outputs.py`](examples/04_structured_outputs.py) (typed Pydantic outputs), [`05_memory_showcase.py`](examples/05_memory_showcase.py) (every memory backend behind one parameter, including GDPR ops). Workflow composition story: [`06_workflow_chain.py`](examples/06_workflow_chain.py) (no LLM — simplest possible), [`07_workflow_route.py`](examples/07_workflow_route.py) (route to specialist Agents), [`08_workflow_loop.py`](examples/08_workflow_loop.py) (refinement loop with cycles), [`09_workflow_as_tool.py`](examples/09_workflow_as_tool.py) (workflow exposed as Agent tool), [`10_workflow_architecture.py`](examples/10_workflow_architecture.py) (Agent with non-default architecture inside a workflow), [`11_workflow_custom_step.py`](examples/11_workflow_custom_step.py) (Agent wrapped in a custom step for prompt formatting + capturing `RunResult` metadata) |
 
 ---
 
@@ -1213,7 +1217,7 @@ adopters know what they can pin against today.
 
 | Tier | API | What it covers |
 |---|---|---|
-| **Stable** | `Agent`, `Agent.run` / `stream` / `resume`, `RunResult`, `RunContext`, `get_run_context`, `set_run_context`, `Memory` protocol (including `profile` / `forget` / `export` / `session_messages`), `Episode`, `Fact`, `MemoryProfile`, `MemoryExport`, `Message`, `Role`, `Event`, `Tool`, `@tool`, `Model` protocol, `Secrets` protocol, the error hierarchy under `JeevesAgentError`, `RetryPolicy`, `OutputValidationError`, `IsolationWarning`, `JeevesDeprecationWarning`, `resolve_memory` | Will not break in 0.x without a migration note + deprecation cycle. Pin against these in production code. |
+| **Stable** | `Agent`, `Agent.run` / `stream` / `resume`, `RunResult`, `RunContext`, `get_run_context`, `set_run_context`, `Memory` protocol (including `profile` / `forget` / `export` / `session_messages`), `Episode`, `Fact`, `MemoryProfile`, `MemoryExport`, `Message`, `Role`, `Event`, `Tool`, `@tool`, `Model` protocol, `Secrets` protocol, `Workflow`, `WorkflowResult`, `step`, `START`, `END`, the error hierarchy under `JeevesAgentError`, `RetryPolicy`, `OutputValidationError`, `IsolationWarning`, `JeevesDeprecationWarning`, `resolve_memory` | Will not break in 0.x without a migration note + deprecation cycle. Pin against these in production code. |
 | **Stable backends** | `InMemoryMemory`, `SqliteMemory`, `ChromaMemory`, `PostgresMemory`, `RedisMemory`, `VectorMemory`, `LazyMemory`, `AutoExtractMemory`, `OpenAIModel`, `AnthropicModel`, `LiteLLMModel`, `EchoModel`, `ScriptedModel`, `InProcRuntime`, `SqliteRuntime`, `PostgresRuntime`, `StandardBudget`, `NoBudget`, `AllowAll`, `StandardPermissions`, `PerUserPermissions`, `EnvSecrets`, `DictSecrets`, `HookRegistry`, `OTelTelemetry`, `NoTelemetry`, `FileAuditLog`, `InMemoryAuditLog` | Concrete implementations; constructor signatures stable, behaviour locked. |
 | **Experimental** | `MultiAgentDebate` / `Swarm` / `Blackboard` / `ReWOO` / `TreeOfThoughts` (the newer architectures), `Skills` and `SkillRegistry`, `JeevesGateway`, `agent.generate_graph()`, the `Team.*` builders | Useful, tested, but newer — internal details may change as we collect production feedback. Wrap with your own thin layer if you depend on them. |
 | **Internal** | `_loop`, `_wrapped_model`, `_wrapped_memory`, `Dependencies`, `AgentSession`, the architecture protocol's exact shape, anything starting with `_` | No stability promise. Subject to change without notice. |
@@ -1226,7 +1230,7 @@ need it promoted.
 
 ## Status
 
-* **983 tests pass** offline in ~18 seconds; **10 live tests pass**
+* **1010 tests pass** offline in ~22 seconds; **10 live tests pass**
   against real OpenAI in ~30 seconds (5 env-gated integrations
   skip without `JEEVES_TEST_PG_DSN` / `JEEVES_TEST_REDIS_URL`)
 * **mypy `--strict`** clean across 112 production source files

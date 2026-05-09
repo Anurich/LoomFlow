@@ -335,6 +335,13 @@ class EventKind(StrEnum):
     ERROR = "error"
     COMPLETED = "completed"
     ARCHITECTURE_EVENT = "architecture_event"
+    # Workflow events — emitted by :class:`jeevesagent.Workflow.stream`.
+    # Distinct from agent events so consumers can filter by pattern.
+    WORKFLOW_STARTED = "workflow_started"
+    WORKFLOW_STEP_STARTED = "workflow_step_started"
+    WORKFLOW_STEP_COMPLETED = "workflow_step_completed"
+    WORKFLOW_STEP_FAILED = "workflow_step_failed"
+    WORKFLOW_COMPLETED = "workflow_completed"
     """Generic architecture-progress event. Carries a namespaced
     ``name`` in the payload (e.g. ``"self_refine.critique"``,
     ``"reflexion.lesson_persisted"``, ``"router.classified"``) so

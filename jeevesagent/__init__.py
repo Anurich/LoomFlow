@@ -181,6 +181,7 @@ from .vectorstore import (
     SearchResult,
     VectorStore,
 )
+from .workflow import END, START, Workflow, WorkflowResult, step
 
 __version__ = "0.9.7"
 
@@ -358,6 +359,12 @@ __all__ = [
     "ChromaVectorStore",
     "PostgresVectorStore",
     "FAISSVectorStore",
+    # workflow — peer of Agent for developer-controlled DAGs
+    "Workflow",
+    "WorkflowResult",
+    "step",
+    "START",
+    "END",
     # team builders / standalone runner
     "Team",
     "run_architecture",
