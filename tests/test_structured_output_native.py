@@ -84,6 +84,44 @@ async def test_openai_complete_attaches_response_format_json_schema() -> None:
     schema = rf["json_schema"]["schema"]
     assert "amount" in schema["properties"]
     assert "currency" in schema["properties"]
+    # OpenAI strict mode requires these two normalisations the
+    # adapter must apply before sending — otherwise OpenAI returns
+    # a 400 (regression test for that exact bug).
+    assert schema["additionalProperties"] is False
+    assert set(schema["required"]) == {"amount", "currency"}
+
+
+async def test_openai_strict_mode_normalises_nested_object_schemas() -> None:
+    """Nested ``BaseModel`` (a model field whose type is another
+    ``BaseModel``) emits a ``$defs`` entry referenced from the
+    parent. Strict mode requires ``additionalProperties: false``
+    on EVERY object node, including nested ones — not just the
+    top level."""
+
+    class LineItem(BaseModel):
+        sku: str
+        qty: int
+
+    class Order(BaseModel):
+        order_id: str
+        items: list[LineItem]
+
+    fake = _OpenAIRecorder()
+    model = OpenAIModel("gpt-4o", client=fake)
+    await model.complete(
+        [Message(role=Role.USER, content="give me an order")],
+        output_schema=Order,
+    )
+    schema = fake.last_kwargs["response_format"]["json_schema"]["schema"]
+
+    # Top level is normalised.
+    assert schema["additionalProperties"] is False
+    assert set(schema["required"]) == {"order_id", "items"}
+
+    # Nested LineItem (under $defs) is normalised too.
+    line_item = schema["$defs"]["LineItem"]
+    assert line_item["additionalProperties"] is False
+    assert set(line_item["required"]) == {"sku", "qty"}
 
 
 async def test_openai_complete_omits_response_format_when_no_schema() -> None:

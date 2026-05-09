@@ -382,6 +382,13 @@ def _build_response_format(output_schema: Any | None) -> dict[str, Any] | None:
     never fires. Supported on ``gpt-4o``, ``gpt-4o-mini``,
     ``gpt-4.1`` and newer; older models silently fall back to
     prompt-augmentation behaviour at the OpenAI side.
+
+    Pydantic's emitted schemas are *not* compatible with OpenAI's
+    strict mode out of the box: strict mode requires every object
+    to carry ``additionalProperties: false`` AND lists every
+    property in ``required``. We normalise the schema in place
+    before sending so callers don't need to hand-roll a strict-
+    compatible Pydantic model.
     """
     if output_schema is None:
         return None
@@ -389,11 +396,59 @@ def _build_response_format(output_schema: Any | None) -> dict[str, Any] | None:
     if not callable(schema_method):
         return None
     name = getattr(output_schema, "__name__", "Output")
+    schema = _normalise_schema_for_openai_strict(schema_method())
     return {
         "type": "json_schema",
         "json_schema": {
             "name": name,
-            "schema": schema_method(),
+            "schema": schema,
             "strict": True,
         },
     }
+
+
+def _normalise_schema_for_openai_strict(schema: Any) -> Any:
+    """Mutate a JSON Schema in place so it satisfies OpenAI's
+    ``response_format=json_schema, strict=True`` constraints.
+
+    Two transformations are applied to every nested ``"type":
+    "object"`` node (top-level + ``$defs`` + nested properties):
+
+    1. ``additionalProperties`` is set to ``False`` if not already
+       present. OpenAI strict mode rejects schemas that don't
+       explicitly forbid extra fields.
+    2. The ``required`` array is set to every key in
+       ``properties``. Strict mode rejects schemas with optional
+       properties; Pydantic ``Optional[T]`` fields are emitted as
+       ``anyOf: [T, null]`` which strict mode DOES accept when
+       listed as required, so this is the right move.
+
+    Returns the same object (mutated). Non-dict inputs return
+    unchanged.
+    """
+    if isinstance(schema, dict):
+        # Walk $defs first so the referenced sub-schemas are
+        # normalised before strict-mode validation reads them.
+        defs = schema.get("$defs")
+        if isinstance(defs, dict):
+            for d in defs.values():
+                _normalise_schema_for_openai_strict(d)
+        if schema.get("type") == "object":
+            schema["additionalProperties"] = False
+            props = schema.get("properties")
+            if isinstance(props, dict):
+                schema["required"] = list(props.keys())
+                for v in props.values():
+                    _normalise_schema_for_openai_strict(v)
+        # Recurse into other constructs (anyOf / oneOf / allOf /
+        # arrays / etc.) so nested objects deeper in the tree are
+        # also normalised.
+        for key, v in list(schema.items()):
+            if key in ("$defs", "properties"):
+                continue
+            if isinstance(v, (dict, list)):
+                _normalise_schema_for_openai_strict(v)
+    elif isinstance(schema, list):
+        for item in schema:
+            _normalise_schema_for_openai_strict(item)
+    return schema
