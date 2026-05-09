@@ -15,9 +15,9 @@ from __future__ import annotations
 import anyio
 import pytest
 
-from jeevesagent import Agent, InMemoryAuditLog, InMemoryMemory
-from jeevesagent.governance.budget import BudgetConfig, StandardBudget
-from jeevesagent.model.scripted import ScriptedModel, ScriptedTurn
+from loomflow import Agent, InMemoryAuditLog, InMemoryMemory
+from loomflow.governance.budget import BudgetConfig, StandardBudget
+from loomflow.model.scripted import ScriptedModel, ScriptedTurn
 
 pytestmark = pytest.mark.anyio
 

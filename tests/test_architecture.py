@@ -20,16 +20,16 @@ from collections.abc import AsyncIterator
 
 import pytest
 
-from jeevesagent import Agent, ScriptedModel, ScriptedTurn
-from jeevesagent.architecture import (
+from loomflow import Agent, ScriptedModel, ScriptedTurn
+from loomflow.architecture import (
     AgentSession,
     Architecture,
     Dependencies,
     ReAct,
     resolve_architecture,
 )
-from jeevesagent.core.errors import ConfigError
-from jeevesagent.core.types import Event
+from loomflow.core.errors import ConfigError
+from loomflow.core.types import Event
 
 pytestmark = pytest.mark.anyio
 
@@ -135,7 +135,7 @@ class _NoopArchitecture:
         # No model / tool calls; just structurally yield one event.
         yield Event.budget_warning(
             session.id,
-            __import__("jeevesagent.core.types", fromlist=["BudgetStatus"])
+            __import__("loomflow.core.types", fromlist=["BudgetStatus"])
             .BudgetStatus.warn_("noop arch warns once"),
         )
 
@@ -180,8 +180,8 @@ async def test_custom_architecture_events_visible_via_stream() -> None:
 async def test_react_drives_a_scripted_two_turn_run() -> None:
     """One tool call, one final text response — the canonical ReAct
     shape. Ensures the extracted iteration matches v0.1.x behaviour."""
-    from jeevesagent import tool
-    from jeevesagent.core.types import ToolCall
+    from loomflow import tool
+    from loomflow.core.types import ToolCall
 
     @tool
     async def echo_back(msg: str) -> str:

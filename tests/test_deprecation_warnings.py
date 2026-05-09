@@ -4,7 +4,7 @@ The framework added ``user_id`` keyword arguments to every
 multi-tenant primitive between 0.9 and 0.10. Existing custom
 implementations without that kwarg are still supported via
 ``try / except TypeError`` shims. Those shims now emit a
-:class:`JeevesDeprecationWarning` so callers can migrate their
+:class:`LoomDeprecationWarning` so callers can migrate their
 custom code before v1.0 removes the fallback entirely.
 
 Tests assert:
@@ -22,13 +22,13 @@ from typing import Any
 
 import pytest
 
-from jeevesagent.core._deprecation import (
-    JeevesDeprecationWarning,
+from loomflow.core._deprecation import (
+    LoomDeprecationWarning,
     _reset_seen_for_tests,
     warn_legacy_protocol,
 )
-from jeevesagent.core.types import PermissionDecision, ToolCall
-from jeevesagent.security.permissions import PerUserPermissions
+from loomflow.core.types import PermissionDecision, ToolCall
+from loomflow.security.permissions import PerUserPermissions
 
 pytestmark = pytest.mark.anyio
 
@@ -75,13 +75,13 @@ class _ModernPermissions:
 def test_warn_legacy_protocol_fires_once_per_site() -> None:
     _reset_seen_for_tests()
     with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always", JeevesDeprecationWarning)
+        warnings.simplefilter("always", LoomDeprecationWarning)
         warn_legacy_protocol("Memory", "remember")
         warn_legacy_protocol("Memory", "remember")
         warn_legacy_protocol("Memory", "remember")
     matching = [
         w for w in caught
-        if issubclass(w.category, JeevesDeprecationWarning)
+        if issubclass(w.category, LoomDeprecationWarning)
     ]
     assert len(matching) == 1
     assert "Memory.remember" in str(matching[0].message)
@@ -93,7 +93,7 @@ def test_warn_legacy_protocol_distinct_sites_each_fire() -> None:
     site warns once."""
     _reset_seen_for_tests()
     with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always", JeevesDeprecationWarning)
+        warnings.simplefilter("always", LoomDeprecationWarning)
         warn_legacy_protocol("Memory", "remember")
         warn_legacy_protocol("Memory", "recall")
         warn_legacy_protocol("HookHost", "pre_tool")
@@ -115,7 +115,7 @@ async def test_per_user_permissions_warns_on_legacy_inner() -> None:
         default=_ModernPermissions(),
     )
     with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always", JeevesDeprecationWarning)
+        warnings.simplefilter("always", LoomDeprecationWarning)
         await perms.check(
             ToolCall(tool="anything"),
             context={},
@@ -123,7 +123,7 @@ async def test_per_user_permissions_warns_on_legacy_inner() -> None:
         )
     matching = [
         w for w in caught
-        if issubclass(w.category, JeevesDeprecationWarning)
+        if issubclass(w.category, LoomDeprecationWarning)
     ]
     assert len(matching) == 1
     assert "Permissions.check" in str(matching[0].message)
@@ -138,7 +138,7 @@ async def test_modern_permissions_emits_no_warning() -> None:
         default=_ModernPermissions(),
     )
     with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always", JeevesDeprecationWarning)
+        warnings.simplefilter("always", LoomDeprecationWarning)
         await perms.check(
             ToolCall(tool="anything"),
             context={},
@@ -146,6 +146,6 @@ async def test_modern_permissions_emits_no_warning() -> None:
         )
     matching = [
         w for w in caught
-        if issubclass(w.category, JeevesDeprecationWarning)
+        if issubclass(w.category, LoomDeprecationWarning)
     ]
     assert matching == []

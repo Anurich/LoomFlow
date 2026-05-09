@@ -26,16 +26,9 @@ from __future__ import annotations
 
 import pytest
 
-from jeevesagent import (
-    Agent,
-    Architecture,
-    ScriptedModel,
-    ScriptedTurn,
-    Supervisor,
-    Tool,
-    tool,
-)
-from jeevesagent.core.types import ToolCall
+from loomflow import Agent, Architecture, ScriptedModel, ScriptedTurn, Tool, tool
+from loomflow.architecture import Supervisor
+from loomflow.core.types import ToolCall
 
 pytestmark = pytest.mark.anyio
 
@@ -216,7 +209,7 @@ async def test_supervisor_composes_user_instructions_with_template() -> None:
         name = "capture"
 
         async def stream(self, messages, *, tools=None):  # type: ignore[no-untyped-def]
-            from jeevesagent.core.types import ModelChunk, Usage
+            from loomflow.core.types import ModelChunk, Usage
 
             for m in messages:
                 if m.role == "system":
@@ -510,7 +503,7 @@ def test_delegate_tool_enumerates_worker_names_in_schema() -> None:
     """The delegate tool's `worker` arg must include an enum of the
     actual worker names so strict-schema providers reject invalid
     names at the API boundary."""
-    from jeevesagent.architecture.supervisor import _make_delegate_tool
+    from loomflow.architecture.supervisor import _make_delegate_tool
 
     coder = _worker("c", "Python coder.")
     writer = _worker("w", "Markdown writer.")
@@ -533,7 +526,7 @@ def test_delegate_tool_enumerates_worker_names_in_schema() -> None:
 def test_forward_message_tool_enumerates_worker_names_in_schema() -> None:
     """The forward_message tool's `worker` arg also gets the worker
     enum — same reason as delegate."""
-    from jeevesagent.architecture.supervisor import (
+    from loomflow.architecture.supervisor import (
         _make_forward_message_tool,
     )
 
@@ -550,7 +543,7 @@ def test_forward_message_tool_enumerates_worker_names_in_schema() -> None:
 
 def test_make_delegate_tool_returns_a_real_tool_instance() -> None:
     """Smoke-test the helper that builds the delegate tool."""
-    from jeevesagent.architecture.supervisor import _make_delegate_tool
+    from loomflow.architecture.supervisor import _make_delegate_tool
 
     workers = {"x": _worker("x")}
     t = _make_delegate_tool(workers, "parent_sess", tool_name="delegate")

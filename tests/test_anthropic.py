@@ -8,9 +8,9 @@ from typing import Any
 
 import pytest
 
-from jeevesagent import Agent
-from jeevesagent.core.types import Message, ModelChunk, Role
-from jeevesagent.model.anthropic import AnthropicModel, _to_anthropic_messages
+from loomflow import Agent
+from loomflow.core.types import Message, ModelChunk, Role
+from loomflow.model.anthropic import AnthropicModel, _to_anthropic_messages
 
 pytestmark = pytest.mark.anyio
 
@@ -189,7 +189,7 @@ def test_system_messages_are_concatenated_into_system_field() -> None:
 
 
 def test_assistant_with_tool_calls_emits_tool_use_blocks() -> None:
-    from jeevesagent.core.types import ToolCall
+    from loomflow.core.types import ToolCall
 
     msgs = [
         Message(role=Role.USER, content="weather?"),

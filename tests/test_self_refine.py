@@ -22,17 +22,10 @@ from collections.abc import AsyncIterator
 
 import pytest
 
-from jeevesagent import (
-    Agent,
-    Architecture,
-    ReAct,
-    ScriptedModel,
-    ScriptedTurn,
-    SelfRefine,
-)
-from jeevesagent.architecture import AgentSession, Dependencies
-from jeevesagent.architecture.resolver import resolve_architecture
-from jeevesagent.core.types import Event
+from loomflow import Agent, Architecture, ReAct, ScriptedModel, ScriptedTurn
+from loomflow.architecture import AgentSession, Dependencies, SelfRefine
+from loomflow.architecture.resolver import resolve_architecture
+from loomflow.core.types import Event
 
 pytestmark = pytest.mark.anyio
 
@@ -251,7 +244,7 @@ async def test_self_refine_budget_blocks_before_round_starts() -> None:
     pre-baked base sets ``session.output``; Self-Refine's very first
     ``allows_step`` blocks, so no critic / refiner runs and the
     output is preserved."""
-    from jeevesagent.core.types import BudgetStatus
+    from loomflow.core.types import BudgetStatus
 
     class _AlwaysBlock:
         async def allows_step(self) -> BudgetStatus:

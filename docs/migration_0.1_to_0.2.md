@@ -1,6 +1,6 @@
 # Migrating from 0.1 → 0.2
 
-JeevesAgent 0.2.0 is mostly additive but ships **two breaking
+Loom 0.2.0 is mostly additive but ships **two breaking
 changes**. This guide shows what to change and why.
 
 ## TL;DR
@@ -13,7 +13,7 @@ changes**. This guide shows what to change and why.
 ```diff
 - with pytest.raises(ValueError):
 -     Agent("hi", model="bad-spec")
-+ from jeevesagent.core.errors import ConfigError
++ from loomflow.core.errors import ConfigError
 + with pytest.raises(ConfigError):
 +     Agent("hi", model="bad-spec")
 ```
@@ -66,7 +66,7 @@ silent fallback.
 ### What changed
 
 `_resolve_model("totally-unknown-spec")` used to raise `ValueError`.
-Now it raises `ConfigError` (from `jeevesagent.core.errors`),
+Now it raises `ConfigError` (from `loomflow.core.errors`),
 matching the rest of the configuration-error vocabulary.
 
 ### Migration
@@ -74,7 +74,7 @@ matching the rest of the configuration-error vocabulary.
 ```diff
 - with pytest.raises(ValueError, match="unknown model spec"):
 -     Agent("hi", model="bad-spec")
-+ from jeevesagent.core.errors import ConfigError
++ from loomflow.core.errors import ConfigError
 + with pytest.raises(ConfigError, match="unknown model spec"):
 +     Agent("hi", model="bad-spec")
 ```
@@ -161,31 +161,31 @@ catching `ConfigError` covers all configuration-level failures.
 
 ## Common pitfall: stale install shadowing the editable
 
-If you have a previous `pip install jeevesagent` in your env, an
+If you have a previous `pip install loomflow` in your env, an
 editable install (`pip install -e .`) of 0.2.0 may not take
 precedence because pip's regular install sometimes wins on the
 import path:
 
 ```
-$ python -c "import jeevesagent; print(jeevesagent.__version__)"
+$ python -c "import loomflow; print(loomflow.__version__)"
 0.1.0   # ← stale; expected 0.2.0
 ```
 
 Fix:
 
 ```bash
-pip uninstall jeevesagent -y
+pip uninstall loomflow -y
 pip install -e '.[dev,...]'
 ```
 
 Verify with:
 
 ```bash
-python -c "import jeevesagent; print(jeevesagent.__version__, jeevesagent.__file__)"
-# Should print: 0.2.0 /your/checkout/path/jeevesagent/__init__.py
+python -c "import loomflow; print(loomflow.__version__, loomflow.__file__)"
+# Should print: 0.2.0 /your/checkout/path/loomflow/__init__.py
 ```
 
-This is a Python packaging quirk, not a JeevesAgent bug — but worth
+This is a Python packaging quirk, not a Loom bug — but worth
 flagging since it produces confusing `AttributeError: ... has no
 attribute 'total_tokens'` failures when 0.1's `RunResult` is
 imported instead of 0.2's.

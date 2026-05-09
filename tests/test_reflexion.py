@@ -24,19 +24,11 @@ from collections.abc import AsyncIterator
 
 import pytest
 
-from jeevesagent import (
-    Agent,
-    Architecture,
-    InMemoryMemory,
-    ReAct,
-    Reflexion,
-    ScriptedModel,
-    ScriptedTurn,
-)
-from jeevesagent.architecture import AgentSession, Dependencies
-from jeevesagent.architecture.reflexion import _parse_score
-from jeevesagent.architecture.resolver import resolve_architecture
-from jeevesagent.core.types import Event
+from loomflow import Agent, Architecture, InMemoryMemory, ReAct, ScriptedModel, ScriptedTurn
+from loomflow.architecture import AgentSession, Dependencies, Reflexion
+from loomflow.architecture.reflexion import _parse_score
+from loomflow.architecture.resolver import resolve_architecture
+from loomflow.core.types import Event
 
 pytestmark = pytest.mark.anyio
 
@@ -397,7 +389,8 @@ async def test_reflexion_via_resolver_string_uses_react_default() -> None:
 async def test_reflexion_persists_lessons_to_vector_store() -> None:
     """When a ``lesson_store`` is configured, lessons go to the
     vector store on each failed attempt — not the memory block."""
-    from jeevesagent import HashEmbedder, InMemoryVectorStore
+    from loomflow import HashEmbedder
+    from loomflow.vectorstore import InMemoryVectorStore
 
     store = InMemoryVectorStore(embedder=HashEmbedder(dimensions=64))
     model = ScriptedModel(
@@ -430,8 +423,9 @@ async def test_reflexion_persists_lessons_to_vector_store() -> None:
 async def test_reflexion_recalls_top_k_from_store() -> None:
     """A populated lesson_store rewrites the working memory block
     on each attempt with at most top_k_lessons retrieved bullets."""
-    from jeevesagent import HashEmbedder, InMemoryVectorStore
-    from jeevesagent.loader.base import Chunk
+    from loomflow import HashEmbedder
+    from loomflow.loader.base import Chunk
+    from loomflow.vectorstore import InMemoryVectorStore
 
     store = InMemoryVectorStore(embedder=HashEmbedder(dimensions=64))
     await store.add(

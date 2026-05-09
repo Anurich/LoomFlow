@@ -231,11 +231,11 @@ def _ensure_pdf(domain: Domain) -> Path:
 # 1. Per-domain index + retriever tool
 # --------------------------------------------------------------------
 
-from jeevesagent import Agent, tool  # noqa: E402
-from jeevesagent.loader import RecursiveChunker, load  # noqa: E402
-from jeevesagent.memory.embedder import OpenAIEmbedder  # noqa: E402
-from jeevesagent.team import Team  # noqa: E402
-from jeevesagent.vectorstore import ChromaVectorStore  # noqa: E402
+from loomflow import Agent, tool  # noqa: E402
+from loomflow.loader import RecursiveChunker, load  # noqa: E402
+from loomflow.memory.embedder import OpenAIEmbedder  # noqa: E402
+from loomflow.team import Team  # noqa: E402
+from loomflow.vectorstore import ChromaVectorStore  # noqa: E402
 
 
 async def build_domain_store(

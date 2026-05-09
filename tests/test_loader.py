@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from jeevesagent.loader import (
+from loomflow.loader import (
     Document,
     load,
     load_csv,
@@ -293,7 +293,7 @@ def test_load_pdf_chunks_cover_all_pages(tmp_path: Path) -> None:
     came back blank. After the loader fix, a recursive chunker at
     600/80 (the user's reported config) emits chunks covering
     every page, including the last."""
-    from jeevesagent.loader.chunking import RecursiveChunker
+    from loomflow.loader.chunking import RecursiveChunker
 
     f = tmp_path / "eight.pdf"
     _make_eight_page_pdf(f)

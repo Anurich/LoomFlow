@@ -25,12 +25,10 @@ from pathlib import Path
 
 import pytest
 
-from jeevesagent import (
-    Agent,
+from loomflow import Agent, ScriptedModel, ScriptedTurn, Tool
+from loomflow.core.types import ToolCall
+from loomflow.tools import (
     PathEscapeError,
-    ScriptedModel,
-    ScriptedTurn,
-    Tool,
     bash_tool,
     default_workdir,
     edit_tool,
@@ -38,7 +36,6 @@ from jeevesagent import (
     read_tool,
     write_tool,
 )
-from jeevesagent.core.types import ToolCall
 
 pytestmark = pytest.mark.anyio
 

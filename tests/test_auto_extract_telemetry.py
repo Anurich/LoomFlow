@@ -19,11 +19,11 @@ from typing import Any
 
 import pytest
 
-from jeevesagent.core.types import Episode, Fact
-from jeevesagent.memory.auto_extract import AutoExtractMemory, _log
-from jeevesagent.memory.consolidator import Consolidator
-from jeevesagent.memory.facts import InMemoryFactStore
-from jeevesagent.memory.inmemory import InMemoryMemory
+from loomflow.core.types import Episode, Fact
+from loomflow.memory.auto_extract import AutoExtractMemory, _log
+from loomflow.memory.consolidator import Consolidator
+from loomflow.memory.facts import InMemoryFactStore
+from loomflow.memory.inmemory import InMemoryMemory
 
 pytestmark = pytest.mark.anyio
 
@@ -184,7 +184,7 @@ async def test_auto_picked_emits_one_time_notice(
     constructed in the process."""
     # The flag is process-wide — reset it so the test is
     # deterministic regardless of other tests' order.
-    import jeevesagent.memory.auto_extract as ae_mod
+    import loomflow.memory.auto_extract as ae_mod
 
     ae_mod._DEFAULT_ON_NOTICE_EMITTED = False
 
@@ -210,7 +210,7 @@ async def test_explicit_opt_in_does_not_emit_notice(
 ) -> None:
     """Caller passing ``auto_extract=True`` knows what they're doing
     — they don't need the default-on warning."""
-    import jeevesagent.memory.auto_extract as ae_mod
+    import loomflow.memory.auto_extract as ae_mod
 
     ae_mod._DEFAULT_ON_NOTICE_EMITTED = False
 

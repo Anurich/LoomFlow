@@ -1,4 +1,4 @@
-# JeevesAgent
+# Loom
 
 **Production-ready async agent harness. Multi-tenant by default,
 typed outputs, retries on transient errors, model-agnostic, MCP-native.**
@@ -14,7 +14,7 @@ typed outputs, retries on transient errors, model-agnostic, MCP-native.**
 ```python
 import asyncio
 from pydantic import BaseModel
-from jeevesagent import Agent
+from loomflow import Agent
 
 class WeatherReport(BaseModel):
     city: str
@@ -91,7 +91,7 @@ Every agent framework forces a choice you shouldn't have to make:
 * **CrewAI / AutoGen** are abstractions over LangChain — same
   problems.
 
-JeevesAgent is the harness for engineers shipping production agents
+Loom is the harness for engineers shipping production agents
 without binding their stack to one model lab — and without wiring
 multi-tenancy / structured outputs / retries by hand.
 
@@ -134,16 +134,16 @@ Three principles govern every line of code:
 ## Install
 
 ```bash
-pip install jeevesagent
+pip install loomflow
 
 # Pick the extras you need:
-pip install 'jeevesagent[anthropic]'           # Claude
-pip install 'jeevesagent[openai]'              # GPT
-pip install 'jeevesagent[postgres]'            # PostgresMemory + facts
-pip install 'jeevesagent[mcp]'                 # real MCP client
-pip install 'jeevesagent[otel]'                # OpenTelemetry exporters
-pip install 'jeevesagent[loader-pdf]'          # PDF loader (unstructured, default)
-pip install 'jeevesagent[loader-pdf-docling]'  # alt PDF backend (docling, IBM)
+pip install 'loomflow[anthropic]'           # Claude
+pip install 'loomflow[openai]'              # GPT
+pip install 'loomflow[postgres]'            # PostgresMemory + facts
+pip install 'loomflow[mcp]'                 # real MCP client
+pip install 'loomflow[otel]'                # OpenTelemetry exporters
+pip install 'loomflow[loader-pdf]'          # PDF loader (unstructured, default)
+pip install 'loomflow[loader-pdf-docling]'  # alt PDF backend (docling, IBM)
 
 # Or install everything for development:
 pip install -e '.[dev,anthropic,openai,mcp,postgres,otel]'
@@ -157,7 +157,7 @@ Requires Python 3.11+.
 
 ```python
 import asyncio
-from jeevesagent import Agent, tool
+from loomflow import Agent, tool
 
 @tool
 async def get_weather(city: str) -> str:
@@ -201,7 +201,7 @@ memory, tools, budget, telemetry, runtime) stays exactly the same.
 ### Single-agent loops: pass `architecture=`
 
 ```python
-from jeevesagent import Agent
+from loomflow import Agent
 
 agent = Agent("...", model="claude-opus-4-7")                            # ReAct default
 agent = Agent("...", model="...", architecture="self-refine")            # iterate until critic happy
@@ -220,7 +220,9 @@ Each builder returns a regular `Agent` — same `.run()` / `.stream()`
 interface, no special calling convention.
 
 ```python
-from jeevesagent import Agent, Team, RouterRoute
+from loomflow import Agent
+from loomflow.architecture import RouterRoute
+from loomflow.team import Team
 
 # Coordinator + workers; the manager calls delegate(...) or forward_message(...)
 team = Team.supervisor(
@@ -284,7 +286,8 @@ hierarchical teams; wrap an entire pipeline in `Reflexion` to retry
 on low scores:
 
 ```python
-from jeevesagent import Agent, Reflexion, Supervisor
+from loomflow import Agent
+from loomflow.architecture import Reflexion, Supervisor
 
 agent = Agent(
     "...",
@@ -307,7 +310,8 @@ in other frameworks); use the nested form for recursive composition.
 ### Standalone testing of orchestrators
 
 ```python
-from jeevesagent import Supervisor, run_architecture
+from loomflow.architecture import Supervisor
+from loomflow.team import run_architecture
 
 sup = Supervisor(workers={"a": agent_a})
 result = await run_architecture(sup, "do the thing", model="claude-opus-4-7")
@@ -535,7 +539,7 @@ optional bundled files. Drop your existing Anthropic-format skills
 into our `skills=[...]` and they Just Work.
 
 ```python
-from jeevesagent import Agent
+from loomflow import Agent
 
 agent = Agent(
     "...",
@@ -603,7 +607,7 @@ agent's tool host when the skill is loaded.
 
 ```python
 # skills/greeter/tools.py
-from jeevesagent import tool
+from loomflow import tool
 
 @tool
 async def say_hi(name: str) -> str:
@@ -628,7 +632,7 @@ Tool names get prefixed with the skill name automatically:
 For tiny one-off skills that don't justify a folder:
 
 ```python
-from jeevesagent import Skill
+from loomflow.skills import Skill
 
 skill = Skill.from_text("""
 ---
@@ -668,7 +672,7 @@ custom-step prompt formatting).
 
 ## Fast path by default
 
-JeevesAgent ships with the full production surface — audit log, OTel
+Loom ships with the full production surface — audit log, OTel
 telemetry, permissions, hooks, durable runtime, budget — but **you
 don't pay for what you don't wire up**. Every layer has a no-op
 default, and the loop detects those defaults at construction time
@@ -715,7 +719,7 @@ speed when you don't, with no code changes between modes.
 ## Resilient by default
 
 Real model APIs fail. Rate limits, 5xx blips, transient connection
-drops happen on every production deployment. JeevesAgent ships
+drops happen on every production deployment. Loom ships
 **retry on transient errors enabled by default** for the in-tree
 network adapters (OpenAI, Anthropic, LiteLLM) — the moment you
 construct a real-world agent it's already covered:
@@ -749,7 +753,8 @@ the framework refuses to silently retry errors it doesn't understand.
 Tune the policy per-Agent:
 
 ```python
-from jeevesagent import Agent, RetryPolicy
+from loomflow import Agent
+from loomflow.governance import RetryPolicy
 
 # Default (production-sensible)
 agent = Agent("...", model="gpt-4.1-mini")
@@ -796,7 +801,7 @@ framework gives you a typed, validated instance:
 
 ```python
 from pydantic import BaseModel
-from jeevesagent import Agent
+from loomflow import Agent
 
 class CompanyInfo(BaseModel):
     name: str
@@ -874,7 +879,7 @@ Or pass a fully-constructed Memory instance the way you do today —
 power users keep every escape hatch:
 
 ```python
-from jeevesagent import ChromaMemory, OpenAIEmbedder
+from loomflow.memory import ChromaMemory, OpenAIEmbedder
 
 memory = ChromaMemory.local("./vectors", with_facts=True, embedder=OpenAIEmbedder())
 agent = Agent(..., memory=memory)
@@ -1012,10 +1017,8 @@ tenants with hard isolation across **all** layers:
 Concrete examples of what M9 enables:
 
 ```python
-from jeevesagent import (
-    Agent, PerUserPermissions, StandardPermissions, Mode,
-)
-from jeevesagent.governance.budget import BudgetConfig, StandardBudget
+from loomflow import Agent, StandardPermissions, Mode, BudgetConfig, StandardBudget
+from loomflow.security import PerUserPermissions
 
 # Per-user permission policies — admins get more, free users get less.
 permissions = PerUserPermissions(
@@ -1061,7 +1064,7 @@ back gracefully.
 
 ## Multi-tenancy by default
 
-JeevesAgent treats `user_id` and `session_id` as **first-class typed
+Loom treats `user_id` and `session_id` as **first-class typed
 primitives**, not strings buried in a free-form config dict. The
 moment you pass them to `agent.run(...)`, the framework partitions
 memory automatically and rehydrates conversation history without
@@ -1094,7 +1097,7 @@ What the framework does with these:
 Inside a tool, you read scope from the live `RunContext`:
 
 ```python
-from jeevesagent import tool, get_run_context
+from loomflow import tool, get_run_context
 
 @tool
 async def fetch_user_orders() -> str:
@@ -1123,7 +1126,7 @@ strict enforcement promote it to an exception:
 
 ```python
 import warnings
-from jeevesagent import IsolationWarning
+from loomflow import IsolationWarning
 warnings.simplefilter("error", IsolationWarning)
 ```
 
@@ -1148,14 +1151,14 @@ End-to-end demo: [`examples/03_multi_user_sessions.py`](examples/03_multi_user_s
 | **Workflow primitive** | Developer-controlled DAG — peer of `Agent`, not a subtype. Use when you can draw the path on a whiteboard before writing code (`Workflow.chain` for sequences, `Workflow.route` for classify-then-dispatch, `Workflow.parallel` for fan-out + merge, explicit graph builder for custom shapes including cycles). Both composition directions are first-class: drop an `Agent` in as a workflow node, or expose a `Workflow` as an `Agent` tool via `wf.as_tool()`. Same observability spine as `Agent` — telemetry, audit log, `user_id` partition. Cycles supported with `max_visits_per_node` / `max_steps` safety caps. See [`docs/workflow_vs_agent.md`](docs/workflow_vs_agent.md) for the rubric. | `Workflow`, `WorkflowResult`, `step`, `START`, `END` |
 | **Team facade** | Sibling-style builders (`Team.supervisor`, `Team.swarm`, `Team.router`, `Team.debate`, `Team.actor_critic`, `Team.blackboard`) for the common multi-agent shapes | `Team`, `Handoff`, `run_architecture` |
 | **Vector store** | `add` / `search` / `delete` with Mongo-style filters, MMR diversity, BM25 hybrid search, save/load | `InMemoryVectorStore`, `ChromaVectorStore`, `PostgresVectorStore`, `FAISSVectorStore`, `SearchResult` |
-| **Document loader** | One-line load for PDF / DOCX / Excel / CSV / HTML / Markdown into markdown chunks. PDF supports two interchangeable backends: `unstructured` (default, Apache 2.0, what LangChain wraps) with `fast` / `hi_res` / `ocr_only` strategies, or `docling` (MIT, IBM Research, 2026 benchmark winner on native PDFs). Per-page extraction failures emit a `RuntimeWarning` — no more silent empty pages. | `jeevesagent.loader.load`, `load_pdf(path, *, backend=, strategy=)`, `MarkdownChunker`, `RecursiveChunker`, `SentenceChunker`, `TokenChunker` |
+| **Document loader** | One-line load for PDF / DOCX / Excel / CSV / HTML / Markdown into markdown chunks. PDF supports two interchangeable backends: `unstructured` (default, Apache 2.0, what LangChain wraps) with `fast` / `hi_res` / `ocr_only` strategies, or `docling` (MIT, IBM Research, 2026 benchmark winner on native PDFs). Per-page extraction failures emit a `RuntimeWarning` — no more silent empty pages. | `loomflow.loader.load`, `load_pdf(path, *, backend=, strategy=)`, `MarkdownChunker`, `RecursiveChunker`, `SentenceChunker`, `TokenChunker` |
 | **Built-in tools** | `read` / `write` / `edit` / `bash` factories with sandbox-aware workdirs | `read_tool`, `write_tool`, `edit_tool`, `bash_tool`, `default_workdir` |
 | **Skills (Anthropic-compatible)** | Packaged playbooks loaded on demand. Three modes coexist: pure markdown, frontmatter-declared subprocess tools (any language), and `tools.py` with `@tool` (Python, in-process). Layered sources with last-wins override. | `Skill`, `SkillRegistry`, `SkillSource`, `SkillMetadata`, `SkillError`, `Agent(skills=...)` |
-| **Model adapters** | Anthropic, OpenAI, LiteLLM (~100 providers), Echo (zero-key), Scripted (tests) | `jeevesagent.AnthropicModel`, `OpenAIModel`, `LiteLLMModel`, `EchoModel`, `ScriptedModel` |
+| **Model adapters** | Anthropic, OpenAI, LiteLLM (~100 providers), Echo (zero-key), Scripted (tests) | `loomflow.AnthropicModel`, `OpenAIModel`, `LiteLLMModel`, `EchoModel`, `ScriptedModel` |
 | **String model resolver** | `model="claude-opus-4-7"`, `"gpt-4o"`, `"mistral-large"`, `"command-r"`, `"echo"`, `"litellm/<any>"` | `Agent.__init__` |
-| **Tools** | `@tool` decorator with auto-schema, sync + async; `agent.with_tool` decorator; `add_tool` / `remove_tool` / `tools_list` | `jeevesagent.tool`, `Tool` |
+| **Tools** | `@tool` decorator with auto-schema, sync + async; `agent.with_tool` decorator; `add_tool` / `remove_tool` / `tools_list` | `loomflow.tool`, `Tool` |
 | **MCP servers** | stdio + Streamable HTTP, multi-server registry, name disambiguation | `MCPRegistry`, `MCPServerSpec` |
-| **Jeeves Gateway** | One-line: `tools=JeevesGateway.from_env()` | `jeevesagent.jeeves` |
+| **Jeeves Gateway** | One-line: `tools=JeevesGateway.from_env()` | `loomflow.jeeves` |
 | **Memory backends** | In-memory dict, vector cosine, Chroma, Postgres+pgvector, Redis | `InMemoryMemory`, `VectorMemory`, `ChromaMemory`, `PostgresMemory`, `RedisMemory` |
 | **Embedders** | HashEmbedder (deterministic, zero deps), OpenAIEmbedder, VoyageEmbedder, CohereEmbedder | `HashEmbedder`, `OpenAIEmbedder`, `VoyageEmbedder`, `CohereEmbedder` |
 | **Bi-temporal facts** | All five memory backends. LLM-driven `Consolidator`. Auto-consolidate, plus `ConsolidationWorker` for long-lived agents. | `Fact`, `Consolidator`, `*FactStore` |
@@ -1179,7 +1182,7 @@ deployed. To go live:
 
 1. Sign in to <https://readthedocs.org/> with the repo's GitHub
    account
-2. Click *Import Project* → pick the JeevesAgent repo
+2. Click *Import Project* → pick the Loom repo
 3. RTD reads `.readthedocs.yaml`, builds, and the site comes up at
    `https://<your-project-slug>.readthedocs.io/`
 
@@ -1198,8 +1201,8 @@ In-tree starting points:
 | [`docs/quickstart.md`](docs/quickstart.md) | Step-by-step examples for each backend combo |
 | [`docs/recipes.md`](docs/recipes.md) | Production patterns: persistent memory, MCP, durable replay, audit |
 | [`docs/architecture.md`](docs/architecture.md) | Module tour, lifecycle, extension points |
-| [`docs/migrations/from-langgraph.md`](docs/migrations/from-langgraph.md) | LangGraph → JeevesAgent translation guide |
-| [`docs/migrations/from-openai-sdk.md`](docs/migrations/from-openai-sdk.md) | Hand-rolled OpenAI loop → JeevesAgent translation guide |
+| [`docs/migrations/from-langgraph.md`](docs/migrations/from-langgraph.md) | LangGraph → Loom translation guide |
+| [`docs/migrations/from-openai-sdk.md`](docs/migrations/from-openai-sdk.md) | Hand-rolled OpenAI loop → Loom translation guide |
 | [`docs/migration_0.1_to_0.2.md`](docs/migration_0.1_to_0.2.md) | What changed in 0.2.0; how to migrate |
 | [`CHANGELOG.md`](CHANGELOG.md) | Version-by-version release notes |
 | [`Subagent.md`](Subagent.md) | Architecture-protocol design rationale; full 14-architecture catalogue (the 5 shipped, the 9 candidates) |
@@ -1215,12 +1218,17 @@ The framework is pre-1.0 — major versions can introduce breaking
 changes — but the surface area is split into stability tiers so
 adopters know what they can pin against today.
 
-| Tier | API | What it covers |
+The package is split into **two import tiers**:
+
+* **Top-level** (`from loomflow import ...`) — the daily-use surface. 66 names. Stable; will not break in 0.x without a migration note. This is what 90% of code touches.
+* **Submodule** (`from loomflow.memory.postgres import PostgresMemory`, etc.) — backend-specific or specialized classes. Importing them deliberately signals "I'm picking this concrete backend / architecture / adapter."
+
+| Tier | What's in it | Example imports |
 |---|---|---|
-| **Stable** | `Agent`, `Agent.run` / `stream` / `resume`, `RunResult`, `RunContext`, `get_run_context`, `set_run_context`, `Memory` protocol (including `profile` / `forget` / `export` / `session_messages`), `Episode`, `Fact`, `MemoryProfile`, `MemoryExport`, `Message`, `Role`, `Event`, `Tool`, `@tool`, `Model` protocol, `Secrets` protocol, `Workflow`, `WorkflowResult`, `step`, `START`, `END`, the error hierarchy under `JeevesAgentError`, `RetryPolicy`, `OutputValidationError`, `IsolationWarning`, `JeevesDeprecationWarning`, `resolve_memory` | Will not break in 0.x without a migration note + deprecation cycle. Pin against these in production code. |
-| **Stable backends** | `InMemoryMemory`, `SqliteMemory`, `ChromaMemory`, `PostgresMemory`, `RedisMemory`, `VectorMemory`, `LazyMemory`, `AutoExtractMemory`, `OpenAIModel`, `AnthropicModel`, `LiteLLMModel`, `EchoModel`, `ScriptedModel`, `InProcRuntime`, `SqliteRuntime`, `PostgresRuntime`, `StandardBudget`, `NoBudget`, `AllowAll`, `StandardPermissions`, `PerUserPermissions`, `EnvSecrets`, `DictSecrets`, `HookRegistry`, `OTelTelemetry`, `NoTelemetry`, `FileAuditLog`, `InMemoryAuditLog` | Concrete implementations; constructor signatures stable, behaviour locked. |
-| **Experimental** | `MultiAgentDebate` / `Swarm` / `Blackboard` / `ReWOO` / `TreeOfThoughts` (the newer architectures), `Skills` and `SkillRegistry`, `JeevesGateway`, `agent.generate_graph()`, the `Team.*` builders | Useful, tested, but newer — internal details may change as we collect production feedback. Wrap with your own thin layer if you depend on them. |
-| **Internal** | `_loop`, `_wrapped_model`, `_wrapped_memory`, `Dependencies`, `AgentSession`, the architecture protocol's exact shape, anything starting with `_` | No stability promise. Subject to change without notice. |
+| **Stable top-level** | `Agent`, `Workflow`, `WorkflowResult`, `step`, `START`, `END`, `tool`, `Tool`, `RunContext`, `RunResult`, `get_run_context`, `set_run_context`, common types (`Message`, `Episode`, `Fact`, `Role`, `Event`, `Usage`, `MemoryBlock`, `MemoryProfile`, `MemoryExport`, `BudgetStatus`, `PermissionDecision`, `ToolCall`, `ToolDef`, `ToolResult`), core protocols (`Memory`, `Model`, `Permissions`, `Budget`, `HookHost`, `Sandbox`, `Telemetry`, `ToolHost`, `Runtime`, `Embedder`, `Secrets`, `AuditLog`, `Architecture`), default backends (`InMemoryMemory`, `InMemoryAuditLog`, `NoBudget`, `NoTelemetry`, `NoSandbox`, `AllowAll`, `Mode`, `StandardPermissions`, `HookRegistry`, `StandardBudget`, `BudgetConfig`, `InProcRuntime`, `ReAct`, `HashEmbedder`), `resolve_memory`, test fakes (`EchoModel`, `ScriptedModel`, `ScriptedTurn`), common errors (`LoomError`, `OutputValidationError`, `IsolationWarning`, `BudgetExceeded`, `ConfigError`, `LoomDeprecationWarning`), `new_id` | `from loomflow import Agent, Workflow, step, tool` |
+| **Stable submodule** | All backend-specific concrete classes — they live in their submodule and are intentionally NOT re-exported at top level. `PostgresMemory`, `ChromaMemory`, `RedisMemory`, `SqliteMemory`, `VectorMemory`, `LazyMemory`, `AutoExtractMemory`, `OpenAIModel`, `AnthropicModel`, `LiteLLMModel`, `SqliteRuntime`, `PostgresRuntime`, `JournaledRuntime`, `PerUserPermissions`, `EnvSecrets`, `DictSecrets`, `FilesystemSandbox`, `SubprocessSandbox`, `FileAuditLog`, `OTelTelemetry`, all vector stores, all embedders, all Anthropic-cookbook architectures (`SelfRefine`, `Reflexion`, `TreeOfThoughts`, `PlanAndExecute`, `ReWOO`, `Supervisor`, `Swarm`, `Router`, `MultiAgentDebate`, `BlackboardArchitecture`, `ActorCritic`), built-in tools (`read_tool`, `write_tool`, `bash_tool`, `edit_tool`), `Team`, `Skill`, `MCPClient`, `MCPRegistry` | `from loomflow.memory.postgres import PostgresMemory`<br>`from loomflow.model.openai import OpenAIModel`<br>`from loomflow.architecture import SelfRefine`<br>`from loomflow.security import PerUserPermissions, EnvSecrets`<br>`from loomflow.observability import OTelTelemetry`<br>`from loomflow.team import Team` |
+| **Experimental** | `agent.generate_graph()`, `JeevesGateway`, the `Team.*` builders | Useful, tested, but newer — internals may change. |
+| **Internal** | `_loop`, `_wrapped_model`, `_wrapped_memory`, `Dependencies`, `AgentSession`, anything starting with `_` | No stability promise. Subject to change without notice. |
 
 If a symbol isn't listed, it's experimental by default. Open an
 issue if you depend on something not yet in the Stable tier and
@@ -1273,10 +1281,10 @@ need it promoted.
 
 ```bash
 git clone <repo>
-cd jeevesagent
+cd loomflow
 pip install -e '.[dev]'
-ruff check jeevesagent
-mypy --strict jeevesagent
+ruff check loomflow
+mypy --strict loomflow
 pytest tests/ -v
 ```
 

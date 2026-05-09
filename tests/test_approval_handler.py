@@ -23,9 +23,9 @@ from __future__ import annotations
 
 import pytest
 
-from jeevesagent import Agent, InMemoryMemory, Mode, StandardPermissions
-from jeevesagent.core.types import ToolCall
-from jeevesagent.model.scripted import ScriptedModel, ScriptedTurn
+from loomflow import Agent, InMemoryMemory, Mode, StandardPermissions
+from loomflow.core.types import ToolCall
+from loomflow.model.scripted import ScriptedModel, ScriptedTurn
 
 pytestmark = pytest.mark.anyio
 

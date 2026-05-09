@@ -8,12 +8,12 @@ shipped-code map.
 ## Module layout
 
 ```
-jeevesagent/
+loomflow/
   __init__.py        # Re-exports the public surface
   core/              # Layer-free primitives
     types.py         # 18 Pydantic value objects
     protocols.py     # 14 Protocols (Model, Memory, Runtime, ...)
-    errors.py        # JeevesAgentError + 11 subclasses
+    errors.py        # LoomError + 11 subclasses
     ids.py           # ULID + deterministic JSON hash
   agent/
     api.py           # The Agent class. Public API.
@@ -197,8 +197,8 @@ plug in any implementation without forking the harness.
 ## Testing the harness
 
 ```bash
-ruff check jeevesagent
-mypy --strict jeevesagent
+ruff check loomflow
+mypy --strict loomflow
 pytest tests/
 ```
 

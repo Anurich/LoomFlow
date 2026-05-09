@@ -54,11 +54,11 @@ What this skeleton is missing for production:
 * No parallel tool dispatch.
 * No backpressure-aware streaming.
 
-## The same thing on JeevesAgent
+## The same thing on Loom
 
 ```python
 import asyncio
-from jeevesagent import Agent, tool
+from loomflow import Agent, tool
 
 @tool
 async def get_weather(city: str) -> str:
@@ -102,8 +102,8 @@ tools = [{
 ```
 
 ```python
-# JeevesAgent — schema derived from type hints + docstring
-from jeevesagent import tool
+# Loom — schema derived from type hints + docstring
+from loomflow import tool
 
 @tool
 async def get_weather(city: str) -> str:
@@ -127,7 +127,7 @@ async def respond(user_id: str, prompt: str) -> str:
 ```
 
 ```python
-# JeevesAgent — session_id rehydrates, user_id partitions
+# Loom — session_id rehydrates, user_id partitions
 agent = Agent("...", model="gpt-4.1-mini")
 
 async def respond(user_id: str, prompt: str) -> str:
@@ -160,7 +160,7 @@ invoice = Invoice.model_validate_json(resp.choices[0].message.content)
 ```
 
 ```python
-# JeevesAgent — output_schema kwarg, automatic validate-and-retry
+# Loom — output_schema kwarg, automatic validate-and-retry
 agent = Agent("...", model="gpt-4.1-mini")
 r = await agent.run("...", output_schema=Invoice)
 invoice: Invoice = r.parsed
@@ -184,8 +184,9 @@ async def with_retry(fn, attempts=3, base_delay=1.0):
 ```
 
 ```python
-# JeevesAgent — happens automatically, configurable
-from jeevesagent import Agent, RetryPolicy
+# Loom — happens automatically, configurable
+from loomflow import Agent
+from loomflow.governance import RetryPolicy
 
 # Default policy is sensible (3 attempts, exp backoff, jitter, honours
 # Retry-After). Override only if you need something different:
@@ -209,7 +210,7 @@ async with client.chat.completions.stream(
 ```
 
 ```python
-# JeevesAgent — Event stream, type-safe filtering
+# Loom — Event stream, type-safe filtering
 async for event in agent.stream("..."):
     if event.kind.value == "model_chunk":
         chunk = event.payload["chunk"]
@@ -224,7 +225,7 @@ run them in parallel. Most hand-rolled loops do them sequentially —
 which is wrong, just hard to notice.
 
 ```python
-# JeevesAgent — automatic parallel dispatch via anyio task groups
+# Loom — automatic parallel dispatch via anyio task groups
 @tool
 async def search_db(query: str) -> str: ...
 
@@ -242,15 +243,15 @@ agent = Agent("...", model="gpt-4.1-mini",
 
 * Your prompts, your tool implementations, your data, your
   monitoring stack. All of it.
-* The OpenAI SDK is still the underlying transport — JeevesAgent's
+* The OpenAI SDK is still the underlying transport — Loom's
   `OpenAIModel` wraps it.
 * You can pass your own `AsyncOpenAI` instance if you have custom
   client config:
 
 ```python
 from openai import AsyncOpenAI
-from jeevesagent.model.openai import OpenAIModel
-from jeevesagent import Agent
+from loomflow.model.openai import OpenAIModel
+from loomflow import Agent
 
 client = AsyncOpenAI(timeout=30.0, max_retries=0)
 agent = Agent(

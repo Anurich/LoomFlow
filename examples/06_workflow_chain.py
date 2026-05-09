@@ -7,13 +7,13 @@ way to feel out the API.
 
 Three things this example demonstrates:
 
-* :class:`~jeevesagent.Workflow.chain` — sugar constructor for a
+* :class:`~loomflow.Workflow.chain` — sugar constructor for a
   linear sequence. Each entry can be an ``async def``, a sync
   function, an ``Agent``, or another ``Workflow``; the framework
   coerces.
 * The ``user_id`` partition flowing through every step — set once
   on ``run`` and visible inside steps via ``get_run_context()``.
-* :class:`~jeevesagent.WorkflowResult` — ``output``, ``visited``,
+* :class:`~loomflow.WorkflowResult` — ``output``, ``visited``,
   and ``per_step`` for inspecting what happened.
 
 Run::
@@ -25,8 +25,8 @@ from __future__ import annotations
 
 import asyncio
 
-from jeevesagent import Workflow
-from jeevesagent.core.context import get_run_context
+from loomflow import Workflow
+from loomflow.core.context import get_run_context
 
 # Each step is a plain async function. Inputs flow step-to-step:
 # the value returned by ``parse_request`` is passed to ``validate``,

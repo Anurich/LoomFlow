@@ -1,4 +1,4 @@
-"""Benchmark: JeevesAgent vs LangChain create_agent — wall-clock latency.
+"""Benchmark: Loom vs LangChain create_agent — wall-clock latency.
 
 Both frameworks use the **same OpenAI model** (``gpt-4.1-mini``) via the
 **same Python OpenAI SDK** under the hood, so any difference in
@@ -70,12 +70,12 @@ PROMPT_TWO_TOOLS = (
 
 
 # ---------------------------------------------------------------------------
-# JeevesAgent setup
+# Loom setup
 # ---------------------------------------------------------------------------
 
 
-from jeevesagent import Agent as JeevesAgent  # noqa: E402
-from jeevesagent import tool as jeeves_tool  # noqa: E402
+from loomflow import Agent as Loom  # noqa: E402
+from loomflow import tool as jeeves_tool  # noqa: E402
 
 
 @jeeves_tool(name="get_weather")
@@ -84,16 +84,16 @@ async def _jeeves_get_weather(city: str) -> str:
     return f"It's sunny and 72°F in {city}."
 
 
-def _build_jeeves_agent() -> JeevesAgent:
-    return JeevesAgent(
+def _build_jeeves_agent() -> Loom:
+    return Loom(
         "You are a helpful assistant. Be concise.",
         model=MODEL_ID,
         tools=[_jeeves_get_weather],
     )
 
 
-async def _run_jeeves(agent: JeevesAgent, prompt: str) -> tuple[str, int, int]:
-    """Run JeevesAgent end to end. Returns (output, tokens_in, tokens_out)."""
+async def _run_jeeves(agent: Loom, prompt: str) -> tuple[str, int, int]:
+    """Run Loom end to end. Returns (output, tokens_in, tokens_out)."""
     result = await agent.run(prompt)
     return result.output, result.tokens_in, result.tokens_out
 
@@ -125,7 +125,7 @@ async def _run_lc(agent: object, prompt: str) -> tuple[str, int, int]:
     """Run LangChain agent end to end. Returns (output, tokens_in, tokens_out).
 
     Uses ``ainvoke`` so LangChain goes through the async OpenAI
-    client (``AsyncOpenAI``), matching JeevesAgent's transport.
+    client (``AsyncOpenAI``), matching Loom's transport.
     Comparing ``invoke`` (sync httpx pool) against ``agent.run()``
     (async httpx pool) muddles framework overhead with
     transport-level differences in connection management.
@@ -221,7 +221,7 @@ async def _time_lc(prompt: str) -> RunResult:
 
 async def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Bench JeevesAgent vs LangChain create_agent."
+        description="Bench Loom vs LangChain create_agent."
     )
     parser.add_argument(
         "--iterations",
@@ -245,7 +245,7 @@ async def main() -> None:
     print()
     print("=" * 78)
     print(
-        f"  Benchmarking JeevesAgent vs LangChain create_agent on {MODEL_ID}"
+        f"  Benchmarking Loom vs LangChain create_agent on {MODEL_ID}"
     )
     print(
         f"  iterations={args.iterations} warmup={args.warmup}"

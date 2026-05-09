@@ -1,6 +1,6 @@
-# JeevesAgent — Engineering Plan
+# Loom — Engineering Plan
 
-> **JeevesAgent** is a model-agnostic, MCP-native, fully-async agent harness. Users define an `Agent`. The harness handles memory, durability, security, observability, and tool plumbing. Configurable at every layer; zero-config out of the box.
+> **Loom** is a model-agnostic, MCP-native, fully-async agent harness. Users define an `Agent`. The harness handles memory, durability, security, observability, and tool plumbing. Configurable at every layer; zero-config out of the box.
 
 This document is the engineering blueprint. It covers architecture, async design, module topology, public/private contracts, plugin system, testing strategy, and the phased build. Every architectural choice is justified with primary-source research, and every snippet is real Python that compiles.
 
@@ -35,10 +35,10 @@ This document is the engineering blueprint. It covers architecture, async design
 
 ### 1.1 The product
 
-A Python library — `jeevesagent` — where this works:
+A Python library — `loomflow` — where this works:
 
 ```python
-from jeevesagent import Agent
+from loomflow import Agent
 
 agent = Agent("You are a research assistant")
 result = await agent.run("Summarize this week's AI news")
@@ -74,7 +74,7 @@ Same `Agent` class. A string becomes a config object becomes an injected impleme
 
 ### 1.2 The wedge
 
-> **JeevesAgent is the model-agnostic, MCP-native harness with memory done right.**
+> **Loom is the model-agnostic, MCP-native harness with memory done right.**
 
 That sentence has three pieces and they appear in priority order:
 
@@ -82,7 +82,7 @@ That sentence has three pieces and they appear in priority order:
 2. **MCP-native** — MCP isn't an integration; it's the spine of the entire system
 3. **Memory done right** — tiered like MemGPT, fast like Mem0, temporal like Zep
 
-If a user is happy on Anthropic and never plans to switch, they should use Claude Agent SDK. JeevesAgent is for everyone else — the people who want a real harness without binding their stack to one model lab.
+If a user is happy on Anthropic and never plans to switch, they should use Claude Agent SDK. Loom is for everyone else — the people who want a real harness without binding their stack to one model lab.
 
 ### 1.3 The user
 
@@ -250,7 +250,7 @@ When we *must* call sync code (e.g., a library has no async version), we use `an
 The package is laid out as a constellation of small, focused modules. Each module exports protocols and concrete implementations. There's a strict dependency direction (no cycles).
 
 ```
-jeevesagent/
+loomflow/
 ├── __init__.py             # Public API: Agent, Memory, Runtime, etc.
 ├── core/                   # Layer-free primitives
 │   ├── types.py            # Pydantic models (Message, Event, ToolCall, ...)
@@ -358,7 +358,7 @@ A module never imports from a module above it. Tests for each layer use fakes fo
 This is where the engineering rigor lives. Every interface is a `Protocol`. Concrete implementations live in their own modules. The loop knows nothing about which implementation it has — only the interface.
 
 ```python
-# jeevesagent/core/protocols.py
+# loomflow/core/protocols.py
 
 from __future__ import annotations
 from typing import Protocol, AsyncIterator, AsyncContextManager, Mapping, Any
@@ -532,7 +532,7 @@ A few things worth highlighting:
 This is the surface 95% of users will touch. Every other module exists to make this class do its job.
 
 ```python
-# jeevesagent/agent/api.py
+# loomflow/agent/api.py
 
 from __future__ import annotations
 from typing import AsyncIterator, Awaitable, Callable
@@ -654,7 +654,7 @@ The loop is the heart. It must be:
 - **Budget-aware** (terminates cleanly when limits are hit)
 
 ```python
-# jeevesagent/agent/loop.py
+# loomflow/agent/loop.py
 
 from __future__ import annotations
 from typing import AsyncIterator
@@ -877,7 +877,7 @@ All three implement the same `Runtime` protocol. Switching is a string change.
 ### 8.3 InProcRuntime — the default
 
 ```python
-# jeevesagent/runtime/inproc.py
+# loomflow/runtime/inproc.py
 
 class InProcRuntime:
     """No durability. Each step just runs. Used in dev, tests, and demos."""
@@ -913,7 +913,7 @@ class InProcRuntime:
 DBOS gives us journal-based replay using just Postgres. The runtime wraps DBOS workflows with our protocol surface. Critical: every `step()` call becomes a DBOS communicator (their term for an external side-effecting call), and the journal is keyed on `(session_id, step_name)`.
 
 ```python
-# jeevesagent/runtime/dbos.py
+# loomflow/runtime/dbos.py
 
 # Pseudo-code; real impl uses dbos-py decorators
 class DBOSRuntime:
@@ -998,7 +998,7 @@ The bi-temporal tracking on `Fact` is the Zep insight — "valid_from/valid_unti
 ### 9.2 The Memory implementation
 
 ```python
-# jeevesagent/memory/postgres.py
+# loomflow/memory/postgres.py
 
 class PostgresMemory:
     """Production memory backend. Postgres + pgvector."""
@@ -1104,7 +1104,7 @@ class PostgresMemory:
 This is the differentiator. The `Memory` is *itself* an MCP server, so the agent can be told "you can call `memory.recall(...)`" the same way it'd be told about Gmail. Internal in-process; same protocol as remote.
 
 ```python
-# jeevesagent/memory/server.py
+# loomflow/memory/server.py
 
 from mcp.server import Server  # python-mcp-sdk
 
@@ -1136,7 +1136,7 @@ Result: when the user adds custom memory tools, or wants to swap the memory back
 Episodes pile up; we don't want to reason over raw episodes forever. A background worker reads episodes, asks an LLM to extract facts, and writes them to the temporal graph.
 
 ```python
-# jeevesagent/memory/semantic.py
+# loomflow/memory/semantic.py
 
 class Consolidator:
     """Runs as a background worker — separate process or asyncio task.
@@ -1325,7 +1325,7 @@ This is where Jeeves directly plugs in.
 ### 11.1 The registry
 
 ```python
-# jeevesagent/mcp/registry.py
+# loomflow/mcp/registry.py
 
 class MCPRegistry:
     """Aggregates many MCP servers into a single ToolHost.
@@ -1402,7 +1402,7 @@ agent = Agent("...", mcp=MCPConfig(lazy_load=False))  # all tools always loaded
 The `jeeves` module wraps the user's Jeeves gateway as a pre-built MCP server config:
 
 ```python
-# jeevesagent/jeeves/client.py
+# loomflow/jeeves/client.py
 
 @dataclass
 class JeevesConfig:
@@ -1429,8 +1429,8 @@ class JeevesGateway:
 Usage:
 
 ```python
-from jeevesagent import Agent
-from jeevesagent.jeeves import JeevesGateway
+from loomflow import Agent
+from loomflow.jeeves import JeevesGateway
 
 agent = Agent(
     "You are a productivity assistant",
@@ -1591,9 +1591,9 @@ agent = Agent("...", memory=RedisMemory(url=REDIS_URL))
 Python's native plugin mechanism. A third-party package declares an entry point:
 
 ```toml
-# pyproject.toml of jeevesagent-redis-memory
-[project.entry-points."jeevesagent.memory"]
-redis = "jeevesagent_redis_memory:RedisMemory"
+# pyproject.toml of loomflow-redis-memory
+[project.entry-points."loomflow.memory"]
+redis = "loomflow_redis_memory:RedisMemory"
 ```
 
 Then users get string-based selection:
@@ -1602,7 +1602,7 @@ Then users get string-based selection:
 agent = Agent("...", memory="redis")  # discovered via entry point
 ```
 
-The harness resolves `"redis"` by scanning the `jeevesagent.memory` entry-point group at startup.
+The harness resolves `"redis"` by scanning the `loomflow.memory` entry-point group at startup.
 
 ### 15.3 Entry-point groups
 
@@ -1610,19 +1610,19 @@ We publish these groups for the ecosystem:
 
 | Group | What plugs in |
 |---|---|
-| `jeevesagent.model` | Model adapters |
-| `jeevesagent.memory` | Memory backends |
-| `jeevesagent.runtime` | Durable runtimes |
-| `jeevesagent.sandbox` | Sandbox implementations |
-| `jeevesagent.telemetry` | Telemetry exporters |
-| `jeevesagent.tool` | Pre-built tool definitions |
+| `loomflow.model` | Model adapters |
+| `loomflow.memory` | Memory backends |
+| `loomflow.runtime` | Durable runtimes |
+| `loomflow.sandbox` | Sandbox implementations |
+| `loomflow.telemetry` | Telemetry exporters |
+| `loomflow.tool` | Pre-built tool definitions |
 
 A first-party plugin set ships in-tree (anthropic model, postgres memory, dbos runtime, etc.). Third-party plugins are pip-installable.
 
 ### 15.4 Resolver
 
 ```python
-# jeevesagent/agent/config.py
+# loomflow/agent/config.py
 
 def resolve_memory(spec) -> Memory:
     if isinstance(spec, Memory):
@@ -1630,7 +1630,7 @@ def resolve_memory(spec) -> Memory:
     if isinstance(spec, MemoryConfig):
         return spec.build()
     if isinstance(spec, str):
-        cls = _load_entry_point("jeevesagent.memory", spec)
+        cls = _load_entry_point("loomflow.memory", spec)
         return cls()  # zero-arg default
     raise TypeError(f"unsupported memory spec: {spec!r}")
 ```
@@ -1962,7 +1962,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "jeevesagent"
+name = "loomflow"
 version = "0.0.1"
 description = "Model-agnostic, MCP-native agent harness"
 readme = "README.md"
@@ -1995,19 +1995,19 @@ dev = [
     "import-linter>=2.0",
 ]
 
-[project.entry-points."jeevesagent.model"]
-anthropic = "jeevesagent.model.anthropic:AnthropicModel"
-openai = "jeevesagent.model.openai:OpenAIModel"
-litellm = "jeevesagent.model.litellm:LiteLLMModel"
+[project.entry-points."loomflow.model"]
+anthropic = "loomflow.model.anthropic:AnthropicModel"
+openai = "loomflow.model.openai:OpenAIModel"
+litellm = "loomflow.model.litellm:LiteLLMModel"
 
-[project.entry-points."jeevesagent.memory"]
-postgres = "jeevesagent.memory.backends.postgres:PostgresMemory"
-inmemory = "jeevesagent.memory.backends.memory:InMemoryMemory"
+[project.entry-points."loomflow.memory"]
+postgres = "loomflow.memory.backends.postgres:PostgresMemory"
+inmemory = "loomflow.memory.backends.memory:InMemoryMemory"
 
-[project.entry-points."jeevesagent.runtime"]
-inproc = "jeevesagent.runtime.inproc:InProcRuntime"
-dbos = "jeevesagent.runtime.dbos:DBOSRuntime"
-temporal = "jeevesagent.runtime.temporal:TemporalRuntime"
+[project.entry-points."loomflow.runtime"]
+inproc = "loomflow.runtime.inproc:InProcRuntime"
+dbos = "loomflow.runtime.dbos:DBOSRuntime"
+temporal = "loomflow.runtime.temporal:TemporalRuntime"
 
 [tool.ruff]
 line-length = 100
@@ -2022,37 +2022,37 @@ addopts = "--anyio-backend=asyncio,trio --strict-markers"
 asyncio_mode = "auto"
 
 [tool.importlinter]
-root_package = "jeevesagent"
+root_package = "loomflow"
 
 [[tool.importlinter.contracts]]
 name = "layered architecture"
 type = "layers"
 layers = [
-    "jeevesagent.agent",
-    "jeevesagent.governance | jeevesagent.observability",
-    "jeevesagent.security | jeevesagent.data",
-    "jeevesagent.mcp",
-    "jeevesagent.runtime | jeevesagent.memory",
-    "jeevesagent.model",
-    "jeevesagent.async_ | jeevesagent.core",
+    "loomflow.agent",
+    "loomflow.governance | loomflow.observability",
+    "loomflow.security | loomflow.data",
+    "loomflow.mcp",
+    "loomflow.runtime | loomflow.memory",
+    "loomflow.model",
+    "loomflow.async_ | loomflow.core",
 ]
 ```
 
-### 20.2 `jeevesagent/__init__.py`
+### 20.2 `loomflow/__init__.py`
 
 ```python
-"""JeevesAgent — model-agnostic, MCP-native agent harness."""
+"""Loom — model-agnostic, MCP-native agent harness."""
 
-from jeevesagent.agent.api import Agent
-from jeevesagent.core.types import (
+from loomflow.agent.api import Agent
+from loomflow.core.types import (
     Event, RunResult, ToolCall, ToolResult,
     Message, ModelChunk, Episode, MemoryBlock,
     PermissionDecision, BudgetStatus,
 )
-from jeevesagent.memory.base import Memory, MemoryConfig
-from jeevesagent.runtime.base import Runtime
-from jeevesagent.security.permissions import Permissions, Mode
-from jeevesagent.governance.budget import Budget, BudgetConfig
+from loomflow.memory.base import Memory, MemoryConfig
+from loomflow.runtime.base import Runtime
+from loomflow.security.permissions import Permissions, Mode
+from loomflow.governance.budget import Budget, BudgetConfig
 
 __version__ = "0.0.1"
 
@@ -2076,7 +2076,7 @@ The day Phase 2 ships, this code must work end-to-end:
 
 ```python
 import asyncio
-from jeevesagent import Agent
+from loomflow import Agent
 
 async def main():
     agent = Agent(

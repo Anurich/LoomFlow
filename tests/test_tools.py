@@ -7,7 +7,7 @@ import time
 import anyio
 import pytest
 
-from jeevesagent import (
+from loomflow import (
     Agent,
     HookRegistry,
     Mode,
@@ -15,8 +15,8 @@ from jeevesagent import (
     Tool,
     tool,
 )
-from jeevesagent.core.types import PermissionDecision, ToolCall
-from jeevesagent.model.scripted import ScriptedModel, ScriptedTurn
+from loomflow.core.types import PermissionDecision, ToolCall
+from loomflow.model.scripted import ScriptedModel, ScriptedTurn
 
 pytestmark = pytest.mark.anyio
 

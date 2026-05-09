@@ -14,9 +14,9 @@ from typing import Any
 
 import pytest
 
-from jeevesagent.core.types import Fact
-from jeevesagent.memory.embedder import HashEmbedder
-from jeevesagent.memory.postgres_facts import PostgresFactStore
+from loomflow.core.types import Fact
+from loomflow.memory.embedder import HashEmbedder
+from loomflow.memory.postgres_facts import PostgresFactStore
 
 pytestmark = pytest.mark.anyio
 
@@ -244,7 +244,7 @@ async def test_postgres_memory_init_schema_runs_fact_store_schema_too() -> None:
     """When ``with_facts=True`` was used, ``init_schema`` should also
     apply the facts schema."""
 
-    from jeevesagent.memory.postgres import PostgresMemory
+    from loomflow.memory.postgres import PostgresMemory
 
     state = _FakeStore()
     pool = _FakePool(state)

@@ -8,9 +8,9 @@ from typing import Any
 
 import pytest
 
-from jeevesagent.core.types import Fact
-from jeevesagent.memory.embedder import HashEmbedder
-from jeevesagent.memory.redis_facts import RedisFactStore
+from loomflow.core.types import Fact
+from loomflow.memory.embedder import HashEmbedder
+from loomflow.memory.redis_facts import RedisFactStore
 
 pytestmark = pytest.mark.anyio
 

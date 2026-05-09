@@ -17,11 +17,12 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
     InMemorySpanExporter,
 )
 
-from jeevesagent import Agent, OTelTelemetry, tool
-from jeevesagent.core.types import ToolCall
-from jeevesagent.governance.budget import BudgetConfig, StandardBudget
-from jeevesagent.model.scripted import ScriptedModel, ScriptedTurn
-from jeevesagent.observability.tracing import NoTelemetry
+from loomflow import Agent, tool
+from loomflow.core.types import ToolCall
+from loomflow.governance.budget import BudgetConfig, StandardBudget
+from loomflow.model.scripted import ScriptedModel, ScriptedTurn
+from loomflow.observability import OTelTelemetry
+from loomflow.observability.tracing import NoTelemetry
 
 pytestmark = pytest.mark.anyio
 

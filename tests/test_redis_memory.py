@@ -12,9 +12,9 @@ from typing import Any
 
 import pytest
 
-from jeevesagent.core.types import Episode
-from jeevesagent.memory.embedder import HashEmbedder
-from jeevesagent.memory.redis import RedisMemory, _pack_float32, _unpack_float32
+from loomflow.core.types import Episode
+from loomflow.memory.embedder import HashEmbedder
+from loomflow.memory.redis import RedisMemory, _pack_float32, _unpack_float32
 
 pytestmark = pytest.mark.anyio
 

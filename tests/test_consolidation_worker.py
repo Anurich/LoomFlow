@@ -8,14 +8,9 @@ from typing import Any
 import anyio
 import pytest
 
-from jeevesagent import (
-    ConsolidationWorker,
-    Consolidator,
-    InMemoryMemory,
-    ScriptedModel,
-    ScriptedTurn,
-)
-from jeevesagent.core.types import Episode
+from loomflow import InMemoryMemory, ScriptedModel, ScriptedTurn
+from loomflow.core.types import Episode
+from loomflow.memory import ConsolidationWorker, Consolidator
 
 pytestmark = pytest.mark.anyio
 

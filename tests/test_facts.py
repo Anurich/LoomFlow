@@ -7,22 +7,16 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from jeevesagent import (
-    Agent,
-    Consolidator,
-    Fact,
-    InMemoryFactStore,
-    InMemoryMemory,
-    VectorMemory,
-)
-from jeevesagent.core.types import (
+from loomflow import Agent, Fact, InMemoryMemory
+from loomflow.core.types import (
     Episode,
     Message,
     ModelChunk,
     ToolDef,
     Usage,
 )
-from jeevesagent.model.scripted import ScriptedModel, ScriptedTurn
+from loomflow.memory import Consolidator, InMemoryFactStore, VectorMemory
+from loomflow.model.scripted import ScriptedModel, ScriptedTurn
 
 pytestmark = pytest.mark.anyio
 

@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "jeevesagent"
+name = "loomflow"
 version = "0.9.7"
-description = "Model-agnostic, MCP-native agent harness"
+description = "Production workflow + agent framework. Multi-tenant, MCP-native, model-agnostic."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
@@ -90,7 +90,7 @@ docs = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["jeevesagent"]
+packages = ["loomflow"]
 # PEP 561: ``py.typed`` marker tells IDEs and type-checkers
 # (Pylance, Pyright, mypy) that this package ships inline type
 # hints. Without it, autocomplete and go-to-definition for our
@@ -98,7 +98,7 @@ packages = ["jeevesagent"]
 # wheel — even though every public function is fully typed in
 # source. See https://peps.python.org/pep-0561/
 [tool.hatch.build.targets.wheel.force-include]
-"jeevesagent/py.typed" = "jeevesagent/py.typed"
+"loomflow/py.typed" = "loomflow/py.typed"
 
 [tool.ruff]
 line-length = 100
@@ -179,6 +179,6 @@ search = 'version = "{current_version}"'
 replace = 'version = "{new_version}"'
 
 [[tool.bumpversion.files]]
-filename = "jeevesagent/__init__.py"
+filename = "loomflow/__init__.py"
 search = '__version__ = "{current_version}"'
 replace = '__version__ = "{new_version}"'

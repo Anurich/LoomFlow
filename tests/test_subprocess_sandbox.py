@@ -10,16 +10,11 @@ import os
 
 import pytest
 
-from jeevesagent import (
-    Agent,
-    InProcessToolHost,
-    ScriptedModel,
-    ScriptedTurn,
-    SubprocessSandbox,
-    Tool,
-)
-from jeevesagent.core.errors import ConfigError
-from jeevesagent.core.types import ToolCall
+from loomflow import Agent, ScriptedModel, ScriptedTurn, Tool
+from loomflow.core.errors import ConfigError
+from loomflow.core.types import ToolCall
+from loomflow.security import SubprocessSandbox
+from loomflow.tools import InProcessToolHost
 
 from . import _subprocess_tools as tools
 
@@ -55,7 +50,7 @@ def test_rejects_non_inprocess_host() -> None:
             return []
 
         async def call(self, tool, args, *, call_id=""):  # type: ignore[no-untyped-def]
-            from jeevesagent.core.types import ToolResult
+            from loomflow.core.types import ToolResult
 
             return ToolResult.error_(call_id, "noop")
 

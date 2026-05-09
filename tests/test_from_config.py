@@ -7,9 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from jeevesagent import Agent, EchoModel
-from jeevesagent.core.errors import ConfigError
-from jeevesagent.governance.budget import StandardBudget
+from loomflow import Agent, EchoModel
+from loomflow.core.errors import ConfigError
+from loomflow.governance.budget import StandardBudget
 
 pytestmark = pytest.mark.anyio
 

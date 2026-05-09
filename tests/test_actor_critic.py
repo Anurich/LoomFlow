@@ -24,14 +24,9 @@ from __future__ import annotations
 
 import pytest
 
-from jeevesagent import (
-    ActorCritic,
-    Agent,
-    Architecture,
-    ScriptedModel,
-    ScriptedTurn,
-)
-from jeevesagent.architecture.actor_critic import (
+from loomflow import Agent, Architecture, ScriptedModel, ScriptedTurn
+from loomflow.architecture import ActorCritic
+from loomflow.architecture.actor_critic import (
     CriticOutput,
     _parse_critique,
 )

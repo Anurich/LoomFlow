@@ -7,9 +7,11 @@ from pathlib import Path
 
 import pytest
 
-from jeevesagent import Agent, FilesystemSandbox, InProcessToolHost, NoSandbox, tool
-from jeevesagent.core.types import ToolCall
-from jeevesagent.model.scripted import ScriptedModel, ScriptedTurn
+from loomflow import Agent, NoSandbox, tool
+from loomflow.core.types import ToolCall
+from loomflow.model.scripted import ScriptedModel, ScriptedTurn
+from loomflow.security import FilesystemSandbox
+from loomflow.tools import InProcessToolHost
 
 pytestmark = pytest.mark.anyio
 

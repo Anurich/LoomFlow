@@ -7,18 +7,18 @@ one in concept.
 ## Setup
 
 ```bash
-pip install jeevesagent
+pip install loomflow
 ```
 
 For real provider API access:
 ```bash
-pip install 'jeevesagent[anthropic,openai]'
+pip install 'loomflow[anthropic,openai]'
 export ANTHROPIC_API_KEY=sk-ant-...
 export OPENAI_API_KEY=sk-...
 ```
 
 For a local-only zero-key experience, you don't need anything beyond
-`pip install jeevesagent`.
+`pip install loomflow`.
 
 ---
 
@@ -26,7 +26,7 @@ For a local-only zero-key experience, you don't need anything beyond
 
 ```python
 import asyncio
-from jeevesagent import Agent
+from loomflow import Agent
 
 async def main():
     agent = Agent("You are a helpful assistant.", model="echo")
@@ -50,7 +50,7 @@ so you can verify the loop works without burning tokens.
 ## 2. Real models
 
 ```python
-from jeevesagent import Agent
+from loomflow import Agent
 
 # Strings dispatch by prefix:
 agent = Agent("You are helpful.", model="claude-opus-4-7")  # → AnthropicModel
@@ -61,7 +61,7 @@ agent = Agent("You are helpful.", model="echo")             # → EchoModel
 Or pass an instance for full control:
 
 ```python
-from jeevesagent import AnthropicModel
+from loomflow.model import AnthropicModel
 
 agent = Agent(
     "You are helpful.",
@@ -79,7 +79,7 @@ The `@tool` decorator takes a regular Python callable (sync or async)
 and derives its JSON schema from type hints.
 
 ```python
-from jeevesagent import Agent, tool
+from loomflow import Agent, tool
 
 @tool
 async def get_weather(city: str) -> str:
@@ -130,7 +130,8 @@ Events: `STARTED`, `MODEL_CHUNK`, `TOOL_CALL`, `TOOL_RESULT`,
 Plug an MCP server in directly:
 
 ```python
-from jeevesagent import Agent, MCPRegistry, MCPServerSpec
+from loomflow import Agent
+from loomflow.mcp import MCPRegistry, MCPServerSpec
 
 registry = MCPRegistry([
     MCPServerSpec.stdio(
@@ -159,7 +160,8 @@ just `commit` if only one does. Either form is accepted at call time.
 ## 6. Jeeves Gateway (one line)
 
 ```python
-from jeevesagent import Agent, JeevesGateway
+from loomflow import Agent
+from loomflow.jeeves import JeevesGateway
 
 agent = Agent(
     "You are a productivity assistant.",
@@ -185,7 +187,7 @@ The simplest way is the **`memory=` resolver** — pass a URL and the
 framework picks the backend:
 
 ```python
-from jeevesagent import Agent
+from loomflow import Agent
 
 # In-memory (default; lost on restart)
 agent = Agent("...", memory="inmemory")
@@ -238,7 +240,7 @@ For full control, pass an explicit instance (today's API,
 unchanged):
 
 ```python
-from jeevesagent import ChromaMemory, OpenAIEmbedder
+from loomflow.memory import ChromaMemory, OpenAIEmbedder
 
 memory = ChromaMemory.local(
     "./chroma-db", with_facts=True, embedder=OpenAIEmbedder()
@@ -254,7 +256,7 @@ bi-temporal fact store, partitioned by `user_id`. No `Consolidator`
 construction; no manual `consolidate()` call.
 
 ```python
-from jeevesagent import Agent
+from loomflow import Agent
 
 agent = Agent(
     "You are a personal assistant.",
@@ -323,7 +325,8 @@ facts_at_jan_2026 = await memory.facts.query(
 ## 9. Durable replay
 
 ```python
-from jeevesagent import Agent, SqliteRuntime
+from loomflow import Agent
+from loomflow.runtime import SqliteRuntime
 
 agent = Agent(
     "...",
@@ -360,7 +363,8 @@ result = await agent.resume("my-task-2026-05-01", "complex task")
 ## 10. Telemetry (OpenTelemetry)
 
 ```python
-from jeevesagent import Agent, OTelTelemetry
+from loomflow import Agent
+from loomflow.observability import OTelTelemetry
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import (
     BatchSpanProcessor,
@@ -386,7 +390,8 @@ Wire any OTel exporter (Honeycomb, Datadog, LangSmith, OTLP, ...).
 ## 11. Audit log
 
 ```python
-from jeevesagent import Agent, FileAuditLog
+from loomflow import Agent
+from loomflow.security import FileAuditLog
 
 audit = FileAuditLog("./audit.jsonl", secret="prod-secret")
 agent = Agent("...", audit_log=audit)
@@ -402,7 +407,7 @@ entries = await audit.query(session_id="sess_...")
 ## 12. Permissions + hooks
 
 ```python
-from jeevesagent import Agent, Mode, StandardPermissions
+from loomflow import Agent, Mode, StandardPermissions
 
 agent = Agent(
     "...",
@@ -415,7 +420,7 @@ agent = Agent(
 @agent.before_tool
 async def review(call):
     if call.tool == "send_email" and "@enemy.com" in str(call.args):
-        from jeevesagent.core.types import PermissionDecision
+        from loomflow.core.types import PermissionDecision
         return PermissionDecision.deny_("blocked by reviewer")
     return None  # allow
 
@@ -449,7 +454,9 @@ for the full failure-mode contract.
 ## 13. Sandbox (filesystem)
 
 ```python
-from jeevesagent import Agent, FilesystemSandbox, InProcessToolHost, tool
+from loomflow import Agent, tool
+from loomflow.security import FilesystemSandbox
+from loomflow.tools import InProcessToolHost
 
 @tool
 def read_file(path: str) -> str:
@@ -468,8 +475,8 @@ agent = Agent("...", tools=sandbox)
 
 ```python
 from datetime import timedelta
-from jeevesagent import Agent
-from jeevesagent.governance.budget import BudgetConfig, StandardBudget
+from loomflow import Agent
+from loomflow.governance.budget import BudgetConfig, StandardBudget
 
 agent = Agent(
     "...",
@@ -493,7 +500,7 @@ When the budget is exceeded, the run terminates cleanly with
 import asyncio
 from datetime import timedelta
 
-from jeevesagent import (
+from loomflow import (
     Agent,
     FileAuditLog,
     JeevesGateway,
@@ -502,7 +509,7 @@ from jeevesagent import (
     SqliteRuntime,
     StandardPermissions,
 )
-from jeevesagent.governance.budget import BudgetConfig, StandardBudget
+from loomflow.governance.budget import BudgetConfig, StandardBudget
 
 async def main():
     agent = Agent(

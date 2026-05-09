@@ -18,15 +18,10 @@ from __future__ import annotations
 
 import pytest
 
-from jeevesagent import (
-    Agent,
-    Architecture,
-    PlanAndExecute,
-    ScriptedModel,
-    ScriptedTurn,
-)
-from jeevesagent.architecture.plan_and_execute import _parse_plan
-from jeevesagent.architecture.resolver import resolve_architecture
+from loomflow import Agent, Architecture, ScriptedModel, ScriptedTurn
+from loomflow.architecture import PlanAndExecute
+from loomflow.architecture.plan_and_execute import _parse_plan
+from loomflow.architecture.resolver import resolve_architecture
 
 pytestmark = pytest.mark.anyio
 

@@ -30,13 +30,9 @@ import anyio.lowlevel
 import pytest
 from pydantic import BaseModel
 
-from jeevesagent import (
-    Agent,
-    RetryPolicy,
-    get_run_context,
-    tool,
-)
-from jeevesagent.memory.inmemory import InMemoryMemory
+from loomflow import Agent, get_run_context, tool
+from loomflow.governance import RetryPolicy
+from loomflow.memory.inmemory import InMemoryMemory
 
 # Try .env (developer ergonomics). CI sets OPENAI_API_KEY directly.
 try:
@@ -281,8 +277,8 @@ async def test_invalid_api_key_classifies_as_authentication_error() -> None:
     (permanent, no retries) — not buried inside a raw SDK
     exception. Verifies the classifier handles a real OpenAI
     auth response."""
-    from jeevesagent import AuthenticationError
-    from jeevesagent.model.openai import OpenAIModel
+    from loomflow.core import AuthenticationError
+    from loomflow.model.openai import OpenAIModel
 
     model = OpenAIModel(MODEL, api_key="sk-deliberately-invalid")
     agent = Agent(
@@ -305,7 +301,7 @@ async def test_auto_extract_populates_facts_after_one_run() -> None:
     by user_id, with no manual ``Consolidator`` call from the
     user. ``auto_extract=True`` is the default for in-tree network
     adapters."""
-    from jeevesagent.memory.inmemory import InMemoryMemory
+    from loomflow.memory.inmemory import InMemoryMemory
 
     memory = InMemoryMemory()
     agent = Agent(

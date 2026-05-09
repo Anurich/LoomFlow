@@ -16,7 +16,7 @@
 #
 # What it does:
 #   1. Refuses to run with a dirty working tree.
-#   2. bump-my-version edits pyproject.toml + jeevesagent/__init__.py
+#   2. bump-my-version edits pyproject.toml + loomflow/__init__.py
 #      atomically, commits, and tags v<new_version>.
 #   3. Pushes the commit and the tag to origin.
 #   4. The push of the v* tag fires .github/workflows/release.yml,
@@ -45,8 +45,8 @@ release:
 	@echo "→ Pre-flight: working tree clean?"
 	@git diff-index --quiet HEAD -- || (echo "  ✗ uncommitted changes; commit or stash first" && exit 1)
 	@echo "→ Pre-flight: gates green?"
-	@ruff check jeevesagent tests examples
-	@mypy --strict jeevesagent
+	@ruff check loomflow tests examples
+	@mypy --strict loomflow
 	@pytest -q
 	@echo "→ Bumping version ($(BUMP)) + committing + tagging..."
 	bump-my-version bump $(BUMP) --verbose
@@ -103,11 +103,11 @@ first-release:
 	  esac; \
 	  FINAL=$$(echo "$$CURRENT" | sed 's/\.dev[0-9]*$$//'); \
 	  echo "  → finalizing $$CURRENT → $$FINAL"; \
-	  ruff check jeevesagent tests examples && \
-	  mypy --strict jeevesagent && \
+	  ruff check loomflow tests examples && \
+	  mypy --strict loomflow && \
 	  pytest -q && \
 	  bump-my-version replace --new-version "$$FINAL" && \
-	  git add pyproject.toml jeevesagent/__init__.py && \
+	  git add pyproject.toml loomflow/__init__.py && \
 	  git commit -m "Release v$$FINAL" && \
 	  git tag -a "v$$FINAL" -m "Release v$$FINAL" && \
 	  git push origin main && \

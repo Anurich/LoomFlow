@@ -22,15 +22,10 @@ from __future__ import annotations
 
 import pytest
 
-from jeevesagent import (
-    Agent,
-    Architecture,
-    ScriptedModel,
-    ScriptedTurn,
-    Swarm,
-)
-from jeevesagent.architecture.swarm import _is_cycling
-from jeevesagent.core.types import ToolCall
+from loomflow import Agent, Architecture, ScriptedModel, ScriptedTurn
+from loomflow.architecture import Swarm
+from loomflow.architecture.swarm import _is_cycling
+from loomflow.core.types import ToolCall
 
 pytestmark = pytest.mark.anyio
 
@@ -447,7 +442,7 @@ async def test_agent_run_extra_tools_kwarg_injects_tools() -> None:
     """Smoke-test the ``Agent.run(extra_tools=...)`` plumbing: a tool
     passed in for ONE run is callable by the model that turn but
     isn't part of the agent's static config."""
-    from jeevesagent import Tool
+    from loomflow import Tool
 
     captured = []
 
@@ -496,7 +491,7 @@ async def test_agent_run_extra_tools_kwarg_injects_tools() -> None:
 
 from pydantic import BaseModel  # noqa: E402
 
-from jeevesagent import Handoff  # noqa: E402
+from loomflow.architecture import Handoff  # noqa: E402
 
 
 class RefundRequest(BaseModel):

@@ -7,8 +7,9 @@ from __future__ import annotations
 
 import pytest
 
-from jeevesagent import Consolidator, InMemoryFactStore, ScriptedModel, ScriptedTurn
-from jeevesagent.core.types import Episode
+from loomflow import ScriptedModel, ScriptedTurn
+from loomflow.core.types import Episode
+from loomflow.memory import Consolidator, InMemoryFactStore
 
 pytestmark = pytest.mark.anyio
 
@@ -45,7 +46,7 @@ async def test_append_many_calls_embed_batch_once() -> None:
 
     from datetime import UTC, datetime
 
-    from jeevesagent import Fact
+    from loomflow import Fact
 
     now = datetime.now(UTC)
     facts = [
@@ -73,7 +74,7 @@ async def test_append_many_with_no_embedder_skips_embedding() -> None:
 
     from datetime import UTC, datetime
 
-    from jeevesagent import Fact
+    from loomflow import Fact
 
     now = datetime.now(UTC)
     facts = [

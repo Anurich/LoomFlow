@@ -28,21 +28,11 @@ from unittest.mock import patch
 
 import pytest
 
-from jeevesagent import (
-    Agent,
-    HashEmbedder,
-    InMemoryVectorStore,
-    Reflexion,
-    RouterRoute,
-    ScriptedModel,
-    ScriptedTurn,
-    Supervisor,
-    Team,
-    build_graph,
-    tool,
-    write_graph,
-)
-from jeevesagent.graph import _Builder, _escape
+from loomflow import Agent, HashEmbedder, ScriptedModel, ScriptedTurn, tool
+from loomflow.architecture import Reflexion, RouterRoute, Supervisor
+from loomflow.graph import _Builder, _escape, build_graph, write_graph
+from loomflow.team import Team
+from loomflow.vectorstore import InMemoryVectorStore
 
 pytestmark = pytest.mark.anyio
 
@@ -385,7 +375,7 @@ async def test_generate_graph_png_falls_back_on_network_error(
     out = tmp_path / "graph.png"
 
     with patch(
-        "jeevesagent.graph._fetch_mermaid_ink",
+        "loomflow.graph._fetch_mermaid_ink",
         side_effect=URLError("mock offline"),
     ):
         with pytest.raises(RuntimeError, match="mermaid.ink"):
@@ -406,7 +396,7 @@ async def test_generate_graph_png_writes_bytes_on_success(
     out = tmp_path / "graph.png"
 
     with patch(
-        "jeevesagent.graph._fetch_mermaid_ink", return_value=fake_png
+        "loomflow.graph._fetch_mermaid_ink", return_value=fake_png
     ):
         await agent.generate_graph(out)
 

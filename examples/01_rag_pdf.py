@@ -1,6 +1,6 @@
 """Example 1 — RAG over a folder of PDFs.
 
-End-to-end pipeline using only JeevesAgent's own building blocks:
+End-to-end pipeline using only Loom's own building blocks:
 
     PDFs in a folder
        │
@@ -37,10 +37,10 @@ PDF backends:
 
 * ``unstructured`` (default) — Apache 2.0, what LangChain wraps.
   Element-level parsing (Title / NarrativeText / Table / ListItem)
-  with per-page metadata. ``pip install 'jeevesagent[loader-pdf]'``.
+  with per-page metadata. ``pip install 'loomflow[loader-pdf]'``.
 * ``docling`` — IBM Research, MIT, ML-based, 2026 best-in-class on
   native PDFs per published benchmarks. Slower first run (downloads
-  layout model on first use). ``pip install 'jeevesagent[loader-pdf-docling]'``.
+  layout model on first use). ``pip install 'loomflow[loader-pdf-docling]'``.
 
 Both replace the historical ``pypdf`` backend whose silent per-page
 extraction failures produced the "questions about content near the
@@ -173,11 +173,11 @@ def _wrap(text: str, width: int) -> list[str]:
 # 1. Build the index
 # --------------------------------------------------------------------
 
-from jeevesagent import Agent, tool  # noqa: E402
-from jeevesagent.loader import RecursiveChunker  # noqa: E402
-from jeevesagent.loader.pdf import load_pdf  # noqa: E402
-from jeevesagent.memory.embedder import OpenAIEmbedder  # noqa: E402
-from jeevesagent.vectorstore import ChromaVectorStore  # noqa: E402
+from loomflow import Agent, tool  # noqa: E402
+from loomflow.loader import RecursiveChunker  # noqa: E402
+from loomflow.loader.pdf import load_pdf  # noqa: E402
+from loomflow.memory.embedder import OpenAIEmbedder  # noqa: E402
+from loomflow.vectorstore import ChromaVectorStore  # noqa: E402
 
 # One persistent Chroma directory per backend — chunks differ
 # slightly between unstructured and docling output, so a single

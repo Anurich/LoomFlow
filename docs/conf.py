@@ -1,4 +1,4 @@
-"""Sphinx configuration for the JeevesAgent docs site.
+"""Sphinx configuration for the Loom docs site.
 
 Build locally with::
 
@@ -27,15 +27,15 @@ sys.path.insert(0, str(_REPO_ROOT))
 
 # -- Project metadata -------------------------------------------------
 
-project = "JeevesAgent"
-author = "JeevesAgent contributors"
-copyright = "2026, JeevesAgent contributors"
+project = "Loom"
+author = "Loom contributors"
+copyright = "2026, Loom contributors"
 
 # Pull the version from the installed package so docs and code never
 # drift. Falls back to "0.0.0" only when the package isn't importable
 # (e.g. building docs in a fresh checkout before ``pip install``).
 try:
-    from jeevesagent import __version__ as _pkg_version
+    from loomflow import __version__ as _pkg_version
     release = _pkg_version
     version = ".".join(_pkg_version.split(".")[:2])
 except ImportError:
@@ -50,7 +50,7 @@ extensions = [
     # alongside any new .rst content without rewriting them.
     "myst_parser",
     # Auto-generate API reference from package source. autoapi runs at
-    # build time, walks ``jeevesagent/``, and emits one page per
+    # build time, walks ``loomflow/``, and emits one page per
     # module with all public symbols documented from their inline
     # docstrings.
     "autoapi.extension",
@@ -77,7 +77,7 @@ templates_path = ["_templates"]
 # -- Theme ------------------------------------------------------------
 
 html_theme = "furo"
-html_title = f"JeevesAgent {release}"
+html_title = f"Loom {release}"
 html_static_path = ["_static"]
 html_theme_options = {
     "sidebar_hide_name": False,
@@ -91,7 +91,7 @@ html_theme_options = {
 # -- autoapi ----------------------------------------------------------
 
 autoapi_type = "python"
-autoapi_dirs = [str(_REPO_ROOT / "jeevesagent")]
+autoapi_dirs = [str(_REPO_ROOT / "loomflow")]
 autoapi_root = "api"
 autoapi_options = [
     "members",

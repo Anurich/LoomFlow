@@ -23,18 +23,10 @@ from __future__ import annotations
 
 import pytest
 
-from jeevesagent import (
-    Agent,
-    Architecture,
-    ReWOO,
-    ReWOOPlan,
-    ReWOOStep,
-    ScriptedModel,
-    ScriptedTurn,
-    tool,
-)
-from jeevesagent.architecture.resolver import resolve_architecture
-from jeevesagent.architecture.rewoo import (
+from loomflow import Agent, Architecture, ScriptedModel, ScriptedTurn, tool
+from loomflow.architecture import ReWOO, ReWOOPlan, ReWOOStep
+from loomflow.architecture.resolver import resolve_architecture
+from loomflow.architecture.rewoo import (
     ReWOOStepResult,
     _extract_placeholders,
     _parse_rewoo_plan,

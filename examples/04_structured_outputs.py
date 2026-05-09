@@ -56,7 +56,7 @@ if not os.environ.get("OPENAI_API_KEY"):
     sys.exit(0)
 
 
-from jeevesagent import Agent  # noqa: E402
+from loomflow import Agent  # noqa: E402
 
 # --------------------------------------------------------------------
 # 1. Schema definition — what we want extracted

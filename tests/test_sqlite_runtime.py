@@ -13,8 +13,9 @@ from pathlib import Path
 
 import pytest
 
-from jeevesagent import Agent, SqliteRuntime
-from jeevesagent.runtime.journal import SqliteJournalStore
+from loomflow import Agent
+from loomflow.runtime import SqliteRuntime
+from loomflow.runtime.journal import SqliteJournalStore
 
 pytestmark = pytest.mark.anyio
 

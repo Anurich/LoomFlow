@@ -13,13 +13,8 @@ from datetime import UTC, datetime
 
 import pytest
 
-from jeevesagent import (
-    Fact,
-    InMemoryMemory,
-    PostgresMemory,
-    RedisMemory,
-    VectorMemory,
-)
+from loomflow import Fact, InMemoryMemory
+from loomflow.memory import PostgresMemory, RedisMemory, VectorMemory
 
 pytestmark = pytest.mark.anyio
 

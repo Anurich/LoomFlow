@@ -1,4 +1,4 @@
-# JeevesAgent
+# Loom
 
 **Production-ready async agent harness. Multi-tenant by default,
 typed outputs, retries on transient errors, model-agnostic,
@@ -7,7 +7,7 @@ MCP-native.**
 ```python
 import asyncio
 from pydantic import BaseModel
-from jeevesagent import Agent
+from loomflow import Agent
 
 class WeatherReport(BaseModel):
     city: str
@@ -77,7 +77,7 @@ migrations/from-openai-sdk
 :maxdepth: 1
 :caption: Reference
 
-api/jeevesagent/index
+api/loomflow/index
 migration_0.1_to_0.2
 ```
 

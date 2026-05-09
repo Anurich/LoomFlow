@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from jeevesagent.loader import (
+from loomflow.loader import (
     Chunk,
     MarkdownChunker,
     RecursiveChunker,

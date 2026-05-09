@@ -8,9 +8,9 @@ from typing import Any
 
 import pytest
 
-from jeevesagent import Agent
-from jeevesagent.core.types import Message, ModelChunk, Role, ToolCall
-from jeevesagent.model.openai import OpenAIModel, _to_openai_messages
+from loomflow import Agent
+from loomflow.core.types import Message, ModelChunk, Role, ToolCall
+from loomflow.model.openai import OpenAIModel, _to_openai_messages
 
 pytestmark = pytest.mark.anyio
 
@@ -251,8 +251,8 @@ def test_assistant_message_with_tool_calls_serializes_arguments_as_json() -> Non
 
 
 def test_tool_definition_converts_to_openai_function_tool() -> None:
-    from jeevesagent.core.types import ToolDef
-    from jeevesagent.model.openai import _to_openai_tool
+    from loomflow.core.types import ToolDef
+    from loomflow.model.openai import _to_openai_tool
 
     td = ToolDef(
         name="lookup",
@@ -299,7 +299,7 @@ async def test_unknown_model_string_raises() -> None:
     """0.2.0 harmonised the resolver's error to ConfigError (was
     ValueError in 0.1.x). The message now also lists LiteLLM prefixes
     and the explicit ``litellm/`` opt-in."""
-    from jeevesagent.core.errors import ConfigError
+    from loomflow.core.errors import ConfigError
 
     with pytest.raises(ConfigError, match="unknown model spec"):
         Agent("hi", model="totally-unknown-prefix-xyz")

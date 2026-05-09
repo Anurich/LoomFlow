@@ -1,6 +1,6 @@
 # Examples
 
-Eleven end-to-end examples that exercise JeevesAgent's own
+Eleven end-to-end examples that exercise Loom's own
 primitives — loader, vector store, retriever-as-tool pattern,
 multi-agent architectures, multi-user / session-continuity
 primitives, and the workflow + agent composition story. Nothing
@@ -55,7 +55,7 @@ python examples/02_specialist_debate.py
     security_policy.pdf
     support_runbook.pdf
         │
-        ▼  jeevesagent.loader.load(...)
+        ▼  loomflow.loader.load(...)
     Document(content=<markdown>)
         │
         ▼  RecursiveChunker(chunk_size=600).split(...)

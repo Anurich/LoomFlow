@@ -26,17 +26,12 @@ from typing import Any
 import anyio
 import pytest
 
-from jeevesagent import (
-    Agent,
-    AuthenticationError,
-    RateLimitError,
-    RetryPolicy,
-    TransientModelError,
-    classify_model_error,
-)
-from jeevesagent.governance.retry import compute_backoff
-from jeevesagent.model.retrying import RetryingModel
-from jeevesagent.model.scripted import ScriptedModel, ScriptedTurn
+from loomflow import Agent
+from loomflow.core import AuthenticationError, RateLimitError, TransientModelError
+from loomflow.governance import RetryPolicy, classify_model_error
+from loomflow.governance.retry import compute_backoff
+from loomflow.model.retrying import RetryingModel
+from loomflow.model.scripted import ScriptedModel, ScriptedTurn
 
 pytestmark = pytest.mark.anyio
 
@@ -159,14 +154,14 @@ class _FlakyModel:
         self.attempts += 1
         if self.attempts <= self._fail_count:
             raise self._exc_factory()
-        from jeevesagent.core.types import Usage
+        from loomflow.core.types import Usage
         return ("ok", [], Usage(), "stop")
 
     async def stream(self, messages: Any, **kwargs: Any) -> Any:
         self.attempts += 1
         if self.attempts <= self._fail_count:
             raise self._exc_factory()
-        from jeevesagent.core.types import ModelChunk, Usage
+        from loomflow.core.types import ModelChunk, Usage
         yield ModelChunk(kind="text", text="ok")
         yield ModelChunk(kind="finish", finish_reason="stop", usage=Usage())
 

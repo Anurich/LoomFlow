@@ -21,14 +21,9 @@ from __future__ import annotations
 
 import pytest
 
-from jeevesagent import (
-    Agent,
-    Architecture,
-    MultiAgentDebate,
-    ScriptedModel,
-    ScriptedTurn,
-)
-from jeevesagent.architecture.debate import (
+from loomflow import Agent, Architecture, ScriptedModel, ScriptedTurn
+from loomflow.architecture import MultiAgentDebate
+from loomflow.architecture.debate import (
     _converged,
     _majority_vote,
     _normalize,

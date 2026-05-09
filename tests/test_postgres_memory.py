@@ -16,9 +16,9 @@ from typing import Any
 
 import pytest
 
-from jeevesagent.core.types import Episode
-from jeevesagent.memory.embedder import HashEmbedder
-from jeevesagent.memory.postgres import (
+from loomflow.core.types import Episode
+from loomflow.memory.embedder import HashEmbedder
+from loomflow.memory.postgres import (
     _ANON_USER_ID,
     PostgresMemory,
     _decode_user_id,

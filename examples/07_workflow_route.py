@@ -39,7 +39,7 @@ if not os.environ.get("OPENAI_API_KEY"):
     sys.exit(0)
 
 
-from jeevesagent import Agent, InMemoryMemory, Workflow  # noqa: E402
+from loomflow import Agent, InMemoryMemory, Workflow  # noqa: E402
 
 MODEL = "gpt-4.1-mini"
 

@@ -41,10 +41,10 @@ jobs:
           pip install -e '.[dev,anthropic,openai,otel,chroma,redis,postgres,mcp,litellm,voyage,cohere]'
 
       - name: Ruff
-        run: ruff check jeevesagent tests
+        run: ruff check loomflow tests
 
       - name: Mypy --strict
-        run: mypy --strict jeevesagent
+        run: mypy --strict loomflow
 
       - name: Pytest
         run: pytest tests/ --tb=short -v

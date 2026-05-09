@@ -2,12 +2,12 @@
 
 import pytest
 
-from jeevesagent import Agent
-from jeevesagent.core.errors import ConfigError
-from jeevesagent.governance.budget import BudgetConfig, StandardBudget
-from jeevesagent.memory.inmemory import InMemoryMemory
-from jeevesagent.model.echo import EchoModel
-from jeevesagent.runtime.inproc import InProcRuntime
+from loomflow import Agent
+from loomflow.core.errors import ConfigError
+from loomflow.governance.budget import BudgetConfig, StandardBudget
+from loomflow.memory.inmemory import InMemoryMemory
+from loomflow.model.echo import EchoModel
+from loomflow.runtime.inproc import InProcRuntime
 
 pytestmark = pytest.mark.anyio
 

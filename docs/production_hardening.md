@@ -21,8 +21,8 @@ per-user caps stop one tenant from exhausting another's quota.
 
 ```python
 from datetime import timedelta
-from jeevesagent import Agent
-from jeevesagent.governance.budget import BudgetConfig, StandardBudget
+from loomflow import Agent
+from loomflow.governance.budget import BudgetConfig, StandardBudget
 
 agent = Agent(
     "...",
@@ -63,7 +63,8 @@ budget automatically — you don't need to thread it manually.
 destructive tools for end users.
 
 ```python
-from jeevesagent import Agent, Mode, PerUserPermissions, StandardPermissions
+from loomflow import Agent, Mode, StandardPermissions
+from loomflow.security import PerUserPermissions
 
 policies = {
     "admin_alice": StandardPermissions(mode=Mode.BYPASS),
@@ -97,8 +98,8 @@ bypasses the gate. Wire a handler to surface the decision to a
 human / Slack / ticket queue:
 
 ```python
-from jeevesagent import Agent
-from jeevesagent.core.types import ToolCall
+from loomflow import Agent
+from loomflow.core.types import ToolCall
 
 async def approve_via_slack(call: ToolCall, user_id: str | None) -> bool:
     """Return True to allow the tool call, False to deny."""
@@ -138,8 +139,8 @@ UUID) grows the dict until the process OOMs. Both primitives now
 default to bounded state with LRU + idle-TTL eviction:
 
 ```python
-from jeevesagent import InMemoryMemory
-from jeevesagent.governance.budget import BudgetConfig, StandardBudget
+from loomflow import InMemoryMemory
+from loomflow.governance.budget import BudgetConfig, StandardBudget
 
 # Defaults: 100k users, 24h idle TTL.
 budget = StandardBudget(BudgetConfig())  # implicit bounds
@@ -194,7 +195,7 @@ A one-time-per-process `INFO` log notice tells you when the
 default-on heuristic fires:
 
 ```
-INFO  jeevesagent.memory.auto_extract: AutoExtractMemory enabled
+INFO  loomflow.memory.auto_extract: AutoExtractMemory enabled
 by default for this model class. Each remembered episode triggers
 a small extraction call to pull (subject, predicate, object)
 facts. Pass Agent(auto_extract=False) to disable, or
@@ -221,7 +222,8 @@ threads, get logged in crashes, and don't rotate). The `Secrets`
 protocol gives you a pluggable resolver:
 
 ```python
-from jeevesagent import Agent, EnvSecrets, DictSecrets
+from loomflow import Agent
+from loomflow.security import DictSecrets, EnvSecrets
 
 # Default — reads from os.environ. Same behaviour as pre-M10.
 agent = Agent("...", model="claude-opus-4-7", secrets=EnvSecrets())
@@ -269,7 +271,7 @@ class VaultSecrets:
 
     def redact(self, text: str) -> str:
         # Use the default regex set or extend with your own:
-        from jeevesagent.security.secrets import _apply_redaction
+        from loomflow.security.secrets import _apply_redaction
         return _apply_redaction(text)
 
     def lookup_sync(self, ref: str) -> str | None:
@@ -302,7 +304,8 @@ strings hit the audit log.
 the framework writes is attributed to the active user:
 
 ```python
-from jeevesagent import Agent, FileAuditLog
+from loomflow import Agent
+from loomflow.security import FileAuditLog
 
 agent = Agent(
     "...",
@@ -380,7 +383,7 @@ things to be aware of when you upgrade:
    `ValueError` — defense against impersonating the anonymous
    bucket.
 2. **Custom `Memory` / `Permissions` / `HookHost` / `AuditLog` impls
-   without a `user_id=` kwarg emit `JeevesDeprecationWarning`.** The
+   without a `user_id=` kwarg emit `LoomDeprecationWarning`.** The
    shim layer still calls the legacy shape, so nothing breaks today.
    The deprecation will turn into a hard removal in 1.0. To silence:
    ```python

@@ -25,21 +25,14 @@ from pathlib import Path
 
 import pytest
 
-from jeevesagent import (
-    Agent,
-    ScriptedModel,
-    ScriptedTurn,
-    Skill,
-    SkillError,
-    SkillRegistry,
-    SkillSource,
-    Team,
-)
-from jeevesagent.skills._frontmatter import (
+from loomflow import Agent, ScriptedModel, ScriptedTurn
+from loomflow.skills import Skill, SkillError, SkillRegistry, SkillSource
+from loomflow.skills._frontmatter import (
     FrontmatterError,
     parse_frontmatter,
 )
-from jeevesagent.skills.tools import make_load_skill_tool
+from loomflow.skills.tools import make_load_skill_tool
+from loomflow.team import Team
 
 pytestmark = pytest.mark.anyio
 
@@ -498,7 +491,7 @@ async def test_team_supervisor_accepts_skills(tmp_path: Path) -> None:
 
 
 async def test_team_router_accepts_skills(tmp_path: Path) -> None:
-    from jeevesagent import RouterRoute
+    from loomflow.architecture import RouterRoute
 
     _make_skill_dir(tmp_path, "alpha", "First.")
     specialist = Agent(
@@ -637,7 +630,7 @@ def _make_mode_b_skill(tmp_path: Path) -> Path:
         "# Greeter\nUse the `say_hi` tool to greet someone.\n"
     )
     (folder / "tools.py").write_text(
-        "from jeevesagent import tool\n"
+        "from loomflow import tool\n"
         "@tool\n"
         "async def say_hi(name: str) -> str:\n"
         "    \"\"\"Say hi to NAME.\"\"\"\n"
@@ -705,7 +698,7 @@ async def test_skill_can_mix_mode_b_and_mode_c(tmp_path: Path) -> None:
         "import sys\nprint(sys.argv[1].upper())\n"
     )
     (folder / "tools.py").write_text(
-        "from jeevesagent import tool\n"
+        "from loomflow import tool\n"
         "@tool\n"
         "async def whisper(msg: str) -> str:\n"
         "    return msg.lower()\n"

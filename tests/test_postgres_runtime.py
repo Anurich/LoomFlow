@@ -11,8 +11,8 @@ from typing import Any
 
 import pytest
 
-from jeevesagent import PostgresJournalStore, PostgresRuntime
-from jeevesagent.runtime.journal import JournalEntry
+from loomflow.runtime import PostgresJournalStore, PostgresRuntime
+from loomflow.runtime.journal import JournalEntry
 
 pytestmark = pytest.mark.anyio
 

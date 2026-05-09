@@ -7,16 +7,9 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from jeevesagent import (
-    Agent,
-    Consolidator,
-    InMemoryMemory,
-    ScriptedModel,
-    ScriptedTurn,
-    Tool,
-    tool,
-)
-from jeevesagent.core.types import RunResult, ToolCall
+from loomflow import Agent, InMemoryMemory, ScriptedModel, ScriptedTurn, Tool, tool
+from loomflow.core.types import RunResult, ToolCall
+from loomflow.memory import Consolidator
 
 pytestmark = pytest.mark.anyio
 
@@ -359,8 +352,8 @@ async def test_add_tool_rejects_when_host_is_not_inprocess() -> None:
     add_tool can't extend it — raise a clear error."""
     from collections.abc import AsyncIterator
 
-    from jeevesagent.core.errors import ConfigError
-    from jeevesagent.core.types import ToolDef, ToolEvent, ToolResult
+    from loomflow.core.errors import ConfigError
+    from loomflow.core.types import ToolDef, ToolEvent, ToolResult
 
     class _CustomHost:
         async def list_tools(self, *, query: str | None = None) -> list[ToolDef]:

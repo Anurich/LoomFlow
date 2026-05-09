@@ -8,8 +8,9 @@ from pathlib import Path
 
 import pytest
 
-from jeevesagent import Fact, SqliteFactStore
-from jeevesagent.memory.sqlite_facts import _to_epoch
+from loomflow import Fact
+from loomflow.memory import SqliteFactStore
+from loomflow.memory.sqlite_facts import _to_epoch
 
 pytestmark = pytest.mark.anyio
 

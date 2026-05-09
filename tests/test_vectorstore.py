@@ -1,4 +1,4 @@
-"""Tests for jeevesagent.vectorstore.
+"""Tests for loomflow.vectorstore.
 
 Covers the in-memory implementation end-to-end (it's the default
 and only one with zero deps) plus the protocol contract checks
@@ -19,15 +19,16 @@ from pathlib import Path
 
 import pytest
 
-from jeevesagent import HashEmbedder, InMemoryVectorStore, SearchResult
-from jeevesagent.loader.base import Chunk
-from jeevesagent.vectorstore._bm25 import BM25Index, reciprocal_rank_fusion
-from jeevesagent.vectorstore._filter import (
+from loomflow import HashEmbedder
+from loomflow.loader.base import Chunk
+from loomflow.vectorstore import InMemoryVectorStore, SearchResult
+from loomflow.vectorstore._bm25 import BM25Index, reciprocal_rank_fusion
+from loomflow.vectorstore._filter import (
     FilterError,
     evaluate_filter,
 )
-from jeevesagent.vectorstore._mmr import mmr_select
-from jeevesagent.vectorstore.base import VectorStore, matches_filter
+from loomflow.vectorstore._mmr import mmr_select
+from loomflow.vectorstore.base import VectorStore, matches_filter
 
 # ---------------------------------------------------------------------------
 # matches_filter — the shared filter helper
@@ -316,7 +317,7 @@ def test_chroma_import_error_when_missing(
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
 
-    from jeevesagent import ChromaVectorStore
+    from loomflow.vectorstore import ChromaVectorStore
 
     with pytest.raises(ImportError, match="vectorstore-chroma"):
         ChromaVectorStore(embedder=HashEmbedder(dimensions=8))
@@ -336,7 +337,7 @@ def test_faiss_import_error_when_missing(
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
 
-    from jeevesagent import FAISSVectorStore
+    from loomflow.vectorstore import FAISSVectorStore
 
     with pytest.raises(ImportError, match="vectorstore-faiss"):
         FAISSVectorStore(embedder=HashEmbedder(dimensions=8))
@@ -359,7 +360,7 @@ async def test_postgres_import_error_when_missing(
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
 
-    from jeevesagent import PostgresVectorStore
+    from loomflow.vectorstore import PostgresVectorStore
 
     store = PostgresVectorStore(
         embedder=HashEmbedder(dimensions=8),
@@ -820,7 +821,7 @@ async def test_load_unsupported_version_raises(
 
 
 def test_postgres_filter_translation() -> None:
-    from jeevesagent.vectorstore.postgres import _build_where_sql
+    from loomflow.vectorstore.postgres import _build_where_sql
 
     sql, params = _build_where_sql({"source": "x.pdf"}, [])
     assert "metadata->>'source'" in sql
@@ -828,7 +829,7 @@ def test_postgres_filter_translation() -> None:
 
 
 def test_postgres_filter_range_translation() -> None:
-    from jeevesagent.vectorstore.postgres import _build_where_sql
+    from loomflow.vectorstore.postgres import _build_where_sql
 
     sql, params = _build_where_sql({"page": {"$gte": 5}}, [])
     assert ">=" in sql
@@ -836,7 +837,7 @@ def test_postgres_filter_range_translation() -> None:
 
 
 def test_postgres_filter_logical_translation() -> None:
-    from jeevesagent.vectorstore.postgres import _build_where_sql
+    from loomflow.vectorstore.postgres import _build_where_sql
 
     sql, _ = _build_where_sql(
         {"$or": [{"a": 1}, {"b": 2}]}, []
@@ -845,7 +846,7 @@ def test_postgres_filter_logical_translation() -> None:
 
 
 def test_postgres_filter_exists_translation() -> None:
-    from jeevesagent.vectorstore.postgres import _build_where_sql
+    from loomflow.vectorstore.postgres import _build_where_sql
 
     sql, _ = _build_where_sql({"key": {"$exists": True}}, [])
     assert "metadata ? 'key'" in sql
@@ -857,28 +858,28 @@ def test_postgres_filter_exists_translation() -> None:
 
 
 def test_chroma_filter_passthrough_operator_form() -> None:
-    from jeevesagent.vectorstore.chroma import _translate_filter
+    from loomflow.vectorstore.chroma import _translate_filter
 
     out = _translate_filter({"page": {"$gte": 5}})
     assert out == {"page": {"$gte": 5}}
 
 
 def test_chroma_filter_scalar_shorthand_normalized() -> None:
-    from jeevesagent.vectorstore.chroma import _translate_filter
+    from loomflow.vectorstore.chroma import _translate_filter
 
     out = _translate_filter({"source": "x.pdf"})
     assert out == {"source": {"$eq": "x.pdf"}}
 
 
 def test_chroma_filter_list_shorthand_normalized() -> None:
-    from jeevesagent.vectorstore.chroma import _translate_filter
+    from loomflow.vectorstore.chroma import _translate_filter
 
     out = _translate_filter({"tag": ["a", "b"]})
     assert out == {"tag": {"$in": ["a", "b"]}}
 
 
 def test_chroma_filter_multi_field_wraps_in_and() -> None:
-    from jeevesagent.vectorstore.chroma import _translate_filter
+    from loomflow.vectorstore.chroma import _translate_filter
 
     out = _translate_filter({"a": 1, "b": 2})
     assert out is not None
@@ -886,7 +887,7 @@ def test_chroma_filter_multi_field_wraps_in_and() -> None:
 
 
 def test_chroma_filter_not_unsupported() -> None:
-    from jeevesagent.vectorstore.chroma import _translate_filter
+    from loomflow.vectorstore.chroma import _translate_filter
 
     with pytest.raises(FilterError, match="Chroma"):
         _translate_filter({"$not": {"a": 1}})

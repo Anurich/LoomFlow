@@ -21,10 +21,10 @@ from typing import Any
 
 import pytest
 
-from jeevesagent import Agent
-from jeevesagent.core.errors import ConfigError
-from jeevesagent.core.types import Message, ModelChunk, Role
-from jeevesagent.model.litellm import LiteLLMModel
+from loomflow import Agent
+from loomflow.core.errors import ConfigError
+from loomflow.core.types import Message, ModelChunk, Role
+from loomflow.model.litellm import LiteLLMModel
 
 pytestmark = pytest.mark.anyio
 

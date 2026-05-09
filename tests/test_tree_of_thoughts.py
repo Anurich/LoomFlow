@@ -21,16 +21,10 @@ from __future__ import annotations
 
 import pytest
 
-from jeevesagent import (
-    Agent,
-    Architecture,
-    ScriptedModel,
-    ScriptedTurn,
-    ThoughtNode,
-    TreeOfThoughts,
-)
-from jeevesagent.architecture.resolver import resolve_architecture
-from jeevesagent.architecture.tree_of_thoughts import _chain_to_root
+from loomflow import Agent, Architecture, ScriptedModel, ScriptedTurn
+from loomflow.architecture import ThoughtNode, TreeOfThoughts
+from loomflow.architecture.resolver import resolve_architecture
+from loomflow.architecture.tree_of_thoughts import _chain_to_root
 
 pytestmark = pytest.mark.anyio
 

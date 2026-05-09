@@ -59,8 +59,8 @@ if not os.environ.get("OPENAI_API_KEY"):
     sys.exit(0)
 
 
-from jeevesagent import Agent, get_run_context, tool  # noqa: E402
-from jeevesagent.memory.inmemory import InMemoryMemory  # noqa: E402
+from loomflow import Agent, get_run_context, tool  # noqa: E402
+from loomflow.memory.inmemory import InMemoryMemory  # noqa: E402
 
 # --------------------------------------------------------------------
 # A tool that reads scope from the run context.

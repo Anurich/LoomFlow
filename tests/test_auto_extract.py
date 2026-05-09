@@ -19,11 +19,11 @@ from typing import Any
 
 import pytest
 
-from jeevesagent import Agent, Episode, Fact
-from jeevesagent.core.types import ModelChunk, Usage
-from jeevesagent.memory.auto_extract import AutoExtractMemory
-from jeevesagent.memory.consolidator import Consolidator
-from jeevesagent.memory.inmemory import InMemoryMemory
+from loomflow import Agent, Episode, Fact
+from loomflow.core.types import ModelChunk, Usage
+from loomflow.memory.auto_extract import AutoExtractMemory
+from loomflow.memory.consolidator import Consolidator
+from loomflow.memory.inmemory import InMemoryMemory
 
 pytestmark = pytest.mark.anyio
 
@@ -194,7 +194,7 @@ async def test_agent_does_not_auto_wrap_scripted_model_by_default() -> None:
     is OFF for them so tests stay deterministic. Verified by the
     type of ``agent._wrapped_memory`` — should equal
     ``agent._memory``, no AutoExtractMemory layer."""
-    from jeevesagent.model.scripted import ScriptedModel, ScriptedTurn
+    from loomflow.model.scripted import ScriptedModel, ScriptedTurn
 
     agent = Agent(
         "...", model=ScriptedModel([ScriptedTurn(text="ok")])
@@ -206,7 +206,7 @@ async def test_agent_does_not_auto_wrap_scripted_model_by_default() -> None:
 async def test_agent_explicit_auto_extract_true_wraps_even_on_fakes() -> None:
     """Explicit opt-in works regardless of model type — the
     framework respects the caller's choice."""
-    from jeevesagent.model.scripted import ScriptedModel, ScriptedTurn
+    from loomflow.model.scripted import ScriptedModel, ScriptedTurn
 
     agent = Agent(
         "...",
@@ -221,7 +221,7 @@ async def test_agent_explicit_auto_extract_false_skips_wrapping() -> None:
     """Explicit opt-out also works for the case where someone is
     already running a real network model but wants today's
     behaviour back."""
-    from jeevesagent.model.scripted import ScriptedModel, ScriptedTurn
+    from loomflow.model.scripted import ScriptedModel, ScriptedTurn
 
     agent = Agent(
         "...",
@@ -236,7 +236,7 @@ async def test_agent_memory_property_returns_inner_not_wrapper() -> None:
     the user-supplied / resolver-built backend — not the
     auto-extract wrapper. Tests + ``agent.memory.profile(...)``
     style code can keep working as if no wrapping happened."""
-    from jeevesagent.model.scripted import ScriptedModel, ScriptedTurn
+    from loomflow.model.scripted import ScriptedModel, ScriptedTurn
 
     inner = InMemoryMemory()
     agent = Agent(
@@ -260,7 +260,7 @@ async def test_agent_run_auto_extracts_facts_into_memory() -> None:
     """The headline UX: one ``agent.run`` and structured facts
     appear in memory, partitioned by user_id, ready for the next
     run's recall to surface."""
-    from jeevesagent.core.types import ToolCall as _Unused  # noqa: F401
+    from loomflow.core.types import ToolCall as _Unused  # noqa: F401
 
     # The agent's own model + the consolidator's model are the
     # SAME instance here (default behaviour). The Scripted model

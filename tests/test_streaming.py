@@ -17,10 +17,10 @@ import time
 import anyio
 import pytest
 
-from jeevesagent import Agent, tool
-from jeevesagent.core.types import EventKind, ToolCall
-from jeevesagent.governance.budget import BudgetConfig, StandardBudget
-from jeevesagent.model.scripted import ScriptedModel, ScriptedTurn
+from loomflow import Agent, tool
+from loomflow.core.types import EventKind, ToolCall
+from loomflow.governance.budget import BudgetConfig, StandardBudget
+from loomflow.model.scripted import ScriptedModel, ScriptedTurn
 
 pytestmark = pytest.mark.anyio
 

@@ -21,16 +21,9 @@ from __future__ import annotations
 
 import pytest
 
-from jeevesagent import (
-    Agent,
-    Architecture,
-    Blackboard,
-    BlackboardArchitecture,
-    BlackboardEntry,
-    ScriptedModel,
-    ScriptedTurn,
-)
-from jeevesagent.architecture.blackboard import (
+from loomflow import Agent, Architecture, ScriptedModel, ScriptedTurn
+from loomflow.architecture import Blackboard, BlackboardArchitecture, BlackboardEntry
+from loomflow.architecture.blackboard import (
     _parse_coordinator_decision,
 )
 

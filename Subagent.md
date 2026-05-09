@@ -1,6 +1,6 @@
-# JeevesAgent — Architecture Reference Manual
+# Loom — Architecture Reference Manual
 
-> Complete reference for every agent architecture shipped with JeevesAgent. Each section covers origin, mechanism, full implementation, performance, strengths, weaknesses, composition, tuning, pitfalls, and worked examples.
+> Complete reference for every agent architecture shipped with Loom. Each section covers origin, mechanism, full implementation, performance, strengths, weaknesses, composition, tuning, pitfalls, and worked examples.
 
 This is the **detailed** reference. For the high-level survey, see `AGENT_ARCHITECTURES.md`. For composition rules between agents, see `MULTI_AGENT_COMPOSITION_SPEC.md`. For the engineering foundation, see `JEEVES_AGENT_ENGINEERING.md`.
 
@@ -293,7 +293,7 @@ class ReActConfig:
 ### Implementation
 
 ```python
-# jeevesagent/architecture/react.py
+# loomflow/architecture/react.py
 
 from __future__ import annotations
 import anyio
@@ -576,8 +576,8 @@ ReAct does NOT compose with itself, with Plan-and-Execute (those are alternative
 
 ```python
 import asyncio
-from jeevesagent import Agent
-from jeevesagent.architecture import ReAct
+from loomflow import Agent
+from loomflow.architecture import ReAct
 
 async def main():
     agent = Agent(
@@ -690,7 +690,7 @@ class PlanAndExecuteConfig:
 ### Implementation
 
 ```python
-# jeevesagent/architecture/plan_execute.py
+# loomflow/architecture/plan_execute.py
 
 from __future__ import annotations
 import anyio
@@ -986,8 +986,8 @@ Plan-and-Execute does NOT compose with ReAct (alternatives), or with ReWOO (diff
 
 ```python
 import asyncio
-from jeevesagent import Agent
-from jeevesagent.architecture import PlanAndExecute
+from loomflow import Agent
+from loomflow.architecture import PlanAndExecute
 
 async def main():
     agent = Agent(
@@ -1094,7 +1094,7 @@ class ReWOOConfig:
 ### Implementation
 
 ```python
-# jeevesagent/architecture/rewoo.py
+# loomflow/architecture/rewoo.py
 
 from __future__ import annotations
 import re
@@ -1365,8 +1365,8 @@ ReWOO does NOT compose with: ReAct, Plan-and-Execute (alternatives); Reflexion o
 
 ```python
 import asyncio
-from jeevesagent import Agent
-from jeevesagent.architecture import ReWOO
+from loomflow import Agent
+from loomflow.architecture import ReWOO
 
 async def main():
     # Use case: known-pattern data retrieval
@@ -1480,7 +1480,7 @@ class ReflexionConfig:
 ### Implementation
 
 ```python
-# jeevesagent/architecture/reflexion.py
+# loomflow/architecture/reflexion.py
 
 from __future__ import annotations
 from typing import AsyncIterator, Callable, Awaitable
@@ -1727,8 +1727,8 @@ Reflexion does NOT compose with itself (Reflexion-of-Reflexion is just burning t
 
 ```python
 import asyncio
-from jeevesagent import Agent
-from jeevesagent.architecture import Reflexion, ReAct
+from loomflow import Agent
+from loomflow.architecture import Reflexion, ReAct
 
 # Domain-specific evaluator
 async def code_test_evaluator(run_result):
@@ -1840,7 +1840,7 @@ class SelfRefineConfig:
 ### Implementation
 
 ```python
-# jeevesagent/architecture/self_refine.py
+# loomflow/architecture/self_refine.py
 
 from __future__ import annotations
 from typing import AsyncIterator
@@ -2032,8 +2032,8 @@ Self-Refine does NOT compose with: Reflexion (overlapping concerns; pick one), M
 
 ```python
 import asyncio
-from jeevesagent import Agent
-from jeevesagent.architecture import SelfRefine, ReAct
+from loomflow import Agent
+from loomflow.architecture import SelfRefine, ReAct
 
 async def main():
     agent = Agent(
@@ -2139,7 +2139,7 @@ class ToTConfig:
 ### Implementation
 
 ```python
-# jeevesagent/architecture/tot.py
+# loomflow/architecture/tot.py
 
 from __future__ import annotations
 import anyio
@@ -2416,8 +2416,8 @@ ToT does NOT compose with: ReAct (alternatives), Plan-and-Execute (different par
 
 ```python
 import asyncio
-from jeevesagent import Agent
-from jeevesagent.architecture import TreeOfThoughts
+from loomflow import Agent
+from loomflow.architecture import TreeOfThoughts
 
 async def main():
     agent = Agent(
@@ -2592,7 +2592,7 @@ class SubagentDef:
 ### Implementation
 
 ```python
-# jeevesagent/architecture/deep_agent.py
+# loomflow/architecture/deep_agent.py
 
 from __future__ import annotations
 from typing import AsyncIterator
@@ -2887,9 +2887,9 @@ agent = Agent(
 ```python
 import asyncio
 from pathlib import Path
-from jeevesagent import Agent
-from jeevesagent.architecture import DeepAgent, ReAct
-from jeevesagent.architecture.config import FilesystemConfig, SubagentDef
+from loomflow import Agent
+from loomflow.architecture import DeepAgent, ReAct
+from loomflow.architecture.config import FilesystemConfig, SubagentDef
 
 async def main():
     workdir = Path("/tmp/research_project")
@@ -3021,7 +3021,7 @@ class SupervisorConfig:
 ### Implementation
 
 ```python
-# jeevesagent/architecture/supervisor.py
+# loomflow/architecture/supervisor.py
 
 from __future__ import annotations
 from typing import AsyncIterator
@@ -3207,8 +3207,8 @@ agent = Agent("...", architecture=Reflexion(base=Supervisor(workers={...})))
 
 ```python
 import asyncio
-from jeevesagent import Agent
-from jeevesagent.architecture import Supervisor, DeepAgent, ActorCritic
+from loomflow import Agent
+from loomflow.architecture import Supervisor, DeepAgent, ActorCritic
 
 async def main():
     # Build the worker team
@@ -3241,7 +3241,7 @@ async def main():
 
     result = await agent.run(
         "Research the LangGraph framework and produce a 1-page comparison "
-        "with our JeevesAgent design. Include code examples that demonstrate "
+        "with our Loom design. Include code examples that demonstrate "
         "the difference."
     )
 
@@ -3330,7 +3330,7 @@ class ActorCriticConfig:
 ### Implementation
 
 ```python
-# jeevesagent/architecture/actor_critic.py
+# loomflow/architecture/actor_critic.py
 
 from __future__ import annotations
 from typing import AsyncIterator, Optional
@@ -3568,8 +3568,8 @@ agent = Agent("...", architecture=Reflexion(base=ActorCritic()))
 
 ```python
 import asyncio
-from jeevesagent import Agent
-from jeevesagent.architecture import ActorCritic
+from loomflow import Agent
+from loomflow.architecture import ActorCritic
 
 async def main():
     # Different models for actor/critic to maximize blind-spot diversity
@@ -3702,7 +3702,7 @@ class DebateConfig:
 ### Implementation
 
 ```python
-# jeevesagent/architecture/debate.py
+# loomflow/architecture/debate.py
 
 from __future__ import annotations
 import anyio
@@ -3991,8 +3991,8 @@ Debate does NOT compose with: Reflexion, Self-Refine, Actor-Critic (overlapping/
 
 ```python
 import asyncio
-from jeevesagent import Agent
-from jeevesagent.architecture import MultiAgentDebate
+from loomflow import Agent
+from loomflow.architecture import MultiAgentDebate
 
 async def main():
     # Three debaters with different models for genuine diversity
@@ -4131,7 +4131,7 @@ class BlackboardConfig:
 ### Implementation
 
 ```python
-# jeevesagent/architecture/blackboard.py
+# loomflow/architecture/blackboard.py
 
 from __future__ import annotations
 from typing import AsyncIterator
@@ -4420,8 +4420,8 @@ Blackboard does NOT compose with: Reflexion, Self-Refine (different paradigms), 
 
 ```python
 import asyncio
-from jeevesagent import Agent
-from jeevesagent.architecture import BlackboardArchitecture
+from loomflow import Agent
+from loomflow.architecture import BlackboardArchitecture
 
 async def main():
     # Agents for an exploratory data discovery task
@@ -4547,7 +4547,7 @@ class SwarmConfig:
 ### Implementation
 
 ```python
-# jeevesagent/architecture/swarm.py
+# loomflow/architecture/swarm.py
 
 from __future__ import annotations
 from typing import AsyncIterator
@@ -4748,8 +4748,8 @@ agent = Agent("...", architecture=Router(routes=[
 
 ```python
 import asyncio
-from jeevesagent import Agent
-from jeevesagent.architecture import SwarmArchitecture
+from loomflow import Agent
+from loomflow.architecture import SwarmArchitecture
 
 async def main():
     # Three peer agents for a customer support prototype
@@ -4858,7 +4858,7 @@ class RouterConfig:
 ### Implementation
 
 ```python
-# jeevesagent/architecture/router.py
+# loomflow/architecture/router.py
 
 from __future__ import annotations
 from typing import AsyncIterator, Literal
@@ -5059,8 +5059,8 @@ agent = Agent("...", architecture=Router(routes={
 
 ```python
 import asyncio
-from jeevesagent import Agent
-from jeevesagent.architecture import Router
+from loomflow import Agent
+from loomflow.architecture import Router
 
 async def main():
     # Specialist agents for a customer support system
@@ -5136,7 +5136,7 @@ asyncio.run(main())
 
 ## Custom architectures
 
-JeevesAgent's architecture system is genuinely extensible. New architectures don't require forking the library or submitting PRs. They're external Python packages that register via entry points. This section shows how.
+Loom's architecture system is genuinely extensible. New architectures don't require forking the library or submitting PRs. They're external Python packages that register via entry points. This section shows how.
 
 ### When to write a custom architecture
 
@@ -5145,7 +5145,7 @@ Most teams should NOT write custom architectures. The 14 shipped architectures c
 1. **A new research paper drops** with a meaningfully different pattern (this happens about quarterly)
 2. **Your domain has unique structure** that doesn't fit existing patterns (rare; usually it's just a tuning of an existing one)
 3. **You need to embed a proprietary algorithm** that you don't want in a public package
-4. **You're prototyping** before contributing back to JeevesAgent
+4. **You're prototyping** before contributing back to Loom
 
 If you find yourself writing a third "custom" architecture, you're probably re-implementing existing patterns badly. Ask in the community first.
 
@@ -5157,10 +5157,10 @@ A custom architecture is a single class implementing the `Architecture` Protocol
 # my_company/architectures/algorithm_of_thoughts.py
 
 from typing import AsyncIterator
-from jeevesagent.architecture.base import Architecture
-from jeevesagent.core.types import Event
-from jeevesagent.agent.session import Session
-from jeevesagent.agent.deps import Dependencies
+from loomflow.architecture.base import Architecture
+from loomflow.core.types import Event
+from loomflow.agent.session import Session
+from loomflow.agent.deps import Dependencies
 
 
 class AlgorithmOfThoughts:
@@ -5229,7 +5229,7 @@ class AlgorithmOfThoughts:
 Add an entry point in your package's `pyproject.toml`:
 
 ```toml
-[project.entry-points."jeevesagent.architecture"]
+[project.entry-points."loomflow.architecture"]
 algorithm-of-thoughts = "my_company.architectures.algorithm_of_thoughts:AlgorithmOfThoughts"
 ```
 
@@ -5239,7 +5239,7 @@ After `pip install my-company-architectures`, users can:
 agent = Agent("...", architecture="algorithm-of-thoughts")
 ```
 
-JeevesAgent discovers the architecture via the entry point — no code changes to JeevesAgent itself.
+Loom discovers the architecture via the entry point — no code changes to Loom itself.
 
 ### Required protocol contract
 
@@ -5262,13 +5262,13 @@ Your architecture SHOULD:
 
 ### Testing custom architectures
 
-JeevesAgent ships test fixtures specifically for architecture testing:
+Loom ships test fixtures specifically for architecture testing:
 
 ```python
 # tests/test_my_architecture.py
 
 import pytest
-from jeevesagent.testing import (
+from loomflow.testing import (
     fake_model,
     fake_runtime,
     fake_dependencies,
@@ -5334,10 +5334,10 @@ async def test_replay_after_crash():
 
 Once tested:
 
-1. Publish to PyPI with a clear name (`jeevesagent-arch-aot`, etc.)
+1. Publish to PyPI with a clear name (`loomflow-arch-aot`, etc.)
 2. Document benchmarks against existing architectures (which patterns it beats and on what)
 3. Reference the originating paper (if applicable)
-4. Submit a pointer to the JeevesAgent community registry (we maintain a list of third-party architectures)
+4. Submit a pointer to the Loom community registry (we maintain a list of third-party architectures)
 
 This is how the architecture ecosystem grows. We define the protocol; the community fills in the implementations.
 
@@ -5459,7 +5459,7 @@ Defaults matter. We pick the default that's right for the most users, not the on
 
 Yes — but it's almost certainly the wrong abstraction. If your "architecture" doesn't use an LLM, it's deterministic logic that should be a tool or a workflow, not an agent architecture. The Architecture protocol exists to swap *iteration patterns over LLM calls*. Pure deterministic logic doesn't need that.
 
-Exception: a "noop" architecture for testing is fine and ships in `jeevesagent.testing`.
+Exception: a "noop" architecture for testing is fine and ships in `loomflow.testing`.
 
 ### How do I choose between Self-Refine and Actor-Critic?
 
@@ -5537,16 +5537,16 @@ No. Three patterns:
 
 1. **String** — `architecture="reflexion"` — no import needed
 2. **Recipe** — `architecture="reflexion+react"` — no import needed
-3. **Object** — `architecture=Reflexion(base=ReAct())` — requires `from jeevesagent.architecture import Reflexion, ReAct`
+3. **Object** — `architecture=Reflexion(base=ReAct())` — requires `from loomflow.architecture import Reflexion, ReAct`
 
 For the simple cases, strings are fine. Import classes only when you're configuring.
 
 ### How do I benchmark architectures against each other?
 
-JeevesAgent ships an eval harness:
+Loom ships an eval harness:
 
 ```python
-from jeevesagent.eval import compare_architectures
+from loomflow.eval import compare_architectures
 
 results = await compare_architectures(
     task_set=my_tasks,  # list of (prompt, expected_output)
@@ -5563,7 +5563,7 @@ results.print_table()
 results.save_html("benchmarks.html")
 ```
 
-The eval harness lives in `jeevesagent.eval` (engineering plan §16). It runs each architecture against the same task set with the same model, captures all metrics, and produces variance-aware comparisons.
+The eval harness lives in `loomflow.eval` (engineering plan §16). It runs each architecture against the same task set with the same model, captures all metrics, and produces variance-aware comparisons.
 
 ### Can architectures change at runtime based on the task?
 
@@ -5578,7 +5578,7 @@ For v3 we may add `architecture="auto"` that chooses dynamically based on task a
 
 ### What if I find a bug in a shipped architecture?
 
-File an issue in the JeevesAgent repository with:
+File an issue in the Loom repository with:
 1. Architecture name and version
 2. Minimal reproduction (preferably failing test)
 3. Expected vs actual behavior
@@ -5596,7 +5596,7 @@ This is the complete architecture reference. Three things to internalize:
 
 2. **Composition is first-class.** Real production stacks are compositions, not single architectures. Reflexion *of* ReAct, Supervisor *of* Deep Agents, Actor-Critic *with a* Tree-of-Thoughts *critic*. The protocol takes a `base: Architecture` parameter wherever it makes sense, and that's how composition happens.
 
-3. **Research becomes API.** When the next paper drops a better architecture (it will, every quarter), JeevesAgent ships it as one entry point and one new class. Users adopt it with a string change. We don't lock anyone into 2026's best practices.
+3. **Research becomes API.** When the next paper drops a better architecture (it will, every quarter), Loom ships it as one entry point and one new class. Users adopt it with a string change. We don't lock anyone into 2026's best practices.
 
 The user types one word; the harness becomes that architecture. Everything else is exactly the same. That's the magic moment.
 

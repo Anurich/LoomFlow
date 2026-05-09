@@ -6,9 +6,10 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from jeevesagent import Agent, VectorMemory
-from jeevesagent.core.types import Episode
-from jeevesagent.memory.embedder import HashEmbedder
+from loomflow import Agent
+from loomflow.core.types import Episode
+from loomflow.memory import VectorMemory
+from loomflow.memory.embedder import HashEmbedder
 
 pytestmark = pytest.mark.anyio
 

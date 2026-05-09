@@ -12,16 +12,9 @@ from pathlib import Path
 
 import pytest
 
-from jeevesagent import (
-    Agent,
-    InMemoryJournalStore,
-    JournaledRuntime,
-    ScriptedModel,
-    ScriptedTurn,
-    SqliteRuntime,
-    tool,
-)
-from jeevesagent.core.types import EventKind, ToolCall
+from loomflow import Agent, ScriptedModel, ScriptedTurn, tool
+from loomflow.core.types import EventKind, ToolCall
+from loomflow.runtime import InMemoryJournalStore, JournaledRuntime, SqliteRuntime
 
 pytestmark = pytest.mark.anyio
 

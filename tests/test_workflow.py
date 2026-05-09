@@ -26,7 +26,7 @@ from typing import Any
 
 import pytest
 
-from jeevesagent import (
+from loomflow import (
     END,
     Agent,
     InMemoryAuditLog,
@@ -35,9 +35,9 @@ from jeevesagent import (
     WorkflowResult,
     step,
 )
-from jeevesagent.core.context import get_run_context
-from jeevesagent.core.types import EventKind
-from jeevesagent.model.scripted import ScriptedModel, ScriptedTurn
+from loomflow.core.context import get_run_context
+from loomflow.core.types import EventKind
+from loomflow.model.scripted import ScriptedModel, ScriptedTurn
 
 pytestmark = pytest.mark.anyio
 

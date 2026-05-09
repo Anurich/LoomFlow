@@ -19,9 +19,9 @@ import time
 import anyio
 import pytest
 
-from jeevesagent import InMemoryMemory
-from jeevesagent.core._eviction import BoundedDict
-from jeevesagent.governance.budget import (
+from loomflow import InMemoryMemory
+from loomflow.core._eviction import BoundedDict
+from loomflow.governance.budget import (
     BudgetConfig,
     StandardBudget,
 )

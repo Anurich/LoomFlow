@@ -27,15 +27,9 @@ from typing import Any
 
 import pytest
 
-from jeevesagent import (
-    Agent,
-    Architecture,
-    Router,
-    RouterRoute,
-    ScriptedModel,
-    ScriptedTurn,
-)
-from jeevesagent.architecture.router import _parse_classification
+from loomflow import Agent, Architecture, ScriptedModel, ScriptedTurn
+from loomflow.architecture import Router, RouterRoute
+from loomflow.architecture.router import _parse_classification
 
 pytestmark = pytest.mark.anyio
 
@@ -335,7 +329,7 @@ async def test_router_uses_deterministic_specialist_session_id() -> None:
         name = "capture"
 
         async def stream(self, messages, *, tools=None):  # type: ignore[no-untyped-def]
-            from jeevesagent.core.types import ModelChunk, Usage
+            from loomflow.core.types import ModelChunk, Usage
 
             yield ModelChunk(
                 kind="text", text="ok"

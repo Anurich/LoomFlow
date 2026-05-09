@@ -14,9 +14,9 @@ pytest.importorskip("chromadb")
 import uuid  # noqa: E402
 from datetime import UTC, datetime, timedelta  # noqa: E402
 
-from jeevesagent import ChromaMemory  # noqa: E402
-from jeevesagent.core.types import Fact  # noqa: E402
-from jeevesagent.memory.chroma_facts import ChromaFactStore  # noqa: E402
+from loomflow.core.types import Fact  # noqa: E402
+from loomflow.memory import ChromaMemory  # noqa: E402
+from loomflow.memory.chroma_facts import ChromaFactStore  # noqa: E402
 
 pytestmark = pytest.mark.anyio
 

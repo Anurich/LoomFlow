@@ -24,8 +24,8 @@ from typing import Any
 import pytest
 from pydantic import BaseModel
 
-from jeevesagent import Agent, OutputValidationError
-from jeevesagent.model.scripted import ScriptedModel, ScriptedTurn
+from loomflow import Agent, OutputValidationError
+from loomflow.model.scripted import ScriptedModel, ScriptedTurn
 
 pytestmark = pytest.mark.anyio
 

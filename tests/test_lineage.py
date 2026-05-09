@@ -6,10 +6,10 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from jeevesagent import FreshnessPolicy, LineagePolicy
-from jeevesagent.core.errors import FreshnessError, LineageError
-from jeevesagent.core.types import CertifiedValue
-from jeevesagent.data.lineage import (
+from loomflow.core.errors import FreshnessError, LineageError
+from loomflow.core.types import CertifiedValue
+from loomflow.data import FreshnessPolicy, LineagePolicy
+from loomflow.data.lineage import (
     check_freshness,
     check_lineage,
     require_freshness,

@@ -1,6 +1,6 @@
 # Workflow vs Agent
 
-JeevesAgent ships two peer primitives. Picking between them is an
+Loom ships two peer primitives. Picking between them is an
 engineering decision, not a stylistic one. Wrong pick → wrong cost,
 wrong latency, wrong debug story.
 
@@ -62,7 +62,7 @@ Most production systems combine the two:
 The framework makes both directions free:
 
 ```python
-from jeevesagent import Agent, Workflow
+from loomflow import Agent, Workflow
 
 # Agent inside a Workflow — drop the Agent in as a node.
 specialist = Agent("billing specialist", model="...")
@@ -94,7 +94,7 @@ No DSL. Decorate the functions, write the workflow as regular
 async Python:
 
 ```python
-from jeevesagent import step
+from loomflow import step
 
 @step
 async def classify(text: str) -> str:
@@ -138,7 +138,7 @@ When you need conditional edges, multiple branches, or the graph
 itself is a deliverable (compliance, BPMN-like flows):
 
 ```python
-from jeevesagent import Workflow, END
+from loomflow import Workflow, END
 
 wf = Workflow("triage")
 wf.add_node("classify", classify)

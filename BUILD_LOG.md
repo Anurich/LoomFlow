@@ -1,4 +1,4 @@
-# JeevesAgent — Build Log
+# Loom — Build Log
 
 A running record of every slice we've shipped. Each section captures
 what was added, the files touched, the verification gates we ran, and
@@ -1054,7 +1054,7 @@ string-based model resolver on `Agent`.
   `ToolCall` is defined before `Message`.
 * `model/anthropic.py` — `AnthropicModel`. Lazy
   `anthropic.AsyncAnthropic` import inside `__init__` (so
-  `from jeevesagent.model import AnthropicModel` works without the
+  `from loomflow.model import AnthropicModel` works without the
   extra installed; ImportError fires only when constructing without
   a `client=`). Streams via `messages.stream` and normalises events:
   `text_delta` -> `ModelChunk(kind="text", ...)`,
@@ -1265,7 +1265,7 @@ classes, ULID + deterministic-hash helpers.
   is an `AbstractAsyncContextManager`. Twelve protocols total: Model,
   Memory, Runtime, RuntimeSession, ToolHost, Sandbox, Permissions,
   HookHost, Budget, Telemetry, Embedder, Secrets.
-* `core/errors.py` — `JeevesAgentError` base + 11 specific subclasses
+* `core/errors.py` — `LoomError` base + 11 specific subclasses
   (ConfigError, BudgetExceeded, PermissionDenied, ToolError,
   SandboxError, RuntimeJournalError, MemoryStoreError, MCPError,
   FreshnessError, LineageError, CancelledByUser).
@@ -1274,9 +1274,9 @@ classes, ULID + deterministic-hash helpers.
   (canonical JSON + SHA256 for idempotency keys).
 
 **Files touched (new):** `pyproject.toml`, `README.md`,
-`jeevesagent/__init__.py`, `jeevesagent/core/__init__.py`,
-`jeevesagent/core/types.py`, `jeevesagent/core/protocols.py`,
-`jeevesagent/core/errors.py`, `jeevesagent/core/ids.py`.
+`loomflow/__init__.py`, `loomflow/core/__init__.py`,
+`loomflow/core/types.py`, `loomflow/core/protocols.py`,
+`loomflow/core/errors.py`, `loomflow/core/ids.py`.
 
 **Gates:** ruff clean, mypy `--strict` clean across 6 source files,
 package imports cleanly with 46 public names exported. No tests yet
@@ -1290,7 +1290,7 @@ package imports cleanly with 46 public names exported. No tests yet
 
 ## Cumulative state (after slice 18)
 
-* **78 source files** under `jeevesagent/` and `tests/`
+* **78 source files** under `loomflow/` and `tests/`
 * **243 tests passing** + 4 skipped (live-integration) in ~2.5 seconds total
 * **mypy `--strict` clean** across 53 production source files
 * **4 user-facing docs** (README + quickstart + recipes + architecture) totaling ~1295 lines
@@ -1306,12 +1306,12 @@ package imports cleanly with 46 public names exported. No tests yet
 ## Architecture map (current)
 
 ```
-jeevesagent/
+loomflow/
   __init__.py          # Re-exports everything public
   core/                # Layer-free primitives
     types.py           # 18 Pydantic value objects
     protocols.py       # 12 module-boundary Protocols
-    errors.py          # JeevesAgentError + 11 subclasses
+    errors.py          # LoomError + 11 subclasses
     ids.py             # ULID + deterministic hash
   agent/
     api.py             # Agent class, _loop(emit) shared by run/stream

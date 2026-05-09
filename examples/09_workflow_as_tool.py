@@ -8,7 +8,7 @@ Use case: an open-ended customer-support Agent might handle a
 hundred different conversation paths, but when the user actually
 asks for a refund the response MUST follow a deterministic flow:
 validate → record → notify. Wrapping that flow as a workflow and
-exposing it via :meth:`~jeevesagent.Workflow.as_tool` gives the
+exposing it via :meth:`~loomflow.Workflow.as_tool` gives the
 Agent a deterministic compliance gate inside its otherwise free
 reasoning.
 
@@ -42,7 +42,7 @@ if not os.environ.get("OPENAI_API_KEY"):
     sys.exit(0)
 
 
-from jeevesagent import Agent, InMemoryAuditLog, Workflow  # noqa: E402
+from loomflow import Agent, InMemoryAuditLog, Workflow  # noqa: E402
 
 MODEL = "gpt-4.1-mini"
 

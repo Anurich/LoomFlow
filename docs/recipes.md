@@ -25,7 +25,8 @@ after every conversation.
 
 ```python
 import asyncio
-from jeevesagent import Agent, SqliteRuntime
+from loomflow import Agent
+from loomflow.runtime import SqliteRuntime
 
 async def main():
     # Postgres URL → resolver builds PostgresMemory + pgvector
@@ -75,7 +76,7 @@ every file access.
 ```python
 import asyncio
 from pathlib import Path
-from jeevesagent import (
+from loomflow import (
     Agent, FileAuditLog, FilesystemSandbox, InProcessToolHost,
     Mode, StandardPermissions, tool,
 )
@@ -110,7 +111,7 @@ async def main():
         if call.tool == "write_file":
             answer = input(f"Allow write to {call.args.get('path')}? [y/N] ")
             if answer.strip().lower() != "y":
-                from jeevesagent.core.types import PermissionDecision
+                from loomflow.core.types import PermissionDecision
                 return PermissionDecision.deny_("user declined")
         return None
 
@@ -134,9 +135,12 @@ you left off.
 
 ```python
 import asyncio
-from jeevesagent import Agent, AnthropicModel, JeevesGateway, SqliteRuntime
+from loomflow import Agent
+from loomflow.jeeves import JeevesGateway
+from loomflow.model import AnthropicModel
+from loomflow.runtime import SqliteRuntime
 from datetime import timedelta
-from jeevesagent.governance.budget import BudgetConfig, StandardBudget
+from loomflow.governance.budget import BudgetConfig, StandardBudget
 
 async def main():
     runtime = SqliteRuntime("./research_journal.db")
@@ -177,7 +181,7 @@ Compose Jeeves Gateway with a local git server and a filesystem
 server. Tool name conflicts get auto-disambiguated.
 
 ```python
-from jeevesagent import (
+from loomflow import (
     Agent, JeevesGateway, MCPClient, MCPRegistry, MCPServerSpec,
 )
 
@@ -217,7 +221,7 @@ inheritance required.
 
 ```python
 from typing import Any
-from jeevesagent import VectorMemory
+from loomflow.memory import VectorMemory
 
 class CohereEmbedder:
     name: str = "embed-english-v3.0"
@@ -253,8 +257,8 @@ memory = VectorMemory(embedder=CohereEmbedder(api_key="..."))
 
 ```python
 from typing import Any, Mapping
-from jeevesagent import Agent
-from jeevesagent.core.types import PermissionDecision, ToolCall
+from loomflow import Agent
+from loomflow.core.types import PermissionDecision, ToolCall
 
 class BusinessHoursPermissions:
     """Block destructive tools outside 9am-5pm local time."""
@@ -291,7 +295,7 @@ WebSocket / SSE / Server-Sent Events handler:
 ```python
 from fastapi import FastAPI
 from sse_starlette.sse import EventSourceResponse
-from jeevesagent import Agent
+from loomflow import Agent
 
 app = FastAPI()
 agent = Agent("...", model="claude-opus-4-7")

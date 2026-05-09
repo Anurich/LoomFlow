@@ -9,14 +9,10 @@ from typing import Any
 import anyio
 import pytest
 
-from jeevesagent import (
-    Agent,
-    InMemoryJournalStore,
-    JournaledRuntime,
-    tool,
-)
-from jeevesagent.core.types import ToolCall
-from jeevesagent.model.scripted import ScriptedModel, ScriptedTurn
+from loomflow import Agent, tool
+from loomflow.core.types import ToolCall
+from loomflow.model.scripted import ScriptedModel, ScriptedTurn
+from loomflow.runtime import InMemoryJournalStore, JournaledRuntime
 
 pytestmark = pytest.mark.anyio
 

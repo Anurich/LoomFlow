@@ -46,11 +46,11 @@ if not os.environ.get("OPENAI_API_KEY"):
     sys.exit(0)
 
 
-from jeevesagent import (  # noqa: E402
+from loomflow import (  # noqa: E402
     Agent,
     MemoryProfile,
 )
-from jeevesagent.memory.embedder import OpenAIEmbedder  # noqa: E402
+from loomflow.memory.embedder import OpenAIEmbedder  # noqa: E402
 
 MODEL = "gpt-4.1-mini"
 
@@ -293,7 +293,7 @@ async def main() -> None:
     # Tier 3 — explicit instance. Today's API; still supported.
     # ----------------------------------------------------------------
     banner("Tier 3: explicit instance")
-    from jeevesagent import SqliteMemory
+    from loomflow.memory import SqliteMemory
     with tempfile.TemporaryDirectory() as tmp:
         db = Path(tmp) / "explicit.db"
         memory = SqliteMemory(

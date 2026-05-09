@@ -18,7 +18,7 @@ from typing import Any
 
 import pytest
 
-from jeevesagent import (
+from loomflow import (
     Agent,
     Episode,
     Fact,
@@ -27,10 +27,10 @@ from jeevesagent import (
     set_run_context,
     tool,
 )
-from jeevesagent.core.types import ToolCall
-from jeevesagent.memory.facts import InMemoryFactStore
-from jeevesagent.memory.inmemory import InMemoryMemory
-from jeevesagent.model.scripted import ScriptedModel, ScriptedTurn
+from loomflow.core.types import ToolCall
+from loomflow.memory.facts import InMemoryFactStore
+from loomflow.memory.inmemory import InMemoryMemory
+from loomflow.model.scripted import ScriptedModel, ScriptedTurn
 
 pytestmark = pytest.mark.anyio
 
@@ -534,7 +534,7 @@ async def test_isolation_warning_fires_on_mixed_bucket_recall() -> None:
     mistake."""
     import warnings
 
-    from jeevesagent import IsolationWarning
+    from loomflow import IsolationWarning
 
     mem = InMemoryMemory()
     await mem.remember(
@@ -553,7 +553,7 @@ async def test_isolation_warning_does_not_fire_when_only_anonymous() -> None:
     None-bucket query is unambiguously correct in that case."""
     import warnings
 
-    from jeevesagent import IsolationWarning
+    from loomflow import IsolationWarning
 
     mem = InMemoryMemory()
     await mem.remember(
@@ -574,7 +574,7 @@ async def test_isolation_warning_does_not_fire_when_user_id_passed() -> None:
     data yet) is a clean call — no warning."""
     import warnings
 
-    from jeevesagent import IsolationWarning
+    from loomflow import IsolationWarning
 
     mem = InMemoryMemory()
     await mem.remember(
@@ -596,7 +596,7 @@ async def test_isolation_warning_can_be_promoted_to_error() -> None:
     warning to an exception via the standard ``warnings`` filter."""
     import warnings
 
-    from jeevesagent import IsolationWarning
+    from loomflow import IsolationWarning
 
     mem = InMemoryMemory()
     await mem.remember(
@@ -618,7 +618,7 @@ async def test_subagent_inherits_parent_user_id_via_contextvar() -> None:
     """A sub-agent invoked via ``SubagentInvocation`` (used by every
     multi-agent architecture) must see the parent's ``user_id``
     through ``get_run_context()`` without any explicit plumbing."""
-    from jeevesagent.architecture.helpers import SubagentInvocation
+    from loomflow.architecture.helpers import SubagentInvocation
 
     seen: list[str | None] = []
 
@@ -655,7 +655,7 @@ async def test_subagent_gets_fresh_session_id_when_one_provided() -> None:
     """``SubagentInvocation(session_id="...")`` must override the
     parent's session_id so the worker has its own conversation
     thread, even while inheriting the parent's user_id."""
-    from jeevesagent.architecture.helpers import SubagentInvocation
+    from loomflow.architecture.helpers import SubagentInvocation
 
     sub_mem = InMemoryMemory()
     sub = Agent(

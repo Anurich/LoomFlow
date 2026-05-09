@@ -17,15 +17,10 @@ from pathlib import Path
 
 import pytest
 
-from jeevesagent import (
-    Episode,
-    Fact,
-    MemoryExport,
-    MemoryProfile,
-    SqliteMemory,
-)
-from jeevesagent.memory.facts import InMemoryFactStore
-from jeevesagent.memory.inmemory import InMemoryMemory
+from loomflow import Episode, Fact, MemoryExport, MemoryProfile
+from loomflow.memory import SqliteMemory
+from loomflow.memory.facts import InMemoryFactStore
+from loomflow.memory.inmemory import InMemoryMemory
 
 pytestmark = pytest.mark.anyio
 

@@ -19,25 +19,26 @@ from __future__ import annotations
 
 import pytest
 
-from jeevesagent import (
-    ActorCritic,
+from loomflow import (
     Agent,
-    BlackboardArchitecture,
     InMemoryAuditLog,
     InMemoryMemory,
+    ScriptedModel,
+    ScriptedTurn,
+    StandardPermissions,
+)
+from loomflow.architecture import (
+    ActorCritic,
+    BlackboardArchitecture,
     MultiAgentDebate,
     Reflexion,
     Router,
     RouterRoute,
-    ScriptedModel,
-    ScriptedTurn,
-    StandardPermissions,
     Supervisor,
     Swarm,
-    Team,
-    run_architecture,
 )
-from jeevesagent.core.types import ToolCall
+from loomflow.core.types import ToolCall
+from loomflow.team import Team, run_architecture
 
 pytestmark = pytest.mark.anyio
 
@@ -294,7 +295,7 @@ async def test_run_architecture_runs_orchestrator_with_minimal_shell() -> None:
 async def test_run_architecture_with_react_default() -> None:
     """The standalone helper works with any architecture, not just
     multi-agent ones — defaults compose normally."""
-    from jeevesagent import ReAct
+    from loomflow import ReAct
 
     model = ScriptedModel([ScriptedTurn(text="hi from solo agent")])
     result = await run_architecture(

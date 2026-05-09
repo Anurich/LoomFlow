@@ -7,7 +7,7 @@ Shape::
                                                         ↑              ↓
                                                         └──────────────┘
 
-Cycles are first-class in JeevesAgent workflows — useful for
+Cycles are first-class in Loom workflows — useful for
 refinement, retry, multi-pass review. ``max_visits_per_node``
 caps the loop so a hard-to-please critic can't spin forever.
 
@@ -51,7 +51,7 @@ if not os.environ.get("OPENAI_API_KEY"):
     sys.exit(0)
 
 
-from jeevesagent import (  # noqa: E402
+from loomflow import (  # noqa: E402
     END,
     Agent,
     InMemoryAuditLog,

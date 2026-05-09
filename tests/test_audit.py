@@ -7,15 +7,11 @@ from pathlib import Path
 
 import pytest
 
-from jeevesagent import (
-    Agent,
-    FileAuditLog,
-    InMemoryAuditLog,
-    tool,
-)
-from jeevesagent.core.types import ToolCall
-from jeevesagent.model.scripted import ScriptedModel, ScriptedTurn
-from jeevesagent.security.audit import verify_signature
+from loomflow import Agent, InMemoryAuditLog, tool
+from loomflow.core.types import ToolCall
+from loomflow.model.scripted import ScriptedModel, ScriptedTurn
+from loomflow.security import FileAuditLog
+from loomflow.security.audit import verify_signature
 
 pytestmark = pytest.mark.anyio
 

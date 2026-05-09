@@ -46,13 +46,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import anyio  # noqa: E402
 
-from jeevesagent import (  # noqa: E402
+from loomflow import (  # noqa: E402
     Agent,
     InMemoryAuditLog,
     InMemoryMemory,
 )
-from jeevesagent.governance.budget import BudgetConfig, StandardBudget  # noqa: E402
-from jeevesagent.model.scripted import ScriptedModel, ScriptedTurn  # noqa: E402
+from loomflow.governance.budget import BudgetConfig, StandardBudget  # noqa: E402
+from loomflow.model.scripted import ScriptedModel, ScriptedTurn  # noqa: E402
 
 
 @dataclass

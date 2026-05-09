@@ -4,7 +4,7 @@ Side-by-side translations of the patterns LangGraph users hit most
 often. The table at the top is the executive summary; the sections
 below show concrete code.
 
-| LangGraph concept | JeevesAgent equivalent |
+| LangGraph concept | Loom equivalent |
 |---|---|
 | `StateGraph` + nodes + edges + reducers | `Agent` + `Architecture` (twelve shipped) |
 | `add_messages` reducer | Automatic — message history rehydrates from `session_id` |
@@ -41,9 +41,9 @@ print(result["messages"][-1].content)
 ```
 
 ```python
-# JeevesAgent
+# Loom
 import asyncio
-from jeevesagent import Agent
+from loomflow import Agent
 
 async def main():
     agent = Agent("Be helpful.", model="gpt-4.1-mini")
@@ -72,8 +72,8 @@ result = agent.invoke(
 ```
 
 ```python
-# JeevesAgent
-from jeevesagent import Agent, tool
+# Loom
+from loomflow import Agent, tool
 
 @tool
 async def get_weather(city: str) -> str:
@@ -92,7 +92,7 @@ result = await agent.run("Weather in Tokyo?")
 
 The biggest correctness gap in LangGraph: `user_id` is a string in
 `config["configurable"]`. Typo it once and you silently leak data
-across tenants. JeevesAgent makes `user_id` a typed primitive that
+across tenants. Loom makes `user_id` a typed primitive that
 the framework honours — every memory backend partitions by it
 automatically.
 
@@ -110,8 +110,8 @@ def my_node(state, config):
 ```
 
 ```python
-# JeevesAgent — user_id is a typed primitive; partition is automatic
-from jeevesagent import Agent, get_run_context
+# Loom — user_id is a typed primitive; partition is automatic
+from loomflow import Agent, get_run_context
 
 # Inside any tool — never plumb user_id through signatures.
 @tool
@@ -140,7 +140,7 @@ graph.invoke({"messages": ["What's my name?"]}, config)
 ```
 
 ```python
-# JeevesAgent — same session_id reused = conversation continues
+# Loom — same session_id reused = conversation continues
 agent = Agent("...", model="gpt-4.1-mini")
 await agent.run("Hi, I'm Alice.", session_id="conv-42", user_id="alice")
 await agent.run("What's my name?", session_id="conv-42", user_id="alice")
@@ -151,7 +151,7 @@ await agent.run("What's my name?", session_id="conv-42", user_id="alice")
 
 LangGraph offloads this to whatever model adapter you wire up
 (`ChatOpenAI(model="...").with_structured_output(MySchema)`).
-JeevesAgent ships it as a first-class kwarg with retry-on-validation-failure.
+Loom ships it as a first-class kwarg with retry-on-validation-failure.
 
 ```python
 # LangGraph
@@ -164,8 +164,8 @@ result = llm.invoke([{"role": "user", "content": "..."}])
 ```
 
 ```python
-# JeevesAgent
-from jeevesagent import Agent
+# Loom
+from loomflow import Agent
 
 agent = Agent("...", model="gpt-4.1-mini")
 result = await agent.run("...", output_schema=MyOutput)
@@ -181,7 +181,7 @@ async for chunk in graph.astream(input_, config, stream_mode="messages"):
 ```
 
 ```python
-# JeevesAgent — one Event stream, backpressure-aware
+# Loom — one Event stream, backpressure-aware
 async for event in agent.stream(prompt, session_id="conv-42"):
     if event.kind.value == "model_chunk":
         print(event.payload["chunk"]["text"], end="", flush=True)
@@ -191,13 +191,14 @@ async for event in agent.stream(prompt, session_id="conv-42"):
 
 LangGraph's subgraphs are compiled-graph-inside-compiled-graph,
 which has known issues around config propagation and
-checkpointing. JeevesAgent multi-agent architectures compose
+checkpointing. Loom multi-agent architectures compose
 `Agent` instances directly — sub-agents inherit the parent's
 `RunContext` automatically.
 
 ```python
-# JeevesAgent — Team facade for the common shapes
-from jeevesagent import Agent, Team
+# Loom — Team facade for the common shapes
+from loomflow import Agent
+from loomflow.team import Team
 
 researcher = Agent("Research the topic.", model="gpt-4.1-mini")
 writer = Agent("Draft the answer.", model="gpt-4.1-mini")
@@ -209,7 +210,7 @@ team = Team.supervisor(
 result = await team.run("Write a brief about Acme Corp.", user_id="alice")
 ```
 
-## Things JeevesAgent does NOT have
+## Things Loom does NOT have
 
 * No graph editor / state-graph DSL. The agent loop is a strategy;
   twelve are shipped. If you need something custom, implement the

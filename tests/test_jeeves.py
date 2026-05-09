@@ -12,10 +12,10 @@ from typing import Any
 
 import pytest
 
-from jeevesagent import Agent
-from jeevesagent.core.errors import ConfigError
-from jeevesagent.core.types import ToolCall
-from jeevesagent.jeeves import (
+from loomflow import Agent
+from loomflow.core.errors import ConfigError
+from loomflow.core.types import ToolCall
+from loomflow.jeeves import (
     JEEVES_API_KEY_ENV,
     JEEVES_DEFAULT_BASE_URL,
     JEEVES_TOKEN_PREFIX,
@@ -23,8 +23,8 @@ from jeevesagent.jeeves import (
     JeevesGateway,
     looks_like_jeeves_key,
 )
-from jeevesagent.mcp import MCPClient, MCPRegistry, MCPServerSpec
-from jeevesagent.model.scripted import ScriptedModel, ScriptedTurn
+from loomflow.mcp import MCPClient, MCPRegistry, MCPServerSpec
+from loomflow.model.scripted import ScriptedModel, ScriptedTurn
 
 pytestmark = pytest.mark.anyio
 

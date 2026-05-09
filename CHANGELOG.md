@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to JeevesAgent will be documented here. The format
+All notable changes to Loom will be documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/).
 
@@ -9,7 +9,7 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 
 ## [0.10.0] — unreleased
 
-This release turns JeevesAgent from a working agent harness into a
+This release turns Loom from a working agent harness into a
 **production framework**. Five themed milestones (M1–M5) close the
 gaps that separate a demo loop from something you put in front of
 paying users — multi-tenant safety, conversation continuity, typed
@@ -139,7 +139,7 @@ behaviour is preserved unless a caller opts in.
 
 * **Bounded per-user state (M10.1).** ``StandardBudget._by_user``
   and ``InMemoryMemory._blocks`` now use a new
-  :class:`jeevesagent.core._eviction.BoundedDict` with LRU +
+  :class:`loomflow.core._eviction.BoundedDict` with LRU +
   idle-TTL eviction. Defaults: ``max_users=100_000``,
   ``user_idle_ttl_seconds=86_400`` (24h). Pass ``None`` to
   either constructor kwarg to disable bounding for single-tenant
@@ -168,7 +168,7 @@ behaviour is preserved unless a caller opts in.
   hole where the fast-hooks default-allow was silently bypassing
   the approval gate.
 * **Deprecation infrastructure (M10.5).** New
-  :class:`JeevesDeprecationWarning` subclass + ``warn_legacy_
+  :class:`LoomDeprecationWarning` subclass + ``warn_legacy_
   protocol(...)`` helper; every protocol-evolution
   ``except TypeError`` shim now warns once-per-process pointing
   at the v1.0 removal target so callers can migrate.
@@ -246,7 +246,7 @@ blocks, budget, audit log, permissions, hooks.
   a ``try / except TypeError`` fallback to the legacy signature, so
   custom implementations users wrote pre-M9 keep working unchanged.
 * **Public exports** — ``PerUserPermissions`` is exported from both
-  ``jeevesagent.security`` and the top-level ``jeevesagent`` package.
+  ``loomflow.security`` and the top-level ``loomflow`` package.
 * **Tests** — 14 new in ``tests/test_user_id_isolation_full.py``
   covering every primitive: working-block partition (in-memory +
   SQLite-persistent), pinned-order per-user, budget per-user
@@ -308,8 +308,8 @@ blocks, budget, audit log, permissions, hooks.
   fact for the user; serialise with `.model_dump_json()` for
   download.
 * **`MemoryProfile`, `MemoryExport`** — new Pydantic types in
-  `core/types.py`, exported from both `jeevesagent.core` and the
-  top-level `jeevesagent` package.
+  `core/types.py`, exported from both `loomflow.core` and the
+  top-level `loomflow` package.
 * **Cross-backend implementations** — all six backends
   (`InMemoryMemory`, `SqliteMemory`, `VectorMemory`, `ChromaMemory`,
   `PostgresMemory`, `RedisMemory`) honour the new methods.
@@ -346,7 +346,7 @@ blocks, budget, audit log, permissions, hooks.
   config systems (TOML, YAML, env-driven configs) can drive memory
   picks.
 * **`SqliteMemory`** — new backend at
-  `jeevesagent.memory.sqlite.SqliteMemory`. Episodes, working
+  `loomflow.memory.sqlite.SqliteMemory`. Episodes, working
   blocks, session messages, and the bi-temporal fact store all in
   one sqlite file. Single-file persistence, no server, idempotent
   schema migrations (`CREATE TABLE IF NOT EXISTS`,
@@ -377,8 +377,8 @@ blocks, budget, audit log, permissions, hooks.
   `Memory(...)` instances keep their existing per-backend
   defaults so today's call sites are unchanged.
 * **Public exports** — `SqliteMemory`, `LazyMemory`,
-  `resolve_memory` exported from both `jeevesagent.memory` and
-  the top-level `jeevesagent` package.
+  `resolve_memory` exported from both `loomflow.memory` and
+  the top-level `loomflow` package.
 
 ### Added — Resilient model calls (M5)
 
@@ -386,7 +386,7 @@ blocks, budget, audit log, permissions, hooks.
   (retryable; carries `retry_after`) + `RateLimitError` (subclass
   of transient) + `PermanentModelError` + `AuthenticationError` +
   `InvalidRequestError` + `ContentFilterError`. All inherit from
-  `JeevesAgentError`; existing `except JeevesAgentError` catches
+  `LoomError`; existing `except LoomError` catches
   keep working. Each carries a `cause` slot and chains through
   `__cause__` so debug code can still inspect the raw SDK error.
 * **`RetryPolicy`** (frozen dataclass) — `max_attempts`,
@@ -415,7 +415,7 @@ blocks, budget, audit log, permissions, hooks.
 
 ### Added — Documentation + migration
 
-* **Sphinx docs site** at <https://jeevesagent.readthedocs.io>
+* **Sphinx docs site** at <https://loomflow.readthedocs.io>
   (`docs/conf.py`, Furo theme, `sphinx-autoapi` for the full API
   reference, `myst-parser` so existing `.md` content mounts
   cleanly). Build locally with `pip install -e ".[docs]"` and
@@ -425,7 +425,7 @@ blocks, budget, audit log, permissions, hooks.
   translations: hello world, tools, multi-tenant memory (the
   `user_id`-as-convention vs `user_id`-as-primitive contrast),
   session continuity, structured output, streaming, multi-agent.
-  Plus a "things JeevesAgent does NOT have" section.
+  Plus a "things Loom does NOT have" section.
 * **`docs/migrations/from-openai-sdk.md`** — translation guide for
   hand-rolled-loop users: tool definitions, multi-turn state,
   structured output, retries, streaming, parallel tool calls.
@@ -500,7 +500,7 @@ blocks, budget, audit log, permissions, hooks.
   skip without `JEEVES_TEST_PG_DSN` / `JEEVES_TEST_REDIS_URL`).
 * **9 live tests pass** against real OpenAI in ~16 s.
 * **mypy `--strict`** clean across **105 production source files**.
-* **ruff** clean across `jeevesagent`, `tests`, `examples`,
+* **ruff** clean across `loomflow`, `tests`, `examples`,
   including `flake8-async` lints.
 
 ### Compatibility
@@ -620,7 +620,7 @@ blocks, budget, audit log, permissions, hooks.
   `"self_refine.refined"`, `"self_refine.converged"`,
   `"self_refine.max_rounds_reached"`) so consumers can pattern-match
   without expanding `EventKind` per architecture.
-* **`jeevesagent.architecture.helpers`** — shared utilities
+* **`loomflow.architecture.helpers`** — shared utilities
   architectures reuse: `text_only_model_call(deps, step_name,
   messages) -> (text, usage)` (one-shot text-only model call,
   journaled for replay) and `add_usage(a, b)` (sum two `Usage`
@@ -677,7 +677,7 @@ blocks, budget, audit log, permissions, hooks.
   Each runs deterministically with `ScriptedModel` (no API key) and
   prints a streaming event view plus the final answer.
 * **`parse_score(text) -> float`** promoted to
-  `jeevesagent.architecture.helpers` (was private in `reflexion.py`).
+  `loomflow.architecture.helpers` (was private in `reflexion.py`).
   Used by Reflexion, Tree of Thoughts, and any future architecture
   with an evaluator step.
 * **32 new ReWOO tests** covering protocol, resolver string,
@@ -700,7 +700,7 @@ blocks, budget, audit log, permissions, hooks.
 
 ### Added — Architecture protocol foundation
 
-* **`jeevesagent.architecture`** package — pluggable agent-loop
+* **`loomflow.architecture`** package — pluggable agent-loop
   strategies. The `Architecture` protocol lets users swap iteration
   patterns (ReAct, Plan-and-Execute, Reflexion, Router, Supervisor,
   ...) without touching memory / runtime / tools / governance. See
@@ -744,7 +744,7 @@ blocks, budget, audit log, permissions, hooks.
   prompt)`, then teardown persists the episode and builds the
   `RunResult`. Helpers (`_seed_context`, `_take_one_turn`,
   `_dispatch_tools`, `_run_single_tool`) moved into
-  `jeevesagent/architecture/react.py`.
+  `loomflow/architecture/react.py`.
 * The `jeeves.run` telemetry span carries an `architecture` attribute
   alongside `model` / `max_turns` / `session_id`. The audit
   `run_started` payload also includes the architecture name.
@@ -808,7 +808,7 @@ blocks, budget, audit log, permissions, hooks.
 * **30 new tests** for embedders + polish + tool ergonomics,
   bringing total tests to 279 from 244.
 * New `voyage` and `cohere` extras in `pyproject.toml`
-  (`pip install 'jeevesagent[voyage,cohere]'`).
+  (`pip install 'loomflow[voyage,cohere]'`).
 * **`ConsolidationWorker`** — long-running anyio task that calls
   `memory.consolidate()` every N seconds. For long-lived agents
   where per-run `auto_consolidate=True` is wasteful. Surfaces new

@@ -7,11 +7,11 @@ from typing import Any
 
 import pytest
 
-from jeevesagent import Agent
-from jeevesagent.core.types import ToolCall
-from jeevesagent.mcp import MCPClient, MCPRegistry, MCPServerSpec
-from jeevesagent.mcp.spec import MCPServerSpec as Spec
-from jeevesagent.model.scripted import ScriptedModel, ScriptedTurn
+from loomflow import Agent
+from loomflow.core.types import ToolCall
+from loomflow.mcp import MCPClient, MCPRegistry, MCPServerSpec
+from loomflow.mcp.spec import MCPServerSpec as Spec
+from loomflow.model.scripted import ScriptedModel, ScriptedTurn
 
 pytestmark = pytest.mark.anyio
 

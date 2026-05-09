@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import pytest
 
-from jeevesagent import DictSecrets, EnvSecrets
+from loomflow.security import DictSecrets, EnvSecrets
 
 pytestmark = pytest.mark.anyio
 
@@ -137,7 +137,7 @@ def test_openai_model_uses_secrets_for_api_key(
     fake_openai.AsyncOpenAI = _FakeAsyncOpenAI  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "openai", fake_openai)
 
-    from jeevesagent.model.openai import OpenAIModel
+    from loomflow.model.openai import OpenAIModel
 
     secrets = DictSecrets({"OPENAI_API_KEY": "sk-from-secrets"})
     OpenAIModel("gpt-4o", secrets=secrets)
@@ -162,7 +162,7 @@ def test_explicit_api_key_takes_precedence_over_secrets(
     fake_openai.AsyncOpenAI = _FakeAsyncOpenAI  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "openai", fake_openai)
 
-    from jeevesagent.model.openai import OpenAIModel
+    from loomflow.model.openai import OpenAIModel
 
     secrets = DictSecrets({"OPENAI_API_KEY": "from-secrets"})
     OpenAIModel("gpt-4o", api_key="explicit", secrets=secrets)

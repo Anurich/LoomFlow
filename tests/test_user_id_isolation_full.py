@@ -17,19 +17,13 @@ from typing import Any
 
 import pytest
 
-from jeevesagent import (
-    Agent,
-    AuditEntry,
-    InMemoryAuditLog,
-    InMemoryMemory,
-    Mode,
-    PerUserPermissions,
-    StandardPermissions,
-)
-from jeevesagent.core.types import ToolCall
-from jeevesagent.governance.budget import BudgetConfig, StandardBudget
-from jeevesagent.memory.sqlite import SqliteMemory
-from jeevesagent.model.scripted import ScriptedModel, ScriptedTurn
+from loomflow import Agent, InMemoryAuditLog, InMemoryMemory, Mode, StandardPermissions
+from loomflow.core import AuditEntry
+from loomflow.core.types import ToolCall
+from loomflow.governance.budget import BudgetConfig, StandardBudget
+from loomflow.memory.sqlite import SqliteMemory
+from loomflow.model.scripted import ScriptedModel, ScriptedTurn
+from loomflow.security import PerUserPermissions
 
 pytestmark = pytest.mark.anyio
 

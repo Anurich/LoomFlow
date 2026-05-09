@@ -19,16 +19,9 @@ from pathlib import Path
 
 import pytest
 
-from jeevesagent import (
-    Agent,
-    ConfigError,
-    Episode,
-    InMemoryMemory,
-    LazyMemory,
-    SqliteMemory,
-    resolve_memory,
-)
-from jeevesagent.memory.embedder import HashEmbedder
+from loomflow import Agent, ConfigError, Episode, InMemoryMemory, resolve_memory
+from loomflow.memory import LazyMemory, SqliteMemory
+from loomflow.memory.embedder import HashEmbedder
 
 pytestmark = pytest.mark.anyio
 
@@ -338,7 +331,7 @@ async def test_lazy_memory_wraps_builder_exception_in_memory_store_error(
     """When the builder raises (bad DSN, network error, etc.), the
     framework normalises it into :class:`MemoryStoreError` so callers
     don't have to catch backend-specific exceptions."""
-    from jeevesagent import MemoryStoreError
+    from loomflow.core import MemoryStoreError
 
     async def bad_builder() -> InMemoryMemory:
         raise RuntimeError("no DNS resolution")

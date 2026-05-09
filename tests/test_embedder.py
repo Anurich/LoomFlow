@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from jeevesagent.memory.embedder import HashEmbedder, OpenAIEmbedder
+from loomflow.memory.embedder import HashEmbedder, OpenAIEmbedder
 
 pytestmark = pytest.mark.anyio
 
@@ -135,7 +135,7 @@ class _FakeVoyageClient:
 
 
 async def test_voyage_embedder_default_dimensions() -> None:
-    from jeevesagent import VoyageEmbedder
+    from loomflow.memory import VoyageEmbedder
 
     fc = _FakeVoyageClient()
     e = VoyageEmbedder("voyage-3", client=fc)
@@ -144,14 +144,14 @@ async def test_voyage_embedder_default_dimensions() -> None:
 
 
 async def test_voyage_embedder_lite_has_smaller_dim() -> None:
-    from jeevesagent import VoyageEmbedder
+    from loomflow.memory import VoyageEmbedder
 
     e = VoyageEmbedder("voyage-3-lite", client=_FakeVoyageClient())
     assert e.dimensions == 512
 
 
 async def test_voyage_embedder_passes_input_type_to_sdk() -> None:
-    from jeevesagent import VoyageEmbedder
+    from loomflow.memory import VoyageEmbedder
 
     fc = _FakeVoyageClient()
     e = VoyageEmbedder("voyage-3", client=fc, input_type="query")
@@ -162,7 +162,7 @@ async def test_voyage_embedder_passes_input_type_to_sdk() -> None:
 
 
 async def test_voyage_embedder_batch_returns_per_input() -> None:
-    from jeevesagent import VoyageEmbedder
+    from loomflow.memory import VoyageEmbedder
 
     fc = _FakeVoyageClient()
     e = VoyageEmbedder("voyage-3", client=fc)
@@ -173,7 +173,7 @@ async def test_voyage_embedder_batch_returns_per_input() -> None:
 
 
 async def test_voyage_embedder_batch_empty_returns_empty() -> None:
-    from jeevesagent import VoyageEmbedder
+    from loomflow.memory import VoyageEmbedder
 
     e = VoyageEmbedder("voyage-3", client=_FakeVoyageClient())
     assert await e.embed_batch([]) == []
@@ -199,7 +199,7 @@ class _FakeCohereClient:
 
 
 async def test_cohere_embedder_default_dimensions() -> None:
-    from jeevesagent import CohereEmbedder
+    from loomflow.memory import CohereEmbedder
 
     fc = _FakeCohereClient()
     e = CohereEmbedder("embed-english-v3.0", client=fc)
@@ -208,7 +208,7 @@ async def test_cohere_embedder_default_dimensions() -> None:
 
 
 async def test_cohere_embedder_light_has_smaller_dim() -> None:
-    from jeevesagent import CohereEmbedder
+    from loomflow.memory import CohereEmbedder
 
     e = CohereEmbedder(
         "embed-english-light-v3.0", client=_FakeCohereClient()
@@ -218,7 +218,7 @@ async def test_cohere_embedder_light_has_smaller_dim() -> None:
 
 async def test_cohere_embedder_passes_input_type_and_floats() -> None:
     """v3 models require ``input_type`` and ``embedding_types``."""
-    from jeevesagent import CohereEmbedder
+    from loomflow.memory import CohereEmbedder
 
     fc = _FakeCohereClient()
     e = CohereEmbedder(
@@ -231,7 +231,7 @@ async def test_cohere_embedder_passes_input_type_and_floats() -> None:
 
 
 async def test_cohere_embedder_batch_returns_per_input() -> None:
-    from jeevesagent import CohereEmbedder
+    from loomflow.memory import CohereEmbedder
 
     fc = _FakeCohereClient()
     e = CohereEmbedder("embed-english-v3.0", client=fc)
@@ -241,7 +241,7 @@ async def test_cohere_embedder_batch_returns_per_input() -> None:
 
 
 async def test_cohere_embedder_batch_empty_returns_empty() -> None:
-    from jeevesagent import CohereEmbedder
+    from loomflow.memory import CohereEmbedder
 
     e = CohereEmbedder(
         "embed-english-v3.0", client=_FakeCohereClient()
