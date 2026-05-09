@@ -140,6 +140,7 @@ def test_load_pdf_extracts_per_page_content(tmp_path: Path) -> None:
     including the last. The pypdf-backed loader silently dropped
     pages on extraction errors, which was the source of the
     lower-half-of-PDF retrieval miss."""
+    pytest.importorskip("unstructured")
     f = tmp_path / "small.pdf"
     _make_pdf(
         f,
@@ -245,6 +246,7 @@ def test_load_pdf_unstructured_recovers_every_page(tmp_path: Path) -> None:
     name MUST appear in the loaded markdown. If pypdf-style silent
     drops creep back in, this fails with a clear "PAGE_X_MARKER
     missing" assertion."""
+    pytest.importorskip("unstructured")
     f = tmp_path / "eight.pdf"
     _make_eight_page_pdf(f)
     doc = load_pdf(f, backend="unstructured")
@@ -293,6 +295,7 @@ def test_load_pdf_chunks_cover_all_pages(tmp_path: Path) -> None:
     came back blank. After the loader fix, a recursive chunker at
     600/80 (the user's reported config) emits chunks covering
     every page, including the last."""
+    pytest.importorskip("unstructured")
     from loomflow.loader.chunking import RecursiveChunker
 
     f = tmp_path / "eight.pdf"
