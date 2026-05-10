@@ -104,7 +104,7 @@ from .security import (
 from .tools import Tool, tool
 from .workflow import END, START, Workflow, WorkflowResult, step
 
-__version__ = "0.9.12"
+__version__ = "0.9.13"
 
 __all__ = [
     "__version__",
