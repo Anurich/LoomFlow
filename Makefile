@@ -55,7 +55,7 @@ release:
 	git push origin --tags
 	@echo ""
 	@echo "  ✓ Released. PyPI workflow firing on the new tag."
-	@echo "    Check: https://github.com/Anurich/JeevesHarness/actions"
+	@echo "    Check: https://github.com/Anurich/LoomFlow/actions"
 	@echo ""
 
 # Show what `make release BUMP=...` would do without changing anything.
