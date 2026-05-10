@@ -363,6 +363,32 @@ def step(
 # ---------------------------------------------------------------------------
 
 
+async def _eval_classifier(fn: Callable[[Any], Any], value: Any) -> Any:
+    """Run a router classifier against ``value`` and return the
+    routing key. Tolerates both sync and async classifier functions
+    so callers can write either:
+
+    .. code-block:: python
+
+        def classify(q: str) -> str: ...                # sync
+        async def classify(q: str) -> str: ...          # async — calls a model
+
+    Async classifiers are awaited; sync ones are called directly.
+    Without this, an ``async def`` classifier would surface as a
+    coroutine object in the routing dict and the router would
+    raise ``no matching route``.
+    """
+    if inspect.iscoroutinefunction(fn):
+        return await fn(value)
+    result = fn(value)
+    # Defensive: a sync wrapper may still return a coroutine
+    # (e.g. ``lambda v: some_async_fn(v)``). Await it transparently
+    # rather than stringifying the coroutine repr.
+    if inspect.iscoroutine(result):
+        return await result
+    return result
+
+
 def _resolve_audit_log(spec: Any) -> AuditLog | None:
     """Normalise the ``audit_log=`` constructor argument.
 
@@ -727,7 +753,7 @@ class Workflow:
             # was used, evaluate the entry router on the input to
             # pick the entry node. Otherwise use the explicit start.
             if self._entry_router is not None:
-                key = self._entry_router.fn(input)
+                key = await _eval_classifier(self._entry_router.fn, input)
                 target = self._entry_router.routes.get(str(key))
                 if target is None:
                     if self._entry_router.default is None:
@@ -827,7 +853,7 @@ class Workflow:
                 )
 
                 # Pick the next node from the outgoing edge.
-                current = self._next_node(current, value)
+                current = await self._next_node(current, value)
 
             yield Event(
                 kind=EventKind.WORKFLOW_COMPLETED,
@@ -1271,7 +1297,7 @@ class Workflow:
                 f"call add_node({source!r}, ...) first"
             )
 
-    def _next_node(self, current: str, value: Any) -> str | None:
+    async def _next_node(self, current: str, value: Any) -> str | None:
         edge = self._edges.get(current)
         if edge is None:
             # No outgoing edge — terminal.
@@ -1279,7 +1305,7 @@ class Workflow:
         if isinstance(edge, _Sentinel):
             return None
         if isinstance(edge, _Router):
-            key = edge.fn(value)
+            key = await _eval_classifier(edge.fn, value)
             target = edge.routes.get(str(key))
             if target is None:
                 if edge.default is None:

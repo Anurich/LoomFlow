@@ -24,6 +24,26 @@ Multi-tenancy and structured outputs are opt-in by passing
 to in-tree network adapters (OpenAI, Anthropic, LiteLLM); custom
 models opt in.
 
+### Fixed — Workflow router classifier can now be `async def`
+
+The classifier passed to ``add_router`` (both ``add_router(node,
+fn=...)`` and ``add_router(START, fn=...)``) is now awaited when
+it's an async function. Previously the framework called it
+synchronously, so an ``async def`` classifier returned a coroutine
+object that ``str()`` rendered as ``<coroutine object …>`` —
+which never matched any route key, causing:
+
+> ``RuntimeError: entry router on '...' produced key
+> <coroutine object ... at 0x...> with no matching route and no
+> default``
+
+Common case this hits: a classifier that calls a model to decide
+the branch. New ``_eval_classifier`` helper detects coroutine
+functions via ``inspect.iscoroutinefunction`` and awaits them;
+also handles sync wrappers around async inner calls
+(``lambda v: some_async_fn(v)``) by awaiting the returned
+coroutine.
+
 ### Added — `add_router(START, ...)` — branch at the entry of the graph
 
 You can now classify the workflow's input and route directly to

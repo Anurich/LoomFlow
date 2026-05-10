@@ -839,6 +839,95 @@ async def test_add_router_with_START_picks_first_node_from_input() -> None:
     assert r2.output == "B:hello beta"
 
 
+async def test_add_router_with_START_accepts_async_classifier() -> None:
+    """The classifier passed to ``add_router(START, ...)`` may be
+    ``async def`` — common when it calls a model to decide. The
+    framework awaits it transparently. Without this, an async
+    classifier surfaces as a coroutine object in the routing dict
+    and the router raises ``no matching route``.
+    """
+    from loomflow import START
+
+    async def step_a(q: str) -> str:
+        return f"A:{q}"
+
+    async def step_b(q: str) -> str:
+        return f"B:{q}"
+
+    async def classify(q: str) -> str:
+        # Real async classifier could await a model call here.
+        return "a" if "alpha" in q else "b"
+
+    wf = Workflow()
+    wf.add_node("step_a", step_a)
+    wf.add_node("step_b", step_b)
+    wf.add_router(
+        START, fn=classify, routes={"a": "step_a", "b": "step_b"}
+    )
+    wf.add_edge("step_a", END)
+    wf.add_edge("step_b", END)
+
+    r = await wf.run("hello alpha")
+    assert r.output == "A:hello alpha"
+
+
+async def test_add_router_mid_graph_accepts_async_classifier() -> None:
+    """Same fix applies to mid-graph routers (``add_router(node,
+    fn=async_fn, ...)``). The router fn is awaited when async."""
+
+    async def step_a(q: str) -> str:
+        return q
+
+    async def step_yes(q: str) -> str:
+        return "yes-branch"
+
+    async def step_no(q: str) -> str:
+        return "no-branch"
+
+    async def classify(prev_output: str) -> str:
+        return "yes" if "alpha" in prev_output else "no"
+
+    wf = Workflow()
+    wf.add_node("step_a", step_a)
+    wf.add_node("step_yes", step_yes)
+    wf.add_node("step_no", step_no)
+    wf.set_start("step_a")
+    wf.add_router(
+        "step_a", fn=classify, routes={"yes": "step_yes", "no": "step_no"}
+    )
+    wf.add_edge("step_yes", END)
+    wf.add_edge("step_no", END)
+
+    r = await wf.run("hello alpha")
+    assert r.output == "yes-branch"
+
+
+async def test_router_classifier_returning_coroutine_is_awaited() -> None:
+    """Sync wrapper around an async function (e.g.
+    ``lambda v: some_async_fn(v)``) returns a coroutine; the
+    framework awaits it transparently rather than stringifying
+    the coroutine repr."""
+    from loomflow import START
+
+    async def _real_classify(q: str) -> str:
+        return "a"
+
+    async def step_a(q: str) -> str:
+        return "ok"
+
+    wf = Workflow()
+    wf.add_node("step_a", step_a)
+    wf.add_router(
+        START,
+        fn=lambda q: _real_classify(q),  # sync wrapper, async inner
+        routes={"a": "step_a"},
+    )
+    wf.add_edge("step_a", END)
+
+    r = await wf.run("anything")
+    assert r.output == "ok"
+
+
 async def test_add_router_with_START_default_branch() -> None:
     """When the classifier returns a key that's not in routes,
     the entry router falls through to ``default`` (or raises if
