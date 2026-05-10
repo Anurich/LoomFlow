@@ -72,6 +72,38 @@ async def test_step_decorator_with_explicit_name() -> None:
     assert inner.__name__ == "custom-name"
 
 
+def test_step_decorator_rejects_sync_function_at_decoration_time() -> None:
+    """``@step`` runs the function on the event loop via ``await``,
+    so wrapping a sync ``def`` would later fail deep in the
+    workflow runner with the cryptic ``'str' can't be used in
+    'await' expression``. Fail loudly at decoration time instead,
+    with a message that names the function and gives the user
+    both fixes (add ``async``, or drop ``@step``)."""
+    with pytest.raises(TypeError) as excinfo:
+
+        @step
+        def sync_step(x: int) -> int:  # type: ignore[misc]
+            return x + 1
+
+    msg = str(excinfo.value)
+    assert "sync_step" in msg
+    assert "async" in msg
+    # Both remediation options should appear so users know
+    # they don't have to make the function async if they don't
+    # want telemetry — Workflow.chain accepts sync directly.
+    assert "Workflow.chain" in msg or "drop @step" in msg.lower()
+
+
+def test_step_decorator_rejects_sync_with_explicit_name() -> None:
+    """The check fires regardless of whether ``@step`` is used
+    bare (``@step``) or parameterised (``@step(name=...)``)."""
+    with pytest.raises(TypeError):
+
+        @step(name="custom")
+        def sync_step(x: int) -> int:  # type: ignore[misc]
+            return x
+
+
 # ---------------------------------------------------------------------------
 # Workflow.chain
 # ---------------------------------------------------------------------------

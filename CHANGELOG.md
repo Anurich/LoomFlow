@@ -24,6 +24,22 @@ Multi-tenancy and structured outputs are opt-in by passing
 to in-tree network adapters (OpenAI, Anthropic, LiteLLM); custom
 models opt in.
 
+### Changed — Workflow `@step` decorator: clearer error on sync functions
+
+* **`@step` now raises at decoration time** when applied to a
+  synchronous `def`. Previously, wrapping a sync function silently
+  succeeded and the workflow only failed deep inside the runner
+  with `'str' can't be used in 'await' expression` — a cryptic
+  message that gave no hint that the user's function was the
+  cause. The new `TypeError` names the offending function and
+  spells out both fixes:
+    1. Add `async` to the `def` (gets telemetry / audit / journaling).
+    2. Drop `@step` and pass the plain function directly —
+       `Workflow.chain` and `.route` already accept sync callables
+       and dispatch them to a worker thread.
+  Failure now surfaces at module import, not after a workflow
+  has started running.
+
 ### Added — Multi-tenancy by default (M1)
 
 * **`RunContext`** (frozen `dataclass(slots=True)`) — typed,

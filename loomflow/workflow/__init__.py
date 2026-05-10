@@ -285,6 +285,27 @@ def step(
     """
 
     def _wrap(f: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
+        # Fail loudly at decoration time when ``@step`` is applied
+        # to a sync ``def``. Otherwise the failure surfaces deep in
+        # the workflow runner as ``'str' can't be used in 'await'
+        # expression``, which gives the user no hint that the issue
+        # is on their function. Workflow steps run on the event
+        # loop and *must* be awaitable.
+        if not inspect.iscoroutinefunction(f):
+            qualname = getattr(f, "__qualname__", getattr(f, "__name__", "step"))
+            fname = getattr(f, "__name__", "step")
+            raise TypeError(
+                f"@step requires an async function, but "
+                f"{qualname} is synchronous. Either:\n"
+                f"  • Add 'async' to the def: "
+                f"`async def {fname}(...)` — gives this step "
+                f"telemetry / audit / journaling.\n"
+                f"  • Drop @step and pass the plain function "
+                f"directly (Workflow.chain / .route accept "
+                f"sync callables; they're dispatched to a "
+                f"worker thread)."
+            )
+
         raw_name: Any = name or getattr(f, "__name__", "step")
         step_name: str = raw_name if isinstance(raw_name, str) else "step"
 
