@@ -701,3 +701,119 @@ async def test_audit_log_accepts_audit_log_instance_unchanged() -> None:
     audit = InMemoryAuditLog()
     wf = Workflow.chain([a], audit_log=audit)
     assert wf._audit_log is audit
+
+
+# ---------------------------------------------------------------------------
+# Visualisation: to_mermaid() / to_dot() / _repr_markdown_
+# ---------------------------------------------------------------------------
+
+
+def test_to_mermaid_chain_emits_linear_flow() -> None:
+    """A chain ``A → B → C`` should render as ``START → A → B →
+    C → END`` with unconditional solid arrows."""
+
+    async def step_a(x: int) -> int:
+        return x + 1
+
+    async def step_b(x: int) -> int:
+        return x * 2
+
+    async def step_c(x: int) -> int:
+        return x
+
+    wf = Workflow.chain([step_a, step_b, step_c])
+    out = wf.to_mermaid()
+
+    assert out.startswith("flowchart TD")
+    # Each step appears as a labelled node + edges connect them.
+    assert 'n_step_a["step_a"]' in out
+    assert 'n_step_b["step_b"]' in out
+    assert "START([START]) --> n_step_a" in out
+    assert "n_step_a --> n_step_b" in out
+    assert "n_step_b --> n_step_c" in out
+    assert "n_step_c --> END([END])" in out
+
+
+def test_to_mermaid_router_labels_branches_and_default() -> None:
+    """Router branches should show as labelled solid arrows; the
+    default branch should be dotted to distinguish at a glance."""
+    from loomflow import END
+
+    async def classify(x: str) -> str:
+        return x
+
+    async def handle_yes(x: str) -> str:
+        return "Y"
+
+    async def handle_no(x: str) -> str:
+        return "N"
+
+    wf = Workflow()
+    wf.add_node("classify", classify)
+    wf.add_node("yes", handle_yes)
+    wf.add_node("no", handle_no)
+    wf.add_router(
+        "classify",
+        fn=lambda v: v,
+        routes={"yes": "yes", "no": "no"},
+        default=END,
+    )
+    wf.add_edge("yes", END)
+    wf.add_edge("no", END)
+    wf.set_start("classify")
+
+    out = wf.to_mermaid()
+    # Router branches are labelled.
+    assert "n_classify -->|yes| n_yes" in out
+    assert "n_classify -->|no| n_no" in out
+    # Default branch uses the dotted-arrow style.
+    assert "n_classify -.->|default| END([END])" in out
+
+
+def test_to_mermaid_handles_empty_workflow() -> None:
+    """An empty ``Workflow()`` (no nodes yet) should still produce
+    a valid Mermaid diagram, not crash. Useful when the user
+    inspects a workflow mid-construction."""
+    wf = Workflow()
+    out = wf.to_mermaid()
+    assert out.startswith("flowchart TD")
+    assert "(empty workflow)" in out
+
+
+def test_to_dot_chain_emits_digraph() -> None:
+    """``to_dot()`` should produce a parseable Graphviz digraph
+    with rounded-rectangle node shapes and one edge per chain
+    transition."""
+
+    async def step_a(x: int) -> int:
+        return x
+
+    async def step_b(x: int) -> int:
+        return x
+
+    wf = Workflow.chain([step_a, step_b], name="my_flow")
+    out = wf.to_dot()
+
+    assert out.startswith('digraph "my_flow" {')
+    assert out.rstrip().endswith("}")
+    assert '"step_a" [shape=box, style=rounded];' in out
+    assert '"step_a" -> "step_b";' in out
+    # END is visualised when at least one edge points to it.
+    assert "__end__" in out
+    assert "label=\"END\"" in out
+
+
+def test_repr_markdown_wraps_mermaid_in_fenced_block() -> None:
+    """``_repr_markdown_`` is what Jupyter calls when a user just
+    types ``wf`` in a cell. It should wrap ``to_mermaid()`` in a
+    fenced ``mermaid`` block so JupyterLab / VS Code render the
+    diagram inline."""
+
+    async def f(x: int) -> int:
+        return x
+
+    wf = Workflow.chain([f])
+    md = wf._repr_markdown_()
+    assert md.startswith("```mermaid\n")
+    assert md.endswith("\n```")
+    assert "flowchart TD" in md

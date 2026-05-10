@@ -24,6 +24,25 @@ Multi-tenancy and structured outputs are opt-in by passing
 to in-tree network adapters (OpenAI, Anthropic, LiteLLM); custom
 models opt in.
 
+### Added — Workflow visualisation: `to_mermaid()` / `to_dot()` / Jupyter
+
+* **`Workflow.to_mermaid() -> str`** — returns a Mermaid
+  ``flowchart TD`` diagram of the graph. Pastes directly into
+  GitHub Markdown (renders inline) or https://mermaid.live for
+  PNG / SVG export. Solid arrows are unconditional edges,
+  labelled solid arrows are router branches, dotted arrows are
+  router *defaults*. ``START`` and ``END`` are stadium-shaped.
+* **`Workflow.to_dot() -> str`** — same picture in Graphviz DOT
+  for users who prefer the Graphviz toolchain (`dot -Tpng -o
+  graph.png`). Optional — Mermaid is the recommended path since
+  it needs no install.
+* **`Workflow._repr_markdown_`** — Jupyter / VS Code / JupyterLab
+  auto-render the diagram inline when you type ``wf`` into a cell.
+  No imports, no extra calls.
+
+Tests cover linear chains, routers (labelled + default branches),
+empty workflows, DOT shape declarations, and the markdown wrapper.
+
 ### Changed — Boundary-input errors now name the fix, not just the failure
 
 A pass over the most-hit user entry points: when the framework

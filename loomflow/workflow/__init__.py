@@ -713,6 +713,149 @@ class Workflow:
         finally:
             _ctx_var.reset(token)
 
+    # ---- visualisation ----------------------------------------------------
+
+    def to_mermaid(self) -> str:
+        """Render the workflow graph as a Mermaid ``flowchart TD``
+        diagram.
+
+        Returns a string suitable for:
+
+        * Pasting into Markdown (GitHub renders Mermaid natively).
+        * https://mermaid.live for online editing / PNG / SVG export.
+        * Jupyter via ``IPython.display.Markdown(...)`` — or just
+          type ``wf`` into a cell; ``_repr_markdown_`` calls this
+          method for you.
+
+        Conventions:
+        * Solid arrows are unconditional edges.
+        * Labelled solid arrows are explicit router branches.
+        * Dotted arrows are router *default* branches.
+        * ``START`` and ``END`` are stadium-shaped nodes; user
+          steps are rounded rectangles.
+        """
+        lines = ["flowchart TD"]
+        if not self._nodes:
+            lines.append('    empty["(empty workflow)"]')
+            return "\n".join(lines)
+
+        # Mermaid node IDs are restricted; sanitise to a safe alias
+        # while keeping the user's name as the visible label.
+        def _alias(name: str) -> str:
+            safe = "".join(c if c.isalnum() or c == "_" else "_" for c in name)
+            return f"n_{safe}"
+
+        # Declare each node with its display label first so later
+        # edge lines can reference the alias without re-declaring.
+        for name in self._nodes:
+            lines.append(f'    {_alias(name)}["{name}"]')
+
+        if self._start is not None:
+            lines.append(
+                f"    START([START]) --> {_alias(self._start)}"
+            )
+
+        for src, target in self._edges.items():
+            src_id = _alias(src)
+            if isinstance(target, _Router):
+                for label, dst in target.routes.items():
+                    if dst == "__END__":
+                        lines.append(
+                            f"    {src_id} -->|{label}| END([END])"
+                        )
+                    else:
+                        lines.append(
+                            f"    {src_id} -->|{label}| {_alias(dst)}"
+                        )
+                # Default branch — dotted to distinguish from
+                # explicit-key branches at a glance.
+                if target.default is not None:
+                    if isinstance(target.default, _Sentinel):
+                        lines.append(
+                            f"    {src_id} -.->|default| END([END])"
+                        )
+                    else:
+                        lines.append(
+                            f"    {src_id} -.->|default| "
+                            f"{_alias(target.default)}"
+                        )
+            elif isinstance(target, _Sentinel):
+                lines.append(f"    {src_id} --> END([END])")
+            else:
+                lines.append(f"    {src_id} --> {_alias(target)}")
+
+        return "\n".join(lines)
+
+    def to_dot(self) -> str:
+        """Render the workflow as a Graphviz DOT digraph.
+
+        Pipe through ``dot -Tpng -o graph.png`` or paste into
+        https://dreampuf.github.io/GraphvizOnline. Use
+        :meth:`to_mermaid` if you don't want a Graphviz install —
+        Mermaid renders inline on GitHub and in Jupyter without
+        any external tool.
+        """
+        lines = [f'digraph "{self.name}" {{', "    rankdir=TB;"]
+        if not self._nodes:
+            lines.append('    empty [label="(empty workflow)"];')
+            lines.append("}")
+            return "\n".join(lines)
+
+        for name in self._nodes:
+            lines.append(f'    "{name}" [shape=box, style=rounded];')
+
+        if self._start is not None:
+            lines.append(
+                '    "__start__" [label="START", shape=oval];'
+            )
+            lines.append(
+                f'    "__start__" -> "{self._start}";'
+            )
+
+        end_seen = False
+        for src, target in self._edges.items():
+            if isinstance(target, _Router):
+                for label, dst in target.routes.items():
+                    if dst == "__END__":
+                        lines.append(
+                            f'    "{src}" -> "__end__" '
+                            f'[label="{label}"];'
+                        )
+                        end_seen = True
+                    else:
+                        lines.append(
+                            f'    "{src}" -> "{dst}" '
+                            f'[label="{label}"];'
+                        )
+                if target.default is not None:
+                    if isinstance(target.default, _Sentinel):
+                        lines.append(
+                            f'    "{src}" -> "__end__" '
+                            f'[label="default", style=dashed];'
+                        )
+                        end_seen = True
+                    else:
+                        lines.append(
+                            f'    "{src}" -> "{target.default}" '
+                            f'[label="default", style=dashed];'
+                        )
+            elif isinstance(target, _Sentinel):
+                lines.append(f'    "{src}" -> "__end__";')
+                end_seen = True
+            else:
+                lines.append(f'    "{src}" -> "{target}";')
+
+        if end_seen:
+            lines.append('    "__end__" [label="END", shape=oval];')
+        lines.append("}")
+        return "\n".join(lines)
+
+    def _repr_markdown_(self) -> str:
+        """Auto-render in Jupyter when the user types ``wf`` in a
+        cell. Wraps :meth:`to_mermaid` in a fenced Mermaid block;
+        Jupyter (and JupyterLab >= 4 / VS Code) renders it inline."""
+        return f"```mermaid\n{self.to_mermaid()}\n```"
+
     # ---- composition ------------------------------------------------------
 
     def as_tool(
