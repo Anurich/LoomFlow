@@ -24,6 +24,39 @@ Multi-tenancy and structured outputs are opt-in by passing
 to in-tree network adapters (OpenAI, Anthropic, LiteLLM); custom
 models opt in.
 
+### Added — `Workflow(memory=...)` shared agent memory across the graph
+
+Workflows can now own a single :class:`~loomflow.Memory` and
+propagate it to every nested :class:`~loomflow.Agent` step that
+didn't specify its own — so episodes / facts written by one
+agent are recall-able by the next without per-agent wiring:
+
+```python
+from loomflow import Workflow, Agent, InMemoryMemory
+
+mem = InMemoryMemory()
+agent_a = Agent(model="gpt-4.1-mini", instructions="...")
+agent_b = Agent(model="gpt-4.1-mini", instructions="...")
+
+wf = Workflow.chain([agent_a, agent_b], memory=mem)
+await wf.run("hi", user_id="alice", session_id="conv-1")
+# Both agents wrote to / read from `mem`.
+```
+
+Resolution order is **explicit always wins**:
+
+1. ``Agent(memory=my_mem)`` keeps using ``my_mem`` even inside
+   a workflow with ``memory=``.
+2. Otherwise ``Workflow(memory=mem)`` is used as the fallback.
+3. Otherwise the agent's per-instance default (in-memory).
+
+Implemented via a contextvar in :mod:`loomflow.core.context`
+that the workflow installs at the start of ``run`` / ``stream``
+and resets in ``finally``, so memory does not leak across
+workflow runs. Available on the explicit ``Workflow(memory=...)``
+constructor and on all sugar constructors (``chain``, ``route``,
+``parallel``).
+
 ### Added — `add_edge(START, "node")` as alias for `set_start("node")`
 
 The ``START`` sentinel was previously inert (just a name). It now

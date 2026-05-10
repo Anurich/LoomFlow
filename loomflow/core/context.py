@@ -172,6 +172,18 @@ _ctx_var: ContextVar[RunContext] = ContextVar(
 )
 
 
+# ``Memory`` ambient — used when a :class:`Workflow` is configured
+# with ``memory=`` and a nested :class:`Agent` did not specify its
+# own. The Workflow installs this for the duration of a run; nested
+# agents that left ``memory=`` unset read it from here as a fallback
+# in :meth:`Agent._loop`. Carried separately from ``RunContext`` to
+# keep that frozen-dataclass small and avoid pulling the ``Memory``
+# protocol into the data class definition.
+_ambient_memory_var: ContextVar[Any] = ContextVar(
+    "loomflow_ambient_memory", default=None
+)
+
+
 def get_run_context() -> RunContext:
     """Return the :class:`RunContext` for the currently-running agent.
 

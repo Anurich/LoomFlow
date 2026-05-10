@@ -853,6 +853,123 @@ def test_add_edge_with_END_as_source_rejected() -> None:
     assert "set_start" in msg or "add_edge(START" in msg
 
 
+# ---------------------------------------------------------------------------
+# Workflow(memory=...) — shared agent memory across the graph
+# ---------------------------------------------------------------------------
+
+
+async def test_workflow_memory_propagates_to_nested_agents_without_explicit_memory() -> None:
+    """``Workflow(memory=mem)`` should be picked up by agents that
+    did NOT specify their own ``memory=`` — episodes written by
+    agent_a are visible to agent_b without per-agent wiring. This
+    is the whole point of the feature: one shared store across the
+    graph, opt-in by passing ``memory=`` once."""
+    from loomflow import InMemoryMemory
+
+    shared = InMemoryMemory()
+
+    # Two agents, neither specifies memory=. Both should pick up
+    # the workflow's memory at run time via the ambient contextvar.
+    agent_a = Agent(
+        instructions="step a",
+        model=ScriptedModel([ScriptedTurn(text="from-a")]),
+        auto_extract=False,
+    )
+    agent_b = Agent(
+        instructions="step b",
+        model=ScriptedModel([ScriptedTurn(text="from-b")]),
+        auto_extract=False,
+    )
+
+    wf = Workflow.chain([agent_a, agent_b], memory=shared)
+    await wf.run("hi", user_id="alice", session_id="s1")
+
+    # Both agents wrote their episode to the SHARED memory.
+    episodes = await shared.recall("", user_id="alice", limit=10)
+    outputs = sorted(e.output for e in episodes)
+    assert outputs == ["from-a", "from-b"]
+
+
+async def test_workflow_memory_does_not_override_explicit_agent_memory() -> None:
+    """Agents that explicitly pass ``memory=`` keep using their own
+    instance — the workflow memory is the FALLBACK only. This is
+    the "explicit always wins" rule; opting out of the shared
+    memory must remain possible."""
+    from loomflow import InMemoryMemory
+
+    workflow_mem = InMemoryMemory()
+    agent_mem = InMemoryMemory()
+
+    agent_a = Agent(
+        instructions="explicit-mem agent",
+        model=ScriptedModel([ScriptedTurn(text="answer-a")]),
+        memory=agent_mem,  # ← explicit; should win over workflow memory
+        auto_extract=False,
+    )
+
+    wf = Workflow.chain([agent_a], memory=workflow_mem)
+    await wf.run("hi", user_id="alice", session_id="s1")
+
+    # The episode landed in the agent's OWN memory, not the workflow's.
+    in_agent = await agent_mem.recall("", user_id="alice", limit=10)
+    in_workflow = await workflow_mem.recall("", user_id="alice", limit=10)
+    assert len(in_agent) == 1
+    assert in_agent[0].output == "answer-a"
+    assert len(in_workflow) == 0
+
+
+async def test_workflow_without_memory_falls_back_to_agent_default() -> None:
+    """When the workflow has no ``memory=``, the contextvar stays
+    None and each agent uses its own default memory — back-compat
+    with every workflow that existed before this feature."""
+    from loomflow.core.context import _ambient_memory_var
+
+    agent_a = Agent(
+        instructions="default-mem agent",
+        model=ScriptedModel([ScriptedTurn(text="ok")]),
+        auto_extract=False,
+    )
+    wf = Workflow.chain([agent_a])  # no memory= on workflow
+    await wf.run("hi", user_id="alice", session_id="s1")
+
+    # The contextvar leaked nothing; agent's own memory was used.
+    assert _ambient_memory_var.get() is None
+    in_agent = await agent_a.memory.recall("", user_id="alice", limit=10)
+    assert len(in_agent) == 1
+
+
+async def test_workflow_memory_is_scoped_to_run_does_not_leak() -> None:
+    """The contextvar is reset in ``finally``: a second workflow
+    without ``memory=`` after a first with ``memory=`` must NOT
+    inherit the first one's memory by accident."""
+    from loomflow import InMemoryMemory
+    from loomflow.core.context import _ambient_memory_var
+
+    mem1 = InMemoryMemory()
+    a1 = Agent(
+        instructions="a1",
+        model=ScriptedModel([ScriptedTurn(text="ok-1")]),
+        auto_extract=False,
+    )
+    wf1 = Workflow.chain([a1], memory=mem1)
+    await wf1.run("hi", user_id="alice", session_id="s1")
+
+    # After the first workflow, the contextvar is back to None.
+    assert _ambient_memory_var.get() is None
+
+    a2 = Agent(
+        instructions="a2",
+        model=ScriptedModel([ScriptedTurn(text="ok-2")]),
+        auto_extract=False,
+    )
+    wf2 = Workflow.chain([a2])  # no memory=
+    await wf2.run("hi", user_id="alice", session_id="s2")
+
+    # Second workflow's agent did NOT pick up mem1.
+    in_mem1 = await mem1.recall("ok-2", user_id="alice", limit=10)
+    assert all(e.output != "ok-2" for e in in_mem1)
+
+
 def test_repr_markdown_wraps_mermaid_in_fenced_block() -> None:
     """``_repr_markdown_`` is what Jupyter calls when a user just
     types ``wf`` in a cell. It should wrap ``to_mermaid()`` in a

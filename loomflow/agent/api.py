@@ -32,7 +32,7 @@ import json
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import anyio
 from pydantic import BaseModel, ValidationError
@@ -183,6 +183,12 @@ class Agent:
         # ("sqlite:./bot.db", "postgres://..."), config dicts
         # ({"backend": ..., ...}), and explicit Memory instances.
         from ..memory.resolver import resolve_memory
+        # Track whether the caller explicitly supplied a memory.
+        # When False, ``_loop`` checks the ambient workflow memory
+        # contextvar (set by ``Workflow(memory=...)``) and uses
+        # that as a fallback. Explicit-on-Agent ALWAYS wins so
+        # opt-out by passing your own memory= still works.
+        self._memory_was_explicit: bool = memory is not None
         self._memory: Memory = resolve_memory(memory)
 
         # Auto fact extraction. When enabled, the agent loop's
@@ -529,6 +535,42 @@ class Agent:
                 action=action,
                 payload=payload,
             )
+
+    def _resolve_run_memory(self) -> Memory:
+        """Pick the :class:`Memory` to use for the current run.
+
+        Resolution order:
+
+        1. **Explicit-on-Agent wins.** If the caller passed
+           ``memory=`` to :class:`Agent`, that instance is used —
+           wrapped with :class:`AutoExtractMemory` when
+           ``auto_extract=True``. Workflow-level memory is ignored.
+        2. **Ambient workflow memory** (set by
+           ``Workflow(memory=...)``) is used as a fallback when the
+           Agent had no explicit memory. This makes
+           ``wf = Workflow.chain([agent_a, agent_b], memory=mem)``
+           propagate ``mem`` to both agents without per-agent wiring.
+           Auto-extract wrapping is *not* re-applied here — the
+           workflow's memory is taken as-is so the user's choice of
+           backend is respected exactly.
+        3. **Agent default** (in-memory store) when neither was
+           supplied — preserves the standalone-Agent behaviour.
+
+        Called once per ``_loop`` invocation; the resolved memory
+        is then used uniformly for the architecture's reads and
+        the post-run episode write.
+        """
+        if self._memory_was_explicit:
+            return self._wrapped_memory
+        from ..core.context import _ambient_memory_var
+        ambient = _ambient_memory_var.get()
+        if ambient is not None:
+            # Workflow memory wins over the agent's default. We use
+            # the raw ambient instance (no auto-extract wrap) so
+            # the workflow's choice of backend is taken at face
+            # value — consistent with "explicit always wins".
+            return cast(Memory, ambient)
+        return self._wrapped_memory
 
     async def _validate_output_with_retry(
         self,
@@ -1114,16 +1156,25 @@ class Agent:
                 if extra_tools
                 else self._tool_host
             )
+            # Resolve the memory for THIS run: explicit-on-Agent
+            # always wins; otherwise check the ambient workflow
+            # memory contextvar so ``Workflow(memory=...)`` flows
+            # through to nested agents that left ``memory=`` blank.
+            # See :func:`_resolve_run_memory` below for full rules.
+            effective_memory = self._resolve_run_memory()
             deps = Dependencies(
                 # ``_wrapped_model`` is the retry-decorated view —
                 # falls through to ``_model`` when the policy is
                 # disabled, so the architecture loop never sees a
                 # raw SDK exception when retries could have helped.
                 model=self._wrapped_model,
-                # ``_wrapped_memory`` runs auto-extract on every
-                # remember() when enabled; falls through to
-                # ``_memory`` when ``auto_extract=False``.
-                memory=self._wrapped_memory,
+                # See ``_resolve_run_memory``: this is either
+                # ``_wrapped_memory`` (the per-Agent default with
+                # auto-extract wrapping) or, when the user left
+                # ``memory=`` unset on this Agent and a parent
+                # ``Workflow(memory=...)`` is active, the workflow's
+                # shared memory.
+                memory=effective_memory,
                 runtime=self._runtime,
                 tools=effective_tools,
                 budget=self._budget,
@@ -1177,11 +1228,11 @@ class Agent:
                 output=session.output,
             )
             if fast_runtime:
-                await self._wrapped_memory.remember(episode)
+                await effective_memory.remember(episode)
             else:
                 await self._runtime.step(
                     f"persist_episode_{session.turns}",
-                    self._wrapped_memory.remember,
+                    effective_memory.remember,
                     episode,
                 )
 

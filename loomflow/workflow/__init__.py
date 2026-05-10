@@ -73,9 +73,14 @@ from typing import TYPE_CHECKING, Any
 
 import anyio
 
-from ..core.context import RunContext, _ctx_var, get_run_context
+from ..core.context import (
+    RunContext,
+    _ambient_memory_var,
+    _ctx_var,
+    get_run_context,
+)
 from ..core.ids import new_id
-from ..core.protocols import Telemetry
+from ..core.protocols import Memory, Telemetry
 from ..core.types import Event, EventKind
 from ..observability.tracing import NoTelemetry
 from ..tools.registry import Tool
@@ -450,6 +455,7 @@ class Workflow:
         *,
         telemetry: Telemetry | None = None,
         audit_log: AuditLog | str | Path | None = None,
+        memory: Memory | None = None,
         max_steps: int = 100,
         max_visits_per_node: int = 25,
     ) -> None:
@@ -468,6 +474,15 @@ class Workflow:
           this many times. Tighter than ``max_steps`` because most
           runaways are one node looping on itself.
 
+        ``memory`` is the **shared agent memory** for this run.
+        Any :class:`~loomflow.Agent` step that did *not* receive
+        an explicit ``memory=`` at construction picks this up at
+        run time, so episodes / facts written by one agent are
+        visible to the next without per-agent wiring. Agents that
+        DID specify their own memory keep using it — explicit
+        always wins. Pass an instance once and reuse it across
+        ``wf.run()`` calls to keep memory across "conversations".
+
         Hit either cap and the workflow raises ``RuntimeError`` with
         the offending node named.
         """
@@ -482,6 +497,7 @@ class Workflow:
         self._start: str | None = None
         self._telemetry = telemetry
         self._audit_log = _resolve_audit_log(audit_log)
+        self._memory = memory
         self._max_steps = max_steps
         self._max_visits_per_node = max_visits_per_node
 
@@ -639,6 +655,12 @@ class Workflow:
             metadata=run_meta,
         )
         token = _ctx_var.set(ctx)
+        # Install the workflow's ``memory=`` (if any) as the
+        # ambient memory for this run. Nested ``Agent`` steps that
+        # didn't get their own ``memory=`` at construction read
+        # this contextvar and use it instead of their default.
+        # Explicit-on-Agent always wins; we only fill the gap.
+        memory_token = _ambient_memory_var.set(self._memory)
 
         try:
             yield Event(
@@ -737,6 +759,7 @@ class Workflow:
                 payload={"workflow": self.name, "output": value},
             )
         finally:
+            _ambient_memory_var.reset(memory_token)
             _ctx_var.reset(token)
 
     # ---- visualisation ----------------------------------------------------
@@ -932,6 +955,7 @@ class Workflow:
         name: str = "chain",
         telemetry: Telemetry | None = None,
         audit_log: AuditLog | str | Path | None = None,
+        memory: Memory | None = None,
         max_steps: int = 100,
         max_visits_per_node: int = 25,
     ) -> Workflow:
@@ -940,10 +964,10 @@ class Workflow:
         Each step receives the previous step's return value. The
         final step's return is the workflow's output.
 
-        Pass ``telemetry`` / ``audit_log`` / ``max_steps`` /
-        ``max_visits_per_node`` here for the sugar constructor too —
-        otherwise these kwargs would only be reachable via the
-        explicit ``Workflow(...)`` constructor.
+        Pass ``telemetry`` / ``audit_log`` / ``memory`` /
+        ``max_steps`` / ``max_visits_per_node`` here for the sugar
+        constructor too — otherwise these kwargs would only be
+        reachable via the explicit ``Workflow(...)`` constructor.
         """
         if not steps:
             raise ValueError("chain requires at least one step")
@@ -951,6 +975,7 @@ class Workflow:
             name,
             telemetry=telemetry,
             audit_log=audit_log,
+            memory=memory,
             max_steps=max_steps,
             max_visits_per_node=max_visits_per_node,
         )
@@ -981,6 +1006,7 @@ class Workflow:
         name: str = "route",
         telemetry: Telemetry | None = None,
         audit_log: AuditLog | str | Path | None = None,
+        memory: Memory | None = None,
         max_steps: int = 100,
         max_visits_per_node: int = 25,
     ) -> Workflow:
@@ -999,6 +1025,7 @@ class Workflow:
             name,
             telemetry=telemetry,
             audit_log=audit_log,
+            memory=memory,
             max_steps=max_steps,
             max_visits_per_node=max_visits_per_node,
         )
@@ -1071,6 +1098,7 @@ class Workflow:
         name: str = "parallel",
         telemetry: Telemetry | None = None,
         audit_log: AuditLog | str | Path | None = None,
+        memory: Memory | None = None,
         max_steps: int = 100,
         max_visits_per_node: int = 25,
     ) -> Workflow:
@@ -1100,6 +1128,7 @@ class Workflow:
             name,
             telemetry=telemetry,
             audit_log=audit_log,
+            memory=memory,
             max_steps=max_steps,
             max_visits_per_node=max_visits_per_node,
         )
