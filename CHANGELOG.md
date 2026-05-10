@@ -24,6 +24,75 @@ Multi-tenancy and structured outputs are opt-in by passing
 to in-tree network adapters (OpenAI, Anthropic, LiteLLM); custom
 models opt in.
 
+### Changed — Skills `tools.py` now imports lazily + `build_tools(ctx)` factory
+
+Two related improvements to how Loom skills load their Python
+tools — both fixing real friction and adding a capability that
+beats deepagents' "no tools.py at all" punt.
+
+**Lazy `tools.py` import (breaking, but fixes a footgun).**
+Previously, ``Skill("path/")`` imported the skill's ``tools.py``
+*at construction time*. If that file did module-level event-loop
+work — e.g., ``asyncio.run(setup_vectorstore())`` — and the
+caller was already inside a Jupyter event loop, the import
+crashed with ``RuntimeError: asyncio.run() cannot be called from
+a running event loop``.
+
+Now the import is deferred to first-use:
+
+* ``Skill(...)`` only *detects* ``tools.py``; doesn't import it.
+* ``Skill.materialize_tools(ctx)`` does the import on first call
+  and caches the result. Subsequent calls reuse the cache.
+* The framework's built-in ``load_skill`` tool calls
+  ``materialize_tools`` from inside the running agent loop, where
+  doing event-loop work is fine.
+
+**Behaviour change:** import errors in ``tools.py`` now surface
+when the model first calls ``load_skill(name)``, not at
+``Skill(...)`` construction. Most skill code paths are unaffected;
+the Mode C subprocess-tool path stays eager. Migration: if your
+tests asserted "construction raises on bad ``tools.py``", call
+``skill.materialize_tools()`` explicitly to trigger the import.
+
+**`build_tools(ctx)` factory protocol (new feature).** Skills
+can now ship tools that close over caller-supplied state without
+globals or module-level setup:
+
+```python
+# skills/pdf-retrieval/tools.py
+from loomflow import tool
+
+def build_tools(ctx):
+    vectorstore = ctx.metadata["vectorstore"]
+    @tool
+    async def retreiver(query: str) -> list:
+        return await vectorstore.search_hybrid(query=query)
+    return [retreiver]
+```
+
+```python
+# In your script:
+agent = Agent(..., skills=[Skill("skills/")])
+result = await agent.run(
+    "...",
+    metadata={"vectorstore": vectorstore},
+)
+# load_skill('pdf-retrieval') passes the live RunContext to
+# build_tools(ctx); the resulting `retreiver` is registered with
+# the agent's tool host and visible on the next turn.
+```
+
+When ``tools.py`` *doesn't* export ``build_tools``, the framework
+falls back to discovering module-level ``@tool``-decorated
+globals (the prior behaviour). Back-compatible.
+
+**Bonus: clearer error on the asyncio gotcha.** When a skill's
+``tools.py`` does ``asyncio.run(...)`` at module level and the
+import does fire inside a running loop, the resulting
+``SkillError`` now includes a hint pointing at the
+``build_tools(ctx)`` pattern instead of just the raw asyncio
+traceback.
+
 ### Fixed — Workflow router classifier can now be `async def`
 
 The classifier passed to ``add_router`` (both ``add_router(node,

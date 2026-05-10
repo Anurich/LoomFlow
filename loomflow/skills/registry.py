@@ -140,21 +140,31 @@ class SkillRegistry:
         return skill.load_body()
 
     def load_with_tools(
-        self, name: str
+        self,
+        name: str,
+        ctx: object | None = None,
     ) -> tuple[str, list[Tool]]:
         """Return ``(body, newly_pending_tools)`` — the body of the
         skill plus the Tool instances the framework should register
         with the agent's tool host on this load.
 
+        ``ctx`` is forwarded to the skill's
+        :meth:`Skill.materialize_tools` call. When the skill's
+        ``tools.py`` defines a ``build_tools(ctx)`` factory, ``ctx``
+        is passed in so the factory can close over caller-supplied
+        state (a vectorstore, DB connection, etc.). Pure-markdown
+        skills and skills without a factory ignore it.
+
         Idempotent: subsequent calls for the same skill return the
         body and an empty tool list, since registration only needs
-        to happen once."""
+        to happen once.
+        """
         body = self.load(name)
         if name in self._loaded:
             return body, []
         skill = self._skills[name]
         self._loaded.add(name)
-        return body, list(skill.pending_tools)
+        return body, list(skill.materialize_tools(ctx))
 
     def is_loaded(self, name: str) -> bool:
         """Whether the skill's pending tools have been registered."""

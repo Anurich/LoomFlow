@@ -640,19 +640,34 @@ def _make_mode_b_skill(tmp_path: Path) -> Path:
 
 
 async def test_mode_b_imports_tools_py(tmp_path: Path) -> None:
+    """``tools.py`` import is deferred — ``Skill()`` only detects
+    the file. Mode B tools materialize on first
+    ``materialize_tools()`` call (which the framework triggers from
+    inside ``load_skill``)."""
     skill = Skill(_make_mode_b_skill(tmp_path))
     assert skill.metadata.has_python_tools is True
-    pending = skill.pending_tools
-    assert len(pending) == 1
-    tool = pending[0]
+    # Before materialize_tools() the Mode B portion is empty.
+    assert skill.pending_tools == []
+    # First materialize triggers the import; tools become available.
+    materialized = skill.materialize_tools()
+    assert len(materialized) == 1
+    tool = materialized[0]
     assert tool.name == "greeter__say_hi"
     out = await tool.fn(name="Alice")
     assert out == "hi, Alice!"
+    # After materialize, ``pending_tools`` reflects the cached set.
+    assert {t.name for t in skill.pending_tools} == {"greeter__say_hi"}
 
 
-async def test_mode_b_import_error_surfaces_at_construction(
+async def test_mode_b_import_error_surfaces_at_load_time(
     tmp_path: Path,
 ) -> None:
+    """Import errors in ``tools.py`` are now deferred to
+    ``materialize_tools()`` (i.e. when ``load_skill`` fires) — the
+    deferral lets ``tools.py`` use the live event loop, but means
+    construction succeeds silently and the error appears on first
+    use. ``Skill()`` constructor still completes; the SkillError
+    raises when materialization is attempted."""
     folder = tmp_path / "broken"
     folder.mkdir()
     (folder / "SKILL.md").write_text(
@@ -661,8 +676,114 @@ async def test_mode_b_import_error_surfaces_at_construction(
     (folder / "tools.py").write_text(
         "import nonexistent_module_xyz\n"
     )
+    # Construction succeeds — the file isn't imported yet.
+    skill = Skill(folder)
+    # materialize_tools() triggers the import → SkillError.
     with pytest.raises(SkillError, match="Error importing"):
-        Skill(folder)
+        skill.materialize_tools()
+
+
+async def test_tools_py_with_event_loop_work_no_longer_crashes_at_construction(
+    tmp_path: Path,
+) -> None:
+    """A ``tools.py`` that does ``asyncio.run(...)`` at module level
+    used to crash at ``Skill()`` construction (because Skill ran the
+    import there, and the construction may happen inside a Jupyter
+    event loop). The deferred-import design means construction
+    succeeds; the import only happens when the framework calls
+    ``materialize_tools()`` from inside the agent loop, where doing
+    event-loop work is fine.
+
+    The test verifies the *construction-time* behaviour: no crash.
+    What materialize does later is up to the user's ``tools.py`` —
+    if they STILL do ``asyncio.run(...)`` at module level, our new
+    error handler gives them a hint instead of the raw asyncio
+    traceback.
+    """
+    folder = tmp_path / "loopy"
+    folder.mkdir()
+    (folder / "SKILL.md").write_text(
+        "---\nname: loopy\ndescription: y\n---\n# x"
+    )
+    (folder / "tools.py").write_text(
+        "import asyncio\n"
+        "async def _setup():\n"
+        "    pass\n"
+        "# Would crash at construction under eager-import; now\n"
+        "# only crashes when materialize_tools() runs inside a\n"
+        "# live event loop. The Skill construction itself is fine.\n"
+        "asyncio.run(_setup())\n"
+    )
+    # Inside this test we're already in an anyio event loop, so
+    # materialize_tools() WILL fail — but Skill() construction
+    # must succeed regardless.
+    skill = Skill(folder)
+    assert skill.metadata.name == "loopy"
+    # The hint kicks in only when the import error is an event-loop
+    # collision; verify the SkillError mentions the fix.
+    with pytest.raises(SkillError) as excinfo:
+        skill.materialize_tools()
+    msg = str(excinfo.value)
+    assert "event loop" in msg
+    assert "build_tools(ctx)" in msg
+
+
+async def test_build_tools_factory_protocol_passes_ctx(
+    tmp_path: Path,
+) -> None:
+    """When ``tools.py`` exports ``build_tools(ctx)`` instead of
+    module-level ``@tool`` definitions, the framework calls the
+    factory with the supplied context and uses its returned list.
+    This is the dependency-injection pattern: tools close over
+    state (a vectorstore, a DB, etc.) that the caller passes via
+    ``ctx.metadata`` rather than module-level globals."""
+    folder = tmp_path / "factory"
+    folder.mkdir()
+    (folder / "SKILL.md").write_text(
+        "---\nname: factory\ndescription: y\n---\n# x"
+    )
+    (folder / "tools.py").write_text(
+        "from loomflow import tool\n"
+        "\n"
+        "def build_tools(ctx):\n"
+        "    secret = ctx.metadata['secret']\n"
+        "    @tool\n"
+        "    async def reveal() -> str:\n"
+        "        return f'secret is {secret}'\n"
+        "    return [reveal]\n"
+    )
+    skill = Skill(folder)
+
+    # Forge a minimal ctx-like object — RunContext works, but for
+    # this unit test we just need ``.metadata``.
+    class _Ctx:
+        metadata = {"secret": "foo42"}
+
+    materialized = skill.materialize_tools(_Ctx())
+    assert len(materialized) == 1
+    tool = materialized[0]
+    assert tool.name == "factory__reveal"
+    assert (await tool.fn()) == "secret is foo42"
+
+
+async def test_build_tools_factory_must_return_list_of_tool(
+    tmp_path: Path,
+) -> None:
+    """A ``build_tools(ctx)`` that returns the wrong type should
+    raise a clear ``SkillError`` so the user sees the contract,
+    not a downstream TypeError when registration tries to iterate."""
+    folder = tmp_path / "badfactory"
+    folder.mkdir()
+    (folder / "SKILL.md").write_text(
+        "---\nname: badfactory\ndescription: y\n---\n# x"
+    )
+    (folder / "tools.py").write_text(
+        "def build_tools(ctx):\n"
+        "    return 'not a list'\n"
+    )
+    skill = Skill(folder)
+    with pytest.raises(SkillError, match="must return a list"):
+        skill.materialize_tools(None)
 
 
 async def test_mode_b_no_tools_py_means_no_python_tools(
@@ -704,10 +825,15 @@ async def test_skill_can_mix_mode_b_and_mode_c(tmp_path: Path) -> None:
         "    return msg.lower()\n"
     )
     skill = Skill(folder)
-    pending_names = {t.name for t in skill.pending_tools}
-    assert pending_names == {"mixed__shout", "mixed__whisper"}
+    # Mode C (subprocess wrappers) is eager — appears immediately.
+    eager_names = {t.name for t in skill.pending_tools}
+    assert eager_names == {"mixed__shout"}
     assert skill.metadata.has_python_tools is True
     assert skill.metadata.declared_tool_count == 1
+    # Mode B (Python @tool from tools.py) is lazy — materialize
+    # to pull in the second tool.
+    full_names = {t.name for t in skill.materialize_tools()}
+    assert full_names == {"mixed__shout", "mixed__whisper"}
 
 
 # ---------------------------------------------------------------------------

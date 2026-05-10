@@ -65,8 +65,16 @@ def make_load_skill_tool(
         description += f"\n\nAvailable skills:\n{catalog_lines}"
 
     async def _load(name: str) -> str:
+        # Pull the live :class:`RunContext` so a skill's
+        # ``build_tools(ctx)`` factory can read ``ctx.metadata`` /
+        # ``ctx.user_id`` and close over caller-supplied state
+        # (a vectorstore, DB connection, API client). Cheap when
+        # the skill has no factory — the ctx is just ignored.
+        from ..core.context import get_run_context
+
+        ctx = get_run_context()
         try:
-            body, pending = registry.load_with_tools(name)
+            body, pending = registry.load_with_tools(name, ctx=ctx)
         except SkillError as exc:
             return f"Error: {exc}"
 

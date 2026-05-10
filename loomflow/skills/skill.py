@@ -126,18 +126,41 @@ class Skill:
         self._body = body
         self._tool_specs = tool_specs
         self._skill_md_path = skill_md
-        # Pending tools — built at construction so import errors
-        # surface fast, but NOT registered with any agent yet. The
-        # registry registers them lazily on load_skill().
+        # Pending tools — Mode C subprocess wrappers are built
+        # eagerly because they don't execute user code (just spawn
+        # subprocesses at call time, which is fine in any context).
         self._pending_tools: list[Tool] = []
         self._pending_tools.extend(
             _build_subprocess_tools(tool_specs, self.path, self.name)
         )
+        # Mode B (Python ``tools.py``) is detected here but NOT
+        # imported — the import is deferred to first use via
+        # :meth:`materialize_tools` below. Two reasons:
+        #
+        # 1. ``tools.py`` may run module-level setup code that needs
+        #    an event loop (e.g. ``asyncio.run(setup())``). Importing
+        #    at ``Skill(...)`` construction inside Jupyter — which
+        #    has its own running loop — fails with ``RuntimeError:
+        #    asyncio.run() cannot be called from a running event
+        #    loop``. Deferring import to load_skill time means we
+        #    import only when the agent loop is already executing.
+        #
+        # 2. Aligns with progressive disclosure: a skill costs
+        #    nothing in the catalog until the model decides to load
+        #    it. If we never load it, we never pay the cost of
+        #    parsing / importing its tools.
+        self._tools_py_path: Path | None = None
+        # Cache: filled on first materialize_tools() call.
+        self._materialized_python_tools: list[Tool] | None = None
         if str(self.path) != "<inline>":
-            python_tools = _import_python_tools(self.path, self.name)
-            if python_tools:
+            tools_py = self.path / "tools.py"
+            if tools_py.exists():
+                self._tools_py_path = tools_py
+                # Set the catalog-line flag based on file presence;
+                # we accept that a tools.py with zero @tool defs
+                # would lie about it, but that's a degenerate case
+                # and avoids parsing AST at construction.
                 self.metadata.has_python_tools = True
-                self._pending_tools.extend(python_tools)
 
     @classmethod
     def from_text(
@@ -165,6 +188,10 @@ class Skill:
         instance._body = body
         instance._tool_specs = []
         instance._pending_tools = []
+        # Inline skills have no on-disk ``tools.py`` to import, so
+        # the lazy-import slots stay empty.
+        instance._tools_py_path = None
+        instance._materialized_python_tools = []
         return instance
 
     @property
@@ -179,10 +206,65 @@ class Skill:
     def pending_tools(self) -> list[Tool]:
         """The Tool instances this skill will register on load.
 
-        Both Mode B (Python @tool from ``tools.py``) and Mode C
-        (subprocess wrappers from frontmatter ``tools:`` manifest)
-        contribute to this list. Empty for pure markdown skills."""
-        return list(self._pending_tools)
+        For Mode C (subprocess wrappers from frontmatter ``tools:``
+        manifest): always returned eagerly; they don't execute user
+        code at construction.
+
+        For Mode B (Python ``@tool`` from ``tools.py``): only
+        returned if :meth:`materialize_tools` has already been
+        called. Otherwise the import is still pending and this
+        property returns an empty Mode B portion. Use
+        :meth:`materialize_tools` to force the import (with optional
+        :class:`~loomflow.RunContext` for the
+        ``build_tools(ctx)`` factory protocol).
+        """
+        out = list(self._pending_tools)
+        if self._materialized_python_tools is not None:
+            out.extend(self._materialized_python_tools)
+        return out
+
+    def materialize_tools(
+        self, ctx: Any | None = None
+    ) -> list[Tool]:
+        """Resolve all :class:`Tool` instances this skill ships,
+        importing ``tools.py`` lazily on first call.
+
+        ``ctx`` (a :class:`~loomflow.RunContext` or any object with
+        ``metadata`` / ``user_id`` / ``session_id`` attributes) is
+        forwarded to the skill's ``build_tools(ctx)`` factory if
+        defined. The factory pattern lets a skill's tools close over
+        caller-supplied state — a vectorstore, a DB connection, an
+        API client — without globals or module-level setup:
+
+        .. code-block:: python
+
+            # skills/pdf-retrieval/tools.py
+            from loomflow import tool
+
+            def build_tools(ctx):
+                vs = ctx.metadata["vectorstore"]
+                @tool
+                async def retreiver(query: str) -> list:
+                    return await vs.search_hybrid(query=query)
+                return [retreiver]
+
+        When ``tools.py`` does *not* export ``build_tools``, the
+        framework falls back to discovering module-level
+        ``@tool``-decorated globals (back-compat behaviour).
+
+        Idempotent: subsequent calls reuse the cached result. Pass
+        a different ``ctx`` and it's ignored — re-import the skill
+        registry if you need a fresh build.
+        """
+        if self._materialized_python_tools is None and self._tools_py_path is not None:
+            self._materialized_python_tools = _import_python_tools(
+                self._tools_py_path, self.name, ctx
+            )
+        if self._materialized_python_tools is None:
+            self._materialized_python_tools = []
+        return list(self._pending_tools) + list(
+            self._materialized_python_tools
+        )
 
     def load_body(self) -> str:
         """Return the full SKILL.md body (without frontmatter)."""
@@ -457,19 +539,43 @@ def _interpreter_for(script: Path) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def _import_python_tools(skill_path: Path, skill_name: str) -> list[Tool]:
-    """Look for ``tools.py`` in the skill folder; if present, import
-    it and collect every :class:`Tool` instance bound at module
-    level.
+def _import_python_tools(
+    tools_py: Path,
+    skill_name: str,
+    ctx: Any | None = None,
+) -> list[Tool]:
+    """Import a skill's ``tools.py`` and collect its :class:`Tool`
+    instances.
 
-    Returns an empty list when no ``tools.py`` exists or no Tools
-    are found. Raises :class:`SkillError` on import error so users
-    see the failure at construction time, not mid-conversation."""
-    tools_py = skill_path / "tools.py"
+    Two ways to expose tools, in priority order:
+
+    1. **Factory protocol** — ``tools.py`` exports a callable
+       ``build_tools(ctx)`` that returns a ``list[Tool]``. Called
+       with ``ctx`` (typically a :class:`RunContext`) so tools can
+       close over caller-supplied state. This is the recommended
+       pattern for tools that need a vectorstore / DB / API
+       client — no globals, no module-level setup, no event-loop
+       collisions.
+
+    2. **Module-level discovery** — when no ``build_tools`` is
+       exported, scan module attributes for :class:`Tool` instances
+       (typically the result of ``@tool``-decorating a function at
+       module level). Back-compatible with skills written before
+       the factory protocol existed.
+
+    Tool names are prefixed with ``{skill_name}__`` so multiple
+    skills exposing the same tool name don't clash when registered
+    with one agent.
+
+    Errors during import surface as :class:`SkillError` with a
+    contextual message — including a hint when the failure looks
+    like an event-loop collision (``asyncio.run`` at module level),
+    which is a frequent first-time mistake.
+    """
     if not tools_py.exists():
         return []
     module_name = (
-        f"_jeeves_skill_tools__{_normalize_skill_name(skill_name)}"
+        f"_loomflow_skill_tools__{_normalize_skill_name(skill_name)}"
     )
     module_spec = importlib.util.spec_from_file_location(
         module_name, tools_py
@@ -482,20 +588,68 @@ def _import_python_tools(skill_path: Path, skill_name: str) -> list[Tool]:
     sys.modules[module_name] = module
     try:
         module_spec.loader.exec_module(module)
+    except RuntimeError as exc:
+        # Surface the most common gotcha — module-level work that
+        # needs an event loop — with a pointer to the fix instead
+        # of the raw asyncio traceback.
+        if "event loop" in str(exc):
+            raise SkillError(
+                f"Error importing {tools_py}: {exc}\n"
+                f"\n"
+                f"Hint: ``tools.py`` runs when the skill is loaded "
+                f"by the agent (which already has a running event "
+                f"loop). Don't call ``asyncio.run(...)`` or do "
+                f"other event-loop work at module level. Either:\n"
+                f"  • Move the setup outside the skill folder "
+                f"(into your main script).\n"
+                f"  • Use a ``build_tools(ctx)`` factory in "
+                f"tools.py and read setup state from "
+                f"``ctx.metadata``."
+            ) from exc
+        raise SkillError(
+            f"Error importing {tools_py}: {exc}"
+        ) from exc
     except Exception as exc:  # noqa: BLE001 — surface ANY import error
         raise SkillError(
             f"Error importing {tools_py}: {exc}"
         ) from exc
 
     prefix = f"{_normalize_skill_name(skill_name)}__"
+
+    # 1. Factory protocol — preferred when state is needed.
+    factory = getattr(module, "build_tools", None)
+    if callable(factory):
+        try:
+            built = factory(ctx)
+        except Exception as exc:  # noqa: BLE001
+            raise SkillError(
+                f"Error calling build_tools(ctx) in {tools_py}: "
+                f"{exc}"
+            ) from exc
+        if not isinstance(built, list) or not all(
+            isinstance(t, Tool) for t in built
+        ):
+            raise SkillError(
+                f"build_tools(ctx) in {tools_py} must return a "
+                f"list[Tool]; got {type(built).__name__}."
+            )
+        return [
+            Tool(
+                name=f"{prefix}{t.name}",
+                description=t.description,
+                fn=t.fn,
+                input_schema=t.input_schema,
+            )
+            for t in built
+        ]
+
+    # 2. Back-compat — module-level @tool discovery.
     tools: list[Tool] = []
     for attr_name in dir(module):
         if attr_name.startswith("_"):
             continue
         obj = getattr(module, attr_name)
         if isinstance(obj, Tool):
-            # Re-create with the prefixed name so multiple skills
-            # exposing the same tool name don't clash on registration.
             tools.append(
                 Tool(
                     name=f"{prefix}{obj.name}",
