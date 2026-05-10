@@ -803,6 +803,56 @@ def test_to_dot_chain_emits_digraph() -> None:
     assert "label=\"END\"" in out
 
 
+async def test_add_edge_with_START_aliases_set_start() -> None:
+    """``add_edge(START, "first")`` should be a drop-in alias for
+    ``set_start("first")`` — graphs read symmetrically with the
+    ``END`` sentinel and matches the pattern LangGraph users
+    expect (``add_edge(START, ...)`` / ``add_edge(..., END)``)."""
+    from loomflow import START
+
+    async def first(x: int) -> int:
+        return x + 1
+
+    async def second(x: int) -> int:
+        return x * 2
+
+    wf = Workflow()
+    wf.add_node("first", first)
+    wf.add_node("second", second)
+    wf.add_edge(START, "first")  # alias for set_start("first")
+    wf.add_edge("first", "second")
+    wf.add_edge("second", END)
+
+    assert wf._start == "first"
+    result = await wf.run(3)
+    assert result.output == 8  # ((3 + 1) * 2)
+
+
+def test_add_edge_with_START_validates_target_is_a_node() -> None:
+    """``add_edge(START, END)`` is meaningless and should fail
+    loudly. Same for ``add_edge(START, START)``."""
+    from loomflow import START
+
+    wf = Workflow()
+    with pytest.raises(ValueError) as excinfo:
+        wf.add_edge(START, END)  # type: ignore[arg-type]
+    assert "target must be a registered node name" in str(excinfo.value)
+
+
+def test_add_edge_with_END_as_source_rejected() -> None:
+    """Only ``START`` is a valid source-side sentinel. ``END`` as
+    source is nonsense — flag it explicitly so the error doesn't
+    surface later as "source node 'END' is not registered"."""
+    wf = Workflow()
+    with pytest.raises(ValueError) as excinfo:
+        wf.add_edge(END, "anywhere")  # type: ignore[arg-type]
+    msg = str(excinfo.value)
+    assert "START" in msg
+    # The error should mention the actual remediation (set_start
+    # / add_edge(START, ...)) so the user can fix without docs.
+    assert "set_start" in msg or "add_edge(START" in msg
+
+
 def test_repr_markdown_wraps_mermaid_in_fenced_block() -> None:
     """``_repr_markdown_`` is what Jupyter calls when a user just
     types ``wf`` in a cell. It should wrap ``to_mermaid()`` in a

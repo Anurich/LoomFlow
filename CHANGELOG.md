@@ -24,6 +24,24 @@ Multi-tenancy and structured outputs are opt-in by passing
 to in-tree network adapters (OpenAI, Anthropic, LiteLLM); custom
 models opt in.
 
+### Added — `add_edge(START, "node")` as alias for `set_start("node")`
+
+The ``START`` sentinel was previously inert (just a name). It now
+works as an edge source so graphs read symmetrically with the
+``END`` sentinel:
+
+```python
+wf.add_edge(START, "first")     # alias for set_start("first")
+wf.add_edge("first", "second")
+wf.add_edge("second", END)
+```
+
+Matches the pattern users coming from LangGraph expect, and lets
+the entry / exit show up in mermaid diagrams via the same edge
+syntax. ``set_start`` continues to work — no breaking change.
+``add_edge(START, END)`` and ``add_edge(END, ...)`` are rejected
+with messages that point at the right method.
+
 ### Added — Workflow visualisation: `to_mermaid()` / `to_dot()` / Jupyter
 
 * **`Workflow.to_mermaid() -> str`** — returns a Mermaid

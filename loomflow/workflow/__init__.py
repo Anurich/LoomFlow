@@ -119,7 +119,9 @@ class _Sentinel:
 
 
 START = _Sentinel("START")
-"""Placeholder for the conceptual entry of a graph."""
+"""Sentinel source for ``add_edge(START, node)`` — alias for
+``set_start(node)``. Lets graphs read symmetrically with ``END``:
+``add_edge(START, "first")`` and ``add_edge("last", END)``."""
 
 END = _Sentinel("END")
 """Sentinel target for ``add_edge(node, END)`` — terminates the run."""
@@ -494,8 +496,32 @@ class Workflow:
         self._raw_nodes[name] = fn
         return self
 
-    def add_edge(self, source: str, target: str | _Sentinel) -> Workflow:
-        """Add an unconditional edge from ``source`` to ``target``."""
+    def add_edge(
+        self, source: str | _Sentinel, target: str | _Sentinel
+    ) -> Workflow:
+        """Add an unconditional edge from ``source`` to ``target``.
+
+        ``source`` can be ``START`` as an alias for
+        :meth:`set_start` — ``add_edge(START, "first")`` reads
+        symmetrically with ``add_edge("last", END)`` and matches
+        the pattern users coming from LangGraph expect. The
+        ``target`` of an ``add_edge(START, ...)`` call must be a
+        registered node name (not another sentinel).
+        """
+        if isinstance(source, _Sentinel):
+            if source is not START:
+                raise ValueError(
+                    f"add_edge source must be a node name or START; "
+                    f"got sentinel {source!r}. Use add_edge(node, END) "
+                    f"to terminate, set_start(name) / "
+                    f"add_edge(START, name) to mark entry."
+                )
+            if isinstance(target, _Sentinel):
+                raise ValueError(
+                    "add_edge(START, target): target must be a "
+                    "registered node name, not a sentinel."
+                )
+            return self.set_start(target)
         self._validate_source(source)
         self._edges[source] = target
         return self
