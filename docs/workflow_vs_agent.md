@@ -86,6 +86,27 @@ Both share the same observability spine — `RunContext`,
 single trace shows exactly which decisions were workflow-
 deterministic and which were LLM-driven.
 
+## Within Workflow: which constructor for which case?
+
+Once you've decided you want a workflow, the next question is
+which *shape*. Pick the simplest that fits — most users only ever
+need the sugar constructors.
+
+| Situation | Use | Why |
+|---|---|---|
+| Two or three sequential `await` calls, no branching, no observability needs | **Plain Python** (no framework) | The Workflow primitive earns its weight in observability + audit + cycles. Without those, a plain `async def` is shorter and clearer. |
+| Linear sequence, you want telemetry / audit / per-step events | `Workflow.chain([fn_a, fn_b, fn_c])` | One call. Each step's return is the next step's input. |
+| Classify input, dispatch to one of N specialists, terminate | `Workflow.route(classifier, {"a": h_a, "b": h_b}, default=...)` | One classifier, one fork, that's it — sugar for the most common branching pattern. |
+| Fan-out: run all N steps with the same input, merge results | `Workflow.parallel([s_1, s_2, s_3], merge=combine)` | `anyio` task group runs them concurrently. |
+| Anything with cycles, mid-graph branching, multi-stage routing, conditional entry | Explicit `add_node` + `add_edge` + `add_router` (+ `START` / `END` sentinels) | The graph becomes the artifact. Use `wf.to_mermaid()` to inspect. |
+
+**The hidden option is plain Python.** If you have three steps,
+no branching, and don't need audit / streaming / per-step
+telemetry, `await step_c(await step_b(await step_a(x)))` is a
+better fit than any framework call. Workflow earns its weight on
+*observability*, *cycles*, and *graph-as-artifact* — not on
+sequential composition alone.
+
 ## Three ways to write a workflow, ordered by ceremony
 
 ### 1. Plain Python with `@step` (recommended for short flows)
@@ -138,24 +159,38 @@ When you need conditional edges, multiple branches, or the graph
 itself is a deliverable (compliance, BPMN-like flows):
 
 ```python
-from loomflow import Workflow, END
+from loomflow import Workflow, START, END
 
 wf = Workflow("triage")
-wf.add_node("classify", classify)
 wf.add_node("billing", billing_agent)
 wf.add_node("tech", tech_agent)
 wf.add_node("fallback", fallback_handler)
-wf.set_start("classify")
+
+# Branch directly from START — classifier picks the first node.
 wf.add_router(
-    "classify",
-    lambda result: result.lower(),
-    {"billing": "billing", "tech": "tech"},
+    START,
+    fn=lambda q: classify(q).lower(),
+    routes={"billing": "billing", "tech": "tech"},
     default="fallback",
 )
 wf.add_edge("billing", END)
 wf.add_edge("tech", END)
 wf.add_edge("fallback", END)
 ```
+
+`START` and `END` are sentinels that work the same way in any
+edge-builder call:
+
+| Want to | Write |
+|---|---|
+| Mark a node as the entry | `wf.add_edge(START, "first")` (alias for `set_start`) |
+| Branch at the entry | `wf.add_router(START, fn=..., routes={...})` |
+| Terminate after a node | `wf.add_edge("last", END)` |
+| Branch then terminate one path | `routes={"done": END, "more": "next_node"}` |
+
+Visualise any workflow inline in Jupyter — just type `wf` in a
+cell, or call `wf.to_mermaid()` for the diagram source you can
+paste into GitHub or [mermaid.live](https://mermaid.live).
 
 ## Cycles and feedback loops
 

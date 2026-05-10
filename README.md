@@ -531,6 +531,61 @@ agent = Agent(
 
 ---
 
+## Workflows: pick the right shape (don't over-engineer)
+
+`Workflow` is the developer-controlled DAG, peer of `Agent`. It
+earns its weight when you need **observability**, **audit**,
+**cycles**, or **graph-as-artifact**. For straight-line code
+that just chains a few `await`s with no branching, *plain Python
+is shorter and clearer* — don't reach for the framework.
+
+**Decision tree, simplest first:**
+
+| Situation | Use | One-liner |
+|---|---|---|
+| 2-3 sequential `await`s, no branching, no audit needs | **Plain Python** | `await c(await b(await a(x)))` |
+| Linear sequence + telemetry / audit / per-step events | `Workflow.chain` | `Workflow.chain([a, b, c])` |
+| Classify input, dispatch to one of N handlers | `Workflow.route` | `Workflow.route(classify, {"a": h_a, "b": h_b}, default=...)` |
+| Fan-out + merge | `Workflow.parallel` | `Workflow.parallel([s1, s2], merge=combine)` |
+| Cycles, mid-graph branching, conditional entry | Explicit graph | `add_node` + `add_edge` + `add_router` (+ `START` / `END`) |
+
+Most users only ever need the sugar constructors. Reach for the
+explicit builder when the graph itself is the artifact (compliance
+flows, refinement loops, multi-stage routing).
+
+**Example — branch at the entry, then terminate per branch:**
+
+```python
+from loomflow import Workflow, START, END
+
+wf = Workflow("triage")
+wf.add_node("billing", billing_agent)
+wf.add_node("tech",    tech_agent)
+wf.add_router(
+    START,
+    fn=lambda q: "billing" if "invoice" in q else "tech",
+    routes={"billing": "billing", "tech": "tech"},
+)
+wf.add_edge("billing", END)
+wf.add_edge("tech",    END)
+
+result = await wf.run("I can't see my invoice", user_id="alice")
+```
+
+`START` and `END` are sentinels — drop them into `add_edge` /
+`add_router` as edge endpoints; no special methods to remember.
+Type `wf` in a Jupyter cell to render the graph inline.
+
+**Memory propagates to nested agents** — `Workflow(memory=mem)`
+is picked up by every agent in the graph that didn't specify its
+own `memory=`, so episodes / facts written by one agent are
+recall-able by the next without per-agent wiring.
+
+Full rubric (when to use Workflow at all vs. Agent, anti-patterns,
+both-at-once shapes): [`docs/workflow_vs_agent.md`](docs/workflow_vs_agent.md).
+
+---
+
 ## Skills: packaged playbooks the agent loads on demand
 
 Tools tell the agent **what** it can do. Skills tell it **how** —
