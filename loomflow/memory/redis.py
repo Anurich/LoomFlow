@@ -27,6 +27,7 @@ from ..core.errors import MemoryStoreError
 from ..core.protocols import Embedder
 from ..core.types import (
     Episode,
+    EpisodeMatch,
     Fact,
     MemoryBlock,
     MemoryExport,
@@ -35,6 +36,7 @@ from ..core.types import (
     Role,
 )
 from ._embedding_util import pack_float32, unpack_float32
+from ._hybrid import default_recall_scored
 from .embedder import HashEmbedder
 
 DEFAULT_KEY_PREFIX = "jeeves:episode:"
@@ -308,6 +310,29 @@ class RedisMemory:
         except Exception as exc:  # noqa: BLE001
             raise MemoryStoreError(f"RediSearch KNN query failed: {exc}") from exc
         return _decode_ft_search(result)
+
+    async def recall_scored(
+        self,
+        query: str,
+        *,
+        kind: str = "episodic",
+        limit: int = 5,
+        time_range: tuple[datetime, datetime] | None = None,
+        user_id: str | None = None,
+        alpha: float = 0.5,
+    ) -> list[EpisodeMatch]:
+        # Redis already does vector recall via RediSearch HNSW
+        # (or brute-force cosine fallback). This shim wraps the
+        # results with neutral scores; a future revision could
+        # plumb HNSW distances into ``vector_score``.
+        eps = await self.recall(
+            query,
+            kind=kind,
+            limit=limit,
+            time_range=time_range,
+            user_id=user_id,
+        )
+        return default_recall_scored(eps)
 
     async def _recall_brute_force(
         self, query_embedding: list[float], limit: int

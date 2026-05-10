@@ -20,6 +20,7 @@ import anyio
 from ..core.protocols import Embedder
 from ..core.types import (
     Episode,
+    EpisodeMatch,
     Fact,
     MemoryBlock,
     MemoryExport,
@@ -27,6 +28,7 @@ from ..core.types import (
     Message,
     Role,
 )
+from ._hybrid import default_recall_scored
 from .embedder import HashEmbedder
 
 DEFAULT_COLLECTION = "jeeves_episodes"
@@ -246,6 +248,32 @@ class ChromaMemory:
             lo, hi = time_range
             episodes = [e for e in episodes if lo <= e.occurred_at <= hi]
         return episodes
+
+    async def recall_scored(
+        self,
+        query: str,
+        *,
+        kind: str = "episodic",
+        limit: int = 5,
+        time_range: tuple[datetime, datetime] | None = None,
+        user_id: str | None = None,
+        alpha: float = 0.5,
+    ) -> list[EpisodeMatch]:
+        # Chroma already does vector recall under the hood; for now
+        # we wrap its results with neutral scores. A future revision
+        # could plumb Chroma's distance scores into ``vector_score``
+        # — that needs the underlying ``query`` call to request
+        # distances and a transform from L2/IP distance into a
+        # comparable cosine similarity. Out of scope for this
+        # protocol-evolution shim.
+        eps = await self.recall(
+            query,
+            kind=kind,
+            limit=limit,
+            time_range=time_range,
+            user_id=user_id,
+        )
+        return default_recall_scored(eps)
 
     async def _recall_recent(
         self,

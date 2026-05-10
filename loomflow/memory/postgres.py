@@ -27,6 +27,7 @@ import anyio
 from ..core.protocols import Embedder
 from ..core.types import (
     Episode,
+    EpisodeMatch,
     Fact,
     MemoryBlock,
     MemoryExport,
@@ -34,6 +35,7 @@ from ..core.types import (
     Message,
     Role,
 )
+from ._hybrid import default_recall_scored
 from .embedder import HashEmbedder
 
 DEFAULT_NAMESPACE = "default"
@@ -371,6 +373,29 @@ class PostgresMemory:
                 limit,
             )
         return _rows_to_episodes(_rows(rows))
+
+    async def recall_scored(
+        self,
+        query: str,
+        *,
+        kind: str = "episodic",
+        limit: int = 5,
+        time_range: tuple[datetime, datetime] | None = None,
+        user_id: str | None = None,
+        alpha: float = 0.5,
+    ) -> list[EpisodeMatch]:
+        # Postgres + pgvector already does HNSW cosine. This shim
+        # wraps with neutral scores; a future revision could plumb
+        # the L2/cosine distance into ``vector_score`` (the SELECT
+        # would need to return the operator's distance column).
+        eps = await self.recall(
+            query,
+            kind=kind,
+            limit=limit,
+            time_range=time_range,
+            user_id=user_id,
+        )
+        return default_recall_scored(eps)
 
     async def _recall_recent(
         self,

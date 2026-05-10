@@ -24,6 +24,55 @@ Multi-tenancy and structured outputs are opt-in by passing
 to in-tree network adapters (OpenAI, Anthropic, LiteLLM); custom
 models opt in.
 
+### Added — `Memory.recall_scored()` — hybrid BM25+vector retrieval with score breakdown
+
+A protocol-evolution change so adding rerankers / MMR / hybrid
+weighting later isn't a breaking surface change. The new
+``recall_scored`` method returns a list of :class:`EpisodeMatch`
+— each carrying the raw episode plus a fused score and the
+component scores (BM25, vector cosine, optional reranker) used
+to rank it. Callers that want to apply a downstream reranker, an
+MMR diversifier, or a score-threshold filter can now do so
+without re-running recall.
+
+```python
+matches = await agent.memory.recall_scored(
+    "postgres replication",
+    user_id="alice",
+    alpha=0.5,        # 0=BM25 only, 1=vector only, 0.5=balanced (RRF)
+)
+for m in matches:
+    print(m.episode.input, m.score, m.bm25_score, m.vector_score)
+```
+
+**Native hybrid implementations:**
+
+* :class:`InMemoryMemory` now ships a real BM25 ranker (replaces
+  the prior substring-match-then-recency behaviour). Episodes
+  whose ``input`` / ``output`` lexically match the query rank
+  ahead of unrelated recent episodes — a real recall-quality
+  upgrade for the default backend.
+* :class:`VectorMemory` does the full BM25 + cosine + Reciprocal
+  Rank Fusion (RRF) hybrid that the framework's vectorstore
+  module already used for RAG, now extended to agent memory.
+
+**Other backends (Chroma, Postgres, Redis, Sqlite, AutoExtract,
+Lazy)** ship a thin shim via the new
+:func:`loomflow.memory.default_recall_scored` helper that wraps
+their existing recall results with neutral scores. The protocol
+stays coherent; native hybrid implementations for those backends
+can land later without breaking callers.
+
+**Why this matters competitively:** before this change, Loom's
+recall was cosine + token-overlap fallback only — weaker than
+Zep (BM25 + vector + graph BFS + reranker) and CrewAI (composite
++ deep mode). After this change, Loom matches the hybrid-recall
+baseline of the field for in-process memory, with the protocol
+shape ready for a reranker / MMR / cross-encoder layer when
+someone needs one. The full bi-temporal + auto-extract +
+multi-tenant + hybrid-recall combination doesn't exist anywhere
+else open-source.
+
 ### Changed — Skills `tools.py` now imports lazily + `build_tools(ctx)` factory
 
 Two related improvements to how Loom skills load their Python

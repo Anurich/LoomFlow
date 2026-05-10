@@ -18,6 +18,7 @@ from ..core._eviction import BoundedDict
 from ..core.context import IsolationWarning
 from ..core.types import (
     Episode,
+    EpisodeMatch,
     Fact,
     MemoryBlock,
     MemoryExport,
@@ -25,6 +26,7 @@ from ..core.types import (
     Message,
     Role,
 )
+from ._hybrid import _BM25, hybrid_rank
 from .consolidator import Consolidator
 from .facts import FactStore, InMemoryFactStore
 
@@ -144,6 +146,111 @@ class InMemoryMemory:
         # ``kind`` and the absent semantic store are pre-existing
         # caveats; both modes still go through recency-fallback.
         return await self._recall_recent(query, limit, time_range, user_id)
+
+    async def recall_scored(
+        self,
+        query: str,
+        *,
+        kind: str = "episodic",
+        limit: int = 5,
+        time_range: tuple[datetime, datetime] | None = None,
+        user_id: str | None = None,
+        alpha: float = 0.5,
+    ) -> list[EpisodeMatch]:
+        """Hybrid recall via BM25 + Reciprocal Rank Fusion.
+
+        :class:`InMemoryMemory` doesn't carry an embedder (its
+        whole point is being zero-config), so the "vector" arm is
+        empty and ``alpha`` collapses to BM25-only ranking. The
+        result still uses :class:`EpisodeMatch` so downstream code
+        can treat all backends uniformly — ``vector_score`` is
+        ``None`` to flag that it wasn't computed for this backend.
+
+        For real semantic recall, use :class:`VectorMemory` (which
+        ships its own embedder + cosine + BM25 hybrid) or one of
+        the persistent backends (Chroma, Postgres, Redis).
+
+        Empty query and zero-match queries fall back to recency
+        ordering with neutral scores so the caller always sees the
+        most-recent episodes when no lexical signal is present.
+        """
+        # Reuse the existing partitioning + warning + time-range
+        # logic by sharing a single private candidate-pool helper.
+        candidates = await self._candidate_episodes(
+            query, time_range, user_id
+        )
+        if not candidates:
+            return []
+
+        if not query.strip():
+            # No query → recency ordering, neutral scores.
+            sorted_recent = sorted(
+                candidates, key=lambda e: e.occurred_at, reverse=True
+            )[:limit]
+            return [
+                EpisodeMatch(episode=e, score=1.0) for e in sorted_recent
+            ]
+
+        # Build a BM25 index over the candidate pool only — no
+        # cross-user contamination because filtering already
+        # happened in ``_candidate_episodes``.
+        texts = [f"{e.input}\n{e.output}" for e in candidates]
+        bm25 = _BM25(texts)
+        bm25_ranking = bm25.rank(query)
+
+        # No vector arm in this backend; pass an empty ranking and
+        # rely on hybrid_rank to fall through to BM25-only.
+        fused = hybrid_rank(
+            bm25_ranking=bm25_ranking,
+            vector_ranking=[],
+            alpha=alpha,
+        )
+        if not fused:
+            # No BM25 hits either — fall back to recency so the
+            # caller always gets *something* useful.
+            sorted_recent = sorted(
+                candidates, key=lambda e: e.occurred_at, reverse=True
+            )[:limit]
+            return [
+                EpisodeMatch(episode=e, score=0.0) for e in sorted_recent
+            ]
+        return [
+            EpisodeMatch(
+                episode=candidates[idx],
+                score=score,
+                bm25_score=bm25_score,
+                vector_score=vector_score,
+            )
+            for idx, score, bm25_score, vector_score in fused[:limit]
+        ]
+
+    async def _candidate_episodes(
+        self,
+        query: str,
+        time_range: tuple[datetime, datetime] | None,
+        user_id: str | None,
+    ) -> list[Episode]:
+        """Shared partition + time-range filter so ``recall`` and
+        ``recall_scored`` share the user_id / time_range logic
+        (including the IsolationWarning footgun-guard) and only
+        differ on ranking."""
+        async with self._lock:
+            episodes = list(self._episodes.values())
+        if user_id is None and any(e.user_id is not None for e in episodes):
+            warnings.warn(
+                "Memory.recall called without user_id, but the store "
+                "contains episodes for one or more named users. The "
+                "anonymous bucket is partitioned from named-user "
+                "buckets, so this query will only see anonymous "
+                "episodes. Did you forget to pass user_id=?",
+                IsolationWarning,
+                stacklevel=4,
+            )
+        episodes = [e for e in episodes if e.user_id == user_id]
+        if time_range is not None:
+            lo, hi = time_range
+            episodes = [e for e in episodes if lo <= e.occurred_at <= hi]
+        return episodes
 
     async def _recall_recent(
         self,

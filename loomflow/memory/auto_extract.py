@@ -41,12 +41,14 @@ from typing import Any
 from ..core.protocols import Memory, Telemetry
 from ..core.types import (
     Episode,
+    EpisodeMatch,
     Fact,
     MemoryBlock,
     MemoryExport,
     MemoryProfile,
     Message,
 )
+from ._hybrid import default_recall_scored
 from .consolidator import Consolidator
 
 __all__ = ["AutoExtractMemory"]
@@ -228,6 +230,39 @@ class AutoExtractMemory:
             user_id=user_id,
         )
         return result
+
+    async def recall_scored(
+        self,
+        query: str,
+        *,
+        kind: str = "episodic",
+        limit: int = 5,
+        time_range: tuple[datetime, datetime] | None = None,
+        user_id: str | None = None,
+        alpha: float = 0.5,
+    ) -> list[EpisodeMatch]:
+        # Wrapper — pass through to the inner backend's scored
+        # recall when it has one (preserves component scores);
+        # otherwise wrap raw recall results with neutral scores.
+        inner_scored = getattr(self._inner, "recall_scored", None)
+        if inner_scored is not None:
+            scored: list[EpisodeMatch] = await inner_scored(
+                query,
+                kind=kind,
+                limit=limit,
+                time_range=time_range,
+                user_id=user_id,
+                alpha=alpha,
+            )
+            return scored
+        eps = await self._inner.recall(
+            query,
+            kind=kind,
+            limit=limit,
+            time_range=time_range,
+            user_id=user_id,
+        )
+        return default_recall_scored(eps)
 
     async def recall_facts(
         self,

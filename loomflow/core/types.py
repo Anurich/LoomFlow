@@ -172,6 +172,49 @@ class Episode(BaseModel):
         return f"[{self.occurred_at.isoformat()}] {self.input!r} -> {self.output!r}"
 
 
+class EpisodeMatch(BaseModel):
+    """A recalled :class:`Episode` paired with its retrieval scores.
+
+    Returned by :meth:`Memory.recall_scored`. Carries enough metadata
+    for downstream code (rerankers, MMR diversification, score-based
+    filtering, A/B retrieval-quality experiments) to reason about
+    *why* this episode was selected without re-running recall.
+
+    The ``score`` field is the **fused final score** the backend used
+    to rank this match — backends are free to define what "1.0 means
+    best" looks like for their algorithm. The component fields
+    (``vector_score``, ``bm25_score``, ``rerank_score``) are
+    optional breakdowns; ``None`` means "this component wasn't
+    computed or doesn't apply for this backend".
+
+    Adding new score components is a backward-compatible field
+    addition (Pydantic ignores unknown fields by default and adds
+    ``None`` defaults for new ones), so the protocol can grow
+    without breaking existing backends.
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    episode: Episode
+    score: float
+    """Final fused score the backend used for ranking. Higher is
+    better. Range and meaning are backend-defined."""
+
+    vector_score: float | None = None
+    """Cosine-similarity component, in ``[-1, 1]``. ``None`` when
+    the backend didn't compute embeddings for this query (e.g.
+    no embedder configured, or pure-lexical recall)."""
+
+    bm25_score: float | None = None
+    """BM25 lexical-match component. ``None`` when the backend
+    didn't compute a BM25 ranking (e.g. pure-vector backends)."""
+
+    rerank_score: float | None = None
+    """Optional cross-encoder / LLM reranker score, computed AFTER
+    the initial fused ranking. ``None`` when no reranker was
+    configured."""
+
+
 class Fact(BaseModel):
     """A semantic claim extracted from one or more episodes.
 

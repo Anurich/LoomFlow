@@ -50,6 +50,7 @@ from ..core.context import IsolationWarning
 from ..core.protocols import Embedder
 from ..core.types import (
     Episode,
+    EpisodeMatch,
     Fact,
     MemoryBlock,
     MemoryExport,
@@ -58,6 +59,7 @@ from ..core.types import (
     Role,
 )
 from ._embedding_util import pack_float32, unpack_float32
+from ._hybrid import default_recall_scored
 from .embedder import HashEmbedder
 from .facts import FactStore
 from .sqlite_facts import SqliteFactStore
@@ -427,6 +429,28 @@ class SqliteMemory:
             scored.append((_cosine(query_vector, vec), row))
         scored.sort(key=lambda pair: pair[0], reverse=True)
         return [_row_to_episode(r) for _, r in scored[:limit]]
+
+    async def recall_scored(
+        self,
+        query: str,
+        *,
+        kind: str = "episodic",
+        limit: int = 5,
+        time_range: tuple[datetime, datetime] | None = None,
+        user_id: str | None = None,
+        alpha: float = 0.5,
+    ) -> list[EpisodeMatch]:
+        # Sqlite recall already does cosine over candidate
+        # embeddings; this shim wraps with neutral scores. A future
+        # revision could plumb the cosine value into ``vector_score``.
+        eps = await self.recall(
+            query,
+            kind=kind,
+            limit=limit,
+            time_range=time_range,
+            user_id=user_id,
+        )
+        return default_recall_scored(eps)
 
     async def _recall_recent(
         self,

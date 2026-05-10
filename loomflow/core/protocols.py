@@ -20,6 +20,7 @@ from typing import Any, Protocol, runtime_checkable
 from .types import (
     BudgetStatus,
     Episode,
+    EpisodeMatch,
     Event,
     Fact,
     MemoryBlock,
@@ -130,6 +131,46 @@ class Memory(Protocol):
         visible to a query with ``user_id="alice"`` and vice versa.
         Backends MUST honour this filter to preserve the framework's
         multi-tenant safety contract.
+        """
+        ...
+
+    async def recall_scored(
+        self,
+        query: str,
+        *,
+        kind: str = "episodic",
+        limit: int = 5,
+        time_range: tuple[datetime, datetime] | None = None,
+        user_id: str | None = None,
+        alpha: float = 0.5,
+    ) -> list[EpisodeMatch]:
+        """Hybrid recall returning episodes paired with retrieval
+        scores.
+
+        Same filtering semantics as :meth:`recall` (``user_id``
+        partition, ``time_range``, ``kind``), but instead of bare
+        :class:`Episode` rows the result is a list of
+        :class:`EpisodeMatch` carrying the score breakdown — vector,
+        BM25, optional reranker — used to rank each match.
+
+        ``alpha`` weights the lexical-vs-vector mix in backends
+        that compute both: ``0.0`` is pure BM25, ``1.0`` is pure
+        vector cosine, ``0.5`` (default) is balanced via Reciprocal
+        Rank Fusion. Backends without one of the rankings ignore
+        ``alpha`` for that direction.
+
+        **Backends without a native hybrid implementation MAY
+        delegate to** :meth:`recall` and wrap each :class:`Episode`
+        with a neutral ``score=1.0`` — see
+        :func:`loomflow.memory.default_recall_scored` for the
+        helper. This keeps the protocol coherent while making
+        native hybrid implementations strictly opt-in for richer
+        ranking.
+
+        Use this method when you care about *which* episodes won
+        and *why* — for downstream rerankers, MMR diversification,
+        score-threshold filters, or A/B retrieval-quality tests.
+        Use :meth:`recall` when you only need the rows.
         """
         ...
 
