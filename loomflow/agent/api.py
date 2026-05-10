@@ -1559,6 +1559,14 @@ def _coerce_tool_host(
         return InProcessToolHost([tools])
     if callable(tools):
         return InProcessToolHost([tools])
-    raise TypeError(f"unsupported tools= argument: {type(tools).__name__}")
+    raise TypeError(
+        f"tools= must be None, a list, a Tool, a callable, or a "
+        f"ToolHost; got {type(tools).__name__}: {tools!r}.\n"
+        f"Valid forms:\n"
+        f"  • tools=None — no tools\n"
+        f"  • tools=[my_fn, other_fn] — list of @tool functions / callables\n"
+        f"  • tools=my_fn — single tool (auto-wrapped in a list)\n"
+        f"  • tools=my_tool_host — a ToolHost instance (has list_tools + call)"
+    )
 
 

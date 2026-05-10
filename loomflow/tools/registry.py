@@ -136,7 +136,16 @@ def _coerce_tool(item: Tool | Callable[..., Any]) -> Tool:
         return item
     if callable(item):
         return tool(item)
-    raise TypeError(f"cannot coerce {item!r} to a Tool")
+    raise TypeError(
+        f"tools= entries must be Tool instances or callables "
+        f"(decorate with @tool or pass a plain function); "
+        f"got {type(item).__name__}: {item!r}.\n"
+        f"Example:\n"
+        f"  from loomflow.tools import tool\n"
+        f"  @tool\n"
+        f"  async def my_tool(query: str) -> str: ...\n"
+        f"  agent = Agent(..., tools=[my_tool])"
+    )
 
 
 class InProcessToolHost:

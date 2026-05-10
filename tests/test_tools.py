@@ -363,3 +363,41 @@ async def test_external_hook_registry_is_used() -> None:
     await agent.run("...")
 
     assert seen_pre == ["echo"]
+
+
+# ---------------------------------------------------------------------------
+# tools= argument validation — clear errors on wrong-shape input
+# ---------------------------------------------------------------------------
+
+
+def test_tools_argument_rejects_unsupported_type_with_clear_error() -> None:
+    """Passing something that isn't None / list / Tool / callable /
+    ToolHost (e.g. a dict) used to fail with a one-line type-name
+    error. Now the message lists every accepted form so the user can
+    pick the right one."""
+
+    model = _scripted(ScriptedTurn(text="ok"))
+
+    with pytest.raises(TypeError) as excinfo:
+        Agent("test", model=model, tools={"not": "a tool"})  # type: ignore[arg-type]
+
+    msg = str(excinfo.value)
+    assert "tools=" in msg
+    # Must list at least the major valid forms so the user can fix.
+    assert "list" in msg
+    assert "Tool" in msg
+    assert "ToolHost" in msg
+
+
+def test_tools_list_entry_rejects_non_callable_with_example() -> None:
+    """A non-callable inside ``tools=[...]`` (e.g. a string by
+    mistake) used to fail with a bare repr; now the message shows
+    a working ``@tool`` example and explains where to put it."""
+    from loomflow.tools.registry import _coerce_tool
+
+    with pytest.raises(TypeError) as excinfo:
+        _coerce_tool("not a callable")  # type: ignore[arg-type]
+
+    msg = str(excinfo.value)
+    assert "@tool" in msg
+    assert "agent = Agent" in msg or "tools=" in msg

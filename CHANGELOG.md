@@ -24,6 +24,32 @@ Multi-tenancy and structured outputs are opt-in by passing
 to in-tree network adapters (OpenAI, Anthropic, LiteLLM); custom
 models opt in.
 
+### Changed — Boundary-input errors now name the fix, not just the failure
+
+A pass over the most-hit user entry points: when the framework
+rejects a wrong-shape argument, the error message now (1) names
+the offending value, (2) lists the accepted forms, and (3) shows
+a working example. The goal is "fail fast at the point of
+mis-use, with the next step in the message" — replacing several
+errors that previously surfaced deep inside the runtime as
+generic Python exceptions (`'str' can't be used in 'await'
+expression`, `list.append() takes no keyword arguments`, etc.).
+
+* **`Workflow(audit_log=...)` accepts `str` / `Path`** — auto-
+  wraps as :class:`~loomflow.security.FileAuditLog` so users can
+  write `Workflow.chain(..., audit_log="run.log")` without
+  importing the backend. Anything else (e.g. a bare `list`) is
+  rejected at construction time with a `TypeError` listing the
+  four valid forms (`InMemoryAuditLog`, `FileAuditLog`, path
+  string/`Path`, `None`).
+* **`Agent(tools=...)` rejection** — non-list / non-Tool / non-
+  callable / non-`ToolHost` values now fail with a message that
+  names every accepted form (`tools=None`, list, single tool,
+  single callable, `ToolHost` instance).
+* **`tools=[entry]` rejection** — non-callable list entries now
+  fail with a `@tool`-decorated function example in the error
+  text, so the user sees the fix inline.
+
 ### Changed — Workflow `@step` decorator: clearer error on sync functions
 
 * **`@step` now raises at decoration time** when applied to a

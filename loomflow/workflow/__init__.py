@@ -85,6 +85,8 @@ if TYPE_CHECKING:
     # lazily at runtime inside ``_coerce_step`` to avoid a circular
     # import). ``AuditLog`` IS used in a string annotation on the
     # ``Workflow`` constructor, so it stays.
+    from pathlib import Path  # noqa: F401
+
     from ..security.audit import AuditLog  # noqa: F401
 
 __all__ = [
@@ -346,6 +348,68 @@ def step(
 
 
 # ---------------------------------------------------------------------------
+# audit_log= resolver — accepts an AuditLog instance, a path string /
+# Path (auto-wrapped as ``FileAuditLog``), or ``None``. Validates at
+# construction time so a wrong-shape value (e.g. a bare ``list``) fails
+# loudly here instead of deep inside ``Workflow._audit`` with the
+# cryptic ``list.append() takes no keyword arguments``.
+# ---------------------------------------------------------------------------
+
+
+def _resolve_audit_log(spec: Any) -> AuditLog | None:
+    """Normalise the ``audit_log=`` constructor argument.
+
+    Accepted forms:
+
+    * ``None`` — no audit log; pass-through.
+    * ``str`` / :class:`pathlib.Path` — sugar for
+      :class:`~loomflow.security.FileAuditLog`. Lets callers write
+      ``Workflow.chain(..., audit_log="run.log")`` without importing
+      the backend explicitly.
+    * Any object satisfying the :class:`AuditLog` protocol
+      (``InMemoryAuditLog``, ``FileAuditLog``, or a custom
+      implementation with the right ``append`` + ``query``
+      surface).
+
+    Anything else raises :class:`TypeError` immediately, naming the
+    offending type and listing the valid options. The protocol is
+    runtime-checkable, so a bare ``list`` (which has ``append`` but
+    no ``query``) is rejected here rather than blowing up later
+    inside ``_audit`` with ``list.append() takes no keyword
+    arguments``.
+    """
+    if spec is None:
+        return None
+
+    # Path-spec sugar.
+    from pathlib import Path
+
+    if isinstance(spec, (str, Path)):
+        from ..security.audit import FileAuditLog
+
+        return FileAuditLog(spec)
+
+    # Real AuditLog instance.
+    from ..security.audit import AuditLog as _AuditLog
+
+    if isinstance(spec, _AuditLog):
+        return spec  # type: ignore[no-any-return]
+
+    raise TypeError(
+        f"audit_log= must be an AuditLog instance, a path "
+        f"(str / pathlib.Path), or None; got "
+        f"{type(spec).__name__}: {spec!r}.\n"
+        f"Valid options:\n"
+        f"  • InMemoryAuditLog() — keep entries in memory "
+        f"(good for tests / notebooks)\n"
+        f"  • FileAuditLog('run.log') — JSONL on disk\n"
+        f"  • 'run.log' or Path('run.log') — sugar for "
+        f"FileAuditLog\n"
+        f"  • None — disable audit logging"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Workflow — the main primitive
 # ---------------------------------------------------------------------------
 
@@ -383,7 +447,7 @@ class Workflow:
         name: str = "workflow",
         *,
         telemetry: Telemetry | None = None,
-        audit_log: AuditLog | None = None,
+        audit_log: AuditLog | str | Path | None = None,
         max_steps: int = 100,
         max_visits_per_node: int = 25,
     ) -> None:
@@ -415,7 +479,7 @@ class Workflow:
         self._edges: dict[str, _EdgeTarget] = {}
         self._start: str | None = None
         self._telemetry = telemetry
-        self._audit_log = audit_log
+        self._audit_log = _resolve_audit_log(audit_log)
         self._max_steps = max_steps
         self._max_visits_per_node = max_visits_per_node
 
@@ -698,7 +762,7 @@ class Workflow:
         *,
         name: str = "chain",
         telemetry: Telemetry | None = None,
-        audit_log: AuditLog | None = None,
+        audit_log: AuditLog | str | Path | None = None,
         max_steps: int = 100,
         max_visits_per_node: int = 25,
     ) -> Workflow:
@@ -747,7 +811,7 @@ class Workflow:
         default: StepLike | None = None,
         name: str = "route",
         telemetry: Telemetry | None = None,
-        audit_log: AuditLog | None = None,
+        audit_log: AuditLog | str | Path | None = None,
         max_steps: int = 100,
         max_visits_per_node: int = 25,
     ) -> Workflow:
@@ -837,7 +901,7 @@ class Workflow:
         merge: Callable[[list[Any]], Any] | None = None,
         name: str = "parallel",
         telemetry: Telemetry | None = None,
-        audit_log: AuditLog | None = None,
+        audit_log: AuditLog | str | Path | None = None,
         max_steps: int = 100,
         max_visits_per_node: int = 25,
     ) -> Workflow:

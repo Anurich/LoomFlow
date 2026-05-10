@@ -611,3 +611,93 @@ async def test_audit_log_receives_per_step_entries() -> None:
     assert actions.count("step_completed") == 2
     # All entries attributed to alice.
     assert all(e.user_id == "alice" for e in entries)
+
+
+# ---------------------------------------------------------------------------
+# audit_log= resolver — sugar + validation
+# ---------------------------------------------------------------------------
+
+
+async def test_audit_log_string_path_auto_wraps_as_file_audit_log(
+    tmp_path: Any,
+) -> None:
+    """``audit_log='run.log'`` should auto-construct a ``FileAuditLog``
+    so users don't have to import the backend just to enable disk
+    logging — same ergonomic pattern as ``model='gpt-4.1-mini'``."""
+    from loomflow.security import FileAuditLog
+
+    log_path = tmp_path / "run.log"
+
+    async def a(x: int) -> int:
+        return x + 1
+
+    wf = Workflow.chain([a], audit_log=str(log_path))
+    assert isinstance(wf._audit_log, FileAuditLog)
+
+    await wf.run(1, user_id="u", session_id="s")
+    # File was actually written to.
+    assert log_path.exists()
+    assert log_path.stat().st_size > 0
+
+
+async def test_audit_log_pathlib_path_auto_wraps_as_file_audit_log(
+    tmp_path: Any,
+) -> None:
+    """``Path`` objects work the same as raw strings for the sugar."""
+    from loomflow.security import FileAuditLog
+
+    log_path = tmp_path / "run.log"
+
+    async def a(x: int) -> int:
+        return x
+
+    wf = Workflow.chain([a], audit_log=log_path)
+    assert isinstance(wf._audit_log, FileAuditLog)
+
+
+def test_audit_log_rejects_list_with_clear_error() -> None:
+    """A bare ``list`` has ``append`` but isn't an AuditLog — used
+    to fail deep in ``_audit`` with ``list.append() takes no
+    keyword arguments``. Now rejected at construction time with a
+    message that lists the valid options."""
+
+    async def a(x: int) -> int:
+        return x
+
+    with pytest.raises(TypeError) as excinfo:
+        Workflow.chain([a], audit_log=["run.log"])  # type: ignore[arg-type]
+
+    msg = str(excinfo.value)
+    assert "audit_log" in msg
+    assert "list" in msg.lower()
+    # Both file and in-memory backends should be advertised so the
+    # user can pick.
+    assert "FileAuditLog" in msg
+    assert "InMemoryAuditLog" in msg
+
+
+def test_audit_log_rejects_arbitrary_object_with_clear_error() -> None:
+    """Anything that isn't None, str/Path, or AuditLog is rejected."""
+
+    async def a(x: int) -> int:
+        return x
+
+    class NotAnAuditLog:
+        pass
+
+    with pytest.raises(TypeError) as excinfo:
+        Workflow.chain([a], audit_log=NotAnAuditLog())  # type: ignore[arg-type]
+
+    assert "audit_log" in str(excinfo.value)
+
+
+async def test_audit_log_accepts_audit_log_instance_unchanged() -> None:
+    """An ``InMemoryAuditLog`` (which conforms to the protocol) must
+    pass through the resolver untouched — not wrapped, not rejected."""
+
+    async def a(x: int) -> int:
+        return x
+
+    audit = InMemoryAuditLog()
+    wf = Workflow.chain([a], audit_log=audit)
+    assert wf._audit_log is audit
