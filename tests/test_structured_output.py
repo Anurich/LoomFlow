@@ -24,7 +24,7 @@ from typing import Any
 import pytest
 from pydantic import BaseModel
 
-from loomflow import Agent, OutputValidationError
+from loomflow import Agent, OutputValidationError, Role
 from loomflow.model.scripted import ScriptedModel, ScriptedTurn
 
 pytestmark = pytest.mark.anyio
@@ -222,6 +222,68 @@ async def test_validation_failure_after_exhausted_retries_raises() -> None:
         await agent.run(
             "...", output_schema=CompanyInfo, output_validation_retries=1
         )
+
+
+# ---------------------------------------------------------------------------
+# Native structured output skips the in-prompt schema directive
+# ---------------------------------------------------------------------------
+
+
+async def test_native_structured_output_skips_in_prompt_schema_directive() -> None:
+    """When the model adapter declares
+    ``supports_native_structured_output = True``, the agent loop
+    must NOT also paste the JSON Schema into the system prompt —
+    that's pure dead tokens (the API-level constraint already
+    forces valid JSON). This test guards against accidentally
+    re-introducing the double-injection that bloated structured-
+    output token usage by ~3× in the v0.9 benchmark vs LangGraph
+    and Pydantic AI.
+    """
+    payload = {"name": "Acme", "founded_year": 2008, "headquarters": "Berlin"}
+    model = _CapturingScripted([ScriptedTurn(text=json.dumps(payload))])
+    # The scripted/capturing fake doesn't claim native support by
+    # default, so flip the flag manually for the test scope.
+    model.supports_native_structured_output = True  # type: ignore[attr-defined]
+
+    agent = Agent("base instructions", model=model)
+    result = await agent.run("...", output_schema=CompanyInfo)
+
+    # Parsing still works.
+    assert isinstance(result.parsed, CompanyInfo)
+
+    # The system message the model saw must NOT contain the JSON
+    # Schema directive. Look at what we captured.
+    sent_messages = model.captured[0]
+    system_text = next(
+        (m.content for m in sent_messages if m.role == Role.SYSTEM),
+        "",
+    )
+    assert "STRUCTURED OUTPUT REQUIRED" not in system_text
+    assert "json_schema" not in system_text.lower()
+    # The base instructions ARE there — we only stripped the directive.
+    assert "base instructions" in system_text
+
+
+async def test_non_native_model_still_gets_in_prompt_schema_directive() -> None:
+    """Custom user-supplied adapters that don't declare
+    ``supports_native_structured_output`` keep the prompt-augmentation
+    safety net — the model needs the schema in the prompt to know
+    what to emit, since there's no decode-time constraint."""
+    payload = {"name": "Acme", "founded_year": 2008, "headquarters": "Berlin"}
+    model = _CapturingScripted([ScriptedTurn(text=json.dumps(payload))])
+    # Default = not native; nothing to flip.
+
+    agent = Agent("base instructions", model=model)
+    result = await agent.run("...", output_schema=CompanyInfo)
+
+    assert isinstance(result.parsed, CompanyInfo)
+    sent_messages = model.captured[0]
+    system_text = next(
+        (m.content for m in sent_messages if m.role == Role.SYSTEM),
+        "",
+    )
+    # Directive present for the non-native fallback path.
+    assert "STRUCTURED OUTPUT REQUIRED" in system_text
 
 
 # ---------------------------------------------------------------------------

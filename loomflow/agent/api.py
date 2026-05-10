@@ -1132,14 +1132,33 @@ class Agent:
             await emit(Event.started(session_id, prompt))
 
             # Append the JSON-schema directive when a structured
-            # output is requested — augments the agent's base
-            # instructions for this run only, leaving the static
-            # ``self._instructions`` unchanged.
+            # output is requested AND the model adapter doesn't have
+            # a provider-native structured-output API. Adapters
+            # flagged ``supports_native_structured_output = True``
+            # (OpenAI, Anthropic, LiteLLM-passthrough) translate the
+            # schema into a decode-time constraint, so duplicating
+            # the schema as text in the system prompt is just dead
+            # tokens. Saves ~2k input tokens per structured-output
+            # call. Validation-retry still injects the schema into
+            # the retry message if the model ever produces invalid
+            # JSON, so reliability is preserved.
+            #
+            # We check ``self._model`` (the raw adapter) rather than
+            # ``_wrapped_model`` (which adds retry decoration) — the
+            # flag is an adapter-level capability, not a wrapper one.
+            native_structured = (
+                output_schema is not None
+                and getattr(
+                    self._model,
+                    "supports_native_structured_output",
+                    False,
+                )
+            )
             effective_instructions = (
                 _augment_instructions_for_schema(
                     self._instructions, output_schema
                 )
-                if output_schema is not None
+                if output_schema is not None and not native_structured
                 else self._instructions
             )
 

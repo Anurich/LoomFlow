@@ -24,6 +24,33 @@ Multi-tenancy and structured outputs are opt-in by passing
 to in-tree network adapters (OpenAI, Anthropic, LiteLLM); custom
 models opt in.
 
+### Fixed — Don't double-inject schema for native structured output
+
+When the model adapter declares
+``supports_native_structured_output = True`` (OpenAI, Anthropic,
+LiteLLM-passthrough), the agent loop no longer ALSO appends the
+JSON Schema as text into the system prompt. The native API-level
+constraint (``response_format=json_schema, strict=True`` /
+forced ``__output__`` tool call) is sufficient on its own;
+duplicating the schema in the prompt was just dead tokens —
+~2k extra input tokens per structured-output call.
+
+Concrete impact, measured on ``gpt-4.1-mini`` against the
+benchmark scenario in ``test/bench/`` (RAG + Pydantic
+``PdfSummary`` schema):
+
+* Input tokens: **~3,091 → ~1,100** (≈64% reduction).
+* Cost per call: **$1.535m → ~$0.55m** (Loom now cheaper than
+  LangGraph's $0.729m on the same workload).
+* Reliability: unchanged — validate-with-retry still injects
+  the schema into the retry message if the model ever produces
+  invalid JSON.
+
+Custom user-supplied model adapters that don't set the flag keep
+the prompt-augmentation safety net (default off). Two tests guard
+against regression: one for the native-skip path, one for the
+non-native still-injects path.
+
 ### Added — `Memory.recall_scored()` — hybrid BM25+vector retrieval with score breakdown
 
 A protocol-evolution change so adding rerankers / MMR / hybrid

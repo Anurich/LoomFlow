@@ -40,6 +40,15 @@ class _PartialTool:
 class AnthropicModel:
     """Talks to Claude via :class:`anthropic.AsyncAnthropic`."""
 
+    # See ``OpenAIModel.supports_native_structured_output``. Anthropic
+    # has no first-party ``response_format``; we translate
+    # ``output_schema`` into a forced tool call (``tool_choice``
+    # pointing at a synthetic ``__output__`` tool whose ``input_schema``
+    # IS the requested schema). The tool is required, so the model
+    # MUST emit a JSON object matching the schema. Equivalent
+    # constraint, no schema text needed in the prompt.
+    supports_native_structured_output: bool = True
+
     def __init__(
         self,
         model: str = "claude-opus-4-7",

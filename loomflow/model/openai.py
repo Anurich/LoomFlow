@@ -35,6 +35,17 @@ class _OAIPartial:
 class OpenAIModel:
     """Talks to OpenAI via :class:`openai.AsyncOpenAI`."""
 
+    # Tells the agent loop this adapter translates ``output_schema``
+    # into a provider-native call (``response_format=json_schema``,
+    # ``strict=True``). When True, the loop skips the redundant
+    # in-prompt JSON Schema directive — the API-level constraint is
+    # enough on its own. Saves ~2k input tokens per structured-output
+    # call without changing reliability (the validate-with-retry
+    # path still adds the schema to the retry message if validation
+    # ever fails). Off-by-default so unknown / custom adapters keep
+    # the prompt-augmentation safety net.
+    supports_native_structured_output: bool = True
+
     def __init__(
         self,
         model: str = "gpt-4o",
