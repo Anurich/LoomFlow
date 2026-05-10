@@ -803,6 +803,158 @@ def test_to_dot_chain_emits_digraph() -> None:
     assert "label=\"END\"" in out
 
 
+async def test_add_router_with_START_picks_first_node_from_input() -> None:
+    """``add_router(START, fn=..., routes=...)`` should branch at
+    the entry of the graph: ``fn(input)`` is evaluated against the
+    workflow's input value and the matching node becomes the first
+    one executed. Mirrors LangGraph's ``add_conditional_edges(
+    START, ...)``."""
+    from loomflow import START
+
+    async def step_a(q: str) -> str:
+        return f"A:{q}"
+
+    async def step_b(q: str) -> str:
+        return f"B:{q}"
+
+    def classify(q: str) -> str:
+        return "a" if "alpha" in q else "b"
+
+    wf = Workflow()
+    wf.add_node("step_a", step_a)
+    wf.add_node("step_b", step_b)
+    wf.add_router(
+        START,
+        fn=classify,
+        routes={"a": "step_a", "b": "step_b"},
+    )
+    wf.add_edge("step_a", END)
+    wf.add_edge("step_b", END)
+
+    # Branch picked by classifier.
+    r1 = await wf.run("hello alpha")
+    assert r1.output == "A:hello alpha"
+
+    r2 = await wf.run("hello beta")
+    assert r2.output == "B:hello beta"
+
+
+async def test_add_router_with_START_default_branch() -> None:
+    """When the classifier returns a key that's not in routes,
+    the entry router falls through to ``default`` (or raises if
+    none was set). ``default=END`` should terminate the run
+    immediately on the unmatched path."""
+    from loomflow import START
+
+    async def step_a(q: str) -> str:
+        return "ran"
+
+    def classify(q: str) -> str:
+        return "unknown"
+
+    wf = Workflow()
+    wf.add_node("step_a", step_a)
+    wf.add_router(
+        START,
+        fn=classify,
+        routes={"a": "step_a"},
+        default=END,
+    )
+    wf.add_edge("step_a", END)
+
+    result = await wf.run("input")
+    # Default branch took us straight to END — output is the
+    # original input, no node ran.
+    assert result.output == "input"
+
+
+async def test_add_router_with_START_validates_target_nodes_exist() -> None:
+    """Catch typos in ``routes={...}`` at build time, not at the
+    first run. The error names the bad target so the fix is
+    obvious."""
+    from loomflow import START
+
+    async def step_a(q: str) -> str:
+        return q
+
+    wf = Workflow()
+    wf.add_node("step_a", step_a)
+
+    with pytest.raises(ValueError) as excinfo:
+        wf.add_router(
+            START,
+            fn=lambda q: "x",
+            routes={"x": "nonexistent_node"},
+        )
+
+    assert "nonexistent_node" in str(excinfo.value)
+    assert "add_node" in str(excinfo.value)
+
+
+async def test_add_router_with_START_clears_explicit_set_start() -> None:
+    """``set_start`` and ``add_router(START, ...)`` are mutually
+    exclusive — calling the router after ``set_start`` should
+    swap to the router-driven entry, and vice versa. Whichever
+    came last wins."""
+    from loomflow import START
+
+    async def step_a(q: str) -> str:
+        return "A"
+
+    async def step_b(q: str) -> str:
+        return "B"
+
+    wf = Workflow()
+    wf.add_node("step_a", step_a)
+    wf.add_node("step_b", step_b)
+    wf.add_edge("step_a", END)
+    wf.add_edge("step_b", END)
+
+    # Explicit set_start first, then router-from-START. Router wins.
+    wf.set_start("step_a")
+    wf.add_router(
+        START, fn=lambda q: "b", routes={"a": "step_a", "b": "step_b"}
+    )
+    assert wf._start is None
+    assert wf._entry_router is not None
+
+    # Now switch back to set_start. The entry router should be cleared.
+    wf.set_start("step_a")
+    assert wf._start == "step_a"
+    assert wf._entry_router is None
+
+
+def test_to_mermaid_renders_START_router_branches() -> None:
+    """When ``add_router(START, ...)`` is used, the diagram should
+    show labelled branches directly from ``START`` — no synthetic
+    entry node — so the visual matches what the user wrote."""
+    from loomflow import START
+
+    async def step_a(q: str) -> str:
+        return q
+
+    async def step_b(q: str) -> str:
+        return q
+
+    wf = Workflow()
+    wf.add_node("step_a", step_a)
+    wf.add_node("step_b", step_b)
+    wf.add_router(
+        START,
+        fn=lambda q: "a",
+        routes={"a": "step_a", "b": "step_b"},
+        default=END,
+    )
+    wf.add_edge("step_a", END)
+    wf.add_edge("step_b", END)
+
+    out = wf.to_mermaid()
+    assert "START([START]) -->|a| n_step_a" in out
+    assert "START([START]) -->|b| n_step_b" in out
+    # Default branch uses dotted-arrow.
+    assert "START([START]) -.->|default| END([END])" in out
+
+
 async def test_add_edge_with_START_aliases_set_start() -> None:
     """``add_edge(START, "first")`` should be a drop-in alias for
     ``set_start("first")`` — graphs read symmetrically with the

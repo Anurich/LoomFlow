@@ -495,6 +495,10 @@ class Workflow:
         self._raw_nodes: dict[str, StepLike] = {}  # for ``as_tool`` schema
         self._edges: dict[str, _EdgeTarget] = {}
         self._start: str | None = None
+        # Set when ``add_router(START, ...)`` is called; ``stream``
+        # evaluates this on the input to pick the first node when
+        # ``_start`` is ``None``. See ``add_router`` for semantics.
+        self._entry_router: _Router | None = None
         self._telemetry = telemetry
         self._audit_log = _resolve_audit_log(audit_log)
         self._memory = memory
@@ -544,7 +548,7 @@ class Workflow:
 
     def add_router(
         self,
-        source: str,
+        source: str | _Sentinel,
         fn: Callable[[Any], Any],
         routes: Mapping[str, str | _Sentinel],
         *,
@@ -556,23 +560,63 @@ class Workflow:
         key is looked up in ``routes`` to pick the next node. Keys
         not in ``routes`` fall through to ``default`` (or raise if
         no default is set).
+
+        ``source`` can be ``START`` to **branch at the entry of the
+        graph** — ``fn(input)`` is evaluated against the workflow's
+        input value and the matching node becomes the first node
+        executed. Mirrors LangGraph's ``add_conditional_edges(START,
+        ...)`` and avoids the no-op "passthrough entry" pattern.
+        ``set_start`` and ``add_router(START, ...)`` are mutually
+        exclusive — calling one resets the other.
         """
-        self._validate_source(source)
-        # Normalize values to either str or sentinel.
+        # Normalize routes once for both code paths.
         normalized: dict[str, str] = {}
         for k, v in routes.items():
             if isinstance(v, _Sentinel):
                 normalized[k] = "__END__"
             else:
                 normalized[k] = v
+
+        if isinstance(source, _Sentinel):
+            if source is not START:
+                raise ValueError(
+                    f"add_router source must be a node name or START; "
+                    f"got sentinel {source!r}. Use add_router(START, ...) "
+                    f"to branch at the entry, or add_router(node, ...) "
+                    f"for a mid-graph branch."
+                )
+            # Validate target nodes exist (catches typos at build
+            # time rather than at first run). END targets are fine.
+            for k, v in normalized.items():
+                if v != "__END__" and v not in self._nodes:
+                    raise ValueError(
+                        f"add_router(START, ...): route {k!r} → {v!r} "
+                        f"is not a registered node. Call "
+                        f"add_node({v!r}, ...) first."
+                    )
+            self._entry_router = _Router(
+                fn=fn, routes=normalized, default=default
+            )
+            # Entry router supersedes any explicit set_start — keep
+            # _start in sync so introspection stays consistent.
+            self._start = None
+            return self
+
+        self._validate_source(source)
         self._edges[source] = _Router(fn=fn, routes=normalized, default=default)
         return self
 
     def set_start(self, node: str) -> Workflow:
-        """Mark ``node`` as the graph's entry point."""
+        """Mark ``node`` as the graph's entry point.
+
+        Mutually exclusive with :meth:`add_router` ``(START, ...)`` —
+        whichever is called last wins.
+        """
         if node not in self._nodes:
             raise ValueError(f"start node {node!r} is not registered")
         self._start = node
+        # Clear any prior entry router so the two never coexist.
+        self._entry_router = None
         return self
 
     # ---- run + stream -----------------------------------------------------
@@ -613,6 +657,14 @@ class Workflow:
                 visited.append(node)
                 per_step[node] = ev.payload["output"]
                 output = ev.payload["output"]
+            elif ev.kind == EventKind.WORKFLOW_COMPLETED:
+                # Cover the zero-step case (e.g. ``add_router(START,
+                # ...)`` with ``default=END`` taking the unmatched
+                # path): no STEP_COMPLETED ever fires, so the
+                # workflow's output is whatever ``stream`` carries
+                # forward — the original input.
+                if not visited:
+                    output = ev.payload.get("output")
         return WorkflowResult(
             output=output, visited=visited, per_step=per_step
         )
@@ -633,10 +685,12 @@ class Workflow:
         finally ``WORKFLOW_COMPLETED`` (or ``ERROR`` on failure).
         Consumers can break out of the iterator early to cancel.
         """
-        if self._start is None:
+        if self._start is None and self._entry_router is None:
             raise RuntimeError(
                 f"workflow {self.name!r} has no start node; "
-                "call set_start() or use one of the sugar constructors"
+                "call set_start(name) / add_edge(START, name) / "
+                "add_router(START, ...) or use one of the sugar "
+                "constructors (chain / route / parallel)"
             )
 
         # Auto-generate a session_id if the caller didn't supply
@@ -669,7 +723,29 @@ class Workflow:
                 payload={"workflow": self.name, "input": input},
             )
 
-            current: str | None = self._start
+            # Resolve the first node. When ``add_router(START, ...)``
+            # was used, evaluate the entry router on the input to
+            # pick the entry node. Otherwise use the explicit start.
+            if self._entry_router is not None:
+                key = self._entry_router.fn(input)
+                target = self._entry_router.routes.get(str(key))
+                if target is None:
+                    if self._entry_router.default is None:
+                        raise RuntimeError(
+                            f"entry router on {self.name!r} produced "
+                            f"key {key!r} with no matching route and "
+                            f"no default"
+                        )
+                    if isinstance(self._entry_router.default, _Sentinel):
+                        current = None
+                    else:
+                        current = self._entry_router.default
+                elif target == "__END__":
+                    current = None
+                else:
+                    current = target
+            else:
+                current = self._start
             value: Any = input
             # Cycles are supported up to the per-workflow caps.
             # ``visit_counts`` tracks how many times each node has
@@ -799,7 +875,28 @@ class Workflow:
         for name in self._nodes:
             lines.append(f'    {_alias(name)}["{name}"]')
 
-        if self._start is not None:
+        if self._entry_router is not None:
+            # START itself branches conditionally.
+            for label, dst in self._entry_router.routes.items():
+                if dst == "__END__":
+                    lines.append(
+                        f"    START([START]) -->|{label}| END([END])"
+                    )
+                else:
+                    lines.append(
+                        f"    START([START]) -->|{label}| {_alias(dst)}"
+                    )
+            if self._entry_router.default is not None:
+                if isinstance(self._entry_router.default, _Sentinel):
+                    lines.append(
+                        "    START([START]) -.->|default| END([END])"
+                    )
+                else:
+                    lines.append(
+                        f"    START([START]) -.->|default| "
+                        f"{_alias(self._entry_router.default)}"
+                    )
+        elif self._start is not None:
             lines.append(
                 f"    START([START]) --> {_alias(self._start)}"
             )
@@ -853,10 +950,38 @@ class Workflow:
         for name in self._nodes:
             lines.append(f'    "{name}" [shape=box, style=rounded];')
 
-        if self._start is not None:
+        end_seen_start = False
+        if self._entry_router is not None or self._start is not None:
             lines.append(
                 '    "__start__" [label="START", shape=oval];'
             )
+        if self._entry_router is not None:
+            for label, dst in self._entry_router.routes.items():
+                if dst == "__END__":
+                    lines.append(
+                        f'    "__start__" -> "__end__" '
+                        f'[label="{label}"];'
+                    )
+                    end_seen_start = True
+                else:
+                    lines.append(
+                        f'    "__start__" -> "{dst}" '
+                        f'[label="{label}"];'
+                    )
+            if self._entry_router.default is not None:
+                if isinstance(self._entry_router.default, _Sentinel):
+                    lines.append(
+                        '    "__start__" -> "__end__" '
+                        '[label="default", style=dashed];'
+                    )
+                    end_seen_start = True
+                else:
+                    lines.append(
+                        f'    "__start__" -> '
+                        f'"{self._entry_router.default}" '
+                        f'[label="default", style=dashed];'
+                    )
+        elif self._start is not None:
             lines.append(
                 f'    "__start__" -> "{self._start}";'
             )
@@ -894,7 +1019,7 @@ class Workflow:
             else:
                 lines.append(f'    "{src}" -> "{target}";')
 
-        if end_seen:
+        if end_seen or end_seen_start:
             lines.append('    "__end__" [label="END", shape=oval];')
         lines.append("}")
         return "\n".join(lines)

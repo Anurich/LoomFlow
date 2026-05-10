@@ -24,6 +24,39 @@ Multi-tenancy and structured outputs are opt-in by passing
 to in-tree network adapters (OpenAI, Anthropic, LiteLLM); custom
 models opt in.
 
+### Added — `add_router(START, ...)` — branch at the entry of the graph
+
+You can now classify the workflow's input and route directly to
+one of N first nodes, without an artificial passthrough "entry"
+step. Mirrors LangGraph's ``add_conditional_edges(START, ...)``:
+
+```python
+from loomflow import Workflow, START, END
+
+wf = Workflow()
+wf.add_node("step_1", step_1)
+wf.add_node("step_3", step_3)
+wf.add_router(
+    START,
+    fn=lambda q: "step_1" if "work" in q else "step_3",
+    routes={"step_1": "step_1", "step_3": "step_3"},
+    default=END,                         # optional fallback
+)
+wf.add_edge("step_1", END)
+wf.add_edge("step_3", END)
+```
+
+Validation at build time: route targets must be registered nodes
+or ``END``, so typos raise a clear error before the run starts.
+``set_start`` and ``add_router(START, ...)`` are mutually
+exclusive — calling one resets the other. The mermaid / DOT
+diagrams show ``START -->|key| node`` directly so the visual
+matches what you wrote.
+
+Ships alongside fix to ``WorkflowResult`` reconstruction so the
+zero-step ``default=END`` path returns the original input as
+``result.output`` (it was returning ``None`` before).
+
 ### Added — `Workflow(memory=...)` shared agent memory across the graph
 
 Workflows can now own a single :class:`~loomflow.Memory` and
