@@ -1,32 +1,25 @@
-"""Example 13 — Telemetry (OpenTelemetry spans + metrics).
+"""Example 13 — Telemetry (spans + metrics, no collector required).
 
 Every Loom primitive emits typed spans and metrics when a
 :class:`~loomflow.Telemetry` adapter is configured. The default
-:class:`~loomflow.NoTelemetry` is zero-cost; in production you
-wire :class:`~loomflow.observability.OTelTelemetry` to whatever
-OTLP collector / Jaeger / Honeycomb your org uses, and every
-``Agent.run`` produces a fully-attributed trace tree.
+:class:`~loomflow.NoTelemetry` is zero-cost; this example uses
+the convenience sinks that ship with Loom so no OTel collector
+deploy is required to see what's happening.
 
-This example uses an **in-memory** OTel SpanExporter +
-MetricReader so the example runs without a collector — you can
-inspect the captured spans / metrics directly in Python.
+Three sinks demonstrated here:
 
-Three things this example demonstrates:
+* :class:`InMemoryTelemetry` — accumulates spans + metrics in
+  lists; introspect via ``.spans()`` / ``.metrics()``. Best for
+  unit tests and exploration.
+* :class:`ConsoleTelemetry` — print spans + metrics to stderr
+  as they happen. Best for "tail my agent in dev".
+* :class:`MultiTelemetry` — fan out to multiple sinks. Watch
+  live in stderr AND assert in tests.
 
-* The trace tree the framework emits — ``loom.run`` →
-  ``loom.turn`` → ``loom.model.stream`` and ``loom.tool``.
-* Per-call metrics — token counts and cost per model call,
-  session duration on completion.
-* The histogram-vs-counter dispatch — names ending in ``_ms`` /
-  ``_seconds`` / ``_bytes`` go to histograms; everything else
-  becomes a counter. One ``emit_metric`` call, the right OTel
-  instrument under the hood.
+For production, swap to :class:`OTelTelemetry` (OpenTelemetry
+SDK with OTLP exporter); the agent code doesn't change.
 
 No API keys required — uses :class:`ScriptedModel`.
-
-Requires ``pip install opentelemetry-sdk`` (already in the
-``[otel]`` extra). Without it, the example raises a clear
-``ImportError`` from the OTel adapter's constructor.
 
 Run::
 
@@ -36,6 +29,8 @@ Run::
 from __future__ import annotations
 
 import asyncio
+import sys
+from typing import Any
 
 from loomflow import (
     Agent,
@@ -44,7 +39,11 @@ from loomflow import (
     ToolCall,
     tool,
 )
-from loomflow.observability import OTelTelemetry
+from loomflow.observability import (
+    ConsoleTelemetry,
+    InMemoryTelemetry,
+    MultiTelemetry,
+)
 
 
 @tool
@@ -53,34 +52,9 @@ async def add(a: int, b: int) -> int:
     return a + b
 
 
-async def main() -> None:
-    # ---- OTel setup — in-memory exporters so we can inspect ------------
-    from opentelemetry.sdk.metrics import MeterProvider
-    from opentelemetry.sdk.metrics.export import InMemoryMetricReader
-    from opentelemetry.sdk.trace import TracerProvider
-    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
-    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
-        InMemorySpanExporter,
-    )
-
-    # Spans go through a SimpleSpanProcessor → InMemoryExporter.
-    span_exporter = InMemorySpanExporter()
-    tracer_provider = TracerProvider()
-    tracer_provider.add_span_processor(SimpleSpanProcessor(span_exporter))
-
-    # Metrics use a periodic reader → in-memory snapshot.
-    metric_reader = InMemoryMetricReader()
-    meter_provider = MeterProvider(metric_readers=[metric_reader])
-
-    telemetry = OTelTelemetry(
-        tracer_provider=tracer_provider,
-        meter_provider=meter_provider,
-    )
-
-    # ---- Run an agent that calls a tool --------------------------------
-    # ScriptedModel returns canned turns so the example is
-    # deterministic; no network call. First turn calls add(2, 3);
-    # second turn emits a final answer.
+def _scripted_agent(telemetry: Any) -> Agent:
+    """Build the same canned agent for every demo so the only
+    thing that varies between parts is the telemetry sink."""
     model = ScriptedModel(
         [
             ScriptedTurn(
@@ -91,95 +65,83 @@ async def main() -> None:
             ScriptedTurn(text="The sum is 5."),
         ]
     )
-
-    agent = Agent(
+    return Agent(
         "You are a precise arithmetic assistant.",
         model=model,
         tools=[add],
         telemetry=telemetry,
     )
 
+
+async def main() -> None:
+    # ---- Part 1 — InMemoryTelemetry --------------------------------------
+    print("=" * 60)
+    print("Part 1 — InMemoryTelemetry (assert in tests)")
+    print("=" * 60)
+
+    in_mem = InMemoryTelemetry()
+    agent = _scripted_agent(in_mem)
     result = await agent.run("What is 2 + 3?", user_id="alice")
-    print(f"Agent output: {result.output!r}\n")
+    print(f"  Agent output: {result.output!r}\n")
 
-    # ---- Inspect captured spans ----------------------------------------
-    print("=" * 60)
-    print("Span tree (one trace, parent → children)")
-    print("=" * 60)
+    # Inspect what got recorded — no OTel SDK objects involved.
+    print("  Spans (sorted by completion time):")
+    for s in in_mem.spans():
+        attrs = ", ".join(f"{k}={v}" for k, v in s.attributes.items())
+        print(f"    • {s.name:<22}  ({s.duration_ms:5.1f}ms)  [{attrs}]")
 
-    spans = span_exporter.get_finished_spans()
-    # Reorder oldest-first so the parents print before children.
-    spans = sorted(spans, key=lambda s: s.start_time)
-    for s in spans:
-        # Indent children under their parent visually. The OTel
-        # SDK exposes the parent's span_id on ``parent``; we walk
-        # up to compute depth quickly.
-        depth = 0
-        cur = s
-        while cur.parent is not None:
-            depth += 1
-            parent_id = cur.parent.span_id
-            parent = next(
-                (p for p in spans if p.context.span_id == parent_id),
-                None,
-            )
-            if parent is None:
-                break
-            cur = parent
-        indent = "  " * depth
-        duration_ms = (s.end_time - s.start_time) / 1_000_000
-        attrs = ", ".join(
-            f"{k}={v}" for k, v in s.attributes.items() if v is not None
+    print("\n  Metrics:")
+    for m in in_mem.metrics():
+        print(
+            f"    • {m.name:<28}  {m.value:<8}  ({m.instrument_kind})"
         )
-        print(f"{indent}• {s.name}  ({duration_ms:.1f}ms)  [{attrs}]")
 
-    # ---- Inspect captured metrics --------------------------------------
+    # ---- Part 2 — ConsoleTelemetry ---------------------------------------
     print()
     print("=" * 60)
-    print("Metrics emitted")
+    print("Part 2 — ConsoleTelemetry (live in stderr)")
+    print("=" * 60)
+    print("(span lines printed to stderr below as the agent runs)")
+
+    console = ConsoleTelemetry(stream=sys.stderr, show_metrics=False)
+    agent = _scripted_agent(console)
+    await agent.run("What is 2 + 3?", user_id="bob")
+
+    # ---- Part 3 — MultiTelemetry — both at once --------------------------
+    print()
+    print("=" * 60)
+    print("Part 3 — MultiTelemetry (watch live AND inspect after)")
     print("=" * 60)
 
-    metrics_data = metric_reader.get_metrics_data()
-    if metrics_data is None:
-        print("  (no metrics emitted — fast_telemetry=True elsewhere?)")
-    else:
-        for resource_metrics in metrics_data.resource_metrics:
-            for scope_metrics in resource_metrics.scope_metrics:
-                for metric in scope_metrics.metrics:
-                    instrument_kind = (
-                        "histogram"
-                        if metric.name.endswith(("_ms", "_seconds", "_bytes"))
-                        else "counter"
-                    )
-                    points = list(metric.data.data_points)
-                    if not points:
-                        continue
-                    if instrument_kind == "histogram":
-                        sums = sum(p.sum for p in points)
-                        counts = sum(p.count for p in points)
-                        print(
-                            f"  {metric.name:<28} "
-                            f"({instrument_kind}): "
-                            f"sum={sums:.3f}, n={counts}"
-                        )
-                    else:
-                        total = sum(p.value for p in points)
-                        print(
-                            f"  {metric.name:<28} "
-                            f"({instrument_kind}): {total}"
-                        )
+    in_mem2 = InMemoryTelemetry()
+    console2 = ConsoleTelemetry(stream=sys.stderr, show_metrics=False)
+    combo = MultiTelemetry([console2, in_mem2])
+
+    agent = _scripted_agent(combo)
+    await agent.run("What is 2 + 3?", user_id="carol")
 
     print()
-    print("Notes:")
-    print("  • `loom.session.duration_ms` → histogram (auto-detected by suffix)")
-    print("  • `loom.tokens.input` / `.output` → counters")
-    print("  • Same `emit_metric()` API; right OTel instrument under the hood")
+    print("  After the run, the in-memory side has everything too:")
+    print(f"    • {len(in_mem2.spans())} spans captured")
+    print(f"    • {len(in_mem2.metrics())} metrics captured")
+    tool_spans = [s for s in in_mem2.spans() if s.name == "loom.tool"]
+    if tool_spans:
+        print(
+            f"    • Tool span attributes: {dict(tool_spans[0].attributes)}"
+        )
+
+    # ---- Production-path reminder ----------------------------------------
     print()
-    print("In production, swap the in-memory exporters for OTLP:")
-    print(
-        "  from opentelemetry.exporter.otlp.proto.grpc.trace_exporter "
-        "import OTLPSpanExporter"
-    )
+    print("=" * 60)
+    print("Production path")
+    print("=" * 60)
+    print("Swap the sink for OTelTelemetry — agent code doesn't change.\n")
+    print("  from loomflow.observability import OTelTelemetry")
+    print("  # Configure your OTel SDK once at startup with an OTLP")
+    print("  # exporter pointing at your collector / Jaeger /")
+    print("  # Honeycomb / Datadog.")
+    print("  telemetry = OTelTelemetry()")
+    print("  agent = Agent(..., telemetry=telemetry)")
 
 
 if __name__ == "__main__":

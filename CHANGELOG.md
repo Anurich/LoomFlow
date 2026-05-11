@@ -24,6 +24,65 @@ Multi-tenancy and structured outputs are opt-in by passing
 to in-tree network adapters (OpenAI, Anthropic, LiteLLM); custom
 models opt in.
 
+### Added — `InMemoryTelemetry` + `ConsoleTelemetry` + `MultiTelemetry`
+
+Three new telemetry sinks that need no OTel collector deploy.
+Previously the only "see what spans my agent emits" path was
+`OTelTelemetry` plus ~10 lines of OTel SDK boilerplate
+(``TracerProvider`` + ``SpanProcessor`` + ``InMemorySpanExporter``).
+That's the right primitive for production, but pure friction
+for tests, exploration, and dev "tail my agent" workflows.
+
+```python
+from loomflow.observability import (
+    InMemoryTelemetry, ConsoleTelemetry, MultiTelemetry,
+)
+
+# Assert on spans + metrics in unit tests
+tel = InMemoryTelemetry()
+agent = Agent(..., telemetry=tel)
+await agent.run(...)
+assert any(s.name == "loom.tool" for s in tel.spans())
+
+# Watch a flow live in stderr while developing
+agent = Agent(..., telemetry=ConsoleTelemetry())
+
+# Fan out — see live AND inspect after
+in_mem = InMemoryTelemetry()
+agent = Agent(..., telemetry=MultiTelemetry([
+    ConsoleTelemetry(), in_mem,
+]))
+```
+
+`InMemoryTelemetry` records each span as a
+:class:`~loomflow.observability.CapturedSpan` (name, trace_id,
+span_id, parent_span_id, started_at, ended_at, duration_ms,
+attributes, optional exception repr). Metrics become
+:class:`~loomflow.observability.CapturedMetric` with the
+auto-detected instrument kind (counter vs histogram) — same
+suffix-based dispatch rule as `OTelTelemetry`.
+
+`ConsoleTelemetry` prints one line per span completion + one
+line per metric emit. Indented by parent depth so the trace
+tree is visible. Default stream is `sys.stderr`; `show_metrics=
+False` available for span-only output.
+
+`MultiTelemetry` enters every sink's ``trace()`` contextmanager
+via `AsyncExitStack`, so cleanup runs in reverse order even
+when one sink raises mid-emit. ``MultiTelemetry([])`` is rejected
+with a clear "use NoTelemetry() for a no-op" error.
+
+Production path unchanged — `OTelTelemetry()` with no args still
+picks up the globally-configured OTel `TracerProvider` /
+`MeterProvider`.
+
+10 new tests across span hierarchy, metric kind dispatch, clear-
+state reset, exception recording, console stream output, multi
+fan-out, empty-sink rejection.
+
+Updated `examples/13_telemetry.py` — was 80 lines of OTel SDK
+plumbing, now 30 lines of Loom-native sink usage.
+
 ### Added — `response_tone=` on Agent + Workflow
 
 A new optional kwarg that steers *how* the agent phrases its

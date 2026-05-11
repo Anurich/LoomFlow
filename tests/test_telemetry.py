@@ -297,3 +297,172 @@ async def test_session_duration_metric_recorded_once_per_run() -> None:
     assert len(histo_pts) >= 1
     total_count = sum(pt.count for pt in histo_pts)
     assert total_count == 2
+
+
+# ---------------------------------------------------------------------------
+# InMemoryTelemetry / ConsoleTelemetry / MultiTelemetry — no OTel SDK
+# ---------------------------------------------------------------------------
+
+
+import io  # noqa: E402
+
+from loomflow.observability import (  # noqa: E402
+    ConsoleTelemetry,
+    InMemoryTelemetry,
+    MultiTelemetry,
+)
+
+
+async def test_in_memory_telemetry_captures_spans_with_attrs() -> None:
+    """``InMemoryTelemetry`` records every span the agent loop
+    opens. Spans carry their attributes intact so tests can
+    assert on what the framework instrumented."""
+    tel = InMemoryTelemetry()
+    agent = Agent("hi", model="echo", telemetry=tel)
+    await agent.run("hello", user_id="alice")
+
+    span_names = {s.name for s in tel.spans()}
+    assert "loom.run" in span_names
+    assert "loom.turn" in span_names
+
+    run_span = next(s for s in tel.spans() if s.name == "loom.run")
+    assert run_span.duration_ms > 0
+    # session_id and model should be on the run span (framework
+    # adds them in the trace() call).
+    assert "session_id" in run_span.attributes
+
+
+async def test_in_memory_telemetry_records_parent_span_hierarchy() -> None:
+    """Nested spans should record the correct parent_span_id —
+    proves contextvar-based parent tracking works across the
+    agent loop's async stack. This is the test that catches
+    silent regressions if anyone refactors task-spawning to use
+    a primitive that doesn't propagate contextvars."""
+    tel = InMemoryTelemetry()
+    agent = Agent("hi", model="echo", telemetry=tel)
+    await agent.run("test")
+
+    spans = tel.spans()
+    run_span = next(s for s in spans if s.name == "loom.run")
+    # The run span is the root — no parent.
+    assert run_span.parent_span_id is None
+    # turn spans should be children of run.
+    turn_spans = [s for s in spans if s.name == "loom.turn"]
+    assert turn_spans
+    for ts in turn_spans:
+        assert ts.parent_span_id == run_span.span_id
+
+
+async def test_in_memory_telemetry_captures_metrics_with_kind() -> None:
+    """Every emit_metric call lands as a CapturedMetric tagged
+    with counter-vs-histogram based on the name suffix."""
+    tel = InMemoryTelemetry()
+    await tel.emit_metric("loom.tokens.input", 42)
+    await tel.emit_metric("loom.session.duration_ms", 100.5)
+
+    metrics = tel.metrics()
+    assert len(metrics) == 2
+    by_name = {m.name: m for m in metrics}
+    assert by_name["loom.tokens.input"].instrument_kind == "counter"
+    assert by_name["loom.session.duration_ms"].instrument_kind == "histogram"
+
+
+async def test_in_memory_telemetry_clear_resets_state() -> None:
+    """``.clear()`` between test cases lets the accumulator be
+    reused without bleeding state."""
+    tel = InMemoryTelemetry()
+    await tel.emit_metric("loom.x", 1)
+    async with tel.trace("test"):
+        pass
+    assert tel.spans() and tel.metrics()
+    tel.clear()
+    assert tel.spans() == [] and tel.metrics() == []
+
+
+async def test_in_memory_telemetry_records_exceptions() -> None:
+    """A span that raises should be recorded with the
+    exception repr — useful for assertions like
+    ``assert any(s.exception for s in tel.spans())``."""
+    tel = InMemoryTelemetry()
+    with pytest.raises(RuntimeError, match="boom"):
+        async with tel.trace("danger"):
+            raise RuntimeError("boom")
+    span = tel.spans()[0]
+    assert span.name == "danger"
+    assert span.exception is not None
+    assert "boom" in span.exception
+
+
+async def test_console_telemetry_writes_span_completions_to_stream() -> None:
+    """``ConsoleTelemetry`` emits one line per span completion
+    with name, duration, and attributes. Default stream is
+    stderr; tests pass a StringIO."""
+    buf = io.StringIO()
+    tel = ConsoleTelemetry(stream=buf)
+    async with tel.trace("outer", user_id="alice"):
+        async with tel.trace("inner"):
+            pass
+
+    output = buf.getvalue()
+    assert "outer" in output
+    assert "inner" in output
+    assert "user_id=alice" in output
+    # "inner" closes before "outer", so it appears first in the stream.
+    assert output.index("inner") < output.index("outer")
+
+
+async def test_console_telemetry_shows_metrics_with_kind() -> None:
+    """Metric emits print with the auto-detected instrument
+    kind so the dev viewer can tell counters from histograms
+    at a glance."""
+    buf = io.StringIO()
+    tel = ConsoleTelemetry(stream=buf)
+    await tel.emit_metric("loom.tokens.input", 100)
+    await tel.emit_metric("loom.session.duration_ms", 250.5)
+
+    output = buf.getvalue()
+    assert "(counter)" in output
+    assert "(histogram)" in output
+
+
+async def test_console_telemetry_show_metrics_false_suppresses_metric_lines() -> None:
+    """``show_metrics=False`` is for users who only want span
+    traces and find per-token metric chatter distracting."""
+    buf = io.StringIO()
+    tel = ConsoleTelemetry(stream=buf, show_metrics=False)
+    await tel.emit_metric("loom.tokens.input", 100)
+    assert buf.getvalue() == ""
+
+
+async def test_multi_telemetry_fans_spans_and_metrics_to_every_sink() -> None:
+    """``MultiTelemetry`` forwards each ``trace`` /
+    ``emit_metric`` call to every sink. Watch live in stderr
+    AND assert in tests — the canonical fan-out pattern."""
+    in_mem = InMemoryTelemetry()
+    buf = io.StringIO()
+    console = ConsoleTelemetry(stream=buf)
+    tel = MultiTelemetry([in_mem, console])
+
+    async with tel.trace("span_a", user_id="bob"):
+        pass
+    await tel.emit_metric("loom.tokens.input", 7)
+
+    # In-memory side has the span recorded.
+    in_mem_spans = in_mem.spans()
+    assert len(in_mem_spans) == 1
+    assert in_mem_spans[0].name == "span_a"
+    assert in_mem_spans[0].attributes["user_id"] == "bob"
+    # Metric also captured.
+    assert any(m.name == "loom.tokens.input" for m in in_mem.metrics())
+    # Console stream has both.
+    out = buf.getvalue()
+    assert "span_a" in out
+    assert "loom.tokens.input" in out
+
+
+async def test_multi_telemetry_empty_sinks_rejected_with_clear_error() -> None:
+    """``MultiTelemetry([])`` is meaningless — use ``NoTelemetry``
+    instead. Fail at construction with a message that names the
+    fix."""
+    with pytest.raises(ValueError, match="at least one sink"):
+        MultiTelemetry([])
