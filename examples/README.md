@@ -31,6 +31,13 @@ previous one's vocabulary.
 | [`10_workflow_architecture.py`](10_workflow_architecture.py) | Agent with `architecture="self-refine"` inside a workflow chain. Demonstrates that workflow shape and agent architecture are orthogonal axes — the architecture is encapsulated inside the agent step; the workflow doesn't see the internal draft → critique → refine iteration. | Yes |
 | [`11_workflow_custom_step.py`](11_workflow_custom_step.py) | Agent wrapped in a custom `async def` step. For when "just call agent.run(prev_output)" isn't enough — multi-field prompt formatting, capturing `RunResult` metadata (tokens, turns) into workflow state, post-processing the agent's output. | Yes |
 
+## Observability
+
+| File | What it shows | Needs OpenAI? |
+|---|---|---|
+| [`12_audit_log.py`](12_audit_log.py) | `InMemoryAuditLog` + `FileAuditLog` — HMAC-signed audit entries written from both Agents (`run_started` / `tool_call` / `tool_result`) and Workflows (`step_started` / `step_completed`). Demonstrates tamper detection via `verify_signature` and seq-counter recovery across process restart. | No |
+| [`13_telemetry.py`](13_telemetry.py) | `OTelTelemetry` with in-memory span / metric readers. Inspect the full trace tree (`loom.run` → `loom.turn` → `loom.model.complete` + `loom.tool`) and the per-call metrics (`loom.tokens.input`, `loom.session.duration_ms`). Histogram-vs-counter dispatch by metric-name suffix. | No, but needs `pip install 'loomflow[otel]'` |
+
 The image-bearing examples (01, 02) generate small sample PDFs on
 first run via `reportlab` and cache them under `examples/data/`.
 The on-disk Chroma indices are also cached, so subsequent runs only
