@@ -1,0 +1,19 @@
+# Issue chooser config.
+# Forces users to pick a template instead of filing blank issues
+# (which usually lack the info needed to action them).
+
+blank_issues_enabled: false
+
+contact_links:
+  - name: 💬 Discussion / usage question
+    url: https://github.com/Anurich/LoomFlow/discussions
+    about: |
+      "How do I use Loom for X?" or open-ended design discussions.
+      Issues are for confirmed bugs and agreed feature work;
+      Discussions are for thinking out loud.
+
+  - name: 🔒 Security vulnerability
+    url: https://github.com/Anurich/LoomFlow/security/policy
+    about: |
+      Please DO NOT file security issues publicly. See SECURITY.md
+      for the private reporting channel.

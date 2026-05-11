@@ -1,5 +1,12 @@
 # Loom
 
+[![CI](https://github.com/Anurich/LoomFlow/actions/workflows/ci.yml/badge.svg)](https://github.com/Anurich/LoomFlow/actions/workflows/ci.yml)
+[![PyPI version](https://img.shields.io/pypi/v/loomflow.svg)](https://pypi.org/project/loomflow/)
+[![Python versions](https://img.shields.io/pypi/pyversions/loomflow.svg)](https://pypi.org/project/loomflow/)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![mypy: strict](https://img.shields.io/badge/mypy-strict-2a6db2.svg)](https://mypy.readthedocs.io/en/stable/command_line.html#cmdoption-mypy-strict)
+[![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
+
 **Production workflow + agent framework. Two peer primitives —
 ``Workflow`` (developer-controlled DAG) and ``Agent`` (LLM-driven
 loop) — that compose freely. Multi-tenant by default, typed
