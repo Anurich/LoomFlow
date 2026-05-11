@@ -183,6 +183,17 @@ _ambient_memory_var: ContextVar[Any] = ContextVar(
     "loomflow_ambient_memory", default=None
 )
 
+# ``response_tone`` ambient — same propagation pattern as memory.
+# A :class:`Workflow` configured with ``response_tone=`` installs
+# the spec here for the duration of a run; nested :class:`Agent`
+# steps that left ``response_tone=`` unset on construction read it
+# as a fallback. Carries the raw string spec (preset name or
+# free-form); :func:`loomflow.core.tone.resolve_response_tone` is
+# responsible for translating it into a directive.
+_ambient_response_tone_var: ContextVar[str | None] = ContextVar(
+    "loomflow_ambient_response_tone", default=None
+)
+
 
 def get_run_context() -> RunContext:
     """Return the :class:`RunContext` for the currently-running agent.

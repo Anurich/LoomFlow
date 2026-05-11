@@ -76,6 +76,7 @@ import anyio
 from ..core.context import (
     RunContext,
     _ambient_memory_var,
+    _ambient_response_tone_var,
     _ctx_var,
     get_run_context,
 )
@@ -482,6 +483,7 @@ class Workflow:
         telemetry: Telemetry | None = None,
         audit_log: AuditLog | str | Path | None = None,
         memory: Memory | None = None,
+        response_tone: str | None = None,
         max_steps: int = 100,
         max_visits_per_node: int = 25,
     ) -> None:
@@ -528,6 +530,11 @@ class Workflow:
         self._telemetry = telemetry
         self._audit_log = _resolve_audit_log(audit_log)
         self._memory = memory
+        # Workflow-level default response tone. Nested ``Agent`` steps
+        # that didn't set their own ``response_tone=`` inherit this via
+        # an ambient contextvar installed in ``stream``. None = no
+        # propagation. See ``loomflow.core.tone`` for preset semantics.
+        self._response_tone = response_tone
         self._max_steps = max_steps
         self._max_visits_per_node = max_visits_per_node
 
@@ -741,6 +748,9 @@ class Workflow:
         # this contextvar and use it instead of their default.
         # Explicit-on-Agent always wins; we only fill the gap.
         memory_token = _ambient_memory_var.set(self._memory)
+        # Same pattern for ``response_tone``: nested agents that
+        # didn't set their own pick up the workflow-level tone.
+        tone_token = _ambient_response_tone_var.set(self._response_tone)
 
         try:
             yield Event(
@@ -861,6 +871,7 @@ class Workflow:
                 payload={"workflow": self.name, "output": value},
             )
         finally:
+            _ambient_response_tone_var.reset(tone_token)
             _ambient_memory_var.reset(memory_token)
             _ctx_var.reset(token)
 
@@ -1107,6 +1118,7 @@ class Workflow:
         telemetry: Telemetry | None = None,
         audit_log: AuditLog | str | Path | None = None,
         memory: Memory | None = None,
+        response_tone: str | None = None,
         max_steps: int = 100,
         max_visits_per_node: int = 25,
     ) -> Workflow:
@@ -1127,6 +1139,7 @@ class Workflow:
             telemetry=telemetry,
             audit_log=audit_log,
             memory=memory,
+            response_tone=response_tone,
             max_steps=max_steps,
             max_visits_per_node=max_visits_per_node,
         )
@@ -1158,6 +1171,7 @@ class Workflow:
         telemetry: Telemetry | None = None,
         audit_log: AuditLog | str | Path | None = None,
         memory: Memory | None = None,
+        response_tone: str | None = None,
         max_steps: int = 100,
         max_visits_per_node: int = 25,
     ) -> Workflow:
@@ -1177,6 +1191,7 @@ class Workflow:
             telemetry=telemetry,
             audit_log=audit_log,
             memory=memory,
+            response_tone=response_tone,
             max_steps=max_steps,
             max_visits_per_node=max_visits_per_node,
         )
@@ -1250,6 +1265,7 @@ class Workflow:
         telemetry: Telemetry | None = None,
         audit_log: AuditLog | str | Path | None = None,
         memory: Memory | None = None,
+        response_tone: str | None = None,
         max_steps: int = 100,
         max_visits_per_node: int = 25,
     ) -> Workflow:
@@ -1280,6 +1296,7 @@ class Workflow:
             telemetry=telemetry,
             audit_log=audit_log,
             memory=memory,
+            response_tone=response_tone,
             max_steps=max_steps,
             max_visits_per_node=max_visits_per_node,
         )

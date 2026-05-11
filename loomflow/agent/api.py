@@ -116,6 +116,7 @@ class Agent:
         approval_handler: Any | None = None,
         secrets: Any | None = None,
         output_schema: type[BaseModel] | Any | None = None,
+        response_tone: str | None = None,
     ) -> None:
         # Skills — packaged on-disk playbooks loaded on demand.
         # Build the registry first so frontmatter validation fires
@@ -271,6 +272,11 @@ class Agent:
         # output_schema=)`` still wins for callers that want to
         # override on a per-prompt basis.
         self._default_output_schema: Any | None = output_schema
+        # Agent-default response tone. Per-call ``run(response_tone=)``
+        # wins; if neither is set, the workflow ambient (set by
+        # ``Workflow(response_tone=)``) is the next fallback;
+        # otherwise no tone directive is appended at all.
+        self._default_response_tone: str | None = response_tone
         self._architecture: Architecture = resolve_architecture(architecture)
 
     # ---- hook decorators (user-facing sugar) ----------------------------
@@ -840,6 +846,7 @@ class Agent:
         emit: Emit | None = None,
         output_schema: type[BaseModel] | Any | None = None,
         output_validation_retries: int = 1,
+        response_tone: str | None = None,
     ) -> RunResult:
         """Run the agent to completion and return its :class:`RunResult`.
 
@@ -918,6 +925,7 @@ class Agent:
                 else self._default_output_schema
             ),
             output_validation_retries=output_validation_retries,
+            response_tone=response_tone,
         )
 
     async def resume(
@@ -965,6 +973,7 @@ class Agent:
         extra_tools: list[Tool] | None = None,
         output_schema: type[BaseModel] | Any | None = None,
         output_validation_retries: int = 1,
+        response_tone: str | None = None,
     ) -> AsyncIterator[Event]:
         """Stream :class:`Event`\\ s as the loop produces them.
 
@@ -999,6 +1008,7 @@ class Agent:
                     extra_tools=extra_tools,
                     output_schema=effective_schema,
                     output_validation_retries=output_validation_retries,
+                    response_tone=response_tone,
                 )
             except Exception as exc:  # noqa: BLE001 — surface as ERROR + re-raise
                 with anyio.CancelScope(shield=True):
@@ -1030,6 +1040,7 @@ class Agent:
         extra_tools: list[Tool] | None = None,
         output_schema: type[BaseModel] | Any | None = None,
         output_validation_retries: int = 1,
+        response_tone: str | None = None,
     ) -> RunResult:
         """Setup → delegate iteration to the architecture → teardown.
 
@@ -1160,6 +1171,26 @@ class Agent:
                 )
                 if output_schema is not None and not native_structured
                 else self._instructions
+            )
+
+            # Resolve the effective response tone for THIS run:
+            # per-call wins, then agent default, then workflow
+            # ambient (set by ``Workflow(response_tone=...)``), then
+            # None. When None, ``append_tone_directive`` is a no-op.
+            from ..core.context import _ambient_response_tone_var
+            from ..core.tone import append_tone_directive
+
+            effective_tone = (
+                response_tone
+                if response_tone is not None
+                else (
+                    self._default_response_tone
+                    if self._default_response_tone is not None
+                    else _ambient_response_tone_var.get()
+                )
+            )
+            effective_instructions = append_tone_directive(
+                effective_instructions, effective_tone
             )
 
             session = AgentSession(

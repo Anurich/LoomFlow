@@ -24,6 +24,59 @@ Multi-tenancy and structured outputs are opt-in by passing
 to in-tree network adapters (OpenAI, Anthropic, LiteLLM); custom
 models opt in.
 
+### Added — `response_tone=` on Agent + Workflow
+
+A new optional kwarg that steers *how* the agent phrases its
+output — not *what* it answers. Pass a preset name or any
+free-form string; the framework appends a one-line style
+directive to the system prompt. Default is ``None`` (no
+directive, no behaviour change).
+
+```python
+# Preset
+agent = Agent("...", model="gpt-4.1-mini", response_tone="legal")
+
+# Free-form passthrough — preset map is convenience, not gatekeeper
+agent = Agent("...", response_tone="warm but precise, like a doctor")
+
+# Per-call override beats agent default
+result = await agent.run("...", response_tone="casual")
+
+# Workflow ambient flows to nested agents that didn't set their own
+wf = Workflow.chain([agent_a, agent_b], response_tone="executive")
+```
+
+**Shipped presets** (one sentence each, intentionally tight):
+``casual``, ``professional``, ``technical``, ``legal``,
+``finance``, ``executive``, ``academic``.
+
+**Resolution order**: per-call > agent default > workflow ambient
+> ``None``. Same propagation pattern as ``Workflow(memory=...)``
+— via a contextvar in :mod:`loomflow.core.context` that the
+workflow installs in ``stream()`` and resets in ``finally``.
+
+**Tone vs persona vs instructions** — three orthogonal levers:
+
+* **Instructions** (``Agent(instructions=...)``) — *what* the
+  agent does.
+* **Persona** (text inside instructions, e.g. "You are a tax
+  lawyer...") — *who* the agent is.
+* **Tone** (``response_tone=``) — *how* the agent phrases its
+  output.
+
+Free-form strings let users pin a custom org voice without
+registering it as a preset. The framework treats the value as
+opaque text appended to the system prompt — the model handles
+the actual styling.
+
+**Interaction with structured output:** when both
+``response_tone`` and ``output_schema`` are set on a non-native
+model adapter (so the schema directive does get injected), the
+tone is appended AFTER the schema so it's the last thing the
+model reads. For native-structured-output adapters (OpenAI,
+Anthropic), only the tone is appended; the schema is the
+API-level constraint as before.
+
 ### Fixed — Don't double-inject schema for native structured output
 
 When the model adapter declares
