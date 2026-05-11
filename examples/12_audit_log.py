@@ -35,10 +35,11 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import anyio
+
 from loomflow import Agent, EchoModel, Workflow, tool
 from loomflow.security import FileAuditLog, InMemoryAuditLog
 from loomflow.security.audit import verify_signature
-
 
 # ---------------------------------------------------------------------------
 # A pretend tool — just to produce ``tool_call`` / ``tool_result``
@@ -85,8 +86,11 @@ async def main() -> None:
     print("=" * 60)
 
     log_path = Path("./_audit_log_demo.jsonl")
-    if log_path.exists():
-        log_path.unlink()
+    # Sync pathlib ops dispatched to a worker thread — ruff's
+    # ASYNC240 catches direct .exists() / .unlink() inside async
+    # functions; this is the idiomatic anyio fix.
+    if await anyio.to_thread.run_sync(log_path.exists):
+        await anyio.to_thread.run_sync(log_path.unlink)
 
     file_audit = FileAuditLog(log_path, secret="my-org-hmac-key")
 
@@ -103,7 +107,8 @@ async def main() -> None:
     print(f"  Workflow result: {result.output!r}")
 
     # Read back the JSONL.
-    print(f"  Wrote {log_path.stat().st_size} bytes to {log_path}")
+    size = await anyio.to_thread.run_sync(lambda: log_path.stat().st_size)
+    print(f"  Wrote {size} bytes to {log_path}")
     file_entries = await file_audit.query(user_id="alice")
     print(f"  Entries written: {len(file_entries)}")
     print(f"  Actions:         {[e.action for e in file_entries]}")
@@ -158,7 +163,7 @@ async def main() -> None:
           f"no seq collisions.")
 
     # Cleanup so re-running the example is idempotent.
-    log_path.unlink()
+    await anyio.to_thread.run_sync(log_path.unlink)
 
 
 if __name__ == "__main__":
