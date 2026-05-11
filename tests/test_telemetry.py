@@ -466,3 +466,115 @@ async def test_multi_telemetry_empty_sinks_rejected_with_clear_error() -> None:
     fix."""
     with pytest.raises(ValueError, match="at least one sink"):
         MultiTelemetry([])
+
+
+# ---------------------------------------------------------------------------
+# FileTelemetry — JSONL append, jq-queryable
+# ---------------------------------------------------------------------------
+
+
+import json as _json  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+
+from loomflow.observability import FileTelemetry  # noqa: E402
+
+
+async def test_file_telemetry_writes_spans_as_jsonl(tmp_path: _Path) -> None:
+    """Every completed span lands as a single JSON line with the
+    fields a downstream pipeline needs to reconstruct the trace
+    (name, trace_id, span_id, parent_span_id, durations,
+    attributes)."""
+    log_path = tmp_path / "traces.jsonl"
+    tel = FileTelemetry(log_path)
+
+    async with tel.trace("loom.run", session_id="sess_1"):
+        async with tel.trace("loom.turn", turn=1):
+            pass
+
+    lines = log_path.read_text().splitlines()
+    records = [_json.loads(line) for line in lines]
+    assert all(r["kind"] == "span" for r in records)
+    # turn span lands first (closes before parent run span)
+    assert records[0]["name"] == "loom.turn"
+    assert records[1]["name"] == "loom.run"
+    # Parent linkage preserved offline.
+    assert records[0]["parent_span_id"] == records[1]["span_id"]
+    assert records[1]["parent_span_id"] is None
+
+
+async def test_file_telemetry_writes_metrics_with_kind(tmp_path: _Path) -> None:
+    """Metrics share the same JSONL stream as spans; each line
+    is tagged ``kind=="metric"`` so an offline parser can split."""
+    log_path = tmp_path / "traces.jsonl"
+    tel = FileTelemetry(log_path)
+
+    await tel.emit_metric("loom.tokens.input", 42, session_id="s1")
+    await tel.emit_metric("loom.session.duration_ms", 250.5)
+
+    lines = log_path.read_text().splitlines()
+    metrics = [_json.loads(line) for line in lines]
+    assert all(m["kind"] == "metric" for m in metrics)
+    counter = next(m for m in metrics if m["name"] == "loom.tokens.input")
+    histogram = next(
+        m for m in metrics if m["name"] == "loom.session.duration_ms"
+    )
+    assert counter["instrument_kind"] == "counter"
+    assert counter["value"] == 42
+    assert counter["attributes"]["session_id"] == "s1"
+    assert histogram["instrument_kind"] == "histogram"
+
+
+async def test_file_telemetry_creates_parent_directory(tmp_path: _Path) -> None:
+    """A nested path like ``./logs/sub/traces.jsonl`` should
+    auto-create the directories — saves users from a
+    ``FileNotFoundError`` on first use. Same DX promise as
+    :class:`FileAuditLog`."""
+    log_path = tmp_path / "logs" / "sub" / "traces.jsonl"
+    tel = FileTelemetry(log_path)
+    async with tel.trace("test"):
+        pass
+    assert log_path.exists()
+
+
+async def test_file_telemetry_records_exceptions(tmp_path: _Path) -> None:
+    """A span that raises should write a record with the
+    ``exception`` field set — so offline incident investigation
+    can find failures by grepping the JSONL for non-null
+    ``exception``."""
+    log_path = tmp_path / "traces.jsonl"
+    tel = FileTelemetry(log_path)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        async with tel.trace("explode"):
+            raise RuntimeError("boom")
+
+    records = [
+        _json.loads(line) for line in log_path.read_text().splitlines()
+    ]
+    assert len(records) == 1
+    assert records[0]["exception"] is not None
+    assert "boom" in records[0]["exception"]
+
+
+async def test_file_telemetry_appends_across_runs(tmp_path: _Path) -> None:
+    """Two FileTelemetry instances writing to the same path
+    should both append — no truncation on second construction.
+    This is what makes the file useful for long-running services
+    that restart."""
+    log_path = tmp_path / "traces.jsonl"
+
+    tel1 = FileTelemetry(log_path)
+    async with tel1.trace("run_1"):
+        pass
+
+    # Pretend the process restarted.
+    tel2 = FileTelemetry(log_path)
+    async with tel2.trace("run_2"):
+        pass
+
+    records = [
+        _json.loads(line) for line in log_path.read_text().splitlines()
+    ]
+    names = [r["name"] for r in records]
+    assert "run_1" in names
+    assert "run_2" in names

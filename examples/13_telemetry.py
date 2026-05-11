@@ -6,13 +6,16 @@ Every Loom primitive emits typed spans and metrics when a
 the convenience sinks that ship with Loom so no OTel collector
 deploy is required to see what's happening.
 
-Three sinks demonstrated here:
+Four sinks demonstrated here:
 
 * :class:`InMemoryTelemetry` — accumulates spans + metrics in
   lists; introspect via ``.spans()`` / ``.metrics()``. Best for
   unit tests and exploration.
 * :class:`ConsoleTelemetry` — print spans + metrics to stderr
   as they happen. Best for "tail my agent in dev".
+* :class:`FileTelemetry` — JSONL append-only on disk. One
+  structured JSON line per span / metric — parseable by ``jq``,
+  Splunk, Datadog log pipelines. Pairs with ``FileAuditLog``.
 * :class:`MultiTelemetry` — fan out to multiple sinks. Watch
   live in stderr AND assert in tests.
 
@@ -29,8 +32,12 @@ Run::
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
+from pathlib import Path
 from typing import Any
+
+import anyio
 
 from loomflow import (
     Agent,
@@ -41,6 +48,7 @@ from loomflow import (
 )
 from loomflow.observability import (
     ConsoleTelemetry,
+    FileTelemetry,
     InMemoryTelemetry,
     MultiTelemetry,
 )
@@ -129,6 +137,40 @@ async def main() -> None:
         print(
             f"    • Tool span attributes: {dict(tool_spans[0].attributes)}"
         )
+
+    # ---- Part 4 — FileTelemetry (JSONL on disk) --------------------------
+    print()
+    print("=" * 60)
+    print("Part 4 — FileTelemetry (JSONL append-only)")
+    print("=" * 60)
+
+    log_path = Path("./_telemetry_demo.jsonl")
+    if await anyio.to_thread.run_sync(log_path.exists):
+        await anyio.to_thread.run_sync(log_path.unlink)
+
+    file_tel = FileTelemetry(log_path)
+    agent = _scripted_agent(file_tel)
+    await agent.run("What is 2 + 3?", user_id="dave")
+
+    # Read back the JSONL — each line is a structured record.
+    lines = (await anyio.to_thread.run_sync(log_path.read_text)).splitlines()
+    print(f"  Wrote {len(lines)} JSON lines to {log_path}\n")
+    spans = [json.loads(line) for line in lines if json.loads(line)["kind"] == "span"]
+    metrics = [json.loads(line) for line in lines if json.loads(line)["kind"] == "metric"]
+    print(f"    {len(spans)} span records (with parent_span_id linkage)")
+    print(f"    {len(metrics)} metric records (counter / histogram tagged)")
+    print()
+    print("  Sample (first span record):")
+    print(f"    {json.dumps(spans[0], indent=2)[:300]}...")
+    print()
+    print("  Query offline with jq:")
+    print('    jq -c \'select(.kind=="span" and .duration_ms > 1)\' \\')
+    print(f"        {log_path}")
+    print('    jq -c \'select(.attributes.user_id=="dave")\' \\')
+    print(f"        {log_path}")
+
+    # Cleanup so the example is idempotent.
+    await anyio.to_thread.run_sync(log_path.unlink)
 
     # ---- Production-path reminder ----------------------------------------
     print()

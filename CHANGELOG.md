@@ -24,6 +24,50 @@ Multi-tenancy and structured outputs are opt-in by passing
 to in-tree network adapters (OpenAI, Anthropic, LiteLLM); custom
 models opt in.
 
+### Added — `FileTelemetry` — JSONL telemetry on disk
+
+A no-collector-required sink for users who want spans + metrics
+persisted to disk in a parseable format. Each completed span
+and metric emit becomes a single JSON line, with a ``"kind"``
+discriminator so downstream pipelines can split them.
+
+```python
+from loomflow.observability import FileTelemetry
+
+agent = Agent(..., telemetry=FileTelemetry("./traces.jsonl"))
+await agent.run("...")
+```
+
+Output:
+
+```jsonl
+{"kind":"span","name":"loom.turn","trace_id":"...","parent_span_id":"...","duration_ms":380,"attributes":{"turn":1},"exception":null}
+{"kind":"span","name":"loom.run","parent_span_id":null,"duration_ms":420,...}
+{"kind":"metric","name":"loom.tokens.input","value":42,"instrument_kind":"counter","attributes":{},"emitted_at":"..."}
+```
+
+Query offline with `jq`:
+
+```shell
+jq -c 'select(.kind=="span" and .duration_ms > 1000)' traces.jsonl
+jq -c 'select(.attributes.session_id=="sess_xyz")'     traces.jsonl
+```
+
+Mirrors `FileAuditLog`'s pattern: parent dir auto-created,
+writes through `anyio.to_thread.run_sync` so the event loop
+never blocks on disk I/O, internal lock serialises concurrent
+emits from parallel tool dispatches, file is append-only so
+restart-recovery is free.
+
+**Complements** `FileAuditLog`; doesn't replace it. Audit log =
+business events for compliance; telemetry = performance /
+diagnostic spans. Run both together in production for full
+offline forensics. No rotation built in — use `logrotate` /
+`journald`.
+
+5 new tests: span JSONL format, metric kind tag, parent dir
+auto-creation, exception recording, append-across-restart.
+
 ### Added — `InMemoryTelemetry` + `ConsoleTelemetry` + `MultiTelemetry`
 
 Three new telemetry sinks that need no OTel collector deploy.

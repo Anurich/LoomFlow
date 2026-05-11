@@ -36,7 +36,7 @@ previous one's vocabulary.
 | File | What it shows | Needs OpenAI? |
 |---|---|---|
 | [`12_audit_log.py`](12_audit_log.py) | `InMemoryAuditLog` + `FileAuditLog` — HMAC-signed audit entries written from both Agents (`run_started` / `tool_call` / `tool_result`) and Workflows (`step_started` / `step_completed`). Demonstrates tamper detection via `verify_signature` and seq-counter recovery across process restart. | No |
-| [`13_telemetry.py`](13_telemetry.py) | `InMemoryTelemetry` + `ConsoleTelemetry` + `MultiTelemetry` — the three "no collector required" sinks. Inspect the full trace tree (`loom.run` → `loom.turn` → `loom.model.complete` + `loom.tool`) via `.spans()` / `.metrics()`, see them live in stderr, or fan-out to both at once. Production path swaps in `OTelTelemetry` with no other code changes. | No |
+| [`13_telemetry.py`](13_telemetry.py) | `InMemoryTelemetry` + `ConsoleTelemetry` + `FileTelemetry` + `MultiTelemetry` — four "no collector required" sinks. Inspect the full trace tree (`loom.run` → `loom.turn` → `loom.model.complete` + `loom.tool`) via `.spans()` / `.metrics()`, see them live in stderr, append structured JSONL to disk for `jq` queries, or fan-out across all of them at once. Production path swaps in `OTelTelemetry` with no other code changes. | No |
 
 The image-bearing examples (01, 02) generate small sample PDFs on
 first run via `reportlab` and cache them under `examples/data/`.

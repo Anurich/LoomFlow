@@ -20,6 +20,7 @@ producing the right OTel instrument under the hood.
 
 from __future__ import annotations
 
+import json
 import sys
 import time
 import uuid
@@ -28,7 +29,10 @@ from contextlib import AsyncExitStack, asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Literal
+
+import anyio
 
 from ..core.types import Span
 
@@ -455,3 +459,127 @@ class MultiTelemetry:
                 errors.append(exc)
         if errors:
             raise errors[0]
+
+
+class FileTelemetry:
+    """Append-only JSONL telemetry sink.
+
+    Each span or metric is serialised to one line of structured
+    JSON in the configured file, so the output is parseable by
+    ``jq``, Splunk, Datadog Log Pipelines, etc. Mirrors the
+    :class:`~loomflow.security.FileAuditLog` pattern: parent
+    directory is created if missing, writes go through
+    ``anyio.to_thread.run_sync`` so the event loop never blocks
+    on disk I/O, and an internal lock serialises concurrent
+    writes from parallel tool dispatches.
+
+    Each line has a ``"kind"`` field discriminating span vs
+    metric records. Span lines additionally carry the parent
+    linkage (``parent_span_id``) needed to reconstruct the trace
+    tree offline.
+
+    .. code-block:: python
+
+        from loomflow.observability import FileTelemetry
+
+        agent = Agent(..., telemetry=FileTelemetry("./traces.jsonl"))
+        await agent.run("...")
+
+    Querying offline with ``jq``:
+
+    .. code-block:: shell
+
+        # Spans that took longer than 1s
+        jq -c 'select(.kind=="span" and .duration_ms > 1000)' \\
+            traces.jsonl
+
+        # One user's session
+        jq -c 'select(.attributes.session_id=="sess_xyz")' \\
+            traces.jsonl
+
+    **Not** a replacement for :class:`~loomflow.security.FileAuditLog`
+    — they capture different things. Audit log = business events
+    for compliance ("did Alice's refund go through?"); telemetry
+    = performance / diagnostic spans ("why was this run slow?").
+    Run both together in production.
+
+    No rotation built in — use ``logrotate`` / ``journald`` /
+    your platform's log management to cap file size. The
+    framework deliberately stays out of that policy decision.
+    """
+
+    def __init__(self, path: str | Path) -> None:
+        self._path = Path(path).expanduser().resolve()
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = anyio.Lock()
+
+    @property
+    def path(self) -> Path:
+        return self._path
+
+    @asynccontextmanager
+    async def trace(self, name: str, **attrs: Any) -> AsyncIterator[Span]:
+        clean_attrs = _clean(attrs)
+        span_id = _new_hex_id(8)
+        trace_id = _trace_id.get() or _new_hex_id(16)
+        parent_id = _parent_span_id.get()
+        started_at = datetime.now(UTC)
+        t0 = time.perf_counter()
+
+        trace_token = _trace_id.set(trace_id)
+        parent_token = _parent_span_id.set(span_id)
+        exc_repr: str | None = None
+        try:
+            yield Span(
+                name=name,
+                trace_id=trace_id,
+                span_id=span_id,
+                attributes=dict(clean_attrs),
+            )
+        except Exception as exc:
+            exc_repr = repr(exc)
+            raise
+        finally:
+            _parent_span_id.reset(parent_token)
+            _trace_id.reset(trace_token)
+            elapsed_ms = (time.perf_counter() - t0) * 1000.0
+            await self._write(
+                {
+                    "kind": "span",
+                    "name": name,
+                    "trace_id": trace_id,
+                    "span_id": span_id,
+                    "parent_span_id": parent_id,
+                    "started_at": started_at.isoformat(),
+                    "ended_at": datetime.now(UTC).isoformat(),
+                    "duration_ms": elapsed_ms,
+                    "attributes": dict(clean_attrs),
+                    "exception": exc_repr,
+                }
+            )
+
+    async def emit_metric(
+        self, name: str, value: float, **attrs: Any
+    ) -> None:
+        await self._write(
+            {
+                "kind": "metric",
+                "name": name,
+                "value": value,
+                "instrument_kind": _instrument_kind(name),
+                "attributes": _clean(attrs),
+                "emitted_at": datetime.now(UTC).isoformat(),
+            }
+        )
+
+    async def _write(self, record: dict[str, Any]) -> None:
+        # Lock-protected so parallel tool dispatches don't
+        # interleave their write() calls mid-line. The actual
+        # disk write happens in a worker thread.
+        async with self._lock:
+            await anyio.to_thread.run_sync(self._sync_write, record)
+
+    def _sync_write(self, record: dict[str, Any]) -> None:
+        with self._path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, default=str))
+            fh.write("\n")

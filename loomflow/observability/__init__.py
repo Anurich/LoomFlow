@@ -9,6 +9,11 @@ Telemetry sinks shipped today:
   ``.metrics()``.
 * :class:`ConsoleTelemetry` — print to stderr as spans complete
   / metrics emit. "Tail my agent in dev" without a collector.
+* :class:`FileTelemetry` — JSONL append-only on disk. Each span
+  / metric becomes a structured line, parseable by ``jq``,
+  Splunk, Datadog log pipelines. Pairs with
+  :class:`~loomflow.security.FileAuditLog` for full offline
+  forensics.
 * :class:`MultiTelemetry` — fan-out across multiple sinks. Watch
   live in stderr AND assert in tests.
 * :class:`OTelTelemetry` — OpenTelemetry-backed for production
@@ -23,6 +28,7 @@ from .tracing import (
     CapturedMetric,
     CapturedSpan,
     ConsoleTelemetry,
+    FileTelemetry,
     InMemoryTelemetry,
     MultiTelemetry,
     NoTelemetry,
@@ -33,6 +39,7 @@ __all__ = [
     "CapturedMetric",
     "CapturedSpan",
     "ConsoleTelemetry",
+    "FileTelemetry",
     "InMemoryTelemetry",
     "MultiTelemetry",
     "NoTelemetry",
