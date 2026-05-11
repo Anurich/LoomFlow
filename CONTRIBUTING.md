@@ -259,8 +259,12 @@ the email in `CODE_OF_CONDUCT.md`.
 
 ## Asking for help
 
-- **For usage questions** (how do I use Loom for X?), open a
-  GitHub Discussion: <https://github.com/Anurich/LoomFlow/discussions>
+- **Chat with us on Discord** for fast back-and-forth, design
+  sanity-checks, and meeting other Loom users:
+  <https://discord.gg/X6njWztQ>
+- **For usage questions** you want as a permanent searchable
+  record, open a GitHub Discussion:
+  <https://github.com/Anurich/LoomFlow/discussions>
 - **For bugs**: open an issue with the bug-report template.
 - **For feature ideas**: open an issue with the feature-request
   template. Big proposals welcome — but **discuss first, build

@@ -5,12 +5,20 @@
 blank_issues_enabled: false
 
 contact_links:
-  - name: 💬 Discussion / usage question
+  - name: 🟣 Discord — chat with maintainers + users
+    url: https://discord.gg/X6njWztQ
+    about: |
+      Fastest path for quick questions, design sanity-checks, or
+      meeting other Loom users. For tracked bugs / features,
+      still open a GitHub issue.
+
+  - name: 💬 GitHub Discussions — long-form Q&A
     url: https://github.com/Anurich/LoomFlow/discussions
     about: |
-      "How do I use Loom for X?" or open-ended design discussions.
-      Issues are for confirmed bugs and agreed feature work;
-      Discussions are for thinking out loud.
+      "How do I use Loom for X?" or open-ended design discussions
+      you want as a permanent, searchable record. Issues are for
+      confirmed bugs and agreed feature work; Discussions are for
+      thinking out loud.
 
   - name: 🔒 Security vulnerability
     url: https://github.com/Anurich/LoomFlow/security/policy
