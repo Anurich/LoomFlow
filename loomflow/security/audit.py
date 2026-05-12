@@ -26,7 +26,7 @@ import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, Union, runtime_checkable
 
 import anyio
 
@@ -334,3 +334,224 @@ async def stream_entries(log: AuditLog) -> AsyncIterator[AuditEntry]:
     entries.sort(key=lambda e: e.seq)
     for entry in entries:
         yield entry
+
+
+# ---------------------------------------------------------------------------
+# Full-transcript wrapper
+# ---------------------------------------------------------------------------
+
+
+def wants_full_transcripts(log: AuditLog | None) -> bool:
+    """True when ``log`` opted into full-content capture by setting
+    ``full_transcripts = True``.
+
+    Framework call sites (agent loop, react tool dispatch) use this
+    to decide whether to send full prompts / outputs / tool result
+    bodies into the audit payload or stick to the safe-by-default
+    summary fields. ``None`` and any log without the attribute return
+    ``False`` — the default stays compliance-friendly.
+    """
+    return bool(getattr(log, "full_transcripts", False))
+
+
+class FullTranscriptAuditLog:
+    """Wraps any :class:`AuditLog` to capture full prompts, outputs,
+    and tool-result bodies — not just the summary fields.
+
+    The default audit log truncates prompts to 500 chars, omits the
+    model's final output, and stores only ``ok`` / ``denied`` /
+    ``error`` / ``reason`` for tool results. That's the right
+    default for compliance regimes that prohibit logging customer
+    PII verbatim.
+
+    For **debugging**, **post-incident replay**, or **internal
+    investigations** ("what did my agent actually say to that
+    user?") the framework checks
+    :func:`wants_full_transcripts` on the wired audit log and emits
+    full content into the payload when this wrapper is present.
+
+    Usage::
+
+        from loomflow.security import (
+            FullTranscriptAuditLog,
+            FileAuditLog,
+        )
+
+        agent = Agent(
+            "...",
+            audit_log=FullTranscriptAuditLog(
+                FileAuditLog("./audit.jsonl", secret="...")
+            ),
+        )
+
+    Forwards every call to the wrapped log unchanged — same seq
+    numbers, same HMAC signatures, same ``query`` semantics. Only
+    difference: the agent / architecture layer fills the
+    ``payload`` dict with full content before calling ``append``.
+
+    The opt-in lives on the wrapper, not on a constructor flag, so
+    threat-modelling is explicit: ``isinstance(log,
+    FullTranscriptAuditLog)`` or ``log.full_transcripts is True``
+    is the audit reviewer's signal that PII may be in the log.
+    """
+
+    # Duck-typed marker checked by :func:`wants_full_transcripts`.
+    # Keeping it as a class attribute (not a constructor arg) means
+    # the type itself is the contract — wrapping = opt-in.
+    full_transcripts: bool = True
+
+    def __init__(self, inner: AuditLog) -> None:
+        self._inner = inner
+
+    @property
+    def inner(self) -> AuditLog:
+        """The wrapped audit log. Useful for tests + introspection."""
+        return self._inner
+
+    async def append(
+        self,
+        *,
+        session_id: str,
+        actor: str,
+        action: str,
+        payload: dict[str, Any],
+        user_id: str | None = None,
+    ) -> AuditEntry:
+        return await self._inner.append(
+            session_id=session_id,
+            actor=actor,
+            action=action,
+            payload=payload,
+            user_id=user_id,
+        )
+
+    async def query(
+        self,
+        *,
+        session_id: str | None = None,
+        action: str | None = None,
+        user_id: str | None = None,
+    ) -> list[AuditEntry]:
+        return await self._inner.query(
+            session_id=session_id,
+            action=action,
+            user_id=user_id,
+        )
+
+    async def all_entries(self) -> list[AuditEntry]:
+        # Forward when the inner log exposes the list helper —
+        # InMemoryAuditLog and FileAuditLog both do. Custom impls
+        # without it just won't have the helper either.
+        fn = getattr(self._inner, "all_entries", None)
+        if fn is None:
+            return await self._inner.query()
+        result: list[AuditEntry] = await fn()
+        return result
+
+
+# ---------------------------------------------------------------------------
+# Resolver — turn the ``audit_log=`` constructor arg into an AuditLog
+# ---------------------------------------------------------------------------
+
+
+# Public type alias — the surface accepted by ``Agent(audit_log=...)`` and
+# ``Workflow(audit_log=...)``.
+AuditLogSpec = Union[
+    "AuditLog",
+    str,
+    Path,
+    dict[str, Any],
+    None,
+]
+
+
+def resolve_audit_log(spec: AuditLogSpec) -> AuditLog | None:
+    """Normalise the ``audit_log=`` constructor argument.
+
+    Accepted forms:
+
+    * ``None`` — no audit log; pass-through.
+    * ``str`` / :class:`pathlib.Path` — sugar for
+      :class:`FileAuditLog` at that path. Use this when you just
+      want JSONL on disk with no signing key and summary-level
+      capture.
+    * Any :class:`AuditLog` instance — used as-is. Lets callers
+      hand-construct a :class:`FileAuditLog` with a signing key,
+      wrap one in :class:`FullTranscriptAuditLog`, or plug in a
+      custom backend.
+    * ``dict`` — config-friendly form. Recognised keys:
+
+        * ``"name"`` (``str`` / ``Path``, optional) — file path.
+          When omitted, an :class:`InMemoryAuditLog` is built.
+        * ``"scope_full"`` (``bool``, default ``False``) — when
+          ``True``, the resulting log is wrapped with
+          :class:`FullTranscriptAuditLog` so prompts, model
+          outputs, and tool result bodies land in the audit
+          payload verbatim instead of being summarised.
+        * ``"secret"`` (``str``, optional) — HMAC signing key
+          passed through to the underlying log.
+
+      Example: ``audit_log={"name": "audit.log", "scope_full": True}``
+      gets you a file-backed log that captures everything.
+
+    Anything else raises :class:`TypeError` with the list of valid
+    options so wiring mistakes surface at construction time, not
+    deep in the runtime.
+    """
+    if spec is None:
+        return None
+
+    if isinstance(spec, (str, Path)):
+        return FileAuditLog(spec)
+
+    if isinstance(spec, dict):
+        return _resolve_from_dict(spec)
+
+    # Real AuditLog instance — runtime-checkable Protocol covers
+    # the framework's two backends + ``FullTranscriptAuditLog`` +
+    # any custom impl with the right ``append`` + ``query`` shape.
+    if isinstance(spec, AuditLog):
+        return spec
+
+    raise TypeError(
+        f"audit_log= must be an AuditLog instance, a path (str / "
+        f"pathlib.Path), a dict, or None; got "
+        f"{type(spec).__name__}: {spec!r}.\n"
+        f"Valid options:\n"
+        f"  • InMemoryAuditLog() — keep entries in memory\n"
+        f"  • FileAuditLog('run.log') — JSONL on disk\n"
+        f"  • 'run.log' or Path('run.log') — sugar for FileAuditLog\n"
+        f"  • {{'name': 'run.log', 'scope_full': True}} — config-style "
+        f"with optional full-transcript capture\n"
+        f"  • None — disable audit logging"
+    )
+
+
+def _resolve_from_dict(spec: dict[str, Any]) -> AuditLog:
+    """Build an audit log from the config-dict form."""
+    allowed = {"name", "scope_full", "secret"}
+    extras = set(spec) - allowed
+    if extras:
+        raise TypeError(
+            f"audit_log= dict has unknown key(s): "
+            f"{sorted(extras)}. Allowed keys: {sorted(allowed)}."
+        )
+
+    name = spec.get("name")
+    secret = spec.get("secret", "")
+    scope_full = bool(spec.get("scope_full", False))
+
+    inner: AuditLog
+    if name is None:
+        inner = InMemoryAuditLog(secret=secret)
+    else:
+        if not isinstance(name, (str, Path)):
+            raise TypeError(
+                f"audit_log['name'] must be a str or pathlib.Path; "
+                f"got {type(name).__name__}: {name!r}."
+            )
+        inner = FileAuditLog(name, secret=secret)
+
+    if scope_full:
+        return FullTranscriptAuditLog(inner)
+    return inner

@@ -43,6 +43,8 @@ class ScriptedModel:
         temperature: float = 1.0,
         max_tokens: int | None = None,
         output_schema: Any | None = None,
+        effort: str | None = None,
+        strict_effort: bool = False,
     ) -> tuple[str, list[ToolCall], Usage, str]:
         """Single-shot replay of the next scripted turn.
 
@@ -75,6 +77,8 @@ class ScriptedModel:
         temperature: float = 1.0,
         max_tokens: int | None = None,
         output_schema: Any | None = None,
+        effort: str | None = None,
+        strict_effort: bool = False,
     ) -> AsyncIterator[ModelChunk]:
         if self._idx >= len(self._turns):
             yield ModelChunk(kind="text", text="")

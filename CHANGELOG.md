@@ -24,6 +24,105 @@ Multi-tenancy and structured outputs are opt-in by passing
 to in-tree network adapters (OpenAI, Anthropic, LiteLLM); custom
 models opt in.
 
+### Added — verbatim audit capture via `audit_log={...}` dict
+
+The default audit log is compliance-friendly: prompts are truncated
+to 500 chars, the model's final output isn't recorded, and tool
+results carry only `ok` / `denied` / `error` / `reason`. That's
+right for regimes that prohibit logging customer PII verbatim.
+
+For **debugging**, **post-incident replay**, or **internal
+investigations**, opt into verbatim capture by passing the existing
+`audit_log=` parameter a config dict — no extra class to import:
+
+```python
+agent = Agent(
+    "...",
+    audit_log={
+        "name": "./audit.jsonl",   # path; omit for in-memory
+        "scope_full": True,         # capture prompts + outputs + tool bodies
+        "secret": "hmac-key",       # optional signing key
+    },
+)
+```
+
+The same dict works on `Workflow(...)`. With `scope_full: True` the
+audit payload includes the full prompt, the model's final output
+(and `parsed` for structured runs), the full tool result body, and
+tool call duration. Signatures still verify cleanly.
+
+`Agent(audit_log=...)` and `Workflow(audit_log=...)` now share one
+resolver — accepts `None`, an `AuditLog` instance, a `str` / `Path`
+sugar for `FileAuditLog`, or the new dict form. The class
+`FullTranscriptAuditLog` is still available for power users who
+want to wrap a hand-built backend; `isinstance(log,
+FullTranscriptAuditLog)` is the audit reviewer's signal that PII
+may be in the log.
+
+### Added — dict-form `model=` config
+
+The `model=` parameter now accepts a config dict, mirroring the
+`audit_log={...}` shape — one parameter carries the model spec and
+related agent-level defaults (no need for separate `effort` /
+`strict_effort` kwargs at the call site):
+
+```python
+agent = Agent(
+    "Plan the migration in detail.",
+    model={
+        "name": "claude-opus-4-7",
+        "effort": "high",
+        "strict_effort": True,
+    },
+)
+```
+
+Recognised dict keys: `name` (the model spec — required; `model`
+is an alias), `effort`, `strict_effort`. Top-level kwargs win when
+both are specified, so `Agent(model={"effort": "low"},
+effort="high")` uses "high". Unknown keys raise `ConfigError`.
+
+Equivalent to the explicit form `Agent(model="claude-opus-4-7",
+effort="high", strict_effort=True)` — pick whichever reads better
+at the call site.
+
+### Added — `effort` dial for reasoning-capable models
+
+One enum, one kwarg, every provider's shape — agents can now
+request "more thinking" without learning each lab's API.
+
+```python
+agent = Agent(
+    "Plan the migration in detail.",
+    model="claude-opus-4-7",
+    effort="xhigh",       # Loom translates per provider
+)
+# Per-call wins over the agent default:
+await agent.run("...", effort="low")
+```
+
+`effort` accepts ``"minimal" | "low" | "medium" | "high" | "xhigh"
+| "max"`` (exported as ``loomflow.Effort``). Each adapter
+translates into the provider's native shape:
+
+* **OpenAI** o-series / GPT-5 — `reasoning_effort` (`xhigh` / `max`
+  clamp to `high` — OpenAI's enum tops out there).
+* **Anthropic Opus 4.7 / Mythos** — adaptive `thinking` +
+  `output_config.effort`, the only regime where `xhigh` and `max`
+  pass through unclamped.
+* **Anthropic Opus 4.6 / Sonnet 4.6** — adaptive + effort enum
+  (xhigh/max clamp to high).
+* **Anthropic Sonnet 3.7 / 4 / 4.5** — legacy
+  `thinking.budget_tokens` integer (1024 → 32768 across the
+  range).
+* **LiteLLM** — `reasoning_effort` forwarded; LiteLLM handles
+  per-provider routing.
+
+Adapters whose model doesn't support reasoning effort emit a
+one-time warning per `(model, effort)` pair and drop the kwarg —
+opt into hard-fail with `Agent(..., strict_effort=True)` to catch
+typos or capability mismatches loudly during development.
+
 ### Added — `FileTelemetry` — JSONL telemetry on disk
 
 A no-collector-required sink for users who want spans + metrics

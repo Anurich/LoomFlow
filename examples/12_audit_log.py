@@ -13,7 +13,7 @@ This example builds an Agent + a Workflow with a shared
 ``FileAuditLog``, runs both, then inspects what was written —
 including HMAC verification.
 
-Three things this example demonstrates:
+Four things this example demonstrates:
 
 * Two backends behind the same Protocol — :class:`InMemoryAuditLog`
   for tests / notebooks, :class:`FileAuditLog` for production.
@@ -21,6 +21,11 @@ Three things this example demonstrates:
   helper — a tampered entry will not verify.
 * ``user_id`` is a first-class filter on ``query`` — multi-
   tenant audit queries without payload-digging.
+* The config-dict form ``audit_log={'name': ..., 'scope_full':
+  True}`` — opts the same parameter into verbatim capture of
+  prompts, model outputs, and full tool-result bodies (off by
+  default so compliance-sensitive deployments don't log PII by
+  accident). Works on both Agent and Workflow.
 
 No API keys required — uses :class:`EchoModel` so the example
 runs anywhere.
@@ -38,7 +43,7 @@ from pathlib import Path
 import anyio
 
 from loomflow import Agent, EchoModel, Workflow, tool
-from loomflow.security import FileAuditLog, InMemoryAuditLog
+from loomflow.security import FileAuditLog, FullTranscriptAuditLog, InMemoryAuditLog
 from loomflow.security.audit import verify_signature
 
 # ---------------------------------------------------------------------------
@@ -161,6 +166,77 @@ async def main() -> None:
     print(f"  Highest seq after new run:   {after}")
     print(f"  Δ = {after - before} new entries appended, "
           f"no seq collisions.")
+
+    # ---- 5. Verbatim capture via dict config -----------------------------
+    print()
+    print("=" * 60)
+    print("Part 5 — Verbatim capture: audit_log={..., 'scope_full': True}")
+    print("=" * 60)
+
+    # The default audit log is compliance-friendly: prompts are
+    # truncated to 500 chars, the model's final output is NOT
+    # recorded, and tool results carry only ok/denied/error/reason.
+    # That's right for regimes that prohibit logging customer PII
+    # verbatim.
+    #
+    # For debugging or internal investigation, pass a config dict
+    # to opt into verbatim capture — no extra imports required.
+    # The same shape works on Agent AND Workflow:
+    #
+    #     audit_log={
+    #         "name": "audit.log",   # path (omit for in-memory)
+    #         "scope_full": True,    # capture prompts + outputs + tool bodies
+    #         "secret": "...",       # optional HMAC signing key
+    #     }
+    debug_agent = Agent(
+        "You are a helpful assistant.",
+        model=EchoModel(),
+        tools=[get_weather],
+        audit_log={
+            # no "name" → in-memory; this run is throwaway. Add a
+            # path to persist: "name": "./debug-audit.log".
+            "scope_full": True,
+            "secret": "my-org-hmac-key",
+        },
+    )
+
+    long_prompt = (
+        "Help me debug a long-running issue. Here's the context: "
+        + "X" * 600  # > 500 chars — proves the default would truncate
+        + " END_OF_PROMPT"
+    )
+    result = await debug_agent.run(long_prompt, user_id="alice")
+
+    # The resolver wrapped an InMemoryAuditLog in
+    # FullTranscriptAuditLog; the agent stored the resolved log
+    # on ``_audit_log``. Real apps would have queued entries via a
+    # path-backed log instead.
+    captured = debug_agent._audit_log  # noqa: SLF001 — demo introspection
+    assert captured is not None
+    started = await captured.query(action="run_started")
+    completed = await captured.query(action="run_completed")
+
+    print(f"  Prompt length recorded:    {len(started[0].payload['prompt'])} "
+          f"(default would cap at 500)")
+    print(f"  Includes END_OF_PROMPT?     "
+          f"{'END_OF_PROMPT' in started[0].payload['prompt']}")
+    print(f"  Final output captured:      "
+          f"{completed[0].payload.get('output') == result.output}")
+
+    # Signatures still verify — the wrapper is a pure forwarder.
+    print(f"  Signature still verifies:   "
+          f"{verify_signature(started[0], secret='my-org-hmac-key')}")
+    print(f"  Wrapped in FullTranscript?  "
+          f"{isinstance(captured, FullTranscriptAuditLog)}")
+
+    # Workflows accept the same dict form — one parameter, two
+    # primitives. The resolver builds the right backend for each.
+    wf3 = Workflow.chain(
+        [step_a, step_b],
+        audit_log={"scope_full": True, "secret": "my-org-hmac-key"},
+    )
+    await wf3.run("hello", user_id="alice")
+    print("  Same dict works on Workflow too.")
 
     # Cleanup so re-running the example is idempotent.
     await anyio.to_thread.run_sync(log_path.unlink)

@@ -39,6 +39,8 @@ class EchoModel:
         temperature: float = 1.0,
         max_tokens: int | None = None,
         output_schema: Any | None = None,
+        effort: str | None = None,
+        strict_effort: bool = False,
     ) -> tuple[str, list[ToolCall], Usage, str]:
         """Single-shot echo. Returns the echoed user prompt as one
         string with synthetic usage. No per-token chunking — used by
@@ -71,6 +73,8 @@ class EchoModel:
         temperature: float = 1.0,
         max_tokens: int | None = None,
         output_schema: Any | None = None,
+        effort: str | None = None,
+        strict_effort: bool = False,
     ) -> AsyncIterator[ModelChunk]:
         last_user = next(
             (m for m in reversed(messages) if m.role == Role.USER),

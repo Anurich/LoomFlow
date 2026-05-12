@@ -314,6 +314,8 @@ class _RecordingModel:
         temperature: float = 1.0,
         max_tokens: int | None = None,
         output_schema: object | None = None,
+        effort: str | None = None,
+        strict_effort: bool = False,
     ) -> AsyncIterator[ModelChunk]:
         self.last_messages = list(messages)
         yield ModelChunk(kind="text", text="ack")

@@ -121,6 +121,27 @@ class LiteLLMModel(OpenAIModel):
         # or the ``api_key=`` we shoved into the defaults above.
         super().__init__(model, client=client, api_key=api_key)
 
+    def _effort_kwargs(
+        self, effort: str | None, strict_effort: bool
+    ) -> dict[str, Any]:
+        """LiteLLM normalises ``reasoning_effort`` across providers
+        (Anthropic, Gemini, Bedrock, …), so we pass the value through
+        regardless of model name. ``xhigh`` / ``max`` clamp to
+        ``high`` because LiteLLM's enum tracks OpenAI's. Effort is
+        never warn-dropped here — LiteLLM's own backend decides
+        whether the provider supports the kwarg."""
+        if effort is None:
+            return {}
+        mapped = {
+            "minimal": "minimal",
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
+            "xhigh": "high",
+            "max": "high",
+        }.get(effort, "medium")
+        return {"reasoning_effort": mapped}
+
 
 def _candidate_env_vars(model_spec: str) -> list[str]:
     """Map a LiteLLM model spec to the env-var names it would

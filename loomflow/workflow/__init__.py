@@ -391,56 +391,16 @@ async def _eval_classifier(fn: Callable[[Any], Any], value: Any) -> Any:
 
 
 def _resolve_audit_log(spec: Any) -> AuditLog | None:
-    """Normalise the ``audit_log=`` constructor argument.
+    """Delegate to the public :func:`resolve_audit_log` resolver.
 
-    Accepted forms:
-
-    * ``None`` — no audit log; pass-through.
-    * ``str`` / :class:`pathlib.Path` — sugar for
-      :class:`~loomflow.security.FileAuditLog`. Lets callers write
-      ``Workflow.chain(..., audit_log="run.log")`` without importing
-      the backend explicitly.
-    * Any object satisfying the :class:`AuditLog` protocol
-      (``InMemoryAuditLog``, ``FileAuditLog``, or a custom
-      implementation with the right ``append`` + ``query``
-      surface).
-
-    Anything else raises :class:`TypeError` immediately, naming the
-    offending type and listing the valid options. The protocol is
-    runtime-checkable, so a bare ``list`` (which has ``append`` but
-    no ``query``) is rejected here rather than blowing up later
-    inside ``_audit`` with ``list.append() takes no keyword
-    arguments``.
+    Kept as a thin module-level wrapper so existing call sites
+    (Workflow constructors) stay unchanged. See
+    :func:`loomflow.security.resolve_audit_log` for the accepted
+    forms — instance, path, dict, or None.
     """
-    if spec is None:
-        return None
+    from ..security.audit import resolve_audit_log
 
-    # Path-spec sugar.
-    from pathlib import Path
-
-    if isinstance(spec, (str, Path)):
-        from ..security.audit import FileAuditLog
-
-        return FileAuditLog(spec)
-
-    # Real AuditLog instance.
-    from ..security.audit import AuditLog as _AuditLog
-
-    if isinstance(spec, _AuditLog):
-        return spec  # type: ignore[no-any-return]
-
-    raise TypeError(
-        f"audit_log= must be an AuditLog instance, a path "
-        f"(str / pathlib.Path), or None; got "
-        f"{type(spec).__name__}: {spec!r}.\n"
-        f"Valid options:\n"
-        f"  • InMemoryAuditLog() — keep entries in memory "
-        f"(good for tests / notebooks)\n"
-        f"  • FileAuditLog('run.log') — JSONL on disk\n"
-        f"  • 'run.log' or Path('run.log') — sugar for "
-        f"FileAuditLog\n"
-        f"  • None — disable audit logging"
-    )
+    return resolve_audit_log(spec)
 
 
 # ---------------------------------------------------------------------------
@@ -481,7 +441,7 @@ class Workflow:
         name: str = "workflow",
         *,
         telemetry: Telemetry | None = None,
-        audit_log: AuditLog | str | Path | None = None,
+        audit_log: AuditLog | str | Path | dict[str, Any] | None = None,
         memory: Memory | None = None,
         response_tone: str | None = None,
         max_steps: int = 100,
@@ -1116,7 +1076,7 @@ class Workflow:
         *,
         name: str = "chain",
         telemetry: Telemetry | None = None,
-        audit_log: AuditLog | str | Path | None = None,
+        audit_log: AuditLog | str | Path | dict[str, Any] | None = None,
         memory: Memory | None = None,
         response_tone: str | None = None,
         max_steps: int = 100,
@@ -1169,7 +1129,7 @@ class Workflow:
         default: StepLike | None = None,
         name: str = "route",
         telemetry: Telemetry | None = None,
-        audit_log: AuditLog | str | Path | None = None,
+        audit_log: AuditLog | str | Path | dict[str, Any] | None = None,
         memory: Memory | None = None,
         response_tone: str | None = None,
         max_steps: int = 100,
@@ -1263,7 +1223,7 @@ class Workflow:
         merge: Callable[[list[Any]], Any] | None = None,
         name: str = "parallel",
         telemetry: Telemetry | None = None,
-        audit_log: AuditLog | str | Path | None = None,
+        audit_log: AuditLog | str | Path | dict[str, Any] | None = None,
         memory: Memory | None = None,
         response_tone: str | None = None,
         max_steps: int = 100,

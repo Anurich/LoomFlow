@@ -94,7 +94,7 @@ class Agent:
         self,
         instructions: str,
         *,
-        model: Model | str | None = None,
+        model: Model | str | dict[str, Any] | None = None,
         memory: Memory | str | Mapping[str, Any] | None = None,
         runtime: Runtime | None = None,
         budget: Budget | None = None,
@@ -106,7 +106,7 @@ class Agent:
         | Callable[..., object]
         | None = None,
         telemetry: Telemetry | None = None,
-        audit_log: AuditLog | None = None,
+        audit_log: AuditLog | str | Path | dict[str, Any] | None = None,
         max_turns: int = DEFAULT_MAX_TURNS,
         auto_consolidate: bool = False,
         architecture: Architecture | str | None = None,
@@ -117,6 +117,8 @@ class Agent:
         secrets: Any | None = None,
         output_schema: type[BaseModel] | Any | None = None,
         response_tone: str | None = None,
+        effort: str | None = None,
+        strict_effort: bool = False,
     ) -> None:
         # Skills — packaged on-disk playbooks loaded on demand.
         # Build the registry first so frontmatter validation fires
@@ -160,6 +162,13 @@ class Agent:
             from ..security.secrets import EnvSecrets
             secrets = EnvSecrets()
         self._secrets = secrets
+        # Dict-form ``model={"name": ..., "effort": ..., "strict_effort":
+        # ...}`` is sugar for passing the model spec + agent-level
+        # reasoning-effort config in one place. Top-level kwargs win when
+        # both are specified — explicit beats config.
+        model, effort, strict_effort = _normalize_model_spec(
+            model, effort=effort, strict_effort=strict_effort,
+        )
         self._model: Model = _resolve_model(model, secrets=self._secrets)
         self._retry_policy: RetryPolicy = (
             retry_policy
@@ -258,7 +267,8 @@ class Agent:
 
         # ``self._telemetry`` already initialised above (before the
         # memory-wrap step so AutoExtractMemory can take a reference).
-        self._audit_log: AuditLog | None = audit_log
+        from ..security.audit import resolve_audit_log
+        self._audit_log: AuditLog | None = resolve_audit_log(audit_log)
         self._max_turns = max_turns
         self._auto_consolidate = auto_consolidate
         # Approval handler resolves :class:`Decision.ask_` outcomes
@@ -277,6 +287,16 @@ class Agent:
         # ``Workflow(response_tone=)``) is the next fallback;
         # otherwise no tone directive is appended at all.
         self._default_response_tone: str | None = response_tone
+        # Default ``effort`` for runs that don't supply one.
+        # ``Agent(effort="high")`` makes "this agent always thinks
+        # hard" the contract; per-call ``run(..., effort=)`` still
+        # wins for callers that want to override per-prompt.
+        self._default_effort: str | None = effort
+        # ``strict_effort`` is agent-level only — no per-call
+        # override. If you want a run to fail when the model can't
+        # honour the effort dial, that's a property of how the
+        # whole agent is wired up.
+        self._strict_effort: bool = strict_effort
         self._architecture: Architecture = resolve_architecture(architecture)
 
     # ---- hook decorators (user-facing sugar) ----------------------------
@@ -655,14 +675,20 @@ class Agent:
             if hasattr(deps.model, "complete"):
                 new_text, _calls, usage, _finish = (
                     await deps.model.complete(
-                        session.messages, tools=None
+                        session.messages,
+                        tools=None,
+                        effort=deps.effort,
+                        strict_effort=deps.strict_effort,
                     )
                 )
             else:
                 parts: list[str] = []
                 usage = Usage()
                 async for chunk in deps.model.stream(
-                    session.messages, tools=None
+                    session.messages,
+                    tools=None,
+                    effort=deps.effort,
+                    strict_effort=deps.strict_effort,
                 ):
                     if chunk.kind == "text" and chunk.text:
                         parts.append(chunk.text)
@@ -847,6 +873,7 @@ class Agent:
         output_schema: type[BaseModel] | Any | None = None,
         output_validation_retries: int = 1,
         response_tone: str | None = None,
+        effort: str | None = None,
     ) -> RunResult:
         """Run the agent to completion and return its :class:`RunResult`.
 
@@ -926,6 +953,7 @@ class Agent:
             ),
             output_validation_retries=output_validation_retries,
             response_tone=response_tone,
+            effort=effort if effort is not None else self._default_effort,
         )
 
     async def resume(
@@ -974,6 +1002,7 @@ class Agent:
         output_schema: type[BaseModel] | Any | None = None,
         output_validation_retries: int = 1,
         response_tone: str | None = None,
+        effort: str | None = None,
     ) -> AsyncIterator[Event]:
         """Stream :class:`Event`\\ s as the loop produces them.
 
@@ -995,6 +1024,9 @@ class Agent:
             if output_schema is not None
             else self._default_output_schema
         )
+        effective_effort = (
+            effort if effort is not None else self._default_effort
+        )
 
         async def _produce() -> None:
             try:
@@ -1009,6 +1041,7 @@ class Agent:
                     output_schema=effective_schema,
                     output_validation_retries=output_validation_retries,
                     response_tone=response_tone,
+                    effort=effective_effort,
                 )
             except Exception as exc:  # noqa: BLE001 — surface as ERROR + re-raise
                 with anyio.CancelScope(shield=True):
@@ -1041,6 +1074,7 @@ class Agent:
         output_schema: type[BaseModel] | Any | None = None,
         output_validation_retries: int = 1,
         response_tone: str | None = None,
+        effort: str | None = None,
     ) -> RunResult:
         """Setup → delegate iteration to the architecture → teardown.
 
@@ -1128,13 +1162,18 @@ class Agent:
             set_run_context(run_ctx),
         ):
             if not fast_audit:
+                # ``FullTranscriptAuditLog`` opts into verbatim
+                # prompt capture; default audit truncates to 500
+                # chars to avoid logging customer PII by accident.
+                from ..security.audit import wants_full_transcripts
+                full_audit = wants_full_transcripts(self._audit_log)
                 await self._audit(
                     session_id=session_id,
                     user_id=run_ctx.user_id,
                     actor="user",
                     action="run_started",
                     payload={
-                        "prompt": prompt[:500],
+                        "prompt": prompt if full_audit else prompt[:500],
                         "model": self._model.name,
                         "max_turns": self._max_turns,
                         "architecture": self._architecture.name,
@@ -1239,6 +1278,12 @@ class Agent:
                 # with native structured-output APIs use it to
                 # constrain the model and skip the validation retry.
                 output_schema=output_schema,
+                # Reasoning-effort dial; architectures forward to
+                # model.complete()/.stream(), where each adapter
+                # translates into its provider's native shape.
+                # strict_effort is agent-level; effort is per-call.
+                effort=effort,
+                strict_effort=self._strict_effort,
                 # Architectures consult this to pick fast (buffered)
                 # vs streaming (channel) paths for parallel work.
                 streaming=emit is not _noop_emit,
@@ -1321,20 +1366,36 @@ class Agent:
                     await emit(Event.error(session_id, exc))
 
             if not fast_audit:
+                from ..security.audit import wants_full_transcripts
+                completion_payload: dict[str, Any] = {
+                    "turns": session.turns,
+                    "interrupted": session.interrupted,
+                    "interruption_reason": session.interruption_reason,
+                    "tokens_in": session.cumulative_usage.input_tokens,
+                    "tokens_out": session.cumulative_usage.output_tokens,
+                    "cost_usd": session.cumulative_usage.cost_usd,
+                    "elapsed_ms": elapsed_ms,
+                }
+                # When ``FullTranscriptAuditLog`` wraps the log,
+                # include the final model output so the entry is
+                # self-contained for replay / investigation. The
+                # ``parsed`` field is serialised via ``model_dump``
+                # when it's a Pydantic instance; raw types pass
+                # through as-is.
+                if wants_full_transcripts(self._audit_log):
+                    completion_payload["output"] = session.output
+                    if parsed is not None:
+                        completion_payload["parsed"] = (
+                            parsed.model_dump(mode="json")
+                            if isinstance(parsed, BaseModel)
+                            else parsed
+                        )
                 await self._audit(
                     session_id=session_id,
                     user_id=run_ctx.user_id,
                     actor="system",
                     action="run_completed",
-                    payload={
-                        "turns": session.turns,
-                        "interrupted": session.interrupted,
-                        "interruption_reason": session.interruption_reason,
-                        "tokens_in": session.cumulative_usage.input_tokens,
-                        "tokens_out": session.cumulative_usage.output_tokens,
-                        "cost_usd": session.cumulative_usage.cost_usd,
-                        "elapsed_ms": elapsed_ms,
-                    },
+                    payload=completion_payload,
                 )
             await emit(Event.completed(session_id, result.model_dump(mode="json")))
             return result
@@ -1559,6 +1620,66 @@ _LITELLM_PREFIXES: tuple[str, ...] = (
     "azure/",         # Azure OpenAI
     "litellm/",       # explicit opt-in: ``litellm/<any>`` strips the prefix
 )
+
+
+_MODEL_DICT_KEYS = frozenset({"name", "model", "effort", "strict_effort"})
+
+
+def _normalize_model_spec(
+    spec: Model | str | dict[str, Any] | None,
+    *,
+    effort: str | None,
+    strict_effort: bool,
+) -> tuple[Model | str | None, str | None, bool]:
+    """Unpack ``model={"name": ..., "effort": ..., "strict_effort": ...}``
+    into a plain spec + the corresponding agent kwargs.
+
+    Mirrors the ``audit_log={...}`` dict pattern: one parameter
+    carries both the resource identifier and any related defaults.
+    Explicit top-level kwargs win over dict-embedded values so
+    callers who pass *both* can override per-Agent without
+    rewriting the dict.
+
+    Returns ``(spec, effort, strict_effort)`` ready for the existing
+    resolution path. Non-dict inputs pass through unchanged.
+    """
+    if not isinstance(spec, dict):
+        return spec, effort, strict_effort
+
+    from ..core.errors import ConfigError
+
+    d = dict(spec)  # shallow copy so we don't mutate the caller's dict
+    extras = set(d) - _MODEL_DICT_KEYS
+    if extras:
+        raise ConfigError(
+            f"model= dict has unknown key(s): {sorted(extras)}. "
+            f"Recognised keys: {sorted(_MODEL_DICT_KEYS)}."
+        )
+    # ``name`` is the preferred key; ``model`` is the same thing
+    # under a different name so users who think of "model name"
+    # don't get tripped up.
+    name = d.pop("name", None)
+    alt = d.pop("model", None)
+    if name is None and alt is None:
+        raise ConfigError(
+            "model= dict requires a 'name' key (or 'model' alias)."
+        )
+    if name is not None and alt is not None:
+        raise ConfigError(
+            "model= dict has both 'name' and 'model' — pick one."
+        )
+    resolved_spec: Model | str = name if name is not None else alt
+
+    dict_effort = d.pop("effort", None)
+    dict_strict = d.pop("strict_effort", None)
+
+    # Explicit top-level kwarg wins; otherwise inherit from the dict.
+    if effort is None and dict_effort is not None:
+        effort = dict_effort
+    if not strict_effort and dict_strict is not None:
+        strict_effort = bool(dict_strict)
+
+    return resolved_spec, effort, strict_effort
 
 
 def _resolve_model(

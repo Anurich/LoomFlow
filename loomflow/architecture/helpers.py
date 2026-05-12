@@ -58,6 +58,8 @@ async def text_only_model_call(
         deps.model.stream,
         messages,
         tools=None,
+        effort=deps.effort,
+        strict_effort=deps.strict_effort,
     )
     async for chunk in chunks:
         if chunk.kind == "text" and chunk.text is not None:

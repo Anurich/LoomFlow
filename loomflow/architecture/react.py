@@ -34,9 +34,33 @@ from ..core.types import (
     ToolResult,
     Usage,
 )
-from ..security.audit import AuditLog
+from ..security.audit import AuditLog, wants_full_transcripts
 from .base import AgentSession, Dependencies
 from .helpers import add_usage
+
+
+def _tool_result_payload(
+    *,
+    call: ToolCall,
+    result: ToolResult,
+    turn: int,
+    audit_log: AuditLog | None,
+) -> dict[str, Any]:
+    """Build the ``tool_result`` audit payload, adding the result
+    body when a :class:`FullTranscriptAuditLog` is wired."""
+    payload: dict[str, Any] = {
+        "tool": call.tool,
+        "call_id": result.call_id,
+        "ok": result.ok,
+        "denied": result.denied,
+        "error": result.error,
+        "reason": result.reason,
+        "turn": turn,
+    }
+    if wants_full_transcripts(audit_log):
+        payload["output"] = result.output
+        payload["duration_ms"] = result.duration_ms
+    return payload
 
 # Module-level singleton no-op async context manager. ``contextlib.nullcontext``
 # implements both the sync and async protocols (since Python 3.10), so we can
@@ -174,6 +198,8 @@ class ReAct:
                                     session.messages,
                                     tools=tool_defs or None,
                                     output_schema=deps.output_schema,
+                                    effort=deps.effort,
+                                    strict_effort=deps.strict_effort,
                                 )
                             )
                         else:
@@ -184,6 +210,8 @@ class ReAct:
                                     session.messages,
                                     tools=tool_defs or None,
                                     output_schema=deps.output_schema,
+                                    effort=deps.effort,
+                                    strict_effort=deps.strict_effort,
                                 )
                             )
                 else:
@@ -205,6 +233,8 @@ class ReAct:
                                 session.messages,
                                 tools=tool_defs or None,
                                 output_schema=deps.output_schema,
+                                effort=deps.effort,
+                                strict_effort=deps.strict_effort,
                             )
                         else:
                             chunks = deps.runtime.stream_step(
@@ -213,6 +243,8 @@ class ReAct:
                                 session.messages,
                                 tools=tool_defs or None,
                                 output_schema=deps.output_schema,
+                                effort=deps.effort,
+                                strict_effort=deps.strict_effort,
                             )
                         async for chunk in chunks:
                             yield Event.model_chunk(session.id, chunk)
@@ -498,15 +530,12 @@ async def _dispatch_streaming(
                     session.id,
                     "system",
                     "tool_result",
-                    {
-                        "tool": call.tool,
-                        "call_id": result.call_id,
-                        "ok": result.ok,
-                        "denied": result.denied,
-                        "error": result.error,
-                        "reason": result.reason,
-                        "turn": session.turns,
-                    },
+                    _tool_result_payload(
+                        call=call,
+                        result=result,
+                        turn=session.turns,
+                        audit_log=deps.audit_log,
+                    ),
                     user_id=deps.context.user_id,
                 )
             await sender.send(Event.tool_result(session.id, result))
@@ -557,15 +586,12 @@ async def _run_one_tool(
             session.id,
             "system",
             "tool_result",
-            {
-                "tool": call.tool,
-                "call_id": result.call_id,
-                "ok": result.ok,
-                "denied": result.denied,
-                "error": result.error,
-                "reason": result.reason,
-                "turn": session.turns,
-            },
+            _tool_result_payload(
+                call=call,
+                result=result,
+                turn=session.turns,
+                audit_log=deps.audit_log,
+            ),
             user_id=deps.context.user_id,
         )
     event_buffer.append(Event.tool_result(session.id, result))

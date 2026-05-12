@@ -82,6 +82,21 @@ class OpenAIModel:
                 base_url=base_url,
             )
 
+    def _effort_kwargs(
+        self, effort: str | None, strict_effort: bool
+    ) -> dict[str, Any]:
+        """Translate the reasoning-effort dial into provider kwargs.
+
+        Default is the OpenAI prefix-matched mapping in
+        :mod:`loomflow.model._effort`. Subclasses that route through a
+        different transport (e.g. :class:`LiteLLMModel` — same wire
+        shape, many providers) override this to do their own
+        translation, since the ``self.name`` check below only knows
+        about real OpenAI models.
+        """
+        from ._effort import openai_kwargs
+        return openai_kwargs(effort, self.name, strict=strict_effort)
+
     async def complete(
         self,
         messages: list[Message],
@@ -90,6 +105,8 @@ class OpenAIModel:
         temperature: float = 1.0,
         max_tokens: int | None = None,
         output_schema: Any | None = None,
+        effort: str | None = None,
+        strict_effort: bool = False,
     ) -> tuple[str, list[ToolCall], Usage, str]:
         """Single-shot completion (no per-chunk yields).
 
@@ -125,6 +142,11 @@ class OpenAIModel:
         rf = _build_response_format(output_schema)
         if rf is not None:
             kwargs["response_format"] = rf
+        # Reasoning-effort translation. Adapter knows which OpenAI
+        # models accept ``reasoning_effort`` and drops the kwarg on
+        # everything else (warn-once or strict-raise depending on
+        # the caller). See ``loomflow/model/_effort.py``.
+        kwargs.update(self._effort_kwargs(effort, strict_effort))
 
         try:
             response = await self._client.chat.completions.create(**kwargs)
@@ -136,6 +158,8 @@ class OpenAIModel:
                     temperature=temperature,
                     max_tokens=max_tokens,
                     output_schema=output_schema,
+                    effort=effort,
+                    strict_effort=strict_effort,
                 )
             )
 
@@ -197,6 +221,8 @@ class OpenAIModel:
         temperature: float = 1.0,
         max_tokens: int | None = None,
         output_schema: Any | None = None,
+        effort: str | None = None,
+        strict_effort: bool = False,
     ) -> AsyncIterator[ModelChunk]:
         oai_messages = _to_openai_messages(messages)
         oai_tools = [_to_openai_tool(t) for t in (tools or [])]
@@ -216,6 +242,7 @@ class OpenAIModel:
         rf = _build_response_format(output_schema)
         if rf is not None:
             kwargs["response_format"] = rf
+        kwargs.update(self._effort_kwargs(effort, strict_effort))
 
         partials: dict[int, _OAIPartial] = {}
         usage = Usage()

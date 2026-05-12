@@ -618,3 +618,23 @@ class ToolEvent(BaseModel):
     tool: str
     server: str | None = None
     at: datetime = Field(default_factory=_utcnow)
+
+
+# Reasoning-effort dial for thinking-capable models. Maps to
+# different per-provider shapes inside each Model adapter:
+#
+# * OpenAI o1/o3/o4/GPT-5  → ``reasoning_effort`` string
+# * Anthropic Claude 4.6+  → ``output_config.effort`` (adaptive)
+# * Anthropic Claude 3.7-4.5 → ``thinking.budget_tokens`` int
+# * LiteLLM passthrough    → ``reasoning_effort`` (normalised)
+#
+# Models that don't support reasoning effort silently drop the
+# kwarg with a one-time warning (see ``Model`` protocol docstring).
+# ``strict_effort=True`` on the Agent makes the drop a hard error
+# instead, for callers who want typo / capability checks loud.
+#
+# ``minimal`` was added with OpenAI GPT-5 and represents the
+# "skip nearly all reasoning" path. ``xhigh`` is currently
+# Anthropic Opus 4.7 only. ``max`` is Anthropic Opus 4.7 and
+# DeepSeek V4-pro.
+Effort = Literal["minimal", "low", "medium", "high", "xhigh", "max"]

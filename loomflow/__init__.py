@@ -96,6 +96,7 @@ from .runtime import InProcRuntime
 from .security import (
     AllowAll,
     AuditLog,
+    FullTranscriptAuditLog,
     HookRegistry,
     InMemoryAuditLog,
     Mode,
@@ -157,6 +158,7 @@ __all__ = [
     # ----- Default in-memory / no-op backends + always-on architecture -----
     "InMemoryMemory",
     "InMemoryAuditLog",
+    "FullTranscriptAuditLog",
     "NoBudget",
     "NoTelemetry",
     "NoSandbox",

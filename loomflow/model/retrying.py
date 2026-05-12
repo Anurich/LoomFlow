@@ -82,6 +82,8 @@ class RetryingModel:
         temperature: float = 1.0,
         max_tokens: int | None = None,
         output_schema: Any | None = None,
+        effort: str | None = None,
+        strict_effort: bool = False,
     ) -> tuple[str, list[ToolCall], Usage, str]:
         """Single-shot completion with retry on transient failures."""
 
@@ -93,6 +95,8 @@ class RetryingModel:
                     temperature=temperature,
                     max_tokens=max_tokens,
                     output_schema=output_schema,
+                    effort=effort,
+                    strict_effort=strict_effort,
                 )
             )
             return result
@@ -110,6 +114,8 @@ class RetryingModel:
         temperature: float = 1.0,
         max_tokens: int | None = None,
         output_schema: Any | None = None,
+        effort: str | None = None,
+        strict_effort: bool = False,
     ) -> AsyncIterator[ModelChunk]:
         """Streaming completion with retry-before-first-chunk.
 
@@ -127,6 +133,8 @@ class RetryingModel:
                     temperature=temperature,
                     max_tokens=max_tokens,
                     output_schema=output_schema,
+                    effort=effort,
+                    strict_effort=strict_effort,
                 )
                 # First chunk — if this raises we can still retry.
                 first_chunk: ModelChunk | None = None

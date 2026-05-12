@@ -38,6 +38,12 @@ previous one's vocabulary.
 | [`12_audit_log.py`](12_audit_log.py) | `InMemoryAuditLog` + `FileAuditLog` — HMAC-signed audit entries written from both Agents (`run_started` / `tool_call` / `tool_result`) and Workflows (`step_started` / `step_completed`). Demonstrates tamper detection via `verify_signature` and seq-counter recovery across process restart. | No |
 | [`13_telemetry.py`](13_telemetry.py) | `InMemoryTelemetry` + `ConsoleTelemetry` + `FileTelemetry` + `MultiTelemetry` — four "no collector required" sinks. Inspect the full trace tree (`loom.run` → `loom.turn` → `loom.model.complete` + `loom.tool`) via `.spans()` / `.metrics()`, see them live in stderr, append structured JSONL to disk for `jq` queries, or fan-out across all of them at once. Production path swaps in `OTelTelemetry` with no other code changes. | No |
 
+## Model-tuning knobs
+
+| File | What it shows | Needs API key? |
+|---|---|---|
+| [`14_effort_dial.py`](14_effort_dial.py) | One enum, every provider's reasoning-effort shape. Runs the same question at each effort tier on Claude Opus 4.7 (the only regime that takes the full `low → xhigh → max` range), shows the agent-default + per-call override pattern, and demonstrates `strict_effort=True` raising `EffortNotSupportedError` when wired to a model that can't honour it. | Anthropic |
+
 The image-bearing examples (01, 02) generate small sample PDFs on
 first run via `reportlab` and cache them under `examples/data/`.
 The on-disk Chroma indices are also cached, so subsequent runs only

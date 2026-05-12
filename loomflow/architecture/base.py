@@ -126,6 +126,20 @@ class Dependencies:
     the model to produce valid JSON. Adapters without native support
     ignore it silently and the prompt-augmentation path (system
     prompt carries the schema) still applies."""
+    effort: str | None = None
+    """Reasoning-effort dial — one of ``"minimal" | "low" | "medium"
+    | "high" | "xhigh" | "max"``. Forwarded to ``model.complete()``
+    / ``model.stream()`` where each adapter translates it into the
+    provider's native shape (OpenAI ``reasoning_effort``, Anthropic
+    ``thinking`` / ``output_config.effort``, LiteLLM passthrough).
+    Models that don't support reasoning effort emit a one-time
+    warning per ``(model, effort)`` pair and drop the kwarg — opt
+    into hard-fail via ``strict_effort=True`` on the Agent."""
+    strict_effort: bool = False
+    """When True, ``effort`` against an unsupported model raises
+    ``EffortNotSupportedError`` instead of warn-and-drop. Useful for
+    pipelines where silently downgrading a reasoning request would
+    be worse than failing fast."""
     streaming: bool = False
     """Whether a downstream consumer is reading from
     ``agent.stream()``. When True, architectures should preserve

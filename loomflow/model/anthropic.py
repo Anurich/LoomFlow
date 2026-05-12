@@ -88,6 +88,8 @@ class AnthropicModel:
         temperature: float = 1.0,
         max_tokens: int | None = None,
         output_schema: Any | None = None,
+        effort: str | None = None,
+        strict_effort: bool = False,
     ) -> tuple[str, list[ToolCall], Usage, str]:
         """Single-shot non-streaming completion.
 
@@ -140,6 +142,15 @@ class AnthropicModel:
                 "type": "tool",
                 "name": synthetic_tool_name,
             }
+        # Reasoning-effort translation. Adapter picks the right
+        # regime (Opus 4.7 adaptive-only / 4.6 adaptive+effort /
+        # legacy budget_tokens) based on the model name; drops the
+        # kwarg with a warning on models that don't support it.
+        from ._effort import anthropic_kwargs
+
+        kwargs.update(
+            anthropic_kwargs(effort, self.name, strict=strict_effort)
+        )
 
         try:
             response = await self._client.messages.create(**kwargs)
@@ -151,6 +162,8 @@ class AnthropicModel:
                     temperature=temperature,
                     max_tokens=max_tokens,
                     output_schema=output_schema,
+                    effort=effort,
+                    strict_effort=strict_effort,
                 )
             )
 
@@ -212,6 +225,8 @@ class AnthropicModel:
         temperature: float = 1.0,
         max_tokens: int | None = None,
         output_schema: Any | None = None,
+        effort: str | None = None,
+        strict_effort: bool = False,
     ) -> AsyncIterator[ModelChunk]:
         system, anth_messages = _to_anthropic_messages(messages)
         anth_tools = [_to_anthropic_tool(t) for t in (tools or [])]
@@ -237,6 +252,11 @@ class AnthropicModel:
             }
         if anth_tools:
             kwargs["tools"] = anth_tools
+        from ._effort import anthropic_kwargs
+
+        kwargs.update(
+            anthropic_kwargs(effort, self.name, strict=strict_effort)
+        )
 
         partials: dict[int, _PartialTool] = {}
         agg_input = 0

@@ -61,6 +61,8 @@ class Model(Protocol):
         temperature: float = 1.0,
         max_tokens: int | None = None,
         output_schema: Any | None = None,
+        effort: str | None = None,
+        strict_effort: bool = False,
     ) -> AsyncIterator[ModelChunk]:
         """Stream completion chunks. Each chunk is text, tool_call, or finish.
 
@@ -74,6 +76,14 @@ class Model(Protocol):
         ignore the kwarg silently — the agent loop's prompt-augmentation
         path still produces JSON, just with retry-on-validation-fail
         instead of hard guarantees.
+
+        ``effort`` is an optional reasoning-effort dial that maps to
+        whatever each provider supports (see :class:`~loomflow.Effort`).
+        Adapters whose model doesn't support reasoning effort drop the
+        kwarg with a one-time per-(model, effort) warning. Pass
+        ``strict_effort=True`` on the agent to make the drop a hard
+        error instead — useful for catching typos / capability mismatches
+        loudly during development.
         """
         ...
 
