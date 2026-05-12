@@ -131,8 +131,25 @@ class MCPRegistry:
 
         try:
             sdk_result = await client.call_tool(bare_name, dict(args))
-        except Exception as exc:  # noqa: BLE001 — surface SDK errors as ToolResult
-            return ToolResult.error_(call_id=call_id, message=str(exc))
+        except Exception as first_exc:  # noqa: BLE001 — see retry path
+            # The session may have died (network drop, server restart,
+            # broken pipe). Reset it and retry ONCE so the agent loop
+            # self-heals without bubbling a transport hiccup up as a
+            # permanent tool failure. We do NOT retry beyond once —
+            # repeated failures get surfaced to the caller, who can
+            # decide whether the underlying tool call is idempotent.
+            reset_ok = await self._reset_client(server_name)
+            if not reset_ok:
+                return ToolResult.error_(call_id=call_id, message=str(first_exc))
+            # _reset_client swaps in a fresh client; re-fetch so we
+            # don't keep talking to the broken one.
+            client = self._clients[server_name]
+            try:
+                sdk_result = await client.call_tool(bare_name, dict(args))
+            except Exception as second_exc:  # noqa: BLE001
+                return ToolResult.error_(
+                    call_id=call_id, message=str(second_exc)
+                )
 
         is_error = bool(getattr(sdk_result, "isError", False))
         output = _extract_output(sdk_result)
@@ -142,6 +159,42 @@ class MCPRegistry:
                 message=output if isinstance(output, str) else str(output),
             )
         return ToolResult.success(call_id=call_id, output=output)
+
+    async def _reset_client(self, server_name: str) -> bool:
+        """Tear down + reopen one client's session. Returns ``True``
+        if reconnection succeeded, ``False`` otherwise.
+
+        Errors during close are swallowed — the existing session is
+        already considered broken, so we just want a fresh one. A
+        ``False`` return means the reset itself failed; callers
+        should not retry against this client until they try again
+        from a healthy state.
+        """
+        client = self._clients.get(server_name)
+        if client is None:
+            return False
+        try:
+            await client.aclose()
+        except Exception:  # noqa: BLE001 — the session is broken; closing may fail
+            pass
+        # Replace with a fresh client bound to the same spec so the
+        # AsyncExitStack inside the closed one stays out of our way.
+        fresh = self._make_client(client.spec)
+        self._clients[server_name] = fresh
+        try:
+            await fresh.connect()
+        except Exception:  # noqa: BLE001 — surface as ToolResult.error_
+            return False
+        return True
+
+    def _make_client(self, spec: MCPServerSpec) -> MCPClient:
+        """Construct a fresh :class:`MCPClient` for ``spec``.
+
+        Subclass / monkeypatch hook used by :meth:`_reset_client` so
+        tests can inject a pre-baked fake client after a reconnect
+        without touching the production constructor path.
+        """
+        return MCPClient(spec)
 
     async def watch(self) -> AsyncIterator[ToolEvent]:
         """``listChanged`` notifications. Not yet implemented; yields nothing."""

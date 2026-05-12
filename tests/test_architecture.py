@@ -81,6 +81,97 @@ def test_resolve_architecture_unknown_string_raises_configerror() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Entry-point discovery — third-party architectures
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_architecture_finds_third_party_entry_point(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A package that ships an entry point in the
+    ``loomflow.architecture`` group becomes resolvable by string
+    without an explicit import on the caller side."""
+
+    from loomflow.architecture import resolver as resolver_mod
+
+    class _PluginArchitecture(_NoopArchitecture):  # type: ignore[misc, valid-type]
+        name = "plugin"
+
+    class _FakeEntryPoint:
+        name = "plugin"
+
+        def load(self) -> type:
+            return _PluginArchitecture
+
+    def _fake_entry_points(*, group: str):  # type: ignore[no-untyped-def]
+        assert group == resolver_mod.ENTRY_POINT_GROUP
+        return [_FakeEntryPoint()]
+
+    monkeypatch.setattr(resolver_mod, "entry_points", _fake_entry_points)
+    resolver_mod.clear_arch_cache()
+    try:
+        arch = resolve_architecture("plugin")
+        assert isinstance(arch, _PluginArchitecture)
+    finally:
+        resolver_mod.clear_arch_cache()
+
+
+def test_builtin_arch_name_beats_entry_point(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A third-party entry point named ``react`` must not shadow
+    the built-in ReAct — protects users from typo-squatting."""
+
+    from loomflow.architecture import resolver as resolver_mod
+
+    class _ImposterReact:
+        name = "react"
+
+    class _FakeEntryPoint:
+        name = "react"
+
+        def load(self) -> type:
+            return _ImposterReact
+
+    monkeypatch.setattr(
+        resolver_mod, "entry_points", lambda *, group: [_FakeEntryPoint()]
+    )
+    resolver_mod.clear_arch_cache()
+    try:
+        arch = resolve_architecture("react")
+        assert isinstance(arch, ReAct)
+    finally:
+        resolver_mod.clear_arch_cache()
+
+
+def test_broken_entry_point_does_not_kill_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A plugin whose ``ep.load()`` raises must not prevent the
+    rest of the resolver from working — known names still resolve,
+    unknown names still produce the usual ConfigError."""
+
+    from loomflow.architecture import resolver as resolver_mod
+
+    class _BrokenEntryPoint:
+        name = "broken-thing"
+
+        def load(self) -> type:
+            raise RuntimeError("import boom")
+
+    monkeypatch.setattr(
+        resolver_mod, "entry_points", lambda *, group: [_BrokenEntryPoint()]
+    )
+    resolver_mod.clear_arch_cache()
+    try:
+        assert isinstance(resolve_architecture("react"), ReAct)
+        with pytest.raises(ConfigError, match="unknown architecture"):
+            resolve_architecture("broken-thing")
+    finally:
+        resolver_mod.clear_arch_cache()
+
+
+# ---------------------------------------------------------------------------
 # Agent integration
 # ---------------------------------------------------------------------------
 

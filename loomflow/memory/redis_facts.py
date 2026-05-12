@@ -31,7 +31,7 @@ from typing import Any
 import anyio
 
 from ..core.protocols import Embedder
-from ..core.types import Fact
+from ..core.types import Fact, _normalize_predicate
 from ._embedding_util import pack_float32, unpack_float32
 from .embedder import HashEmbedder
 
@@ -170,7 +170,7 @@ class RedisFactStore:
                 continue
             if subject is not None and fact.subject != subject:
                 continue
-            if predicate is not None and fact.predicate != predicate:
+            if predicate is not None and fact.predicate != _normalize_predicate(predicate):
                 continue
             if object_ is not None and fact.object != object_:
                 continue

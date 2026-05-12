@@ -949,3 +949,169 @@ def test_three_source_layered_override_pattern(tmp_path: Path) -> None:
     assert shared.description == "PROJECT."
     # The labelled source attaches its label to the skill metadata.
     assert shared.metadata.source_label == "Project"
+
+
+# ---------------------------------------------------------------------------
+# Skill requires — recursive dependency loading
+# ---------------------------------------------------------------------------
+
+
+def _write_skill(
+    tmp_path: Path,
+    name: str,
+    *,
+    body: str = "body",
+    requires: list[str] | None = None,
+) -> Path:
+    """Write a SKILL.md with an optional ``requires:`` block."""
+    folder = tmp_path / name
+    folder.mkdir()
+    requires_block = ""
+    if requires:
+        requires_block = "requires:\n" + "\n".join(
+            f"  - {r}" for r in requires
+        ) + "\n"
+    (folder / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: {name} desc.\n"
+        f"{requires_block}---\n\n{body}\n"
+    )
+    return folder
+
+
+def test_skill_metadata_captures_requires(tmp_path: Path) -> None:
+    folder = _write_skill(
+        tmp_path, "child", requires=["dep_one", "dep_two"]
+    )
+    skill = Skill(folder)
+    assert skill.metadata.requires == ["dep_one", "dep_two"]
+
+
+def test_skill_requires_rejects_self_reference(tmp_path: Path) -> None:
+    folder = _write_skill(tmp_path, "loop", requires=["loop"])
+    with pytest.raises(SkillError, match="cannot list itself"):
+        Skill(folder)
+
+
+def test_skill_requires_dedupes(tmp_path: Path) -> None:
+    folder = _write_skill(
+        tmp_path, "dup", requires=["a", "a", "b", "a"]
+    )
+    skill = Skill(folder)
+    assert skill.metadata.requires == ["a", "b"]
+
+
+def test_registry_load_concatenates_dependency_bodies(
+    tmp_path: Path,
+) -> None:
+    """When skill ``A`` requires ``B``, ``load('A')`` returns B's body
+    first (with attribution) followed by A's body, separated by a
+    rule. The dependency body always lands above the requesting
+    skill's body so the model reads dependencies before the skill
+    that pulled them in."""
+    _write_skill(tmp_path, "base", body="BASE_INSTRUCTIONS")
+    _write_skill(
+        tmp_path, "feature", body="FEATURE_INSTRUCTIONS", requires=["base"]
+    )
+    reg = SkillRegistry([tmp_path / "base", tmp_path / "feature"])
+    body = reg.load("feature")
+    # Both bodies show up, separated, with the dep first and
+    # attributed.
+    assert "BASE_INSTRUCTIONS" in body
+    assert "FEATURE_INSTRUCTIONS" in body
+    assert body.index("BASE_INSTRUCTIONS") < body.index("FEATURE_INSTRUCTIONS")
+    assert "Required skill: base" in body
+    # The requesting skill's body shouldn't be prefixed with a
+    # "Required skill" header (it's the one being loaded).
+    assert "Required skill: feature" not in body
+
+
+def test_registry_load_transitive_dependencies(tmp_path: Path) -> None:
+    """Transitive: ``c`` requires ``b`` requires ``a``. ``load('c')``
+    returns a, b, c in that order."""
+    _write_skill(tmp_path, "a", body="A_BODY")
+    _write_skill(tmp_path, "b", body="B_BODY", requires=["a"])
+    _write_skill(tmp_path, "c", body="C_BODY", requires=["b"])
+    reg = SkillRegistry(
+        [tmp_path / "a", tmp_path / "b", tmp_path / "c"]
+    )
+    body = reg.load("c")
+    assert body.index("A_BODY") < body.index("B_BODY") < body.index("C_BODY")
+
+
+def test_registry_load_detects_cycles(tmp_path: Path) -> None:
+    _write_skill(tmp_path, "left", requires=["right"])
+    _write_skill(tmp_path, "right", requires=["left"])
+    reg = SkillRegistry([tmp_path / "left", tmp_path / "right"])
+    with pytest.raises(SkillError, match="cycle"):
+        reg.load("left")
+
+
+def test_registry_load_reports_missing_required_skill(
+    tmp_path: Path,
+) -> None:
+    _write_skill(tmp_path, "needy", requires=["ghost"])
+    reg = SkillRegistry([tmp_path / "needy"])
+    with pytest.raises(SkillError, match="ghost.*not registered"):
+        reg.load("needy")
+
+
+def test_registry_load_with_tools_materialises_dependency_tools(
+    tmp_path: Path,
+) -> None:
+    """A skill loaded with tools should also register its required
+    skills' tools — one ``load_skill`` call wires up the whole
+    dependency tree."""
+    # Two skills with tools.py — each defines a single tool whose
+    # name we can spot in the returned list.
+    for skill_name, tool_label in (("dep", "dep_action"), ("root", "root_action")):
+        folder = tmp_path / skill_name
+        folder.mkdir()
+        requires_block = "requires:\n  - dep\n" if skill_name == "root" else ""
+        (folder / "SKILL.md").write_text(
+            f"---\nname: {skill_name}\ndescription: x\n{requires_block}---\nbody\n"
+        )
+        (folder / "tools.py").write_text(
+            "from loomflow import tool\n"
+            f"@tool(name='{tool_label}')\n"
+            "async def action() -> str:\n"
+            "    \"\"\"Do thing.\"\"\"\n"
+            "    return 'ok'\n"
+        )
+    reg = SkillRegistry([tmp_path / "dep", tmp_path / "root"])
+    body, tools = reg.load_with_tools("root")
+    tool_names = {t.name for t in tools}
+    # Tools from BOTH skills should be returned, namespace-prefixed
+    # by the skill name (existing convention).
+    assert any("dep_action" in n for n in tool_names), tool_names
+    assert any("root_action" in n for n in tool_names), tool_names
+    # Body composed in dep-first order.
+    assert body.index("Required skill: dep") < body.index("body")
+
+
+def test_registry_load_with_tools_idempotent_for_already_loaded_deps(
+    tmp_path: Path,
+) -> None:
+    """If ``dep`` was previously loaded directly, re-loading ``root``
+    (which requires ``dep``) only registers tools for ``root``."""
+    for skill_name, tool_label in (("dep", "dep_action"), ("root", "root_action")):
+        folder = tmp_path / skill_name
+        folder.mkdir()
+        requires_block = "requires:\n  - dep\n" if skill_name == "root" else ""
+        (folder / "SKILL.md").write_text(
+            f"---\nname: {skill_name}\ndescription: x\n{requires_block}---\nbody\n"
+        )
+        (folder / "tools.py").write_text(
+            "from loomflow import tool\n"
+            f"@tool(name='{tool_label}')\n"
+            "async def action() -> str:\n"
+            "    \"\"\"Do thing.\"\"\"\n"
+            "    return 'ok'\n"
+        )
+    reg = SkillRegistry([tmp_path / "dep", tmp_path / "root"])
+    _, first_tools = reg.load_with_tools("dep")
+    assert {t.name for t in first_tools}  # at least one tool
+
+    _, second_tools = reg.load_with_tools("root")
+    # ``dep`` already loaded — its tools must not be re-registered.
+    assert not any("dep_action" in t.name for t in second_tools)
+    assert any("root_action" in t.name for t in second_tools)

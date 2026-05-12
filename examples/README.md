@@ -1,10 +1,11 @@
 # Examples
 
-Eleven end-to-end examples that exercise Loom's own
+Fifteen end-to-end examples that exercise Loom's own
 primitives — loader, vector store, retriever-as-tool pattern,
 multi-agent architectures, multi-user / session-continuity
-primitives, and the workflow + agent composition story. Nothing
-pulled in from outside the framework.
+primitives, the workflow + agent composition story, observability
+sinks, the reasoning-effort dial, and TOML / dict-form declarative
+config. Nothing pulled in from outside the framework.
 
 ## Agent + retrieval + memory
 
@@ -43,6 +44,12 @@ previous one's vocabulary.
 | File | What it shows | Needs API key? |
 |---|---|---|
 | [`14_effort_dial.py`](14_effort_dial.py) | One enum, every provider's reasoning-effort shape. Runs the same question at each effort tier on Claude Opus 4.7 (the only regime that takes the full `low → xhigh → max` range), shows the agent-default + per-call override pattern, and demonstrates `strict_effort=True` raising `EffortNotSupportedError` when wired to a model that can't honour it. | Anthropic |
+
+## Declarative config
+
+| File | What it shows | Needs API key? |
+|---|---|---|
+| [`15_config_file.py`](15_config_file.py) | `Agent.from_config("agent.toml")` and `Agent.from_dict({...})` — wire memory, runtime, telemetry, audit log, permissions, budget, architecture, skills, and MCP servers in one declarative file. Each backend block goes through the same resolver Agent uses for its kwargs, so anything you can build inline you can also declare in TOML / YAML / settings. Kwargs override matching cfg entries for things TOML can't express (callable tools, hooks, custom secret stores). | No |
 
 The image-bearing examples (01, 02) generate small sample PDFs on
 first run via `reportlab` and cache them under `examples/data/`.

@@ -24,6 +24,7 @@ returned by :class:`InMemoryTelemetry`; useful for type
 annotations in test code.
 """
 
+from .resolver import resolve_telemetry
 from .tracing import (
     CapturedMetric,
     CapturedSpan,
@@ -44,4 +45,5 @@ __all__ = [
     "MultiTelemetry",
     "NoTelemetry",
     "OTelTelemetry",
+    "resolve_telemetry",
 ]

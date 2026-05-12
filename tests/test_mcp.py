@@ -314,3 +314,97 @@ async def test_agent_run_dispatches_to_mcp_tool() -> None:
     assert "sunny" in result.output.lower()
     assert s.calls == [("get_weather", {"city": "Tokyo"})]
     assert not result.interrupted
+
+
+# ---------------------------------------------------------------------------
+# Reconnect-and-retry — one-shot self-heal on transport errors
+# ---------------------------------------------------------------------------
+
+
+async def test_call_reconnects_and_retries_after_transport_error() -> None:
+    """When the first ``call_tool`` raises a transport-style error,
+    the registry should tear down the broken client, swap in a
+    fresh one (provided here by the test via ``_make_client``), and
+    retry the call once. The second attempt succeeds, the caller
+    sees a successful ToolResult."""
+
+    async def boom_once(name: str, args: dict[str, Any]) -> Any:
+        raise ConnectionError("upstream pipe closed")
+
+    broken_session = _FakeMcpSession(
+        [_FakeMcpTool(name="probe")], call_handler=boom_once
+    )
+
+    async def healed(name: str, args: dict[str, Any]) -> _FakeCallResult:
+        return _FakeCallResult(content=[_FakeContent(text="healed")])
+
+    healed_session = _FakeMcpSession(
+        [_FakeMcpTool(name="probe")], call_handler=healed
+    )
+
+    class _ReconnectRegistry(MCPRegistry):
+        """Replaces ``_make_client`` so the reconnect attempt yields
+        a fresh client backed by our pre-baked healed session."""
+
+        def _make_client(self, spec: MCPServerSpec) -> MCPClient:
+            return MCPClient(spec, session=healed_session)
+
+    reg = _ReconnectRegistry(
+        [MCPClient(MCPServerSpec.stdio("only", "noop"), session=broken_session)]
+    )
+
+    r = await reg.call("probe", {"x": 1}, call_id="c1")
+    assert r.ok, r.error
+    assert r.output == "healed"
+    # Broken session saw the first attempt; healed session saw the retry.
+    assert broken_session.calls == [("probe", {"x": 1})]
+    assert healed_session.calls == [("probe", {"x": 1})]
+
+
+async def test_retry_failure_surfaces_error_not_silently_succeeds() -> None:
+    """If the reconnect succeeds but the retried call ALSO fails,
+    the registry must surface the second error — not pretend the
+    call succeeded just because reconnect worked."""
+
+    async def always_boom(name: str, args: dict[str, Any]) -> Any:
+        raise RuntimeError("still broken")
+
+    s1 = _FakeMcpSession([_FakeMcpTool(name="t")], call_handler=always_boom)
+    s2 = _FakeMcpSession([_FakeMcpTool(name="t")], call_handler=always_boom)
+
+    class _ReconnectRegistry(MCPRegistry):
+        def _make_client(self, spec: MCPServerSpec) -> MCPClient:
+            return MCPClient(spec, session=s2)
+
+    reg = _ReconnectRegistry(
+        [MCPClient(MCPServerSpec.stdio("only", "noop"), session=s1)]
+    )
+    r = await reg.call("t", {}, call_id="c1")
+    assert not r.ok
+    assert r.error is not None
+    assert "still broken" in r.error
+
+
+async def test_reconnect_failure_surfaces_first_error() -> None:
+    """When reconnection itself can't establish a fresh session,
+    the registry returns the ORIGINAL exception (not the reconnect
+    failure) — that's what tells the caller why their call failed."""
+
+    async def boom(name: str, args: dict[str, Any]) -> Any:
+        raise RuntimeError("original cause")
+
+    s = _FakeMcpSession([_FakeMcpTool(name="t")], call_handler=boom)
+
+    class _ReconnectRegistry(MCPRegistry):
+        def _make_client(self, spec: MCPServerSpec) -> MCPClient:
+            # Build a client whose connect() will raise (no session,
+            # bogus command so the real transport path errors out).
+            return MCPClient(spec)
+
+    reg = _ReconnectRegistry(
+        [MCPClient(MCPServerSpec.stdio("only", "noop"), session=s)]
+    )
+    r = await reg.call("t", {}, call_id="c1")
+    assert not r.ok
+    assert r.error is not None
+    assert "original cause" in r.error

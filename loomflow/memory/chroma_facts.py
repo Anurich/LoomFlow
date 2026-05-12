@@ -27,7 +27,7 @@ from typing import Any
 import anyio
 
 from ..core.protocols import Embedder
-from ..core.types import Fact
+from ..core.types import Fact, _normalize_predicate
 from .embedder import HashEmbedder
 
 DEFAULT_FACTS_COLLECTION = "jeeves_facts"
@@ -340,7 +340,7 @@ def _build_where(
     if subject is not None:
         clauses.append({"subject": subject})
     if predicate is not None:
-        clauses.append({"predicate": predicate})
+        clauses.append({"predicate": _normalize_predicate(predicate)})
     if object_ is not None:
         clauses.append({"object": object_})
     if valid_at is not None:

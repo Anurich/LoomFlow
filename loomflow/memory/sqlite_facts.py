@@ -29,7 +29,7 @@ from typing import Any
 import anyio
 
 from ..core.protocols import Embedder
-from ..core.types import Fact
+from ..core.types import Fact, _normalize_predicate
 from ._embedding_util import pack_float32, unpack_float32
 
 _FACTS_DDL = """
@@ -216,7 +216,7 @@ class SqliteFactStore:
             params.append(subject)
         if predicate is not None:
             sql_parts.append("AND predicate = ?")
-            params.append(predicate)
+            params.append(_normalize_predicate(predicate))
         if object_ is not None:
             sql_parts.append("AND object = ?")
             params.append(object_)

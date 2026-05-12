@@ -11,6 +11,7 @@ from .audit import (
 )
 from .hooks import HookRegistry, PostToolHook, PreToolHook
 from .permissions import AllowAll, Mode, PerUserPermissions, StandardPermissions
+from .permissions_resolver import resolve_permissions
 from .sandbox import FilesystemSandbox, NoSandbox, SubprocessSandbox
 from .secrets import DictSecrets, EnvSecrets
 
@@ -33,5 +34,6 @@ __all__ = [
     "StandardPermissions",
     "SubprocessSandbox",
     "resolve_audit_log",
+    "resolve_permissions",
     "verify_signature",
 ]

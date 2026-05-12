@@ -22,7 +22,7 @@ from datetime import datetime
 from typing import Any
 
 from ..core.protocols import Embedder
-from ..core.types import Fact
+from ..core.types import Fact, _normalize_predicate
 
 
 class PostgresFactStore:
@@ -207,7 +207,7 @@ class PostgresFactStore:
             idx += 1
         if predicate is not None:
             clauses.append(f"predicate = ${idx}")
-            params.append(predicate)
+            params.append(_normalize_predicate(predicate))
             idx += 1
         if object_ is not None:
             clauses.append(f"object = ${idx}")

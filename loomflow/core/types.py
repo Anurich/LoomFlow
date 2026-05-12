@@ -5,17 +5,38 @@ immutable where possible, validated on construction, and free of behavior
 that requires I/O.
 """
 
+import re
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .ids import new_id
 
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+_PREDICATE_CAMEL_BOUNDARY = re.compile(r"([a-z0-9])([A-Z])")
+_PREDICATE_NON_WORD = re.compile(r"[\s\-]+")
+
+
+def _normalize_predicate(value: str) -> str:
+    """Canonicalise a predicate string for stable supersession.
+
+    Maps free-form predicates emitted by LLM extractors ("Name_Is",
+    "name-is", "nameIs", "name is") onto a single canonical form
+    ("name_is") so that ``InMemoryFactStore`` / SQLite / Postgres
+    supersession can match equivalent claims by string equality. We
+    only collapse case + word-separator variants — semantically
+    distinct predicates ("name_is" vs "is_named") still differ and
+    require a custom alias map at a higher layer.
+    """
+    s = _PREDICATE_CAMEL_BOUNDARY.sub(r"\1_\2", value)
+    s = _PREDICATE_NON_WORD.sub("_", s)
+    return s.lower().strip("_")
 
 
 # ---------------------------------------------------------------------------
@@ -238,6 +259,16 @@ class Fact(BaseModel):
     valid_until: datetime | None = None
     recorded_at: datetime = Field(default_factory=_utcnow)
     sources: list[str] = Field(default_factory=list)
+
+    @field_validator("predicate")
+    @classmethod
+    def _canonicalise_predicate(cls, v: str) -> str:
+        """Normalise predicates so supersession sees equivalent claims.
+
+        "Name_Is", "name-is", and "nameIs" all canonicalise to
+        "name_is". See :func:`_normalize_predicate`.
+        """
+        return _normalize_predicate(v)
 
     def format(self) -> str:
         suffix = ""

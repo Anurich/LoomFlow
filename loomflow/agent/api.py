@@ -96,7 +96,7 @@ class Agent:
         *,
         model: Model | str | dict[str, Any] | None = None,
         memory: Memory | str | Mapping[str, Any] | None = None,
-        runtime: Runtime | None = None,
+        runtime: Runtime | str | Mapping[str, Any] | None = None,
         budget: Budget | None = None,
         permissions: Permissions | None = None,
         hooks: HookRegistry | None = None,
@@ -105,7 +105,7 @@ class Agent:
         | Tool
         | Callable[..., object]
         | None = None,
-        telemetry: Telemetry | None = None,
+        telemetry: Telemetry | str | Mapping[str, Any] | None = None,
         audit_log: AuditLog | str | Path | dict[str, Any] | None = None,
         max_turns: int = DEFAULT_MAX_TURNS,
         auto_consolidate: bool = False,
@@ -184,10 +184,12 @@ class Agent:
             self._wrapped_model = self._model
         # Telemetry is initialised *before* the memory wrapping so
         # the AutoExtractMemory wrapper (below) can take a reference
-        # and emit duration / extraction-count metrics.
-        self._telemetry: Telemetry = (
-            telemetry if telemetry is not None else NoTelemetry()
-        )
+        # and emit duration / extraction-count metrics. The resolver
+        # accepts string ("console", "file:./spans.jsonl", "otel"),
+        # dict ({"backend": "file", "path": "..."}), or an already-
+        # built Telemetry instance.
+        from ..observability.resolver import resolve_telemetry
+        self._telemetry: Telemetry = resolve_telemetry(telemetry)
         # Resolve ``memory=`` into a concrete :class:`Memory`.
         # The resolver handles None (default in-memory), strings
         # ("sqlite:./bot.db", "postgres://..."), config dicts
@@ -241,7 +243,12 @@ class Agent:
             )
         else:
             self._wrapped_memory = self._memory
-        self._runtime: Runtime = runtime if runtime is not None else InProcRuntime()
+        # Resolve ``runtime=`` (string / dict / instance) the same way
+        # model / memory / telemetry do. Sync resolution only —
+        # PostgresRuntime needs an async connect, so users wire it up
+        # themselves and pass the instance through.
+        from ..runtime.resolver import resolve_runtime
+        self._runtime: Runtime = resolve_runtime(runtime)
         self._budget: Budget = budget if budget is not None else NoBudget()
         self._permissions: Permissions = (
             permissions if permissions is not None else AllowAll()
@@ -725,10 +732,17 @@ class Agent:
         cls,
         cfg: dict[str, Any],
         *,
-        model: Model | None = None,
-        memory: Memory | None = None,
-        runtime: Runtime | None = None,
+        model: Model | str | dict[str, Any] | None = None,
+        memory: Memory | str | Mapping[str, Any] | None = None,
+        runtime: Runtime | str | Mapping[str, Any] | None = None,
+        telemetry: Telemetry | str | Mapping[str, Any] | None = None,
+        audit_log: AuditLog | str | Path | dict[str, Any] | None = None,
+        permissions: Permissions | str | Mapping[str, Any] | None = None,
         tools: list[Tool | Callable[..., object]] | ToolHost | None = None,
+        secrets: Any | None = None,
+        hooks: HookRegistry | None = None,
+        retry_policy: RetryPolicy | None = None,
+        approval_handler: Any | None = None,
     ) -> Agent:
         """Construct an ``Agent`` from a parsed config dict.
 
@@ -737,21 +751,54 @@ class Agent:
         file — environment variables, a Pydantic settings model, a
         ``yaml.safe_load`` result, an HTTP API, etc.
 
+        Each backend kwarg overrides the corresponding ``cfg`` entry
+        when both are supplied. Callables (tools, hooks, approval
+        handlers, secrets stores) and pre-built instances are passed
+        through kwargs because TOML / JSON / YAML can't express them.
+
         Recognised keys (all optional except ``instructions`` and
         ``model``):
 
         * ``instructions: str`` — required
-        * ``model: str`` — required (or pass ``model=`` kwarg)
-        * ``max_turns: int``
-        * ``auto_consolidate: bool``
+        * ``model: str | dict`` — required (or pass ``model=`` kwarg).
+          Dict form: ``{"name": "...", "effort": "...",
+          "strict_effort": bool}``.
+        * ``memory: str | dict`` — string spec ("sqlite:./bot.db",
+          "postgres://...") or a ``{"backend": ..., ...}`` dict.
+        * ``runtime: str | dict`` — "inproc" / "sqlite:./j.db" or
+          ``{"backend": "sqlite", "path": "..."}``.
+        * ``telemetry: str | dict`` — "none" / "console" / "memory" /
+          "file:./spans.jsonl" / "otel" or matching dict form.
+        * ``audit_log: str | dict`` — file path or
+          ``{"name": "file", "path": "...", "scope_full": bool,
+          "secret": "..."}``.
+        * ``permissions: str | dict`` — "allow_all" / "strict" /
+          "accept_edits" / "bypass" or
+          ``{"backend": "standard", "mode": ..., "allowed_tools":
+          [...], "denied_tools": [...]}``.
+        * ``architecture: str`` — "react" / "reflexion" / etc.
+        * ``effort: str``, ``strict_effort: bool``,
+          ``response_tone: str``.
+        * ``max_turns: int``, ``auto_consolidate: bool``,
+          ``auto_extract: bool``.
         * ``budget: dict`` with any of ``max_tokens``,
           ``max_input_tokens``, ``max_output_tokens``, ``max_cost_usd``,
-          ``max_wall_clock_minutes``, ``soft_warning_at``
+          ``max_wall_clock_minutes``, ``soft_warning_at``.
+        * ``skills: list`` — strings (directory paths) or dicts
+          ({"path": "...", "label": "..."}).
+        * ``mcp: list[dict]`` — each entry has ``name`` + ``transport``
+          ("stdio" with ``command`` / ``args`` / ``env`` OR "http"
+          with ``url`` / ``headers``). Wrapped in an
+          :class:`~loomflow.mcp.MCPRegistry` and threaded into
+          ``tools=`` (unless a tool host is also supplied via the
+          kwarg, in which case ``mcp`` is rejected).
         """
         from datetime import timedelta
 
         from ..core.errors import ConfigError
         from ..governance.budget import BudgetConfig, StandardBudget
+        from ..mcp import MCPRegistry, MCPServerSpec
+        from ..skills import SkillSource
 
         instructions = cfg.get("instructions")
         if not isinstance(instructions, str):
@@ -759,6 +806,7 @@ class Agent:
                 "Agent.from_dict: missing or non-string 'instructions' field"
             )
 
+        # ----- model (kwarg overrides cfg) ----------------------------
         model_spec = model if model is not None else cfg.get("model")
         if model_spec is None:
             raise ConfigError(
@@ -766,9 +814,38 @@ class Agent:
                 "model = 'claude-opus-4-7' (or pass model= explicitly)."
             )
 
+        # ----- scalar agent-level toggles -----------------------------
         max_turns = cfg.get("max_turns", DEFAULT_MAX_TURNS)
         auto_consolidate = bool(cfg.get("auto_consolidate", False))
+        architecture = cfg.get("architecture")
+        effort = cfg.get("effort")
+        strict_effort = bool(cfg.get("strict_effort", False))
+        response_tone = cfg.get("response_tone")
+        auto_extract = cfg.get("auto_extract")
 
+        # ----- backend kwargs (kwarg wins, otherwise cfg) -------------
+        memory_arg = memory if memory is not None else cfg.get("memory")
+        runtime_arg = runtime if runtime is not None else cfg.get("runtime")
+        telemetry_arg = (
+            telemetry if telemetry is not None else cfg.get("telemetry")
+        )
+        audit_log_arg = (
+            audit_log if audit_log is not None else cfg.get("audit_log")
+        )
+        permissions_arg = (
+            permissions if permissions is not None else cfg.get("permissions")
+        )
+        # Run the permissions string/dict through the resolver here so
+        # the Agent constructor (which expects ``Permissions | None``)
+        # gets a concrete instance.
+        from ..security.permissions_resolver import resolve_permissions
+        permissions_obj = (
+            resolve_permissions(permissions_arg)
+            if permissions_arg is not None
+            else None
+        )
+
+        # ----- budget (scalar dict) -----------------------------------
         budget: Budget | None = None
         if "budget" in cfg:
             b = cfg["budget"]
@@ -786,15 +863,72 @@ class Agent:
                 )
             )
 
+        # ----- skills (list of paths / dicts) -------------------------
+        skill_specs: list[Any] = []
+        for raw in cfg.get("skills", []) or []:
+            if isinstance(raw, str):
+                skill_specs.append(raw)
+            elif isinstance(raw, Mapping):
+                path = raw.get("path")
+                if not isinstance(path, str):
+                    raise ConfigError(
+                        "Agent.from_dict: skills[*] dicts must include a "
+                        "string 'path'."
+                    )
+                label = raw.get("label")
+                # Path strings → SkillSource via coerce so the Path
+                # gets ``expanduser``'d and validated against the
+                # filesystem the same way the bare-string form is.
+                if label is None:
+                    skill_specs.append(SkillSource.coerce(path))
+                else:
+                    skill_specs.append(SkillSource.coerce((path, label)))
+            else:
+                raise ConfigError(
+                    "Agent.from_dict: skills entries must be strings or "
+                    f"dicts; got {type(raw).__name__}."
+                )
+
+        # ----- mcp (list of server dicts → MCPRegistry) ---------------
+        mcp_entries = cfg.get("mcp") or []
+        if mcp_entries:
+            if tools is not None:
+                raise ConfigError(
+                    "Agent.from_dict: cannot mix 'mcp' config with a "
+                    "tools= kwarg. Either drop one or build a combined "
+                    "ToolHost yourself (e.g. ExtendedToolHost over both)."
+                )
+            specs: list[MCPServerSpec] = []
+            for entry in mcp_entries:
+                if not isinstance(entry, Mapping):
+                    raise ConfigError(
+                        "Agent.from_dict: mcp[*] entries must be dicts."
+                    )
+                specs.append(_mcp_spec_from_dict(entry))
+            tools = MCPRegistry(list(specs))  # type: ignore[assignment]
+
         return cls(
             instructions,
             model=model_spec,
-            memory=memory,
-            runtime=runtime,
+            memory=memory_arg,
+            runtime=runtime_arg,
+            telemetry=telemetry_arg,
+            audit_log=audit_log_arg,
+            permissions=permissions_obj,
             tools=tools,
             budget=budget,
+            architecture=architecture,
+            effort=effort,
+            strict_effort=strict_effort,
+            response_tone=response_tone,
             max_turns=int(max_turns),
             auto_consolidate=auto_consolidate,
+            auto_extract=auto_extract,
+            skills=skill_specs or None,
+            secrets=secrets,
+            hooks=hooks,
+            retry_policy=retry_policy,
+            approval_handler=approval_handler,
         )
 
     @classmethod
@@ -802,32 +936,72 @@ class Agent:
         cls,
         path: str | Path,
         *,
-        model: Model | None = None,
-        memory: Memory | None = None,
-        runtime: Runtime | None = None,
+        model: Model | str | dict[str, Any] | None = None,
+        memory: Memory | str | Mapping[str, Any] | None = None,
+        runtime: Runtime | str | Mapping[str, Any] | None = None,
+        telemetry: Telemetry | str | Mapping[str, Any] | None = None,
+        audit_log: AuditLog | str | Path | dict[str, Any] | None = None,
+        permissions: Permissions | str | Mapping[str, Any] | None = None,
         tools: list[Tool | Callable[..., object]] | ToolHost | None = None,
+        secrets: Any | None = None,
+        hooks: HookRegistry | None = None,
+        retry_policy: RetryPolicy | None = None,
+        approval_handler: Any | None = None,
     ) -> Agent:
         """Construct an ``Agent`` from a TOML config file.
 
         Designed for ops/devops users who want declarative agent
-        config separate from code. Supports the textual / numeric
-        bits — instructions, model spec (string), max_turns,
-        auto_consolidate, budget — and lets callers pass concrete
-        instances for the things TOML can't reasonably express
-        (real ``Memory``, ``Runtime``, custom ``Model``, tools).
+        config separate from code. The TOML covers every backend the
+        framework can build sync — model, memory, runtime, telemetry,
+        audit log, permissions, budget, architecture, effort, skills,
+        and MCP servers. Things TOML can't naturally express (real
+        callables, custom hook objects, secret stores, retry policies)
+        come in through kwargs that override matching cfg entries.
 
-        Example ``agent.toml``::
+        Example ``agent.toml`` covering most options::
 
             instructions = "You are a research assistant."
             model = "claude-opus-4-7"
             max_turns = 100
+            architecture = "react"
             auto_consolidate = true
+            effort = "medium"
+
+            [memory]
+            backend = "sqlite"
+            path = "./memory.db"
+
+            [runtime]
+            backend = "sqlite"
+            path = "./journal.db"
+
+            [telemetry]
+            backend = "file"
+            path = "./spans.jsonl"
+
+            [audit_log]
+            name = "file"
+            path = "./audit.jsonl"
+            scope_full = true
+
+            [permissions]
+            backend = "standard"
+            mode = "default"
+            denied_tools = ["bash"]
 
             [budget]
             max_tokens = 200_000
             max_cost_usd = 5.0
             max_wall_clock_minutes = 10
-            soft_warning_at = 0.8
+
+            [[skills]]
+            path = "./skills/research"
+
+            [[mcp]]
+            name = "git"
+            transport = "stdio"
+            command = "uvx"
+            args = ["mcp-server-git", "--repo", "."]
 
         Then::
 
@@ -851,7 +1025,14 @@ class Agent:
                 model=model,
                 memory=memory,
                 runtime=runtime,
+                telemetry=telemetry,
+                audit_log=audit_log,
+                permissions=permissions,
                 tools=tools,
+                secrets=secrets,
+                hooks=hooks,
+                retry_policy=retry_policy,
+                approval_handler=approval_handler,
             )
         except ConfigError as exc:
             # Re-raise with the file path in the message so users know
@@ -1789,6 +1970,99 @@ def _coerce_tool_host(
         f"  • tools=[my_fn, other_fn] — list of @tool functions / callables\n"
         f"  • tools=my_fn — single tool (auto-wrapped in a list)\n"
         f"  • tools=my_tool_host — a ToolHost instance (has list_tools + call)"
+    )
+
+
+def _mcp_spec_from_dict(entry: Mapping[str, Any]) -> Any:
+    """Translate a parsed-from-config dict into an :class:`MCPServerSpec`.
+
+    Schema::
+
+        { name = "git",
+          transport = "stdio",         # or "http"
+          # stdio:
+          command = "uvx",
+          args = ["mcp-server-git", "--repo", "."],
+          env = { GIT_PAGER = "cat" }, # optional
+          # http:
+          url = "https://example.com/mcp",
+          headers = { Authorization = "Bearer ..." },
+          description = "...",         # optional, free-form
+        }
+    """
+    from ..core.errors import ConfigError
+    from ..mcp import MCPServerSpec
+
+    name = entry.get("name")
+    transport = entry.get("transport")
+    if not isinstance(name, str) or not name:
+        raise ConfigError(
+            "Agent.from_dict: mcp[*] entry needs a non-empty 'name' string."
+        )
+    if transport not in ("stdio", "http"):
+        raise ConfigError(
+            f"Agent.from_dict: mcp[{name!r}].transport must be 'stdio' or "
+            f"'http' (got {transport!r})."
+        )
+    description = entry.get("description", "")
+    if not isinstance(description, str):
+        raise ConfigError(
+            f"Agent.from_dict: mcp[{name!r}].description must be a string."
+        )
+    if transport == "stdio":
+        command = entry.get("command")
+        if not isinstance(command, str):
+            raise ConfigError(
+                f"Agent.from_dict: mcp[{name!r}] stdio transport needs "
+                "a string 'command'."
+            )
+        args = entry.get("args") or []
+        if not isinstance(args, list) or not all(
+            isinstance(a, str) for a in args
+        ):
+            raise ConfigError(
+                f"Agent.from_dict: mcp[{name!r}].args must be a list of strings."
+            )
+        env = entry.get("env")
+        if env is not None and not (
+            isinstance(env, Mapping)
+            and all(
+                isinstance(k, str) and isinstance(v, str)
+                for k, v in env.items()
+            )
+        ):
+            raise ConfigError(
+                f"Agent.from_dict: mcp[{name!r}].env must be a string→string mapping."
+            )
+        return MCPServerSpec.stdio(
+            name,
+            command,
+            list(args),
+            env=dict(env) if env is not None else None,
+            description=description,
+        )
+    # http
+    url = entry.get("url")
+    if not isinstance(url, str):
+        raise ConfigError(
+            f"Agent.from_dict: mcp[{name!r}] http transport needs a string 'url'."
+        )
+    headers = entry.get("headers")
+    if headers is not None and not (
+        isinstance(headers, Mapping)
+        and all(
+            isinstance(k, str) and isinstance(v, str)
+            for k, v in headers.items()
+        )
+    ):
+        raise ConfigError(
+            f"Agent.from_dict: mcp[{name!r}].headers must be a string→string mapping."
+        )
+    return MCPServerSpec.http(
+        name,
+        url,
+        headers=dict(headers) if headers is not None else None,
+        description=description,
     )
 
 

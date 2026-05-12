@@ -129,15 +129,27 @@ class SkillRegistry:
         result). Raises :class:`SkillError` for unknown names so
         the model gets a clear error in the tool result.
 
+        When the skill declares ``requires:`` dependencies, each
+        required skill's body is prepended in topological order
+        (deepest dependency first), separated by ``---`` rules.
+        Cycles raise :class:`SkillError`.
+
         Does NOT register pending Tools. For the full load-and-
-        register flow, see :meth:`load_with_tools`."""
-        skill = self._skills.get(name)
-        if skill is None:
-            available = ", ".join(sorted(self._skills)) or "(none)"
-            raise SkillError(
-                f"Unknown skill {name!r}. Available: {available}"
-            )
-        return skill.load_body()
+        register flow, see :meth:`load_with_tools`.
+        """
+        order = self._resolve_deps(name)
+        if len(order) == 1:
+            return self._skills[name].load_body()
+        sections: list[str] = []
+        for dep_name in order:
+            body = self._skills[dep_name].load_body()
+            if dep_name == name:
+                sections.append(body)
+            else:
+                sections.append(
+                    f"## Required skill: {dep_name}\n\n{body}"
+                )
+        return "\n\n---\n\n".join(sections)
 
     def load_with_tools(
         self,
@@ -145,27 +157,81 @@ class SkillRegistry:
         ctx: object | None = None,
     ) -> tuple[str, list[Tool]]:
         """Return ``(body, newly_pending_tools)`` — the body of the
-        skill plus the Tool instances the framework should register
+        skill (with any required-skill bodies prepended in topological
+        order) plus the Tool instances the framework should register
         with the agent's tool host on this load.
 
-        ``ctx`` is forwarded to the skill's
+        Required-skill tools are materialised in the same call so a
+        skill that says ``requires: [foo]`` doesn't need a separate
+        ``load_skill('foo')`` round-trip to get foo's tools wired
+        up.
+
+        ``ctx`` is forwarded to each loaded skill's
         :meth:`Skill.materialize_tools` call. When the skill's
         ``tools.py`` defines a ``build_tools(ctx)`` factory, ``ctx``
         is passed in so the factory can close over caller-supplied
         state (a vectorstore, DB connection, etc.). Pure-markdown
         skills and skills without a factory ignore it.
 
-        Idempotent: subsequent calls for the same skill return the
-        body and an empty tool list, since registration only needs
-        to happen once.
+        Idempotent: subsequent calls for any (or transitively any)
+        skill that's already had its tools registered return the
+        body and an empty tool list for that skill, since registration
+        only needs to happen once.
         """
         body = self.load(name)
-        if name in self._loaded:
-            return body, []
-        skill = self._skills[name]
-        self._loaded.add(name)
-        return body, list(skill.materialize_tools(ctx))
+        order = self._resolve_deps(name)
+        new_tools: list[Tool] = []
+        for dep_name in order:
+            if dep_name in self._loaded:
+                continue
+            self._loaded.add(dep_name)
+            new_tools.extend(self._skills[dep_name].materialize_tools(ctx))
+        return body, new_tools
 
     def is_loaded(self, name: str) -> bool:
         """Whether the skill's pending tools have been registered."""
         return name in self._loaded
+
+    # ---- dependency resolution -----------------------------------------
+
+    def _resolve_deps(self, name: str) -> list[str]:
+        """Return ``[dep1, dep2, ..., name]`` in topological order.
+
+        Three-colour DFS: a ``visiting`` node re-encountered before
+        it finishes is a cycle. Unknown names raise
+        :class:`SkillError` with the chain that pulled them in.
+        """
+        if name not in self._skills:
+            available = ", ".join(sorted(self._skills)) or "(none)"
+            raise SkillError(
+                f"Unknown skill {name!r}. Available: {available}"
+            )
+
+        order: list[str] = []
+        visited: set[str] = set()
+        visiting: set[str] = set()
+
+        def _visit(current: str, chain: tuple[str, ...]) -> None:
+            if current in visited:
+                return
+            if current in visiting:
+                cycle = " -> ".join([*chain, current])
+                raise SkillError(
+                    f"Skill require-cycle detected: {cycle}"
+                )
+            skill = self._skills.get(current)
+            if skill is None:
+                pulled_by = chain[-1] if chain else current
+                raise SkillError(
+                    f"Skill {current!r} is required by "
+                    f"{pulled_by!r} but is not registered."
+                )
+            visiting.add(current)
+            for dep in skill.metadata.requires:
+                _visit(dep, (*chain, current))
+            visiting.discard(current)
+            visited.add(current)
+            order.append(current)
+
+        _visit(name, ())
+        return order

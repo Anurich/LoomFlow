@@ -65,6 +65,11 @@ class SkillMetadata:
     compatibility: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)
     allowed_tools: list[str] | None = None
+    requires: list[str] = field(default_factory=list)
+    """Names of other skills this one depends on. Loading this skill
+    also loads every transitive requirement (dependencies first,
+    then this skill) and materialises their tools. Cycles raise
+    :class:`SkillError`."""
     source_label: str | None = None
     has_python_tools: bool = False    # tools.py was found
     declared_tool_count: int = 0      # # of frontmatter `tools:` entries
@@ -339,6 +344,24 @@ def _parse_skill(
     ):
         raise SkillError("'allowed_tools' must be a list of strings.")
 
+    requires = meta.get("requires") or []
+    if not isinstance(requires, list) or not all(
+        isinstance(r, str) for r in requires
+    ):
+        raise SkillError("'requires' must be a list of skill name strings.")
+    # Reject self-reference and duplicates here so SkillRegistry's
+    # cycle-detector doesn't have to special-case the trivial case.
+    if name in requires:
+        raise SkillError(
+            f"Skill {name!r} cannot list itself in 'requires'."
+        )
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for r in requires:
+        if r and r not in seen:
+            seen.add(r)
+            deduped.append(r)
+
     extra = meta.get("metadata") or {}
     if extra and not isinstance(extra, dict):
         raise SkillError("'metadata' must be a mapping if provided.")
@@ -352,6 +375,7 @@ def _parse_skill(
         compatibility=_optional_str(meta, "compatibility"),
         extra=dict(extra),
         allowed_tools=list(allowed_tools) if allowed_tools else None,
+        requires=deduped,
         source_label=source_label,
         declared_tool_count=len(tool_specs),
     )

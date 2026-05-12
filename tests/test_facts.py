@@ -593,3 +593,68 @@ async def test_agent_loop_tolerates_memory_without_facts_attribute() -> None:
         m.content for m in rec.last_messages if m.role.value == "system"
     )
     assert "Known facts" not in joined
+
+
+# ---------------------------------------------------------------------------
+# Predicate normalisation — protects supersession from LLM-extracted
+# case / separator drift.
+# ---------------------------------------------------------------------------
+
+
+def test_fact_predicate_canonicalises_case_and_separators() -> None:
+    """``Fact`` runs predicates through a normaliser at construction
+    time so case-only or separator-only variants collapse to one
+    canonical form."""
+    f1 = Fact(subject="u", predicate="Name_Is", object="A")
+    f2 = Fact(subject="u", predicate="name-is", object="A")
+    f3 = Fact(subject="u", predicate="nameIs", object="A")
+    f4 = Fact(subject="u", predicate="name is", object="A")
+    assert f1.predicate == "name_is"
+    assert f2.predicate == "name_is"
+    assert f3.predicate == "name_is"
+    assert f4.predicate == "name_is"
+
+
+def test_fact_predicate_preserves_already_canonical() -> None:
+    f = Fact(subject="u", predicate="lives_in", object="Tokyo")
+    assert f.predicate == "lives_in"
+
+
+async def test_supersession_matches_case_variant_predicates() -> None:
+    """A second fact with a case-variant predicate ("Name_Is") still
+    closes off the prior canonical "name_is" fact — the whole point
+    of the normaliser."""
+    store = InMemoryFactStore()
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    f1_id = await store.append(
+        Fact(
+            subject="user",
+            predicate="name_is",
+            object="Alice",
+            valid_from=base,
+        )
+    )
+    await store.append(
+        Fact(
+            subject="user",
+            predicate="Name_Is",  # case-variant
+            object="Bob",
+            valid_from=base + timedelta(days=1),
+        )
+    )
+    by_id = {f.id: f for f in await store.all_facts()}
+    assert by_id[f1_id].valid_until == base + timedelta(days=1)
+
+
+async def test_query_predicate_filter_accepts_non_canonical_form() -> None:
+    """``query(predicate="Lives-In")`` returns facts stored with the
+    canonical ``lives_in`` predicate. Without normalisation users
+    would have to remember which exact variant a fact was written
+    with."""
+    store = InMemoryFactStore()
+    await store.append(_fact(predicate="lives_in", object_="Tokyo"))
+    await store.append(_fact(predicate="lives_in", object_="Paris"))
+
+    found = await store.query(predicate="Lives-In")
+    assert len(found) == 2
+    assert {f.object for f in found} == {"Tokyo", "Paris"}

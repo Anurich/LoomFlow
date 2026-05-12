@@ -21,6 +21,7 @@ from .journal import (
 )
 from .journaled import JournaledRuntime, JournaledSession
 from .postgres import PostgresRuntime
+from .resolver import resolve_runtime
 from .sqlite import SqliteRuntime
 
 __all__ = [
@@ -35,4 +36,5 @@ __all__ = [
     "PostgresRuntime",
     "SqliteJournalStore",
     "SqliteRuntime",
+    "resolve_runtime",
 ]

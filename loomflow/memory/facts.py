@@ -34,7 +34,7 @@ from typing import Protocol, runtime_checkable
 import anyio
 
 from ..core.protocols import Embedder
-from ..core.types import Fact
+from ..core.types import Fact, _normalize_predicate
 
 
 @runtime_checkable
@@ -204,7 +204,10 @@ class InMemoryFactStore:
         if subject is not None:
             results = [f for f in results if f.subject == subject]
         if predicate is not None:
-            results = [f for f in results if f.predicate == predicate]
+            # Match the canonical form stored on Fact.predicate so a
+            # query for "Name_Is" finds facts stored as "name_is".
+            canonical = _normalize_predicate(predicate)
+            results = [f for f in results if f.predicate == canonical]
         if object_ is not None:
             results = [f for f in results if f.object == object_]
         if valid_at is not None:
