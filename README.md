@@ -13,12 +13,6 @@
 loop) — that compose freely. Multi-tenant by default, typed
 outputs, retries on transient errors, model-agnostic, MCP-native.**
 
-📖 **Docs** — build locally with `pip install -e ".[docs]" && sphinx-build -b html docs docs/_build/html` (RTD hosting pending — set up the project at https://readthedocs.org once you have an account, then this link goes live)
-&nbsp;&nbsp;·&nbsp;&nbsp;
-**Migrating?** — [from LangGraph](docs/migrations/from-langgraph.md)
-&nbsp;·&nbsp;
-[from raw OpenAI SDK](docs/migrations/from-openai-sdk.md)
-&nbsp;&nbsp;·&nbsp;&nbsp;
 **Changelog** — [CHANGELOG.md](CHANGELOG.md)
 
 ```python
