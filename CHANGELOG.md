@@ -9,6 +9,52 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 
 ## [0.10.0] — unreleased
 
+### Added — TodoWrite-style living plan via `living_plan=`
+
+`Agent(living_plan=True)` wires two structured-plan tools onto the
+agent: `plan_write(goal, steps)` (atomic full-list rewrite — every
+call returns the rendered plan back as markdown, so the plan
+becomes load-bearing in the conversation) and `plan_read()`. Each
+step is `{description, status, finding}` where status is one of
+`todo` | `doing` | `done` | `blocked` | `skipped`. Synonyms like
+`in_progress` / `WIP` / `failed` are auto-normalised. The `steps`
+argument accepts four serialisation shapes (native list, JSON
+string of list, JSON string of `{"steps":[…]}` wrapper, free-form
+numbered text) because providers serialise complex args differently.
+
+When `workspace=` is also wired, the plan mirrors to a `kind="plan"`
+note in the shared notebook — the first `plan_write` creates the
+note, subsequent calls `update_note` the same slug. A
+`recall_past_plans(query)` tool is auto-added in this case, so
+future runs can search past plans by free-text query and bootstrap
+from ones that match. Cross-task plan lineage is multi-tenant by
+`user_id`, partitioned via the standard `RunContext`.
+
+Per-run plan state lives in a new `_ambient_living_plan_var`
+contextvar (mirroring `_ambient_workspace_var`), so concurrent
+`agent.run()` invocations on the same `Agent` instance have
+isolated plans. Custom architectures / hooks read the active plan
+via `loomflow.tools.plan.get_active_plan()`.
+
+Public exports: `LivingPlan` and `LivingPlanStep` at the top level;
+`make_plan_tools`, `make_recall_past_plans_tool`,
+`living_plan_prompt_section`, `resolve_living_plan`,
+`ResolvedLivingPlan` under `loomflow.tools`.
+
+Default is **opt-in** for v0.10.0 (`living_plan=None` → disabled).
+v0.11 will flip the default to "auto" — on when `tools=` is
+non-empty, off otherwise — after the primitive has been dogfooded.
+
+Empirical motivation: Terminal-Bench 2.0 tasks where the agent
+previously failed 3× in a row (across 3 different architectures)
+were resolved on the first attempt after adding a structured plan
+tool. The pattern is mainstream in 2026 (Claude Code's TodoWrite,
+Devin's plan-mode, OpenHands' task graph) — empirical SWE-bench
+data shows scaffolding moved scores from 1.96% to 78.4% holding
+the model constant.
+
+
+
 This release turns Loom from a working agent harness into a
 **production framework**. Five themed milestones (M1–M5) close the
 gaps that separate a demo loop from something you put in front of

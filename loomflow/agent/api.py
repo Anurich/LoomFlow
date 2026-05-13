@@ -122,6 +122,7 @@ class Agent:
         strict_effort: bool = False,
         prompt_caching: bool | Mapping[str, Any] | None = None,
         workspace: Any | str | Mapping[str, Any] | None = None,
+        living_plan: Any = None,
     ) -> None:
         # Skills — packaged on-disk playbooks loaded on demand.
         # Build the registry first so frontmatter validation fires
@@ -338,6 +339,66 @@ class Agent:
             self._instructions = (
                 f"{self._instructions.rstrip()}\n\n"
                 f"{_ws_prompt(author=author, teammates=self._workspace_teammates)}"
+            )
+
+        # ----- Living plan ----------------------------------------------
+        # When ``living_plan=`` is enabled, the framework auto-installs
+        # two TodoWrite-style tools (``plan_write`` / ``plan_read``)
+        # onto the agent, plus optionally ``recall_past_plans`` when
+        # the workspace mirror is on. The tools read per-run state
+        # from the ambient :data:`_ambient_living_plan_var` contextvar
+        # (set in :meth:`_loop`) so concurrent ``agent.run()`` calls
+        # on the same Agent have isolated plans.
+        #
+        # Default for v0.10.0 is OPT-IN (``None`` → disabled). The
+        # roadmap is to flip ``None`` to a smart-default in v0.11 (on
+        # for tool-using agents, off otherwise) once the primitive
+        # has been dogfooded.
+        from ..tools.plan import (
+            living_plan_prompt_section as _lp_prompt,
+        )
+        from ..tools.plan import (
+            make_plan_tools as _make_plan_tools,
+        )
+        from ..tools.plan import (
+            make_recall_past_plans_tool as _make_recall_past_plans,
+        )
+        from ..tools.plan_resolver import resolve_living_plan
+
+        self._living_plan_spec = resolve_living_plan(
+            living_plan,
+            workspace_present=self._workspace is not None,
+        )
+        if self._living_plan_spec.enabled:
+            plan_author = (
+                self._living_plan_spec.author
+                or self._workspace_name
+                or "agent"
+            )
+            plan_workspace = (
+                self._workspace
+                if self._living_plan_spec.mirror_to_workspace
+                else None
+            )
+            plan_tools = _make_plan_tools(
+                workspace=plan_workspace,
+                task_id=self._living_plan_spec.task_id,
+                author=plan_author,
+            )
+            if self._living_plan_spec.include_recall and plan_workspace is not None:
+                plan_tools = [
+                    *plan_tools,
+                    _make_recall_past_plans(plan_workspace, author=plan_author),
+                ]
+            if not isinstance(host, InProcessToolHost) and not hasattr(
+                host, "register"
+            ):
+                host = ExtendedToolHost(host, [])
+            for t in plan_tools:
+                host.register(t)  # type: ignore[union-attr]
+            self._instructions = (
+                f"{self._instructions.rstrip()}\n\n"
+                f"{_lp_prompt(has_workspace_mirror=self._living_plan_spec.mirror_to_workspace)}"
             )
         self._tool_host: ToolHost = host
 
@@ -987,6 +1048,11 @@ class Agent:
                 specs.append(_mcp_spec_from_dict(entry))
             tools = MCPRegistry(list(specs))  # type: ignore[assignment]
 
+        # ``living_plan`` accepts the same bool / str / dict / instance
+        # forms as the constructor kwarg. The resolver inside
+        # ``Agent.__init__`` does the validation.
+        living_plan_arg: Any = cfg.get("living_plan")
+
         return cls(
             instructions,
             model=model_spec,
@@ -1009,6 +1075,7 @@ class Agent:
             hooks=hooks,
             retry_policy=retry_policy,
             approval_handler=approval_handler,
+            living_plan=living_plan_arg,
         )
 
     @classmethod
@@ -1426,13 +1493,31 @@ class Agent:
         # automatically through every worker. We reset the token in
         # a ``finally`` below so the contextvar doesn't leak past
         # this run.
-        from ..core.context import _ambient_workspace_var
+        from ..core.context import (
+            _ambient_living_plan_var,
+            _ambient_workspace_var,
+        )
 
         ws_token: Any = (
             _ambient_workspace_var.set(self._workspace)
             if self._workspace is not None
             else None
         )
+
+        # Install a fresh per-run living-plan state for the duration
+        # of this run when enabled. The tools registered at __init__
+        # read this state via the contextvar at call time, so
+        # concurrent runs of the same Agent see isolated plans.
+        # Pre-seed from the construction-time spec when supplied
+        # (``Agent(living_plan=LivingPlan(...))``).
+        plan_token: Any = None
+        if self._living_plan_spec.enabled:
+            from ..tools.plan import LivingPlan, _LivingPlanState
+            seed = self._living_plan_spec.seed_plan
+            plan_state = _LivingPlanState(
+                plan=seed if seed is not None else LivingPlan(),
+            )
+            plan_token = _ambient_living_plan_var.set(plan_state)
 
         async with (
             self._runtime.session(session_id),
@@ -1724,6 +1809,8 @@ class Agent:
             # set-up order above.
             if ws_token is not None:
                 _ambient_workspace_var.reset(ws_token)
+            if plan_token is not None:
+                _ambient_living_plan_var.reset(plan_token)
             return result
 
 

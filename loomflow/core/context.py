@@ -206,6 +206,20 @@ _ambient_workspace_var: ContextVar[Any] = ContextVar(
     "loomflow_ambient_workspace", default=None
 )
 
+# ``LivingPlan`` ambient — per-run plan storage for the TodoWrite-
+# style ``plan_write`` / ``plan_read`` tools. :meth:`Agent.run`
+# allocates a fresh :class:`LivingPlan` (or uses the seeded one
+# from ``living_plan=<LivingPlan instance>``) at run start, installs
+# it here for the duration, and resets the token at run end. Plan
+# tools read this contextvar at call time so concurrent
+# ``agent.run()`` invocations on the same :class:`Agent` instance
+# operate on isolated plan state. Held separately from
+# ``RunContext`` because :class:`LivingPlan` is mutable and the
+# ``RunContext`` is a frozen dataclass.
+_ambient_living_plan_var: ContextVar[Any] = ContextVar(
+    "loomflow_ambient_living_plan", default=None
+)
+
 
 def get_run_context() -> RunContext:
     """Return the :class:`RunContext` for the currently-running agent.

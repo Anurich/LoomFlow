@@ -18,17 +18,34 @@ from .builtin import (
     read_tool,
     write_tool,
 )
+from .plan import (
+    LivingPlan,
+    LivingPlanStep,
+    get_active_plan,
+    living_plan_prompt_section,
+    make_plan_tools,
+    make_recall_past_plans_tool,
+)
+from .plan_resolver import ResolvedLivingPlan, resolve_living_plan
 from .registry import InProcessToolHost, Tool, tool
 
 __all__ = [
     "InProcessToolHost",
+    "LivingPlan",
+    "LivingPlanStep",
     "PathEscapeError",
+    "ResolvedLivingPlan",
     "Tool",
     "bash_tool",
     "default_workdir",
     "edit_tool",
     "filesystem_tools",
+    "get_active_plan",
+    "living_plan_prompt_section",
+    "make_plan_tools",
+    "make_recall_past_plans_tool",
     "read_tool",
+    "resolve_living_plan",
     "tool",
     "write_tool",
 ]

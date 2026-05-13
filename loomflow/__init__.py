@@ -103,7 +103,7 @@ from .security import (
     NoSandbox,
     StandardPermissions,
 )
-from .tools import Tool, tool
+from .tools import LivingPlan, LivingPlanStep, Tool, tool
 from .workflow import END, START, Workflow, WorkflowResult, step
 from .workspace import (
     InMemoryWorkspace,
@@ -129,6 +129,8 @@ __all__ = [
     "END",
     "tool",
     "Tool",
+    "LivingPlan",
+    "LivingPlanStep",
     # ----- Run context (always-relevant) -----
     "RunContext",
     "RunResult",
