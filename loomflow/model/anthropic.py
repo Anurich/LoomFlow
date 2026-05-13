@@ -28,6 +28,65 @@ from typing import Any
 from ..core.types import Message, ModelChunk, Role, ToolCall, ToolDef, Usage
 from ._pricing import estimate_cost
 
+
+def _cache_control_for(prompt_caching: Any) -> dict[str, Any] | None:
+    """Build the ``cache_control`` block for Anthropic's API when
+    caching is enabled, otherwise return ``None``.
+
+    Anthropic accepts ``{"type": "ephemeral"}`` (5-min TTL, default)
+    or ``{"type": "ephemeral", "ttl": "1h"}`` (1-hour TTL at 2x
+    write premium). The dict goes onto the LAST cacheable content
+    block in ``system`` / ``tools`` / ``messages`` — Anthropic
+    caches everything up to and including that breakpoint.
+    """
+    if prompt_caching is None or not getattr(prompt_caching, "enabled", False):
+        return None
+    ttl = getattr(prompt_caching, "ttl", "5m")
+    out: dict[str, Any] = {"type": "ephemeral"}
+    if ttl == "1h":
+        out["ttl"] = "1h"
+    return out
+
+
+def _apply_anthropic_cache_control(
+    kwargs: dict[str, Any],
+    system: str | None,
+    anth_tools: list[dict[str, Any]],
+    cache_ctrl: dict[str, Any] | None,
+) -> None:
+    """Inject Anthropic cache breakpoints when caching is enabled.
+
+    We use **two of the four** available breakpoints by default:
+
+    1. The LAST block of ``system`` — caches the entire system
+       prompt (typically the largest stable prefix).
+    2. The LAST tool definition — caches the whole tool array.
+
+    The remaining two breakpoints are reserved for future expansion
+    (memory blocks, long pinned messages) without breaking existing
+    cache hits. Mutates ``kwargs`` in place to convert the ``system``
+    string into a content-block list with cache_control, and to add
+    cache_control to ``anth_tools[-1]``.
+    """
+    if cache_ctrl is None:
+        return
+    if system:
+        # Convert ``system`` string into a single text block with
+        # cache_control. Anthropic accepts EITHER a string OR a list
+        # of content blocks; the block form is needed for caching.
+        kwargs["system"] = [
+            {
+                "type": "text",
+                "text": system,
+                "cache_control": cache_ctrl,
+            }
+        ]
+    if anth_tools:
+        # Annotate the LAST tool with cache_control; caches every
+        # tool definition up to and including this one.
+        anth_tools[-1] = {**anth_tools[-1], "cache_control": cache_ctrl}
+        kwargs["tools"] = anth_tools
+
 DEFAULT_MAX_TOKENS = 4096
 
 
@@ -91,6 +150,7 @@ class AnthropicModel:
         output_schema: Any | None = None,
         effort: str | None = None,
         strict_effort: bool = False,
+        prompt_caching: Any = None,
     ) -> tuple[str, list[ToolCall], Usage, str]:
         """Single-shot non-streaming completion.
 
@@ -153,6 +213,13 @@ class AnthropicModel:
             anthropic_kwargs(effort, self.name, strict=strict_effort)
         )
 
+        # Prompt cache injection (no-op when caching is disabled).
+        # Must run AFTER ``kwargs["tools"]`` / ``kwargs["system"]``
+        # are set, since the helper rewrites them with cache_control
+        # markers when enabled.
+        cache_ctrl = _cache_control_for(prompt_caching)
+        _apply_anthropic_cache_control(kwargs, system, anth_tools, cache_ctrl)
+
         try:
             response = await self._client.messages.create(**kwargs)
         except Exception:  # noqa: BLE001 — fallback for fake / non-conforming clients
@@ -211,10 +278,30 @@ class AnthropicModel:
         u = getattr(response, "usage", None)
         in_tok = getattr(u, "input_tokens", 0) or 0
         out_tok = getattr(u, "output_tokens", 0) or 0
+        # Anthropic uses ``separate buckets`` semantics:
+        # ``input_tokens`` = tokens AFTER the last cache breakpoint
+        # (charged at full rate); ``cache_read_input_tokens`` =
+        # cache hits (0.1x); ``cache_creation_input_tokens`` =
+        # tokens written into cache on this call (1.25x for 5m,
+        # 2x for 1h). Total prompt processed =
+        # in_tok + cache_read + cache_write. We forward this shape
+        # directly through Usage.
+        cache_read = getattr(u, "cache_read_input_tokens", 0) or 0
+        cache_write = getattr(u, "cache_creation_input_tokens", 0) or 0
+        ttl = getattr(prompt_caching, "ttl", "5m") if prompt_caching else "5m"
         usage = Usage(
             input_tokens=in_tok,
+            cached_input_tokens=cache_read,
+            cache_write_tokens=cache_write,
             output_tokens=out_tok,
-            cost_usd=estimate_cost(self.name, in_tok, out_tok),
+            cost_usd=estimate_cost(
+                self.name,
+                in_tok,
+                out_tok,
+                cached_input_tokens=cache_read,
+                cache_write_tokens=cache_write,
+                cache_ttl=ttl,
+            ),
         )
         stop_reason = (
             getattr(response, "stop_reason", None) or "end_turn"
@@ -231,6 +318,7 @@ class AnthropicModel:
         output_schema: Any | None = None,
         effort: str | None = None,
         strict_effort: bool = False,
+        prompt_caching: Any = None,
     ) -> AsyncIterator[ModelChunk]:
         system, anth_messages = _to_anthropic_messages(messages)
         anth_tools = [_to_anthropic_tool(t) for t in (tools or [])]
@@ -262,8 +350,14 @@ class AnthropicModel:
             anthropic_kwargs(effort, self.name, strict=strict_effort)
         )
 
+        # Prompt cache injection (no-op when caching is disabled).
+        cache_ctrl = _cache_control_for(prompt_caching)
+        _apply_anthropic_cache_control(kwargs, system, anth_tools, cache_ctrl)
+
         partials: dict[int, _PartialTool] = {}
         agg_input = 0
+        agg_cache_read = 0
+        agg_cache_write = 0
         agg_output = 0
         finish_reason: str | None = None
 
@@ -277,6 +371,17 @@ class AnthropicModel:
                     if usage is not None:
                         agg_input += getattr(usage, "input_tokens", 0) or 0
                         agg_output += getattr(usage, "output_tokens", 0) or 0
+                        # Cache stats are emitted on ``message_start``
+                        # in the streaming event sequence (the API
+                        # decides cache hit/miss before producing
+                        # tokens). Pull them once here.
+                        agg_cache_read += (
+                            getattr(usage, "cache_read_input_tokens", 0) or 0
+                        )
+                        agg_cache_write += (
+                            getattr(usage, "cache_creation_input_tokens", 0)
+                            or 0
+                        )
 
                 elif etype == "content_block_start":
                     block = event.content_block
@@ -330,13 +435,26 @@ class AnthropicModel:
                         if sr:
                             finish_reason = sr
 
+        ttl = (
+            getattr(prompt_caching, "ttl", "5m")
+            if prompt_caching else "5m"
+        )
         yield ModelChunk(
             kind="finish",
             finish_reason=finish_reason or "end_turn",
             usage=Usage(
                 input_tokens=agg_input,
+                cached_input_tokens=agg_cache_read,
+                cache_write_tokens=agg_cache_write,
                 output_tokens=agg_output,
-                cost_usd=estimate_cost(self.name, agg_input, agg_output),
+                cost_usd=estimate_cost(
+                    self.name,
+                    agg_input,
+                    agg_output,
+                    cached_input_tokens=agg_cache_read,
+                    cache_write_tokens=agg_cache_write,
+                    cache_ttl=ttl,
+                ),
             ),
         )
 

@@ -1,12 +1,13 @@
 # Examples
 
-Sixteen end-to-end examples that exercise Loom's own
+Seventeen end-to-end examples that exercise Loom's own
 primitives — loader, vector store, retriever-as-tool pattern,
 multi-agent architectures, multi-user / session-continuity
 primitives, the workflow + agent composition story, observability
 sinks, the reasoning-effort dial, TOML / dict-form declarative
-config, and the shared-notebook workspace for multi-agent
-coordination. Nothing pulled in from outside the framework.
+config, the shared-notebook workspace for multi-agent coordination,
+and provider-aware prompt caching. Nothing pulled in from outside
+the framework.
 
 ## Agent + retrieval + memory
 
@@ -57,6 +58,12 @@ previous one's vocabulary.
 | File | What it shows | Needs API key? |
 |---|---|---|
 | [`16_shared_workspace.py`](16_shared_workspace.py) | `Workspace` — a shared notebook primitive for multi-agent teams. Agents call `note(title, content)` to share findings; teammates read via `list_notes()` / `read_note(slug)` / `search_notes(query)`. Author attribution, slug generation, multi-tenant `user_id` partitioning, and an auto-regenerated `WORKSPACE.md` index are all handled by the framework. Three demos: 5 specialists in `Workflow.parallel` writing concurrently, `Team.supervisor` threading the workspace to its workers, and cross-run persistence (second run sees the first run's notes). | No |
+
+## Cost optimization
+
+| File | What it shows | Needs API key? |
+|---|---|---|
+| [`17_prompt_caching.py`](17_prompt_caching.py) | `Agent(prompt_caching=True)` — one boolean enables provider-aware prompt caching. **OpenAI**: parses `cached_tokens` from response, applies 0.5x discount automatically. **Anthropic**: injects `cache_control:{type:"ephemeral"}` on the last system block + last tool definition (2 of 4 breakpoints), parses `cache_read_input_tokens` / `cache_creation_input_tokens` from response, applies 0.1x read discount + 1.25x write premium (5m TTL) or 2x (1h TTL). Dict form for advanced: `{"enabled": True, "ttl": "1h", "cache_key": "user_42"}`. Live demo runs the same prompt twice and shows the cache-hit cost drop in `result.cached_tokens_in` + `result.cost_usd`. | OpenAI or Anthropic |
 
 The image-bearing examples (01, 02) generate small sample PDFs on
 first run via `reportlab` and cache them under `examples/data/`.

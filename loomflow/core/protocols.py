@@ -63,6 +63,7 @@ class Model(Protocol):
         output_schema: Any | None = None,
         effort: str | None = None,
         strict_effort: bool = False,
+        prompt_caching: Any = None,
     ) -> AsyncIterator[ModelChunk]:
         """Stream completion chunks. Each chunk is text, tool_call, or finish.
 

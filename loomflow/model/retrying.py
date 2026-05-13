@@ -84,6 +84,7 @@ class RetryingModel:
         output_schema: Any | None = None,
         effort: str | None = None,
         strict_effort: bool = False,
+        prompt_caching: Any = None,
     ) -> tuple[str, list[ToolCall], Usage, str]:
         """Single-shot completion with retry on transient failures."""
 
@@ -97,6 +98,7 @@ class RetryingModel:
                     output_schema=output_schema,
                     effort=effort,
                     strict_effort=strict_effort,
+                    prompt_caching=prompt_caching,
                 )
             )
             return result
@@ -116,6 +118,7 @@ class RetryingModel:
         output_schema: Any | None = None,
         effort: str | None = None,
         strict_effort: bool = False,
+        prompt_caching: Any = None,
     ) -> AsyncIterator[ModelChunk]:
         """Streaming completion with retry-before-first-chunk.
 
@@ -135,6 +138,7 @@ class RetryingModel:
                     output_schema=output_schema,
                     effort=effort,
                     strict_effort=strict_effort,
+                    prompt_caching=prompt_caching,
                 )
                 # First chunk — if this raises we can still retry.
                 first_chunk: ModelChunk | None = None

@@ -61,6 +61,7 @@ from ..core.types import (
     Episode,
     Event,
     Message,
+    PromptCacheConfig,
     Role,
     RunResult,
     Usage,
@@ -119,6 +120,7 @@ class Agent:
         response_tone: str | None = None,
         effort: str | None = None,
         strict_effort: bool = False,
+        prompt_caching: bool | Mapping[str, Any] | None = None,
         workspace: Any | str | Mapping[str, Any] | None = None,
     ) -> None:
         # Skills — packaged on-disk playbooks loaded on demand.
@@ -371,6 +373,17 @@ class Agent:
         # honour the effort dial, that's a property of how the
         # whole agent is wired up.
         self._strict_effort: bool = strict_effort
+        # Prompt caching is also agent-level: caching is a property
+        # of how the agent is wired (which model, which TTL,
+        # whether to route per-session). The Anthropic adapter
+        # reads this to decide whether to inject ``cache_control``
+        # markers on the system prompt + tool definitions; the
+        # OpenAI adapter reads it for the optional
+        # ``prompt_cache_key`` routing hint (OpenAI caching itself
+        # is automatic regardless).
+        self._prompt_caching: PromptCacheConfig = _resolve_prompt_caching(
+            prompt_caching
+        )
         self._architecture: Architecture = resolve_architecture(architecture)
 
     # ---- hook decorators (user-facing sugar) ----------------------------
@@ -1582,6 +1595,12 @@ class Agent:
                 # strict_effort is agent-level; effort is per-call.
                 effort=effort,
                 strict_effort=self._strict_effort,
+                # Prompt cache config — Anthropic adapters use it to
+                # inject ``cache_control`` markers; OpenAI uses the
+                # optional ``cache_key`` as a routing hint. Carries
+                # ``enabled=False`` when caching is off, so adapters
+                # check ``deps.prompt_caching.enabled`` and skip.
+                prompt_caching=self._prompt_caching,
                 # Architectures consult this to pick fast (buffered)
                 # vs streaming (channel) paths for parallel work.
                 streaming=emit is not _noop_emit,
@@ -1635,6 +1654,8 @@ class Agent:
                 parsed=parsed,
                 turns=session.turns,
                 tokens_in=session.cumulative_usage.input_tokens,
+                cached_tokens_in=session.cumulative_usage.cached_input_tokens,
+                cache_write_tokens=session.cumulative_usage.cache_write_tokens,
                 tokens_out=session.cumulative_usage.output_tokens,
                 cost_usd=session.cumulative_usage.cost_usd,
                 started_at=started_at,
@@ -1985,6 +2006,49 @@ def _normalize_model_spec(
         strict_effort = bool(dict_strict)
 
     return resolved_spec, effort, strict_effort
+
+
+def _resolve_prompt_caching(
+    spec: bool | Mapping[str, Any] | None,
+) -> PromptCacheConfig:
+    """Normalise the ``prompt_caching=`` kwarg into a typed config.
+
+    Accepted shapes:
+
+    * ``None`` / ``False`` → disabled config
+    * ``True`` → enabled with default TTL (``"5m"``)
+    * ``Mapping`` → ``{"enabled": bool, "ttl": "5m"|"1h",
+      "cache_key": "..."}``. Missing keys take their defaults.
+
+    Anything else raises :class:`ConfigError` with the recognised
+    forms enumerated.
+    """
+    from ..core.errors import ConfigError
+
+    if spec is None or spec is False:
+        return PromptCacheConfig(enabled=False)
+    if spec is True:
+        return PromptCacheConfig(enabled=True)
+    if isinstance(spec, Mapping):
+        enabled = bool(spec.get("enabled", True))
+        ttl = spec.get("ttl", "5m")
+        if ttl not in ("5m", "1h"):
+            raise ConfigError(
+                f"prompt_caching= 'ttl' must be '5m' or '1h'; got {ttl!r}."
+            )
+        cache_key = spec.get("cache_key")
+        if cache_key is not None and not isinstance(cache_key, str):
+            raise ConfigError(
+                "prompt_caching= 'cache_key' must be a string or None."
+            )
+        return PromptCacheConfig(
+            enabled=enabled, ttl=ttl, cache_key=cache_key,
+        )
+    raise ConfigError(
+        f"prompt_caching= unrecognised value {spec!r}. Use True / False / "
+        "None, or a dict like {'enabled': True, 'ttl': '5m'|'1h', "
+        "'cache_key': '<session-id>'}."
+    )
 
 
 def _resolve_model(

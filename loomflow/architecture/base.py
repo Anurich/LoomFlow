@@ -140,6 +140,15 @@ class Dependencies:
     ``EffortNotSupportedError`` instead of warn-and-drop. Useful for
     pipelines where silently downgrading a reasoning request would
     be worse than failing fast."""
+    prompt_caching: Any = None
+    """Resolved :class:`~loomflow.core.types.PromptCacheConfig`
+    (or ``None`` when caching is disabled). Forwarded to
+    ``model.complete()`` / ``model.stream()`` so the Anthropic
+    adapter can inject ``cache_control`` markers and the OpenAI
+    adapter can pass an optional ``prompt_cache_key``. Typed as
+    ``Any`` here to avoid pulling a value-type dependency into
+    the architecture base module — the consuming adapters know
+    the shape."""
     streaming: bool = False
     """Whether a downstream consumer is reading from
     ``agent.stream()``. When True, architectures should preserve

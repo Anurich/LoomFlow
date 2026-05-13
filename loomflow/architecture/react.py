@@ -200,6 +200,7 @@ class ReAct:
                                     output_schema=deps.output_schema,
                                     effort=deps.effort,
                                     strict_effort=deps.strict_effort,
+                                    prompt_caching=deps.prompt_caching,
                                 )
                             )
                         else:
@@ -212,6 +213,7 @@ class ReAct:
                                     output_schema=deps.output_schema,
                                     effort=deps.effort,
                                     strict_effort=deps.strict_effort,
+                                    prompt_caching=deps.prompt_caching,
                                 )
                             )
                 else:
@@ -235,6 +237,7 @@ class ReAct:
                                 output_schema=deps.output_schema,
                                 effort=deps.effort,
                                 strict_effort=deps.strict_effort,
+                                prompt_caching=deps.prompt_caching,
                             )
                         else:
                             chunks = deps.runtime.stream_step(
@@ -245,6 +248,7 @@ class ReAct:
                                 output_schema=deps.output_schema,
                                 effort=deps.effort,
                                 strict_effort=deps.strict_effort,
+                                prompt_caching=deps.prompt_caching,
                             )
                         async for chunk in chunks:
                             yield Event.model_chunk(session.id, chunk)

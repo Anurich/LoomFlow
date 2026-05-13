@@ -316,6 +316,7 @@ class _RecordingModel:
         output_schema: object | None = None,
         effort: str | None = None,
         strict_effort: bool = False,
+        prompt_caching: object = None,
     ) -> AsyncIterator[ModelChunk]:
         self.last_messages = list(messages)
         yield ModelChunk(kind="text", text="ack")

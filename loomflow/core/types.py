@@ -127,13 +127,97 @@ class ToolResult(BaseModel):
 
 
 class Usage(BaseModel):
-    """Token and cost accounting for a model call."""
+    """Token and cost accounting for a model call.
+
+    The cache fields follow Anthropic's **separate-buckets** semantics:
+    ``input_tokens`` is the count of tokens billed at the FULL input
+    rate (i.e. not served from cache); ``cached_input_tokens`` is the
+    count served from the prompt cache (billed at the provider's
+    discount — OpenAI 0.5x, Anthropic 0.1x). Total tokens the model
+    processed is ``input_tokens + cached_input_tokens``.
+
+    OpenAI's native API uses ``input_tokens`` = total, with
+    ``cached_tokens`` as a subset; the OpenAI adapter normalises to
+    the loomflow convention on the way in so downstream code sees one
+    shape.
+    """
 
     model_config = ConfigDict(frozen=True)
 
     input_tokens: int = 0
+    """Prompt tokens billed at the full input rate (i.e. cache miss
+    or caching disabled). Does NOT include cached tokens — they're
+    counted separately in ``cached_input_tokens``."""
+
+    cached_input_tokens: int = 0
+    """Prompt tokens served from the provider's prompt cache (cache
+    hits). Billed at the cache-read rate — OpenAI 0.5x, Anthropic
+    0.1x of the model's base input rate. Zero when caching is
+    disabled or the prompt was a cache miss."""
+
+    cache_write_tokens: int = 0
+    """Prompt tokens written to the cache on this call (Anthropic
+    only — OpenAI's cache writes are free and not surfaced).
+    Billed at the cache-write premium: 1.25x for 5-minute TTL,
+    2x for 1-hour TTL."""
+
     output_tokens: int = 0
+    """Completion tokens billed at the model's output rate."""
+
     cost_usd: float = 0.0
+    """USD cost computed by :func:`loomflow.model._pricing.estimate_cost`
+    from the four token buckets above + the model's pricing entry.
+    Zero for unknown models."""
+
+
+class PromptCacheConfig(BaseModel):
+    """Configuration for **prompt caching** across model providers.
+
+    The :class:`~loomflow.Agent` constructor accepts three shapes for
+    its ``prompt_caching=`` kwarg, all of which resolve to one of
+    these:
+
+    * ``False`` / ``None`` → ``PromptCacheConfig(enabled=False)``.
+      Default. No cache markers injected; cached usage fields stay 0
+      even if the provider serves cached tokens automatically
+      (OpenAI). Best for first-time-correctness reviewers.
+    * ``True`` → ``PromptCacheConfig(enabled=True)`` with 5-minute
+      TTL. Anthropic adapters will inject ``cache_control`` on the
+      system prompt + tool definitions; OpenAI adapters will parse
+      ``cached_tokens`` from the response and apply the discount.
+    * ``dict`` → explicit per-field config:
+      ``{"enabled": True, "ttl": "1h", "cache_key": "session_42"}``.
+
+    Provider mapping:
+
+    * **OpenAI** — caching is automatic regardless of this flag, but
+      ``cache_key`` (when set) forwards as ``prompt_cache_key`` for
+      improved cache-hit routing. Read tokens are billed at 0.5x.
+    * **Anthropic** — ``cache_control: {type: "ephemeral", ttl}``
+      injected on the LAST system block + the LAST tool definition
+      (2 of the 4 available breakpoints). Read tokens billed at
+      0.1x; write tokens at 1.25x (5m) or 2x (1h).
+    * **Gemini** — not supported in this release (Gemini requires a
+      separate ``CachedContent.create`` API call; planned for a
+      future loomflow version).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    enabled: bool = False
+    """Master switch. When ``False``, no cache_control markers are
+    injected and cached usage fields aren't populated."""
+
+    ttl: Literal["5m", "1h"] = "5m"
+    """Cache time-to-live. ``"5m"`` (default, cheapest write) or
+    ``"1h"`` (Anthropic only; 2x write premium but worth it for
+    long-running sessions that re-hit the same prefix)."""
+
+    cache_key: str | None = None
+    """Optional cache-routing hint. OpenAI's ``prompt_cache_key``
+    parameter; helps requests with the same prefix hit the same
+    backend cache. Map to ``user_id`` or ``session_id`` for
+    per-user / per-session routing. Ignored by Anthropic."""
 
 
 class ModelChunk(BaseModel):
@@ -566,6 +650,13 @@ class RunResult(BaseModel):
     schema and can cast or annotate as needed."""
     turns: int
     tokens_in: int = 0
+    """Prompt tokens billed at the full input rate (cache misses)."""
+    cached_tokens_in: int = 0
+    """Prompt tokens served from the provider's prompt cache. Zero
+    when caching is disabled or the model doesn't support it. See
+    :class:`Usage.cached_input_tokens` for the per-call equivalent."""
+    cache_write_tokens: int = 0
+    """Prompt tokens written to cache on this run (Anthropic only)."""
     tokens_out: int = 0
     cost_usd: float = 0.0
     started_at: datetime

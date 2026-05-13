@@ -73,6 +73,8 @@ async def text_only_model_call(
 def add_usage(a: Usage, b: Usage) -> Usage:
     return Usage(
         input_tokens=a.input_tokens + b.input_tokens,
+        cached_input_tokens=a.cached_input_tokens + b.cached_input_tokens,
+        cache_write_tokens=a.cache_write_tokens + b.cache_write_tokens,
         output_tokens=a.output_tokens + b.output_tokens,
         cost_usd=a.cost_usd + b.cost_usd,
     )

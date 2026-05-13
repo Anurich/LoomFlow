@@ -108,6 +108,7 @@ class OpenAIModel:
         output_schema: Any | None = None,
         effort: str | None = None,
         strict_effort: bool = False,
+        prompt_caching: Any = None,
     ) -> tuple[str, list[ToolCall], Usage, str]:
         """Single-shot completion (no per-chunk yields).
 
@@ -149,6 +150,16 @@ class OpenAIModel:
         # the caller). See ``loomflow/model/_effort.py``.
         kwargs.update(self._effort_kwargs(effort, strict_effort))
 
+        # OpenAI prompt caching is **automatic** — no request-side
+        # change required. The optional ``prompt_cache_key`` improves
+        # cache-hit routing when many requests share a long prefix
+        # (e.g. per-user system prompt). Forward it when the caller
+        # supplied one via ``PromptCacheConfig(cache_key=...)``.
+        if prompt_caching is not None and getattr(
+            prompt_caching, "cache_key", None
+        ):
+            kwargs["prompt_cache_key"] = prompt_caching.cache_key
+
         try:
             response = await self._client.chat.completions.create(**kwargs)
         except Exception:  # noqa: BLE001 — surface the fallback transparently
@@ -161,6 +172,7 @@ class OpenAIModel:
                     output_schema=output_schema,
                     effort=effort,
                     strict_effort=strict_effort,
+                    prompt_caching=prompt_caching,
                 )
             )
 
@@ -207,16 +219,28 @@ class OpenAIModel:
             )
 
         u = getattr(response, "usage", None)
-        in_tok = getattr(u, "prompt_tokens", 0) or 0
+        total_in = getattr(u, "prompt_tokens", 0) or 0
         out_tok = getattr(u, "completion_tokens", 0) or 0
+        # OpenAI uses ``subset`` semantics: ``prompt_tokens`` is the
+        # TOTAL prompt size (cache hits + misses), with
+        # ``prompt_tokens_details.cached_tokens`` as the cached
+        # portion. Normalise to loomflow's ``separate buckets``
+        # convention so downstream Usage math doesn't double-count.
+        details = getattr(u, "prompt_tokens_details", None)
+        cache_read = getattr(details, "cached_tokens", 0) or 0
+        in_tok = max(0, total_in - cache_read)  # uncached portion
         usage = Usage(
             input_tokens=in_tok,
+            cached_input_tokens=cache_read,
+            # OpenAI doesn't surface cache_write_tokens — writes are
+            # free and not billed separately. Always 0 for OpenAI.
             output_tokens=out_tok,
-            # Compute USD cost from token counts + the model name's
-            # entry in the pricing table. Returns 0.0 (with a one-time
-            # warning) for unknown models so users see something is
-            # off without the call exploding.
-            cost_usd=estimate_cost(self.name, in_tok, out_tok),
+            cost_usd=estimate_cost(
+                self.name,
+                in_tok,
+                out_tok,
+                cached_input_tokens=cache_read,
+            ),
         )
         finish_reason = getattr(choice, "finish_reason", None) or "stop"
         return text, tool_calls, usage, str(finish_reason)
@@ -231,6 +255,7 @@ class OpenAIModel:
         output_schema: Any | None = None,
         effort: str | None = None,
         strict_effort: bool = False,
+        prompt_caching: Any = None,
     ) -> AsyncIterator[ModelChunk]:
         oai_messages = _to_openai_messages(messages)
         oai_tools = [_to_openai_tool(t) for t in (tools or [])]
@@ -251,6 +276,13 @@ class OpenAIModel:
         if rf is not None:
             kwargs["response_format"] = rf
         kwargs.update(self._effort_kwargs(effort, strict_effort))
+        # See the ``complete()`` path for the rationale — caching is
+        # automatic on OpenAI; only the optional routing hint flows
+        # through here.
+        if prompt_caching is not None and getattr(
+            prompt_caching, "cache_key", None
+        ):
+            kwargs["prompt_cache_key"] = prompt_caching.cache_key
 
         partials: dict[int, _OAIPartial] = {}
         usage = Usage()
@@ -260,12 +292,24 @@ class OpenAIModel:
         async for chunk in stream:
             chunk_usage = getattr(chunk, "usage", None)
             if chunk_usage is not None:
-                in_tok = getattr(chunk_usage, "prompt_tokens", 0) or 0
+                total_in = getattr(chunk_usage, "prompt_tokens", 0) or 0
                 out_tok = getattr(chunk_usage, "completion_tokens", 0) or 0
+                # Same cache-aware normalisation as ``complete()``:
+                # cached_tokens is a subset of prompt_tokens; surface
+                # them as separate buckets.
+                details = getattr(chunk_usage, "prompt_tokens_details", None)
+                cache_read = getattr(details, "cached_tokens", 0) or 0
+                in_tok = max(0, total_in - cache_read)
                 usage = Usage(
                     input_tokens=in_tok,
+                    cached_input_tokens=cache_read,
                     output_tokens=out_tok,
-                    cost_usd=estimate_cost(self.name, in_tok, out_tok),
+                    cost_usd=estimate_cost(
+                        self.name,
+                        in_tok,
+                        out_tok,
+                        cached_input_tokens=cache_read,
+                    ),
                 )
 
             choices = getattr(chunk, "choices", None)

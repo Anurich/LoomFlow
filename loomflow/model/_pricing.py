@@ -82,23 +82,78 @@ PRICING_PER_MTOKEN: dict[str, tuple[float, float]] = {
 _WARNED_UNKNOWN: set[str] = set()
 
 
+# ---------------------------------------------------------------------------
+# Cache-read / cache-write multipliers, per provider
+# ---------------------------------------------------------------------------
+#
+# Cache-read: cached prompt tokens cost this fraction of the base input
+# rate. OpenAI gives 50%; Anthropic and Gemini give 90%.
+#
+# Cache-write: writing tokens to the cache costs this multiple of the
+# base input rate. OpenAI doesn't charge separately for writes (so we
+# never bill cache_write_tokens for OpenAI). Anthropic charges 1.25x
+# for 5-minute TTL and 2x for 1-hour TTL.
+
+_CACHE_READ_MULTIPLIER: dict[str, float] = {
+    "openai": 0.5,
+    "anthropic": 0.1,
+    "gemini": 0.1,
+    "litellm": 0.5,   # routed; conservative
+}
+
+_CACHE_WRITE_MULTIPLIER: dict[str, dict[str, float]] = {
+    "openai": {"5m": 0.0, "1h": 0.0},     # OpenAI doesn't bill writes
+    "anthropic": {"5m": 1.25, "1h": 2.0},
+    "gemini": {"5m": 0.0, "1h": 0.0},     # cache storage billed separately
+    "litellm": {"5m": 1.25, "1h": 2.0},   # assume Anthropic-style
+}
+
+
+def _provider_for(model: str) -> str:
+    """Map a model name onto its provider family for cache-rate
+    lookup. Detection is name-prefix based — the same heuristic used
+    by ``_resolve_model`` in :mod:`loomflow.agent.api`.
+    """
+    if not model:
+        return "openai"
+    if model.startswith("claude-"):
+        return "anthropic"
+    if model.startswith(("gpt-", "o1-", "o3-", "o4-")):
+        return "openai"
+    if model.startswith("gemini-"):
+        return "gemini"
+    return "openai"  # safe default for the longest-prefix fallback path
+
+
 def estimate_cost(
     model: str,
     input_tokens: int,
     output_tokens: int,
+    *,
+    cached_input_tokens: int = 0,
+    cache_write_tokens: int = 0,
+    cache_ttl: str = "5m",
 ) -> float:
-    """Return the USD cost of ``input_tokens`` + ``output_tokens``
-    for ``model``, or ``0.0`` for unknown models.
+    """Return the USD cost of a model call given its token buckets.
+
+    Argument semantics (Anthropic-style **separate buckets**):
+
+    * ``input_tokens`` — full-rate (cache miss / caching disabled).
+    * ``cached_input_tokens`` — cache hits, at the provider's
+      discount multiplier (OpenAI 0.5x, Anthropic / Gemini 0.1x).
+    * ``cache_write_tokens`` — tokens being written into cache on
+      this call. Anthropic only (1.25x for 5m TTL, 2x for 1h);
+      OpenAI doesn't bill writes.
+    * ``output_tokens`` — completion at the model's output rate.
+    * ``cache_ttl`` — ``"5m"`` (default) or ``"1h"``. Affects only
+      the cache-write rate.
 
     Lookup order:
 
     1. Exact match against :data:`PRICING_PER_MTOKEN`.
-    2. **Longest-prefix** match (so ``gpt-4.1-mini-2026-05-13``
-       still hits the ``gpt-4.1-mini`` rate).
+    2. **Longest-prefix** match (``gpt-4.1-mini-2026-05-13`` →
+       ``gpt-4.1-mini``).
     3. Miss → return ``0.0`` and warn once per unknown model.
-
-    The longest-prefix step keeps the table small while tolerating
-    OpenAI's date-suffixed snapshot model IDs.
     """
     if not model:
         return 0.0
@@ -115,11 +170,21 @@ def estimate_cost(
                 stacklevel=3,
             )
         return 0.0
-    in_price_per_mtok, out_price_per_mtok = pricing
-    return (
-        (input_tokens * in_price_per_mtok) +
-        (output_tokens * out_price_per_mtok)
-    ) / 1_000_000.0
+    in_rate, out_rate = pricing
+
+    provider = _provider_for(model)
+    read_mult = _CACHE_READ_MULTIPLIER.get(provider, 0.5)
+    write_mult = _CACHE_WRITE_MULTIPLIER.get(provider, {}).get(
+        cache_ttl, 1.25
+    )
+
+    total = (
+        input_tokens * in_rate
+        + cached_input_tokens * (in_rate * read_mult)
+        + cache_write_tokens * (in_rate * write_mult)
+        + output_tokens * out_rate
+    )
+    return total / 1_000_000.0
 
 
 def _longest_prefix_match(model: str) -> tuple[float, float] | None:

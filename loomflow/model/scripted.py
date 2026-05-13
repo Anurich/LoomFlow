@@ -45,6 +45,7 @@ class ScriptedModel:
         output_schema: Any | None = None,
         effort: str | None = None,
         strict_effort: bool = False,
+        prompt_caching: Any = None,
     ) -> tuple[str, list[ToolCall], Usage, str]:
         """Single-shot replay of the next scripted turn.
 
@@ -79,6 +80,7 @@ class ScriptedModel:
         output_schema: Any | None = None,
         effort: str | None = None,
         strict_effort: bool = False,
+        prompt_caching: Any = None,
     ) -> AsyncIterator[ModelChunk]:
         if self._idx >= len(self._turns):
             yield ModelChunk(kind="text", text="")
