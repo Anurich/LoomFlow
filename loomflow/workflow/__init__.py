@@ -77,6 +77,7 @@ from ..core.context import (
     RunContext,
     _ambient_memory_var,
     _ambient_response_tone_var,
+    _ambient_workspace_var,
     _ctx_var,
     get_run_context,
 )
@@ -446,6 +447,7 @@ class Workflow:
         response_tone: str | None = None,
         max_steps: int = 100,
         max_visits_per_node: int = 25,
+        workspace: Any | str | Mapping[str, Any] | None = None,
     ) -> None:
         """Construct an empty workflow.
 
@@ -495,6 +497,14 @@ class Workflow:
         # an ambient contextvar installed in ``stream``. None = no
         # propagation. See ``loomflow.core.tone`` for preset semantics.
         self._response_tone = response_tone
+        # Workflow-level shared notebook. Nested ``Agent`` steps that
+        # didn't set their own ``workspace=`` pick this up at run
+        # start via :data:`_ambient_workspace_var` and auto-wire the
+        # five notebook tools onto themselves. One Workflow + one
+        # workspace gives every nested agent a shared scratchpad
+        # without per-agent wiring.
+        from ..workspace.resolver import resolve_workspace as _resolve_ws
+        self._workspace: Any = _resolve_ws(workspace)
         self._max_steps = max_steps
         self._max_visits_per_node = max_visits_per_node
 
@@ -711,6 +721,10 @@ class Workflow:
         # Same pattern for ``response_tone``: nested agents that
         # didn't set their own pick up the workflow-level tone.
         tone_token = _ambient_response_tone_var.set(self._response_tone)
+        # Workspace ambient — nested ``Agent`` steps that didn't set
+        # their own ``workspace=`` see the workflow's notebook here
+        # and auto-wire the five notebook tools at run start.
+        workspace_token = _ambient_workspace_var.set(self._workspace)
 
         try:
             yield Event(
@@ -831,6 +845,7 @@ class Workflow:
                 payload={"workflow": self.name, "output": value},
             )
         finally:
+            _ambient_workspace_var.reset(workspace_token)
             _ambient_response_tone_var.reset(tone_token)
             _ambient_memory_var.reset(memory_token)
             _ctx_var.reset(token)
@@ -1228,12 +1243,18 @@ class Workflow:
         response_tone: str | None = None,
         max_steps: int = 100,
         max_visits_per_node: int = 25,
+        workspace: Any | str | Mapping[str, Any] | None = None,
     ) -> Workflow:
         """Fan-out, run all steps with the *same* input, then merge.
 
         ``merge(results)`` produces the workflow's final output;
         defaults to returning the list of results unchanged. Steps
         run concurrently via :mod:`anyio` task groups.
+
+        ``workspace`` flows through to every nested Agent step via
+        the same ambient-contextvar mechanism as the regular
+        :class:`Workflow` constructor — one notebook shared across
+        all parallel branches.
         """
         if not steps:
             raise ValueError("parallel requires at least one step")
@@ -1259,6 +1280,7 @@ class Workflow:
             response_tone=response_tone,
             max_steps=max_steps,
             max_visits_per_node=max_visits_per_node,
+            workspace=workspace,
         )
         wf.add_node("fan_out", _fan_out)
         wf.set_start("fan_out")

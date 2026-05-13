@@ -194,6 +194,18 @@ _ambient_response_tone_var: ContextVar[str | None] = ContextVar(
     "loomflow_ambient_response_tone", default=None
 )
 
+# ``Workspace`` ambient — same propagation pattern as memory + tone.
+# A :class:`Workflow` configured with ``workspace=`` installs the
+# resolved :class:`~loomflow.workspace.Workspace` here for the
+# duration of a run; nested :class:`Agent` steps that left
+# ``workspace=`` unset on construction read it as a fallback and
+# auto-wire the five notebook tools onto themselves at run start.
+# Lets a team share one notebook by wiring it once at the workflow
+# level instead of per-agent.
+_ambient_workspace_var: ContextVar[Any] = ContextVar(
+    "loomflow_ambient_workspace", default=None
+)
+
 
 def get_run_context() -> RunContext:
     """Return the :class:`RunContext` for the currently-running agent.

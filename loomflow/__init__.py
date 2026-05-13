@@ -105,6 +105,16 @@ from .security import (
 )
 from .tools import Tool, tool
 from .workflow import END, START, Workflow, WorkflowResult, step
+from .workspace import (
+    InMemoryWorkspace,
+    LocalDiskWorkspace,
+    Note,
+    NoteMatch,
+    NoteSummary,
+    Workspace,
+    WorkspaceMembership,
+    resolve_workspace,
+)
 
 __version__ = "0.9.39"
 
@@ -186,4 +196,13 @@ __all__ = [
     "LoomDeprecationWarning",
     # ----- ID utilities -----
     "new_id",
+    # ----- Shared workspace (multi-agent notebook) -----
+    "Workspace",
+    "WorkspaceMembership",
+    "LocalDiskWorkspace",
+    "InMemoryWorkspace",
+    "Note",
+    "NoteSummary",
+    "NoteMatch",
+    "resolve_workspace",
 ]

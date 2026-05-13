@@ -1,11 +1,12 @@
 # Examples
 
-Fifteen end-to-end examples that exercise Loom's own
+Sixteen end-to-end examples that exercise Loom's own
 primitives — loader, vector store, retriever-as-tool pattern,
 multi-agent architectures, multi-user / session-continuity
 primitives, the workflow + agent composition story, observability
-sinks, the reasoning-effort dial, and TOML / dict-form declarative
-config. Nothing pulled in from outside the framework.
+sinks, the reasoning-effort dial, TOML / dict-form declarative
+config, and the shared-notebook workspace for multi-agent
+coordination. Nothing pulled in from outside the framework.
 
 ## Agent + retrieval + memory
 
@@ -50,6 +51,12 @@ previous one's vocabulary.
 | File | What it shows | Needs API key? |
 |---|---|---|
 | [`15_config_file.py`](15_config_file.py) | `Agent.from_config("agent.toml")` and `Agent.from_dict({...})` — wire memory, runtime, telemetry, audit log, permissions, budget, architecture, skills, and MCP servers in one declarative file. Each backend block goes through the same resolver Agent uses for its kwargs, so anything you can build inline you can also declare in TOML / YAML / settings. Kwargs override matching cfg entries for things TOML can't express (callable tools, hooks, custom secret stores). | No |
+
+## Multi-agent coordination
+
+| File | What it shows | Needs API key? |
+|---|---|---|
+| [`16_shared_workspace.py`](16_shared_workspace.py) | `Workspace` — a shared notebook primitive for multi-agent teams. Agents call `note(title, content)` to share findings; teammates read via `list_notes()` / `read_note(slug)` / `search_notes(query)`. Author attribution, slug generation, multi-tenant `user_id` partitioning, and an auto-regenerated `WORKSPACE.md` index are all handled by the framework. Three demos: 5 specialists in `Workflow.parallel` writing concurrently, `Team.supervisor` threading the workspace to its workers, and cross-run persistence (second run sees the first run's notes). | No |
 
 The image-bearing examples (01, 02) generate small sample PDFs on
 first run via `reportlab` and cache them under `examples/data/`.

@@ -91,6 +91,27 @@ _ToolsArg = (
 )
 
 
+def _attach_workspace_to_workers(
+    workers: dict[str, Agent],
+) -> None:
+    """Stamp each worker with its team-name + teammates so when the
+    parent coordinator's ambient workspace is picked up at run-time,
+    the worker writes notes attributed to its team role (not the
+    generic ``"agent"`` default).
+
+    Mutates each worker's ``_workspace_name`` and
+    ``_workspace_teammates`` post-construction. This is intentional:
+    "team membership" is something the Team builder assigns, not
+    something the agent decided about itself. Workers keep their
+    own ``_workspace = None`` so the workflow-style ambient
+    inheritance kicks in — they don't pin their own.
+    """
+    names = list(workers.keys())
+    for name, worker in workers.items():
+        worker._workspace_name = name  # noqa: SLF001 — intentional
+        worker._workspace_teammates = names  # noqa: SLF001 — intentional
+
+
 class Team:
     """Namespace for multi-agent team builders.
 
@@ -129,6 +150,7 @@ class Team:
         max_turns: int = DEFAULT_MAX_TURNS,
         auto_consolidate: bool = False,
         skills: list[Any] | None = None,
+        workspace: Any | str | None = None,
         # --- supervisor-specific options ---
         instructions_template: str | None = None,
         delegate_tool_name: str = "delegate",
@@ -140,7 +162,26 @@ class Team:
         to dispatch a subtask, or ``forward_message(worker)`` to
         return a worker's output verbatim. Multiple delegations in
         one turn run in parallel.
+
+        ``workspace`` wires a shared notebook onto the coordinator
+        and every worker. The worker's dict key becomes its author
+        identity in the notebook (so notes show up as
+        ``[researcher]`` rather than the generic ``[agent]``).
+        Workers pick up the workspace via ambient inheritance from
+        the coordinator's run, so you don't have to rebuild them.
         """
+        coord_ws: Any = workspace
+        if workspace is not None:
+            _attach_workspace_to_workers(workers)
+            # Resolve the spec, then re-wrap with the coordinator's
+            # identity. ``ws.member(...)`` collapses the three old
+            # kwargs into one.
+            from .workspace.resolver import resolve_workspace
+            resolved = resolve_workspace(workspace)
+            if resolved is not None and hasattr(resolved, "member"):
+                coord_ws = resolved.member(
+                    "coordinator", teammates=list(workers.keys())
+                )
         return Agent(
             instructions=instructions,
             model=model,
@@ -155,6 +196,7 @@ class Team:
             max_turns=max_turns,
             auto_consolidate=auto_consolidate,
             skills=skills,
+            workspace=coord_ws,
             architecture=Supervisor(
                 workers=workers,
                 instructions_template=instructions_template,
@@ -191,6 +233,7 @@ class Team:
         max_turns: int = DEFAULT_MAX_TURNS,
         auto_consolidate: bool = False,
         skills: list[Any] | None = None,
+        workspace: Any | str | None = None,
         # --- swarm-specific options ---
         max_handoffs: int = 8,
         detect_cycles: bool = True,
@@ -203,7 +246,26 @@ class Team:
         ``input_type``).
 
         ``entry_agent`` is the peer that receives the first message.
+
+        ``workspace`` wires a shared notebook across every peer.
+        Each peer's dict key becomes its author identity in the
+        notebook so handoffs leave a clear trail of who wrote what.
         """
+        entry_ws: Any = workspace
+        if workspace is not None:
+            # Unwrap Handoff configs so we can mutate the underlying
+            # Agent's workspace identity.
+            raw: dict[str, Agent] = {
+                k: (v.agent if isinstance(v, Handoff) else v)
+                for k, v in agents.items()
+            }
+            _attach_workspace_to_workers(raw)
+            from .workspace.resolver import resolve_workspace
+            resolved = resolve_workspace(workspace)
+            if resolved is not None and hasattr(resolved, "member"):
+                entry_ws = resolved.member(
+                    entry_agent, teammates=list(agents.keys())
+                )
         return Agent(
             instructions=instructions,
             model=model,
@@ -218,6 +280,7 @@ class Team:
             max_turns=max_turns,
             auto_consolidate=auto_consolidate,
             skills=skills,
+            workspace=entry_ws,
             architecture=Swarm(
                 agents=agents,
                 entry_agent=entry_agent,
@@ -440,6 +503,7 @@ class Team:
         max_turns: int = DEFAULT_MAX_TURNS,
         auto_consolidate: bool = False,
         skills: list[Any] | None = None,
+        workspace: Any | str | None = None,
         # --- blackboard-specific options ---
         max_rounds: int = 10,
         coordinator_instructions: str | None = None,
@@ -448,7 +512,23 @@ class Team:
         """Build a blackboard team where ``agents`` collaborate via
         a shared workspace; an optional ``coordinator`` selects who
         acts each round and an optional ``decider`` decides when
-        the work is done."""
+        the work is done.
+
+        ``workspace`` adds a persistent shared notebook on top of
+        the in-memory blackboard contributions, so notes survive
+        across runs and humans can inspect them via the filesystem.
+        Each agent's dict key becomes its author identity in the
+        notebook.
+        """
+        coord_ws: Any = workspace
+        if workspace is not None:
+            _attach_workspace_to_workers(agents)
+            from .workspace.resolver import resolve_workspace
+            resolved = resolve_workspace(workspace)
+            if resolved is not None and hasattr(resolved, "member"):
+                coord_ws = resolved.member(
+                    "coordinator", teammates=list(agents.keys())
+                )
         return Agent(
             instructions=instructions,
             model=model,
@@ -463,6 +543,7 @@ class Team:
             max_turns=max_turns,
             auto_consolidate=auto_consolidate,
             skills=skills,
+            workspace=coord_ws,
             architecture=BlackboardArchitecture(
                 agents=agents,
                 coordinator=coordinator,

@@ -119,6 +119,7 @@ class Agent:
         response_tone: str | None = None,
         effort: str | None = None,
         strict_effort: bool = False,
+        workspace: Any | str | Mapping[str, Any] | None = None,
     ) -> None:
         # Skills — packaged on-disk playbooks loaded on demand.
         # Build the registry first so frontmatter validation fires
@@ -270,6 +271,72 @@ class Agent:
                 skill_registry, host=host
             )
             host.register(load_tool)
+
+        # ----- Shared workspace ----------------------------------------
+        # When ``workspace=`` is wired, the framework auto-installs
+        # five tools onto the agent (note / read_note / list_notes /
+        # search_notes / update_note) and appends a prompt section
+        # nudging the model to coordinate with teammates via the
+        # shared notebook. Author identity is baked into the tool
+        # closures so the agent never has to attribute itself.
+        from ..workspace.resolver import resolve_workspace as _resolve_ws
+        from ..workspace.tools import (
+            make_workspace_tools as _make_ws_tools,
+        )
+        from ..workspace.tools import (
+            workspace_prompt_section as _ws_prompt,
+        )
+        from ..workspace.types import WorkspaceMembership as _WSMember
+
+        # The ``workspace=`` kwarg accepts three shapes:
+        #   * raw :class:`Workspace` instance — share the notebook,
+        #     no specific identity (notes attributed to "agent")
+        #   * :class:`WorkspaceMembership` (typed) — chained from
+        #     ``ws.member("researcher", teammates=[...])`` — name
+        #     and teammates bundled in
+        #   * ``Mapping`` with ``backend`` / ``author`` / ``teammates``
+        #     — declarative dict form, resolved to a Membership
+        # The resolver returns either a bare Workspace or a
+        # Membership; we unpack identity here so the rest of
+        # ``_loop`` sees ``self._workspace`` / ``self._workspace_name``
+        # / ``self._workspace_teammates`` as before.
+        _resolved = _resolve_ws(workspace)
+        _ws_name: str | None = None
+        _ws_teammates: list[str] | None = None
+        if isinstance(_resolved, _WSMember):
+            self._workspace: Any | None = _resolved.workspace
+            _ws_name = _resolved.name
+            _ws_teammates = (
+                list(_resolved.teammates) if _resolved.teammates else None
+            )
+        else:
+            self._workspace = _resolved
+        self._workspace_was_explicit: bool = workspace is not None
+        self._workspace_name: str | None = _ws_name
+        # Names of teammates this agent collaborates with on the
+        # shared workspace. The prompt section names them so the
+        # model knows who else is contributing. Populated by the
+        # ``WorkspaceMembership`` form OR mutated by a Team builder
+        # at the moment the agent is wrapped into a team.
+        self._workspace_teammates: list[str] | None = _ws_teammates
+        if self._workspace is not None:
+            author = self._workspace_name or "agent"
+            ws_tools = _make_ws_tools(self._workspace, author=author)
+            if not isinstance(host, InProcessToolHost) and not hasattr(
+                host, "register"
+            ):
+                # Non-register-capable host (raw MCP, etc.) — wrap so
+                # we can add the workspace tools alongside its native
+                # ones. Mirrors the skills branch above.
+                host = ExtendedToolHost(host, [])
+            for t in ws_tools:
+                host.register(t)  # type: ignore[union-attr]
+            # Append the workspace prompt section after instructions
+            # (and after the skill catalog if present).
+            self._instructions = (
+                f"{self._instructions.rstrip()}\n\n"
+                f"{_ws_prompt(author=author, teammates=self._workspace_teammates)}"
+            )
         self._tool_host: ToolHost = host
 
         # ``self._telemetry`` already initialised above (before the
@@ -1337,6 +1404,23 @@ class Agent:
             )
         )
 
+        # When this Agent owns a workspace, also install it as the
+        # ambient for the duration of the run. Nested Agents (sub-
+        # agents spawned by a Supervisor / Swarm / Blackboard / Team
+        # builder) that didn't get their own ``workspace=`` at
+        # construction will pick it up via ``_ambient_workspace_var``
+        # in their own ``_loop``, so one Team workspace cascades
+        # automatically through every worker. We reset the token in
+        # a ``finally`` below so the contextvar doesn't leak past
+        # this run.
+        from ..core.context import _ambient_workspace_var
+
+        ws_token: Any = (
+            _ambient_workspace_var.set(self._workspace)
+            if self._workspace is not None
+            else None
+        )
+
         async with (
             self._runtime.session(session_id),
             run_trace,
@@ -1421,9 +1505,42 @@ class Agent:
             # the agent's host so the model sees them alongside the
             # statically-configured tools. The wrap is local to this
             # run; the agent's _tool_host is unchanged.
+            per_run_extras: list[Tool] = list(extra_tools or [])
+
+            # Ambient workspace inheritance: when this Agent didn't
+            # get its own ``workspace=`` at construction but a parent
+            # ``Workflow(workspace=...)`` is active, materialise the
+            # five notebook tools for THIS run only. The agent's
+            # ``_tool_host`` stays unchanged; the workspace prompt
+            # nudges happen via ``_default_instructions_with_ambient``
+            # below.
+            ambient_ws_tools: list[Tool] = []
+            ambient_ws_section: str = ""
+            if not self._workspace_was_explicit:
+                from ..core.context import _ambient_workspace_var
+                from ..workspace.tools import make_workspace_tools as _make_ws_tools
+                from ..workspace.tools import workspace_prompt_section as _ws_prompt
+
+                amb_ws = _ambient_workspace_var.get()
+                if amb_ws is not None:
+                    author = self._workspace_name or "agent"
+                    ambient_ws_tools = _make_ws_tools(amb_ws, author=author)
+                    ambient_ws_section = _ws_prompt(
+                        author=author,
+                        teammates=self._workspace_teammates,
+                    )
+                    per_run_extras.extend(ambient_ws_tools)
+            if ambient_ws_section:
+                # Same pattern as the skills catalog + the agent-level
+                # workspace section: append the nudges after the user
+                # instructions so the agent sees them at every turn.
+                effective_instructions = (
+                    f"{effective_instructions.rstrip()}\n\n{ambient_ws_section}"
+                )
+
             effective_tools = (
-                ExtendedToolHost(self._tool_host, extra_tools)
-                if extra_tools
+                ExtendedToolHost(self._tool_host, per_run_extras)
+                if per_run_extras
                 else self._tool_host
             )
             # Resolve the memory for THIS run: explicit-on-Agent
@@ -1579,6 +1696,13 @@ class Agent:
                     payload=completion_payload,
                 )
             await emit(Event.completed(session_id, result.model_dump(mode="json")))
+            # Reset the workspace contextvar set above so the
+            # ambient doesn't leak past this run. We do it inside
+            # the ``async with`` so it fires before the run-context
+            # teardown — keeps the cleanup order symmetric with the
+            # set-up order above.
+            if ws_token is not None:
+                _ambient_workspace_var.reset(ws_token)
             return result
 
 

@@ -54,6 +54,7 @@ journal*.db
 
 # Local Claude / agent state
 .claude/
+CLAUDE.md
 
 # Mac
 .AppleDouble
