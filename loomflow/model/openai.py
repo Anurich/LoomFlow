@@ -23,6 +23,7 @@ from typing import Any
 
 from ..core.ids import new_id
 from ..core.types import Message, ModelChunk, Role, ToolCall, ToolDef, Usage
+from ._pricing import estimate_cost
 
 
 @dataclass
@@ -206,9 +207,16 @@ class OpenAIModel:
             )
 
         u = getattr(response, "usage", None)
+        in_tok = getattr(u, "prompt_tokens", 0) or 0
+        out_tok = getattr(u, "completion_tokens", 0) or 0
         usage = Usage(
-            input_tokens=getattr(u, "prompt_tokens", 0) or 0,
-            output_tokens=getattr(u, "completion_tokens", 0) or 0,
+            input_tokens=in_tok,
+            output_tokens=out_tok,
+            # Compute USD cost from token counts + the model name's
+            # entry in the pricing table. Returns 0.0 (with a one-time
+            # warning) for unknown models so users see something is
+            # off without the call exploding.
+            cost_usd=estimate_cost(self.name, in_tok, out_tok),
         )
         finish_reason = getattr(choice, "finish_reason", None) or "stop"
         return text, tool_calls, usage, str(finish_reason)
@@ -252,9 +260,12 @@ class OpenAIModel:
         async for chunk in stream:
             chunk_usage = getattr(chunk, "usage", None)
             if chunk_usage is not None:
+                in_tok = getattr(chunk_usage, "prompt_tokens", 0) or 0
+                out_tok = getattr(chunk_usage, "completion_tokens", 0) or 0
                 usage = Usage(
-                    input_tokens=getattr(chunk_usage, "prompt_tokens", 0) or 0,
-                    output_tokens=getattr(chunk_usage, "completion_tokens", 0) or 0,
+                    input_tokens=in_tok,
+                    output_tokens=out_tok,
+                    cost_usd=estimate_cost(self.name, in_tok, out_tok),
                 )
 
             choices = getattr(chunk, "choices", None)

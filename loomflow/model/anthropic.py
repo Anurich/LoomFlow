@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..core.types import Message, ModelChunk, Role, ToolCall, ToolDef, Usage
+from ._pricing import estimate_cost
 
 DEFAULT_MAX_TOKENS = 4096
 
@@ -208,9 +209,12 @@ class AnthropicModel:
                 )
 
         u = getattr(response, "usage", None)
+        in_tok = getattr(u, "input_tokens", 0) or 0
+        out_tok = getattr(u, "output_tokens", 0) or 0
         usage = Usage(
-            input_tokens=getattr(u, "input_tokens", 0) or 0,
-            output_tokens=getattr(u, "output_tokens", 0) or 0,
+            input_tokens=in_tok,
+            output_tokens=out_tok,
+            cost_usd=estimate_cost(self.name, in_tok, out_tok),
         )
         stop_reason = (
             getattr(response, "stop_reason", None) or "end_turn"
@@ -329,7 +333,11 @@ class AnthropicModel:
         yield ModelChunk(
             kind="finish",
             finish_reason=finish_reason or "end_turn",
-            usage=Usage(input_tokens=agg_input, output_tokens=agg_output),
+            usage=Usage(
+                input_tokens=agg_input,
+                output_tokens=agg_output,
+                cost_usd=estimate_cost(self.name, agg_input, agg_output),
+            ),
         )
 
 
