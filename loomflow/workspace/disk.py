@@ -35,6 +35,7 @@ import shutil
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import anyio
 
@@ -48,6 +49,17 @@ from ._common import (
     summary_from_note,
 )
 from .types import Note, NoteKind, NoteMatch, NoteSummary, WorkspaceMembership
+
+if TYPE_CHECKING:
+    # Only needed for the ``filesystem_tools()`` return type. Import
+    # is deferred under TYPE_CHECKING because:
+    #   1. ``from __future__ import annotations`` makes every annotation
+    #      a string at runtime, so ``Tool`` doesn't need to be resolvable
+    #      at import time.
+    #   2. Importing it eagerly would pull in the ``tools`` subpackage
+    #      (and ``anyio.to_thread`` machinery) just to type one return
+    #      annotation. Worth the deferred-import pattern.
+    from ..tools.registry import Tool
 
 INDEX_FILENAME = "WORKSPACE.md"
 NOTES_DIR = "notes"
@@ -399,7 +411,7 @@ class LocalDiskWorkspace:
         *,
         include_bash: bool = False,
         user_id: str | None = None,
-    ) -> list:
+    ) -> list[Tool]:
         """Return the framework's existing :func:`read_tool` /
         :func:`write_tool` / :func:`edit_tool` rooted at this
         workspace's directory.
@@ -427,7 +439,7 @@ class LocalDiskWorkspace:
 
         scope = self._user_root(user_id)
         scope.mkdir(parents=True, exist_ok=True)
-        tools = [
+        tools: list[Tool] = [
             read_tool(scope),
             write_tool(scope),
             edit_tool(scope),
