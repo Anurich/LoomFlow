@@ -151,6 +151,7 @@ class Team:
         auto_consolidate: bool = False,
         skills: list[Any] | None = None,
         workspace: Any | str | None = None,
+        living_plan: Any = None,
         # --- supervisor-specific options ---
         instructions_template: str | None = None,
         delegate_tool_name: str = "delegate",
@@ -197,6 +198,7 @@ class Team:
             auto_consolidate=auto_consolidate,
             skills=skills,
             workspace=coord_ws,
+            living_plan=living_plan,
             architecture=Supervisor(
                 workers=workers,
                 instructions_template=instructions_template,
@@ -234,6 +236,7 @@ class Team:
         auto_consolidate: bool = False,
         skills: list[Any] | None = None,
         workspace: Any | str | None = None,
+        living_plan: Any = None,
         # --- swarm-specific options ---
         max_handoffs: int = 8,
         detect_cycles: bool = True,
@@ -281,6 +284,7 @@ class Team:
             auto_consolidate=auto_consolidate,
             skills=skills,
             workspace=entry_ws,
+            living_plan=living_plan,
             architecture=Swarm(
                 agents=agents,
                 entry_agent=entry_agent,
@@ -504,6 +508,7 @@ class Team:
         auto_consolidate: bool = False,
         skills: list[Any] | None = None,
         workspace: Any | str | None = None,
+        living_plan: Any = None,
         # --- blackboard-specific options ---
         max_rounds: int = 10,
         coordinator_instructions: str | None = None,
@@ -544,6 +549,7 @@ class Team:
             auto_consolidate=auto_consolidate,
             skills=skills,
             workspace=coord_ws,
+            living_plan=living_plan,
             architecture=BlackboardArchitecture(
                 agents=agents,
                 coordinator=coordinator,
