@@ -322,6 +322,8 @@ class Team:
         max_turns: int = DEFAULT_MAX_TURNS,
         auto_consolidate: bool = False,
         skills: list[Any] | None = None,
+        workspace: Any | str | None = None,
+        living_plan: Any = None,
         # --- router-specific options ---
         fallback_route: str | None = None,
         require_confidence_above: float = 0.0,
@@ -345,6 +347,8 @@ class Team:
             max_turns=max_turns,
             auto_consolidate=auto_consolidate,
             skills=skills,
+            workspace=workspace,
+            living_plan=living_plan,
             architecture=Router(
                 routes=routes,
                 fallback_route=fallback_route,
@@ -381,6 +385,8 @@ class Team:
         max_turns: int = DEFAULT_MAX_TURNS,
         auto_consolidate: bool = False,
         skills: list[Any] | None = None,
+        workspace: Any | str | None = None,
+        living_plan: Any = None,
         # --- debate-specific options ---
         rounds: int = 2,
         convergence_check: bool = True,
@@ -406,6 +412,8 @@ class Team:
             max_turns=max_turns,
             auto_consolidate=auto_consolidate,
             skills=skills,
+            workspace=workspace,
+            living_plan=living_plan,
             architecture=MultiAgentDebate(
                 debaters=debaters,
                 judge=judge,
@@ -445,6 +453,8 @@ class Team:
         max_turns: int = DEFAULT_MAX_TURNS,
         auto_consolidate: bool = False,
         skills: list[Any] | None = None,
+        workspace: Any | str | None = None,
+        living_plan: Any = None,
         # --- actor-critic-specific options ---
         max_rounds: int = 3,
         approval_threshold: float = 0.9,
@@ -468,6 +478,8 @@ class Team:
             max_turns=max_turns,
             auto_consolidate=auto_consolidate,
             skills=skills,
+            workspace=workspace,
+            living_plan=living_plan,
             architecture=ActorCritic(
                 actor=actor,
                 critic=critic,
