@@ -266,6 +266,32 @@ async def test_plan_write_mirrors_to_workspace() -> None:
         assert notes[0].slug == first_slug
 
 
+async def test_plan_mirror_falls_back_to_ambient_workspace() -> None:
+    """When the plan tools were built without an explicit workspace
+    but a parent :class:`Workflow` set ``_ambient_workspace_var``,
+    the mirror should target the ambient workspace. This makes
+    ``Workflow(workspace=ws)`` + nested ``Agent(living_plan=True)``
+    (no explicit workspace) work symmetrically with how the
+    workspace tools themselves inherit the ambient."""
+    from loomflow.core.context import _ambient_workspace_var
+    await _with_plan_state()
+    ambient_ws = InMemoryWorkspace()
+    # NO workspace passed to make_plan_tools — relies on the ambient.
+    [plan_write, _] = make_plan_tools(author="agent")
+    token = _ambient_workspace_var.set(ambient_ws)
+    try:
+        async with set_run_context(RunContext(user_id="alice", run_id="r1")):
+            await _call_tool(
+                plan_write,
+                {"goal": "ambient-test", "steps": [{"description": "a"}]},
+            )
+        notes = await ambient_ws.list_notes(user_id="alice")
+        assert len(notes) == 1
+        assert notes[0].kind == "plan"
+    finally:
+        _ambient_workspace_var.reset(token)
+
+
 async def test_plan_mirror_failure_does_not_break_tool() -> None:
     """If the workspace mirror raises, the plan tool must still
     return successfully — the in-memory plan is the source of

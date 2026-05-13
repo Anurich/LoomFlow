@@ -57,6 +57,7 @@ import anyio
 
 from ..core.context import (
     _ambient_living_plan_var,
+    _ambient_workspace_var,
     get_run_context,
 )
 from .registry import Tool, tool
@@ -304,7 +305,17 @@ def make_plan_tools(
     """
 
     async def _mirror_to_workspace(state: _LivingPlanState) -> None:
-        if workspace is None:
+        # Explicit workspace wins; otherwise inherit from the
+        # ambient ``_ambient_workspace_var`` set by a parent
+        # :class:`Workflow`. Mirrors the workspace-tools ambient
+        # pattern so ``Workflow(workspace=ws)`` + child
+        # ``Agent(living_plan=True)`` (no explicit workspace) works
+        # symmetrically: the plan persists into the workflow's
+        # shared notebook without per-agent ``workspace=`` boilerplate.
+        effective_workspace = workspace
+        if effective_workspace is None:
+            effective_workspace = _ambient_workspace_var.get()
+        if effective_workspace is None:
             return
         body = (
             state.plan.render()
@@ -323,14 +334,14 @@ def make_plan_tools(
         title = f"Plan {title_id}: {state.plan.goal[:60]}"
         try:
             if state.mirror_slug is not None:
-                await workspace.update_note(
+                await effective_workspace.update_note(
                     author=author,
                     slug=state.mirror_slug,
                     body=body,
                     user_id=_current_user_id(),
                 )
             else:
-                note = await workspace.write_note(
+                note = await effective_workspace.write_note(
                     author=author,
                     title=title,
                     body=body,
