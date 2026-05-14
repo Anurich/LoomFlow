@@ -33,6 +33,7 @@ from .types import (
     NoteMatch,
     NoteSummary,
     NoteVersion,
+    PruneResult,
     WorkspaceMembership,
 )
 
@@ -44,6 +45,7 @@ __all__ = [
     "NoteMatch",
     "NoteSummary",
     "NoteVersion",
+    "PruneResult",
     "Workspace",
     "WorkspaceMembership",
     "make_workspace_tools",

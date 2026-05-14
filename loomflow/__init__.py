@@ -112,6 +112,7 @@ from .workspace import (
     NoteMatch,
     NoteSummary,
     NoteVersion,
+    PruneResult,
     Workspace,
     WorkspaceMembership,
     resolve_workspace,
@@ -208,5 +209,6 @@ __all__ = [
     "NoteSummary",
     "NoteMatch",
     "NoteVersion",
+    "PruneResult",
     "resolve_workspace",
 ]

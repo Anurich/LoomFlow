@@ -9,6 +9,45 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 
 ## [0.10.0] — unreleased
 
+### Added — workspace retention: `Workspace.prune()`
+
+`Workspace.prune()` is the workspace garbage-collector — citation-
+aware retention that **hard-deletes** stale, low-value notes while
+protecting valuable ones.
+
+A note is pruned only when ALL hold:
+
+* ``older_than`` is set AND the note's last activity
+  (``max(updated_at, last_cited_at)``) is older than the window.
+  When ``older_than`` is ``None``, age is not a filter (every note
+  is age-eligible — the docstring strongly recommends passing it).
+* ``cited_count`` is below ``min_cited_count`` (default 1, so a
+  note cited even once survives).
+* ``kind`` is not in ``keep_kinds`` (e.g. ``["decision"]`` to
+  never GC decisions).
+
+``keep_last_versions=N`` separately trims each surviving note's
+``.history`` to the most recent N revisions — history grows
+fastest, so it gets its own cap.
+
+This is where the citation metadata (``cited_count`` /
+``success_count`` / ``last_cited_at``) earns its keep: pruning is
+SMART — "delete old uncited notes but keep anything that's been
+referenced" — rather than dumb time-based deletion that loses
+valuable old knowledge.
+
+``prune`` is observation-class (no author-ownership check) — it's
+an operator / maintenance op, not an agent action. Don't wire it
+as an agent tool; call it from a cron job, an end-of-benchmark
+hook, or manually. Mirrors ``Memory.forget``.
+
+Returns a new ``PruneResult`` (Tier 1 export) with
+``notes_deleted`` / ``versions_deleted`` / ``notes_kept`` counts.
+Disk backend hard-deletes the ``.md`` file + its embedding
+sidecar + its ``.history`` dir; in-memory backend drops the dict
+entries. Multi-tenant: only touches the given ``user_id``'s
+partition.
+
 ### Added — workspace self-improvement loop: citation tracking + outcome attribution + relevance-aware search
 
 Three additions that turn the workspace from a passive notebook

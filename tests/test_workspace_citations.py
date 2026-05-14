@@ -264,3 +264,155 @@ async def test_summary_carries_citation_fields() -> None:
     assert listed[0].cited_count == 1
     assert listed[0].success_count == 1
     assert listed[0].last_cited_at is not None
+
+
+# ---------------------------------------------------------------------------
+# prune() — retention / garbage collection
+# ---------------------------------------------------------------------------
+
+
+async def test_prune_keeps_cited_notes() -> None:
+    """A note cited at least min_cited_count times survives prune
+    even with no age filter."""
+    ws = InMemoryWorkspace()
+    cited = await ws.write_note(
+        author="agent", title="cited", body="b", user_id="u",
+    )
+    await ws.write_note(
+        author="agent", title="uncited", body="b", user_id="u",
+    )
+    # Cite the first note once.
+    cites: set[str] = set()
+    token = _ambient_citations_var.set(cites)
+    try:
+        await ws.read_note(cited.slug, user_id="u")
+        await ws.attribute_outcome(success=True, user_id="u")
+    finally:
+        _ambient_citations_var.reset(token)
+    # Prune with no age filter, min_cited_count=1 → uncited note
+    # goes, cited note stays.
+    result = await ws.prune(min_cited_count=1, user_id="u")
+    assert result.notes_deleted == 1
+    assert result.notes_kept == 1
+    remaining = await ws.list_notes(user_id="u")
+    assert len(remaining) == 1
+    assert remaining[0].slug == cited.slug
+
+
+async def test_prune_respects_older_than() -> None:
+    """With an older_than window, recent notes are never pruned
+    even if uncited."""
+    from datetime import timedelta
+    ws = InMemoryWorkspace()
+    await ws.write_note(
+        author="agent", title="fresh", body="b", user_id="u",
+    )
+    # older_than = 30 days; the note was just written → not a
+    # candidate regardless of citation count.
+    result = await ws.prune(
+        older_than=timedelta(days=30),
+        min_cited_count=1,
+        user_id="u",
+    )
+    assert result.notes_deleted == 0
+    assert result.notes_kept == 1
+
+
+async def test_prune_keep_kinds_protected() -> None:
+    """Notes whose kind is in keep_kinds are never pruned."""
+    ws = InMemoryWorkspace()
+    await ws.write_note(
+        author="agent", title="a decision", body="b", user_id="u",
+        kind="decision",
+    )
+    await ws.write_note(
+        author="agent", title="a finding", body="b", user_id="u",
+        kind="finding",
+    )
+    result = await ws.prune(
+        min_cited_count=1, keep_kinds=["decision"], user_id="u",
+    )
+    # decision survives (protected kind), finding goes (uncited).
+    assert result.notes_deleted == 1
+    remaining = await ws.list_notes(user_id="u")
+    assert len(remaining) == 1
+    assert remaining[0].kind == "decision"
+
+
+async def test_prune_keep_last_versions() -> None:
+    """keep_last_versions trims a surviving note's history."""
+    ws = InMemoryWorkspace()
+    n = await ws.write_note(
+        author="agent", title="T", body="v1", user_id="u",
+        kind="decision",  # protected so the note itself survives
+    )
+    for v in range(2, 7):  # v2..v6 → 5 updates → 5 history entries
+        await ws.update_note(
+            author="agent", slug=n.slug, body=f"v{v}", user_id="u",
+        )
+    before = await ws.list_versions(n.slug, author="agent", user_id="u")
+    assert len(before) == 5
+    result = await ws.prune(
+        keep_last_versions=2, keep_kinds=["decision"], user_id="u",
+    )
+    assert result.versions_deleted == 3
+    after = await ws.list_versions(n.slug, author="agent", user_id="u")
+    assert len(after) == 2
+
+
+async def test_prune_disk_hard_deletes_files() -> None:
+    """Disk prune actually removes the .md file from disk."""
+    import tempfile
+    from pathlib import Path
+
+    import anyio
+
+    def _count_files(root: str, slug: str) -> int:
+        return len(list(Path(root).rglob(f"{slug}.md")))
+
+    with tempfile.TemporaryDirectory() as d:
+        ws = LocalDiskWorkspace(d)
+        n = await ws.write_note(
+            author="agent", title="doomed", body="b", user_id="u",
+        )
+        # Confirm the file exists (filesystem walk on a worker
+        # thread — ASYNC240: don't touch pathlib in the async body).
+        before = await anyio.to_thread.run_sync(
+            _count_files, d, n.slug
+        )
+        assert before == 1
+        # Prune (uncited, no age filter → deleted).
+        result = await ws.prune(min_cited_count=1, user_id="u")
+        assert result.notes_deleted == 1
+        # File is gone from disk.
+        after = await anyio.to_thread.run_sync(
+            _count_files, d, n.slug
+        )
+        assert after == 0
+
+
+async def test_prune_returns_prune_result() -> None:
+    from loomflow import PruneResult
+    ws = InMemoryWorkspace()
+    result = await ws.prune(user_id="u")
+    assert isinstance(result, PruneResult)
+    assert result.notes_deleted == 0
+    assert result.notes_kept == 0
+    assert result.versions_deleted == 0
+
+
+async def test_prune_multi_tenant_partition() -> None:
+    """prune only touches the given user_id's notes."""
+    ws = InMemoryWorkspace()
+    await ws.write_note(
+        author="agent", title="alice note", body="b", user_id="alice",
+    )
+    await ws.write_note(
+        author="agent", title="bob note", body="b", user_id="bob",
+    )
+    # Prune alice's partition only.
+    await ws.prune(min_cited_count=1, user_id="alice")
+    alice = await ws.list_notes(user_id="alice")
+    bob = await ws.list_notes(user_id="bob")
+    assert len(alice) == 0  # alice's uncited note pruned
+    assert len(bob) == 1    # bob's note untouched

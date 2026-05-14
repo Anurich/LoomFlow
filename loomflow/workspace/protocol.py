@@ -11,6 +11,7 @@ multi-tenant — every method that filters notes accepts an optional
 
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import Protocol, runtime_checkable
 
 from .types import (
@@ -19,6 +20,7 @@ from .types import (
     NoteMatch,
     NoteSummary,
     NoteVersion,
+    PruneResult,
     WorkspaceMembership,
 )
 
@@ -221,6 +223,49 @@ class Workspace(Protocol):
 
         The returned note's ``updated_at`` reflects the revision
         timestamp, not the current note's timestamp.
+        """
+        ...
+
+    async def prune(
+        self,
+        *,
+        older_than: timedelta | None = None,
+        min_cited_count: int = 1,
+        keep_kinds: list[NoteKind] | None = None,
+        keep_last_versions: int | None = None,
+        user_id: str | None = None,
+    ) -> PruneResult:
+        """Garbage-collect stale, low-value notes. **Hard-deletes**
+        — the removed notes are gone, not archived.
+
+        A note is **pruned** only when ALL of these hold:
+
+        * ``older_than`` is set AND the note's last activity
+          (``max(updated_at, last_cited_at)``) is older than that
+          window. When ``older_than`` is ``None``, age is NOT a
+          filter — every note becomes age-eligible. **Strongly
+          recommended to pass ``older_than``** so a freshly-
+          written note can't be pruned before it's had a chance
+          to be cited.
+        * the note's ``cited_count`` is BELOW ``min_cited_count``
+          (default 1 — i.e. a note cited at least once survives).
+        * the note's ``kind`` is NOT in ``keep_kinds`` (e.g. pass
+          ``["decision"]`` to never prune decisions).
+
+        ``keep_last_versions``: when set, each surviving note's
+        revision history is trimmed to the most recent N
+        revisions. ``None`` (default) leaves history untouched.
+
+        Returns a :class:`PruneResult` with counts. Idempotent in
+        spirit — running it twice with the same args just deletes
+        nothing the second time.
+
+        ``prune`` is **observation-class** like
+        :meth:`attribute_outcome` — it does not check author
+        ownership, because it's an operator / maintenance
+        operation, not an agent action. Don't wire it as an agent
+        tool; call it from a cron job, an end-of-benchmark hook,
+        or manually.
         """
         ...
 

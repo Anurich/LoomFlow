@@ -15,7 +15,7 @@ cross-author ``mark_answered`` carve-out.
 from __future__ import annotations
 
 import math
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import anyio
@@ -26,12 +26,14 @@ from ._common import (
     slugify_title,
     summary_from_note,
 )
+from .disk import _should_prune
 from .types import (
     Note,
     NoteKind,
     NoteMatch,
     NoteSummary,
     NoteVersion,
+    PruneResult,
     WorkspaceMembership,
 )
 
@@ -363,6 +365,52 @@ class InMemoryWorkspace:
             return None
         _log_citation(slug)
         return hist[version - 1]
+
+    async def prune(
+        self,
+        *,
+        older_than: timedelta | None = None,
+        min_cited_count: int = 1,
+        keep_kinds: list[NoteKind] | None = None,
+        keep_last_versions: int | None = None,
+        user_id: str | None = None,
+    ) -> PruneResult:
+        now = datetime.now(UTC)
+        keep_kind_set = set(keep_kinds or [])
+        notes_deleted = 0
+        notes_kept = 0
+        versions_deleted = 0
+        async with self._lock:
+            # Snapshot keys first — we mutate the dict during the loop.
+            for (uid, slug) in list(self._notes.keys()):
+                if uid != user_id:
+                    continue
+                note = self._notes[(uid, slug)]
+                if _should_prune(
+                    note,
+                    now=now,
+                    older_than=older_than,
+                    min_cited_count=min_cited_count,
+                    keep_kind_set=keep_kind_set,
+                ):
+                    del self._notes[(uid, slug)]
+                    self._embeddings.pop((uid, slug), None)
+                    self._history.pop((uid, note.author, slug), None)
+                    notes_deleted += 1
+                else:
+                    notes_kept += 1
+                    if keep_last_versions is not None:
+                        hist_key = (uid, note.author, slug)
+                        hist = self._history.get(hist_key)
+                        if hist and len(hist) > keep_last_versions:
+                            excess = len(hist) - keep_last_versions
+                            self._history[hist_key] = hist[excess:]
+                            versions_deleted += excess
+        return PruneResult(
+            notes_deleted=notes_deleted,
+            versions_deleted=versions_deleted,
+            notes_kept=notes_kept,
+        )
 
     async def attribute_outcome(
         self,

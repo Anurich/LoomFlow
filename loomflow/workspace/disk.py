@@ -33,7 +33,7 @@ import os
 import re
 import shutil
 from collections.abc import Iterable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -54,6 +54,7 @@ from .types import (
     NoteMatch,
     NoteSummary,
     NoteVersion,
+    PruneResult,
     WorkspaceMembership,
 )
 
@@ -484,6 +485,88 @@ class LocalDiskWorkspace:
                 return p
         return None
 
+    async def prune(
+        self,
+        *,
+        older_than: timedelta | None = None,
+        min_cited_count: int = 1,
+        keep_kinds: list[NoteKind] | None = None,
+        keep_last_versions: int | None = None,
+        user_id: str | None = None,
+    ) -> PruneResult:
+        now = datetime.now(UTC)
+        keep_kind_set = set(keep_kinds or [])
+        notes_deleted = 0
+        notes_kept = 0
+        versions_deleted = 0
+        async with self._index_lock:
+            for path in self._walk_note_files(user_id):
+                note = await self._load_note(path)
+                if _should_prune(
+                    note,
+                    now=now,
+                    older_than=older_than,
+                    min_cited_count=min_cited_count,
+                    keep_kind_set=keep_kind_set,
+                ):
+                    # Hard-delete the note file + its embedding
+                    # sidecar + its entire history dir.
+                    await anyio.to_thread.run_sync(path.unlink, True)
+                    sidecar = path.with_suffix(".embedding.json")
+                    await anyio.to_thread.run_sync(sidecar.unlink, True)
+                    hist = self._history_dir(
+                        user_id, note.author, note.slug
+                    )
+                    if hist.exists():
+                        await anyio.to_thread.run_sync(
+                            shutil.rmtree, str(hist), True
+                        )
+                    notes_deleted += 1
+                else:
+                    notes_kept += 1
+                    # Surviving note: optionally trim its history
+                    # to the most recent N revisions.
+                    if keep_last_versions is not None:
+                        versions_deleted += await self._trim_history(
+                            user_id, note.author, note.slug,
+                            keep_last_versions,
+                        )
+        if notes_deleted:
+            await self._regenerate_index(user_id)
+        return PruneResult(
+            notes_deleted=notes_deleted,
+            versions_deleted=versions_deleted,
+            notes_kept=notes_kept,
+        )
+
+    async def _trim_history(
+        self,
+        user_id: str | None,
+        author: str,
+        slug: str,
+        keep_last: int,
+    ) -> int:
+        """Delete all but the most recent ``keep_last`` revision
+        files for one note. Returns the count deleted."""
+        history_dir = self._history_dir(user_id, author, slug)
+        if not history_dir.exists():
+            return 0
+        versioned: list[tuple[int, Path]] = []
+        for p in history_dir.iterdir():
+            if not p.is_file() or p.suffix != ".md":
+                continue
+            try:
+                versioned.append((int(p.stem), p))
+            except ValueError:
+                continue
+        if len(versioned) <= keep_last:
+            return 0
+        versioned.sort(key=lambda t: t[0])
+        to_delete = versioned[: len(versioned) - keep_last]
+        for _, p in to_delete:
+            await anyio.to_thread.run_sync(p.unlink, True)
+        return len(to_delete)
+
     def _history_dir(
         self, user_id: str | None, author: str, slug: str
     ) -> Path:
@@ -899,6 +982,35 @@ def _sanitise_author(value: str) -> str:
 # ---------------------------------------------------------------------------
 # Walk filters — exclude meta dirs
 # ---------------------------------------------------------------------------
+
+
+def _should_prune(
+    note: Note,
+    *,
+    now: datetime,
+    older_than: timedelta | None,
+    min_cited_count: int,
+    keep_kind_set: set[NoteKind],
+) -> bool:
+    """Decide whether a note is GC-eligible. A note is pruned only
+    when ALL hold: not a protected kind, cited below the
+    threshold, and (if ``older_than`` is set) idle longer than the
+    window. Shared by both backends so prune semantics stay
+    identical.
+    """
+    # Protected kind — never pruned.
+    if note.kind in keep_kind_set:
+        return False
+    # Valuable — cited enough times.
+    if note.cited_count >= min_cited_count:
+        return False
+    # Age filter. When ``older_than`` is None, age is not a factor
+    # — every note is age-eligible (the caller opted into that).
+    if older_than is not None:
+        last_activity = note.last_cited_at or note.updated_at
+        if now - last_activity < older_than:
+            return False
+    return True
 
 
 def _is_in_meta_dir(path: Path) -> bool:

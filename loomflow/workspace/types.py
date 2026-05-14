@@ -231,6 +231,30 @@ class NoteVersion(BaseModel):
     :meth:`Workspace.read_version`."""
 
 
+class PruneResult(BaseModel):
+    """Outcome of a :meth:`Workspace.prune` call.
+
+    ``prune`` is the workspace's garbage-collector — it hard-
+    deletes notes (and optionally history revisions) that are
+    stale AND low-value. This struct reports what it did so the
+    caller can log / assert / decide whether to run it again.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="ignore")
+
+    notes_deleted: int
+    """Number of note files removed from the workspace."""
+
+    versions_deleted: int
+    """Number of historical revision files removed (from the
+    ``keep_last_versions`` cap). Zero when ``keep_last_versions``
+    was not passed."""
+
+    notes_kept: int
+    """Number of notes that survived the prune — either too
+    recent, cited often enough, or a protected ``kind``."""
+
+
 class WorkspaceMembership(BaseModel):
     """A :class:`~loomflow.Workspace` plus the agent's identity in
     it — the single argument :class:`~loomflow.Agent` accepts when
