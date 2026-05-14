@@ -273,33 +273,41 @@ class Workspace(Protocol):
         self,
         *,
         success: bool,
+        slugs: list[str] | None = None,
         user_id: str | None = None,
     ) -> int:
-        """Close the self-improvement loop: take every note the
-        agent cited during the current run (tracked via the
-        ambient ``_ambient_citations_var`` contextvar) and update
-        the per-note relevance metadata.
+        """Close the self-improvement loop: take the notes the
+        agent cited and update their per-note relevance metadata.
 
-        Specifically:
+        Specifically, for each cited note:
 
-        * ``cited_count`` += 1 for every cited note
+        * ``cited_count`` += 1
         * ``success_count`` += 1 if ``success=True``
-        * ``last_cited_at`` = now for every cited note
+        * ``last_cited_at`` = now
+
+        Two ways to supply the cited notes:
+
+        * **Explicit ``slugs=``** (recommended) — pass
+          ``RunResult.cited_slugs`` from the run you're scoring.
+          This is the reliable path: it works AFTER ``agent.run()``
+          / ``agent.stream()`` has returned. Use this.
+        * **``slugs=None``** — falls back to draining the ambient
+          ``_ambient_citations_var`` contextvar. This only works
+          when called DURING a run (e.g. from inside a tool or
+          hook), because the agent loop resets the contextvar at
+          run-end. Outside a run it finds an empty set and is a
+          no-op.
 
         Returns the number of notes whose metadata was updated
-        (zero outside a run, or if the run cited nothing).
+        (zero if nothing was cited or the slugs don't resolve).
 
-        ``attribute_outcome`` is **observation-class** — it does
-        not check author ownership. Anyone with workspace access
-        can report what they cited and the outcome; this is how
-        you know which past notes were USEFUL versus just
-        present.
+        ``attribute_outcome`` is **observation-class** — no author
+        check. Anyone with workspace access can report what they
+        cited and the outcome; that's how the workspace learns
+        which past notes were USEFUL versus just present.
 
-        Idempotency: calling twice with ``success=True`` for the
-        same run double-counts. Callers should call it once per
-        run. To opt out of citation tracking, simply don't call
-        this method — the per-run citation log evaporates with
-        the contextvar.
+        Idempotency: calling twice for the same run double-counts.
+        Call it once per run.
         """
         ...
 

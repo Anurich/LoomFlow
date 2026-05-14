@@ -442,9 +442,13 @@ class LocalDiskWorkspace:
         self,
         *,
         success: bool,
+        slugs: list[str] | None = None,
         user_id: str | None = None,
     ) -> int:
-        cited = _drain_citations()
+        # Explicit slugs (from RunResult.cited_slugs) win — that's
+        # the reliable post-run path. Fall back to draining the
+        # contextvar only when no slugs were passed (in-run case).
+        cited = set(slugs) if slugs is not None else _drain_citations()
         if not cited:
             return 0
         now = datetime.now(UTC)

@@ -1746,6 +1746,19 @@ class Agent:
                     episode,
                 )
 
+            # Snapshot the per-run citation set BEFORE the
+            # contextvar is reset below. Without this, calling
+            # ``Workspace.attribute_outcome`` after ``run()``
+            # returns would find an empty set (the contextvar is
+            # already reset) — the self-improvement loop would be
+            # a silent no-op. Carrying the slugs on the RunResult
+            # lets the caller drive ``attribute_outcome`` with an
+            # explicit ``slugs=`` after the run.
+            _cited = _ambient_citations_var.get()
+            cited_slugs = (
+                sorted(_cited) if isinstance(_cited, set) else []
+            )
+
             result = RunResult(
                 session_id=session_id,
                 output=session.output,
@@ -1760,6 +1773,7 @@ class Agent:
                 finished_at=datetime.now(UTC),
                 interrupted=session.interrupted,
                 interruption_reason=session.interruption_reason,
+                cited_slugs=cited_slugs,
             )
 
             elapsed_ms = (anyio.current_time() - loop_started) * 1000

@@ -416,9 +416,12 @@ class InMemoryWorkspace:
         self,
         *,
         success: bool,
+        slugs: list[str] | None = None,
         user_id: str | None = None,
     ) -> int:
-        cited = _drain_citations()
+        # Explicit slugs win (post-run path); fall back to draining
+        # the contextvar only when none were passed (in-run path).
+        cited = set(slugs) if slugs is not None else _drain_citations()
         if not cited:
             return 0
         now = datetime.now(UTC)

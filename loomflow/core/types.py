@@ -664,6 +664,20 @@ class RunResult(BaseModel):
     interrupted: bool = False
     interruption_reason: str | None = None
 
+    cited_slugs: list[str] = Field(default_factory=list)
+    """Workspace note slugs the agent READ during this run (via
+    ``read_note`` / ``read_version``). Captured from the per-run
+    citation contextvar just before it's reset at run-end, so the
+    caller can drive the self-improvement loop AFTER the run::
+
+        result = await agent.run(prompt, user_id="u")
+        await workspace.attribute_outcome(
+            success=True, slugs=result.cited_slugs, user_id="u",
+        )
+
+    Empty when no workspace is wired, when nothing was read, or
+    when ``living_plan`` / workspace tooling is disabled."""
+
     @property
     def value(self) -> Any:
         """Smart accessor: ``parsed`` when set, else ``output``.

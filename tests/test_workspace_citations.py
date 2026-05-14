@@ -144,6 +144,81 @@ async def test_attribute_outcome_no_run_returns_zero() -> None:
     assert updated == 0
 
 
+async def test_attribute_outcome_explicit_slugs() -> None:
+    """The reliable post-run path: pass slugs explicitly (as from
+    RunResult.cited_slugs). Works WITHOUT an active contextvar —
+    this is what callers use after agent.run() returns."""
+    ws = InMemoryWorkspace()
+    a = await ws.write_note(
+        author="agent", title="A", body="b", user_id="u",
+    )
+    b = await ws.write_note(
+        author="agent", title="B", body="b", user_id="u",
+    )
+    # NO contextvar set — simulating "after the run, contextvar
+    # already reset". Pre-fix this would have been a no-op.
+    updated = await ws.attribute_outcome(
+        success=True, slugs=[a.slug, b.slug], user_id="u",
+    )
+    assert updated == 2
+    after_a = await ws.read_note(a.slug, user_id="u")
+    after_b = await ws.read_note(b.slug, user_id="u")
+    assert after_a is not None and after_a.cited_count == 1
+    assert after_b is not None and after_b.success_count == 1
+
+
+async def test_attribute_outcome_explicit_slugs_failure() -> None:
+    ws = InMemoryWorkspace()
+    n = await ws.write_note(
+        author="agent", title="T", body="b", user_id="u",
+    )
+    updated = await ws.attribute_outcome(
+        success=False, slugs=[n.slug], user_id="u",
+    )
+    assert updated == 1
+    after = await ws.read_note(n.slug, user_id="u")
+    assert after is not None
+    assert after.cited_count == 1
+    assert after.success_count == 0  # failed run — no success credit
+
+
+async def test_run_result_carries_cited_slugs() -> None:
+    """RunResult.cited_slugs is populated from the per-run citation
+    set before the contextvar is reset — the bridge that makes
+    post-run attribute_outcome possible."""
+    from loomflow import Agent, tool
+    from loomflow.core.types import ToolCall
+    from loomflow.model.scripted import ScriptedModel, ScriptedTurn
+
+    ws = InMemoryWorkspace()
+    seeded = await ws.write_note(
+        author="agent", title="seed", body="prior knowledge",
+        user_id="u",
+    )
+
+    @tool
+    async def noop() -> str:
+        return "ok"
+
+    # Script: the model reads the seeded note, then finishes.
+    model = ScriptedModel(turns=[
+        ScriptedTurn(
+            text="",
+            tool_calls=[ToolCall(
+                id="c1", tool="read_note",
+                args={"slug_or_title": seeded.slug},
+            )],
+        ),
+        ScriptedTurn(text="done"),
+    ])
+    agent = Agent(
+        "test", model=model, tools=[noop], workspace=ws,
+    )
+    result = await agent.run("read the seed note", user_id="u")
+    # The read_note call should have been captured.
+    assert seeded.slug in result.cited_slugs
+
+
 async def test_attribute_outcome_disk_persistence() -> None:
     """Disk backend must persist citation counts to frontmatter."""
     import tempfile

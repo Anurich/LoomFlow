@@ -9,6 +9,35 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 
 ## [0.10.0] — unreleased
 
+### Fixed — `attribute_outcome` now works AFTER a run (was a silent no-op)
+
+The self-improvement loop had a fatal gap: `attribute_outcome`
+drained the per-run citation contextvar, but `Agent._loop` RESETS
+that contextvar at run-end. So calling `attribute_outcome` after
+`agent.run()` / `agent.stream()` returned always found an empty
+set and did nothing — the citation counts never moved.
+
+Fix:
+
+* `RunResult` gains `cited_slugs: list[str]` — the workspace note
+  slugs the agent read during the run, snapshotted from the
+  contextvar just before it's reset.
+* `Workspace.attribute_outcome` gains an explicit `slugs=` param.
+  Pass `RunResult.cited_slugs` and it works reliably post-run.
+  `slugs=None` keeps the old in-run contextvar-drain behaviour
+  for tools / hooks that call it mid-run.
+
+Canonical post-run pattern:
+
+```python
+result = await agent.run(prompt, user_id="u")
+await workspace.attribute_outcome(
+    success=<did it work?>,
+    slugs=result.cited_slugs,
+    user_id="u",
+)
+```
+
 ### Added — workspace retention: `Workspace.prune()`
 
 `Workspace.prune()` is the workspace garbage-collector — citation-
