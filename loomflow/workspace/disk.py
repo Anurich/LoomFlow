@@ -1018,15 +1018,19 @@ def _should_prune(
 
 
 def _is_in_meta_dir(path: Path) -> bool:
-    """``True`` when ``path`` is inside ``.history`` (or any other
-    dot-prefixed dir) under the notes tree. Used to filter
-    ``rglob("*.md")`` so historical revisions never surface as
-    live notes in ``list_notes`` / ``search_notes`` / the index.
+    """``True`` when ``path`` is inside the ``.history`` revision
+    store. Used to filter ``rglob("*.md")`` so historical
+    revisions never surface as live notes in ``list_notes`` /
+    ``search_notes`` / the index.
+
+    NOTE: this checks specifically for the ``.history`` segment,
+    NOT "any dot-prefixed part". An earlier version flagged every
+    dot-dir — which silently broke any workspace rooted under a
+    dot-directory (``.loom/notebook``, ``.claude/workspace``,
+    ...), because then every note path contains a dotted segment
+    and every note got filtered out of listings.
     """
-    for part in path.parts:
-        if part.startswith(".") and part not in (".", ".."):
-            return True
-    return False
+    return HISTORY_DIR in path.parts
 
 
 # ---------------------------------------------------------------------------

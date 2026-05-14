@@ -200,6 +200,30 @@ async def test_history_excluded_from_list_notes() -> None:
         assert len(listed) == 1
 
 
+async def test_workspace_under_dotdir_lists_notes() -> None:
+    """Regression: a workspace rooted under a dot-directory (e.g.
+    ``.loom/notebook``, ``.claude/workspace``) must still list its
+    notes. An earlier ``_is_in_meta_dir`` flagged ANY dot-prefixed
+    path part — so every note path containing ``.loom`` got
+    filtered out and ``list_notes`` returned nothing. The check
+    must be specific to the ``.history`` segment."""
+    import tempfile
+    from pathlib import Path
+    with tempfile.TemporaryDirectory() as d:
+        # Root the workspace under a dot-dir, like loom-code does.
+        dotdir_root = Path(d) / ".loom" / "notebook"
+        ws = LocalDiskWorkspace(str(dotdir_root))
+        await ws.write_note(
+            author="agent", title="under a dotdir", body="b",
+            user_id="u",
+        )
+        listed = await ws.list_notes(user_id="u")
+        assert len(listed) == 1
+        # search_notes must work too (same _walk_note_files path).
+        hits = await ws.search_notes("dotdir", user_id="u")
+        assert len(hits) == 1
+
+
 # ---------------------------------------------------------------------------
 # Questions / answers
 # ---------------------------------------------------------------------------
