@@ -554,7 +554,27 @@ def living_plan_prompt_section(*, has_workspace_mirror: bool) -> str:
     )
     if has_workspace_mirror:
         body += (
-            "\nYour plan persists to the shared notebook as a "
+            "\n**Plan + research as separate artifacts** (the "
+            "Anthropic multi-agent research pattern — keep them "
+            "split, don't conflate):\n\n"
+            "- The **plan** (``plan_write``) is your strategy / "
+            "todo list. The ``finding`` field on each step is a "
+            "1-line SUMMARY only.\n"
+            "- The **research** (``note(kind=\"finding\", ...)``) "
+            "is the actual collected information — analysis, "
+            "evidence, version compatibility tables, error "
+            "diagnoses, anything substantive. Multi-paragraph is "
+            "fine; this is the real research log.\n\n"
+            "When a step involves substantive research / analysis, "
+            "**write the full findings as a ``note(kind=\"finding\", "
+            "title=\"...\", content=\"...\")`` FIRST**, then put a "
+            "1-line pointer in the step's ``finding`` field "
+            "(e.g. ``\"see note: env-conflict-analysis\"``). The "
+            "plan stays scannable; the research log stays "
+            "complete; both persist for future tasks via "
+            "``recall_past_plans`` (for the plan) and "
+            "``search_notes`` (for the findings).\n\n"
+            "Your plan persists to the shared notebook as a "
             '``kind="plan"`` note. Future runs can call '
             "``recall_past_plans(query)`` to find similar prior "
             "plans and bootstrap from what worked.\n"
