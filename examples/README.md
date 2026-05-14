@@ -1,13 +1,14 @@
 # Examples
 
-Eighteen end-to-end examples that exercise Loom's own
+Nineteen end-to-end examples that exercise Loom's own
 primitives — loader, vector store, retriever-as-tool pattern,
 multi-agent architectures, multi-user / session-continuity
 primitives, the workflow + agent composition story, observability
 sinks, the reasoning-effort dial, TOML / dict-form declarative
 config, the shared-notebook workspace for multi-agent coordination,
-provider-aware prompt caching, and the TodoWrite-style living
-plan primitive. Nothing pulled in from outside the framework.
+provider-aware prompt caching, the TodoWrite-style living plan
+primitive, and the workspace lifecycle / self-improvement surface.
+Nothing pulled in from outside the framework.
 
 ## Agent + retrieval + memory
 
@@ -70,6 +71,12 @@ previous one's vocabulary.
 | File | What it shows | Needs API key? |
 |---|---|---|
 | [`18_living_plan.py`](18_living_plan.py) | `Agent(living_plan=True)` — wires `plan_write` + `plan_read` tools that maintain a structured `LivingPlan` the agent atomically rewrites each turn. Steps have `{description, status, finding}` where status is `todo`/`doing`/`done`/`blocked`/`skipped`. The plan tool returns the rendered plan back as markdown so it becomes load-bearing in the conversation — drift becomes structurally hard. When `workspace=` is also wired, the plan mirrors to a `kind="plan"` note and `recall_past_plans(query)` is auto-added for cross-run plan lineage. Plan auto-inherits the workspace via ambient when an `Agent` doesn't set its own. Per-run state via contextvar (concurrent runs on the same Agent have isolated plans). Example uses `ScriptedModel` so it runs offline — no API key needed. | No |
+
+## Workspace lifecycle + self-improvement
+
+| File | What it shows | Needs API key? |
+|---|---|---|
+| [`19_workspace_lifecycle.py`](19_workspace_lifecycle.py) | The workspace v0.10 lifecycle surface — eight features in one offline run. **Namespacing** (sub-buckets in one workspace; `list_notes` sees all by default). **Versioning** (every `update_note` snapshots `.history`; `list_versions` / `read_version` walk it). **Archive** (`archive_note` soft-hides; still readable by slug). **Questions** (`ask_question` / `answer_question` / `list_open_questions`, opt-in via `questions=True`; cross-author `mark_answered` carve-out). **Semantic search** (optional `embedder=` on the backend; `mode="semantic"|"hybrid"` with RRF). **Citation tracking** (`read_note` logs into a per-run set; `attribute_outcome(success=)` updates `cited_count` / `success_count` / `last_cited_at`). **Relevance-aware search** (`search_notes(boost_relevance=True)` ranks proven notes higher). **Retention** (`prune()` citation-aware GC — keeps what's been *used*, not just what's *recent*). Uses `InMemoryWorkspace` + a deterministic stub embedder, so no API key. Where 16 shows the workspace as multi-agent COORDINATION, 19 shows it as the substrate an agent gets smarter on, run over run. | No |
 
 The image-bearing examples (01, 02) generate small sample PDFs on
 first run via `reportlab` and cache them under `examples/data/`.
