@@ -48,23 +48,38 @@ from ._common import (
     slugify_title,
     summary_from_note,
 )
-from .types import Note, NoteKind, NoteMatch, NoteSummary, WorkspaceMembership
+from .types import (
+    Note,
+    NoteKind,
+    NoteMatch,
+    NoteSummary,
+    NoteVersion,
+    WorkspaceMembership,
+)
 
 if TYPE_CHECKING:
-    # Only needed for the ``filesystem_tools()`` return type. Import
-    # is deferred under TYPE_CHECKING because:
+    # Only needed for type annotations. Imports are deferred under
+    # TYPE_CHECKING because:
     #   1. ``from __future__ import annotations`` makes every annotation
-    #      a string at runtime, so ``Tool`` doesn't need to be resolvable
+    #      a string at runtime, so these don't need to be resolvable
     #      at import time.
-    #   2. Importing it eagerly would pull in the ``tools`` subpackage
-    #      (and ``anyio.to_thread`` machinery) just to type one return
-    #      annotation. Worth the deferred-import pattern.
+    #   2. Importing ``Tool`` eagerly would pull in the ``tools``
+    #      subpackage just to type one return annotation. Worth
+    #      the deferred-import pattern.
+    #   3. ``Embedder`` is used only when the optional ``embedder=``
+    #      ctor param is wired; lazy-import keeps the workspace
+    #      module light.
+    from ..core.protocols import Embedder
     from ..tools.registry import Tool
 
 INDEX_FILENAME = "WORKSPACE.md"
 NOTES_DIR = "notes"
 SEEDS_DIR = "seeds"
 LOOM_META_DIR = ".loom"
+# Subdir name under each note's parent that holds revision history.
+# Excluded from `_walk_note_files` so historical revisions never
+# appear in `list_notes` / `search_notes` / index renders.
+HISTORY_DIR = ".history"
 
 
 class LocalDiskWorkspace:
@@ -85,11 +100,22 @@ class LocalDiskWorkspace:
         *,
         seed_paths: Iterable[str | Path] | None = None,
         cleanup_on_close: bool = False,
+        embedder: Embedder | None = None,
     ) -> None:
         self._root = Path(root).expanduser().resolve()
         self._root.mkdir(parents=True, exist_ok=True)
         self._cleanup_on_close = cleanup_on_close
+        # One lock for index regeneration AND for note writes /
+        # history snapshots. Renaming the old ``_index_lock`` to
+        # ``_write_lock`` would break subclasses; keep the old
+        # name as the canonical write lock. Concurrent updates of
+        # the same slug now correctly serialise behind this.
         self._index_lock = anyio.Lock()
+        # Optional embedder for semantic search. When set, every
+        # write_note also computes + persists an embedding sidecar;
+        # search_notes uses cosine similarity (or hybrid RRF) when
+        # mode allows. Default ``None`` preserves BM25-only behavior.
+        self._embedder = embedder
         if seed_paths is not None:
             self._copy_seeds(seed_paths)
 
@@ -143,8 +169,28 @@ class LocalDiskWorkspace:
         bucket = user_id if user_id else "_anon"
         return self._root / _sanitise_user_id(bucket)
 
-    def _notes_dir(self, user_id: str | None, author: str) -> Path:
-        return self._user_root(user_id) / NOTES_DIR / _sanitise_author(author)
+    def _notes_dir(
+        self,
+        user_id: str | None,
+        author: str,
+        namespace: str | None = None,
+    ) -> Path:
+        """Per-author notes dir, optionally scoped to a namespace.
+
+        Path shape:
+
+        * ``namespace is None``: ``<root>/<user>/notes/<author>/`` —
+          the v0.9 layout, preserved for back-compat.
+        * ``namespace`` set: ``<root>/<user>/notes/<author>/<namespace>/``
+          — files under a sub-bucket. Counter for slug numbering is
+          still author-global (NOT reset per namespace) so a slug
+          uniquely identifies a note within an author across
+          namespaces.
+        """
+        base = self._user_root(user_id) / NOTES_DIR / _sanitise_author(author)
+        if namespace:
+            return base / _sanitise_author(namespace)
+        return base
 
     def _index_path(self, user_id: str | None) -> Path:
         return self._user_root(user_id) / INDEX_FILENAME
@@ -179,11 +225,22 @@ class LocalDiskWorkspace:
         tags: list[str] | None = None,
         user_id: str | None = None,
         run_id: str | None = None,
+        namespace: str | None = None,
+        answered: bool | None = None,
+        parent_slug: str | None = None,
     ) -> Note:
-        notes_dir = self._notes_dir(user_id, author)
-        notes_dir.mkdir(parents=True, exist_ok=True)
+        # The author's slug counter is GLOBAL across namespaces —
+        # walking the bare author dir (no namespace) gives the max
+        # NNN seen anywhere under that author. This keeps slugs
+        # globally unique within ``(user_id, author)``, simplifying
+        # the in-memory dict key and any future "find by slug
+        # without namespace hint" lookups.
+        author_root = self._notes_dir(user_id, author, namespace=None)
+        author_root.mkdir(parents=True, exist_ok=True)
+        ns_dir = self._notes_dir(user_id, author, namespace=namespace)
+        ns_dir.mkdir(parents=True, exist_ok=True)
         slug_frag = slugify_title(title)
-        counter = self._next_counter(notes_dir, slug_frag)
+        counter = self._next_counter_across_namespaces(author_root)
         slug = f"{counter:03d}-{slug_frag}"
         now = datetime.now(UTC)
         note = Note(
@@ -197,8 +254,12 @@ class LocalDiskWorkspace:
             updated_at=now,
             user_id=user_id,
             run_id=run_id,
+            namespace=namespace,
+            answered=answered,
+            parent_slug=parent_slug,
         )
-        await self._write_note_atomic(notes_dir / f"{slug}.md", note)
+        await self._write_note_atomic(ns_dir / f"{slug}.md", note)
+        await self._maybe_write_embedding(ns_dir / f"{slug}.md", note)
         await self._regenerate_index(user_id)
         return note
 
@@ -210,39 +271,209 @@ class LocalDiskWorkspace:
         body: str,
         tags: list[str] | None = None,
         user_id: str | None = None,
+        mark_answered: str | None = None,
     ) -> Note:
-        notes_dir = self._notes_dir(user_id, author)
-        note_path = notes_dir / f"{slug}.md"
-        if not note_path.exists():
+        note_path = self._find_note_path(user_id, author, slug)
+        if note_path is None:
+            raise FileNotFoundError(
+                f"note {slug!r} not found under author {author!r}"
+            )
+        existing = await self._load_note(note_path)
+        # The ``mark_answered`` cross-author carve-out: any agent
+        # can flip ``answered=True`` + ``answered_by=<slug>`` on a
+        # question they didn't author. This is the single
+        # exception to the "author owns updates" rule and is
+        # documented in the protocol. All OTHER fields stay the
+        # asker's property.
+        if mark_answered is not None and existing.author != author:
+            # Cross-author mark — preserve original body + tags,
+            # only update the answered flags. Write a history
+            # snapshot anyway so the answered transition is
+            # auditable.
+            async with self._index_lock:
+                await self._snapshot_history(note_path, existing)
+                updated = existing.model_copy(
+                    update={
+                        "answered": True,
+                        "answered_by": mark_answered,
+                        "updated_at": datetime.now(UTC),
+                    }
+                )
+                await self._write_note_atomic(note_path, updated)
+                await self._maybe_write_embedding(note_path, updated)
+            await self._regenerate_index(user_id)
+            return updated
+        if existing.author != author:
+            raise PermissionError(
+                f"agent {author!r} cannot update note {slug!r} "
+                f"owned by {existing.author!r}"
+            )
+        # Normal author update: snapshot prior body before
+        # overwriting. The history snapshot is under the index
+        # lock so concurrent updates serialise their version
+        # numbers correctly.
+        async with self._index_lock:
+            await self._snapshot_history(note_path, existing)
+            update_dict: dict[str, object] = {
+                "body": body,
+                "tags": list(tags) if tags is not None else list(existing.tags),
+                "updated_at": datetime.now(UTC),
+            }
+            if mark_answered is not None:
+                update_dict["answered"] = True
+                update_dict["answered_by"] = mark_answered
+            updated = existing.model_copy(update=update_dict)
+            await self._write_note_atomic(note_path, updated)
+            await self._maybe_write_embedding(note_path, updated)
+        await self._regenerate_index(user_id)
+        return updated
+
+    async def archive_note(
+        self,
+        *,
+        author: str,
+        slug: str,
+        user_id: str | None = None,
+    ) -> Note:
+        note_path = self._find_note_path(user_id, author, slug)
+        if note_path is None:
             raise FileNotFoundError(
                 f"note {slug!r} not found under author {author!r}"
             )
         existing = await self._load_note(note_path)
         if existing.author != author:
             raise PermissionError(
-                f"agent {author!r} cannot update note {slug!r} "
+                f"agent {author!r} cannot archive note {slug!r} "
                 f"owned by {existing.author!r}"
             )
-        updated = existing.model_copy(
+        archived = existing.model_copy(
             update={
-                "body": body,
-                "tags": list(tags) if tags is not None else list(existing.tags),
+                "archived_at": datetime.now(UTC),
                 "updated_at": datetime.now(UTC),
             }
         )
-        await self._write_note_atomic(note_path, updated)
+        # No history snapshot for archive — archiving is metadata-
+        # only, the body doesn't change.
+        await self._write_note_atomic(note_path, archived)
         await self._regenerate_index(user_id)
-        return updated
+        return archived
 
-    def _next_counter(self, notes_dir: Path, slug_frag: str) -> int:
-        """Per-author counter — looks at the existing files to find
-        the highest ``NNN-`` prefix and returns the next."""
-        del slug_frag  # we count across the whole author dir, not per slug
+    async def list_versions(
+        self,
+        slug: str,
+        *,
+        author: str,
+        user_id: str | None = None,
+    ) -> list[NoteVersion]:
+        history_dir = self._history_dir(user_id, author, slug)
+        if not history_dir.exists():
+            return []
+        out: list[NoteVersion] = []
+        for path in sorted(history_dir.iterdir()):
+            if not path.is_file() or path.suffix != ".md":
+                continue
+            try:
+                version = int(path.stem)
+            except ValueError:
+                continue
+            text = await anyio.to_thread.run_sync(path.read_text)
+            fm, body = parse_note_file(text)
+            note = note_from_frontmatter(fm, body)
+            out.append(
+                NoteVersion(
+                    slug=slug,
+                    author=author,
+                    version=version,
+                    created_at=note.updated_at,
+                    body_preview=extract_lede(note.body),
+                )
+            )
+        return out
+
+    async def read_version(
+        self,
+        slug: str,
+        version: int,
+        *,
+        author: str,
+        user_id: str | None = None,
+    ) -> Note | None:
+        history_dir = self._history_dir(user_id, author, slug)
+        path = history_dir / f"{version:04d}.md"
+        if not path.exists():
+            return None
+        text = await anyio.to_thread.run_sync(path.read_text)
+        fm, body = parse_note_file(text)
+        return note_from_frontmatter(fm, body)
+
+    def _history_dir(
+        self, user_id: str | None, author: str, slug: str
+    ) -> Path:
+        # History lives under the AUTHOR root (not namespaced) so
+        # `read_version`/`list_versions` work regardless of which
+        # namespace the live note is in. Single source of truth
+        # per (user, author, slug).
+        return (
+            self._notes_dir(user_id, author, namespace=None)
+            / HISTORY_DIR
+            / slug
+        )
+
+    async def _snapshot_history(self, live_path: Path, note: Note) -> None:
+        """Copy the live note body to the next version file in
+        ``<author>/.history/<slug>/NNNN.md`` before overwriting.
+
+        Counter is monotonic per-slug; zero-padded to 4 digits so
+        agents on long-running tasks can hit 1000+ revisions
+        without collision. Caller must hold the index lock.
+        """
+        user_id = note.user_id
+        history_dir = self._history_dir(user_id, note.author, note.slug)
+        history_dir.mkdir(parents=True, exist_ok=True)
+        # Find the highest existing version number; next = +1.
+        existing_max = 0
+        for p in history_dir.iterdir():
+            if not p.is_file() or p.suffix != ".md":
+                continue
+            try:
+                n = int(p.stem)
+            except ValueError:
+                continue
+            existing_max = max(existing_max, n)
+        next_version = existing_max + 1
+        dest = history_dir / f"{next_version:04d}.md"
+        # Copy the live file's CURRENT content to the version slot.
+        # We can't render(note) here because the caller might have
+        # already mutated `note` — copy the existing file bytes.
+        content = await anyio.to_thread.run_sync(live_path.read_text)
+        await anyio.to_thread.run_sync(dest.write_text, content)
+
+    def _find_note_path(
+        self, user_id: str | None, author: str, slug: str
+    ) -> Path | None:
+        """Locate a note's live .md file, regardless of namespace.
+
+        Walks the author's notes dir (excluding ``.history`` /
+        ``.embeddings``) looking for ``<slug>.md``. Returns the
+        first match or None. Cheap because each author has a
+        small subtree.
+        """
+        author_root = self._notes_dir(user_id, author, namespace=None)
+        if not author_root.exists():
+            return None
+        for p in author_root.rglob(f"{slug}.md"):
+            if not _is_in_meta_dir(p):
+                return p
+        return None
+
+    def _next_counter_across_namespaces(self, author_root: Path) -> int:
+        """Highest ``NNN-`` prefix seen anywhere under the author
+        root, across every namespace. +1. Excludes history dirs."""
         counter = 0
-        if not notes_dir.exists():
+        if not author_root.exists():
             return 1
-        for p in notes_dir.iterdir():
-            if not p.is_file() or not p.suffix == ".md":
+        for p in author_root.rglob("*.md"):
+            if not p.is_file() or _is_in_meta_dir(p):
                 continue
             m = re.match(r"^(\d{3,})-", p.stem)
             if m:
@@ -254,6 +485,40 @@ class LocalDiskWorkspace:
         tmp = dest.with_suffix(dest.suffix + ".tmp")
         await anyio.to_thread.run_sync(tmp.write_text, body)
         await anyio.to_thread.run_sync(os.replace, str(tmp), str(dest))
+
+    async def _maybe_write_embedding(
+        self, note_path: Path, note: Note
+    ) -> None:
+        """When an embedder is wired, persist the note's embedding
+        as a JSON sidecar next to the .md file. The sidecar carries
+        the embedder model name so swapping embedders silently
+        invalidates stale vectors (cosine on different model spaces
+        is meaningless).
+        """
+        if self._embedder is None:
+            return
+        try:
+            text = f"{note.title}\n\n{note.body}"
+            vector = await self._embedder.embed(text)
+            if not vector:
+                return
+            import json
+            model = getattr(self._embedder, "name", "unknown")
+            sidecar = note_path.with_suffix(".embedding.json")
+            payload = {
+                "model": model,
+                "dim": len(vector),
+                "vector": list(vector),
+            }
+            await anyio.to_thread.run_sync(
+                sidecar.write_text, json.dumps(payload)
+            )
+        except anyio.get_cancelled_exc_class():
+            raise
+        except Exception:  # noqa: BLE001 — embedding is best-effort
+            # An embedder failure should never break the note
+            # write. Fall back to BM25 silently for this note.
+            pass
 
     # ---- read paths ------------------------------------------------------
 
@@ -285,16 +550,20 @@ class LocalDiskWorkspace:
         author: str | None = None,
         kind: NoteKind | None = None,
         user_id: str | None = None,
+        namespace: str | None = None,
+        include_archived: bool = False,
         limit: int = 50,
     ) -> list[NoteSummary]:
         notes: list[Note] = []
         for path in self._walk_note_files(user_id):
-            # Cheap author filter via parent-dir name.
-            if author is not None:
-                if path.parent.name != _sanitise_author(author):
-                    continue
             note = await self._load_note(path)
+            if author is not None and note.author != author:
+                continue
             if kind is not None and note.kind != kind:
+                continue
+            if namespace is not None and note.namespace != namespace:
+                continue
+            if not include_archived and note.archived_at is not None:
                 continue
             notes.append(note)
         notes.sort(key=lambda n: n.updated_at, reverse=True)
@@ -305,48 +574,101 @@ class LocalDiskWorkspace:
         query: str,
         *,
         user_id: str | None = None,
+        namespace: str | None = None,
+        include_archived: bool = False,
+        mode: str = "auto",
         limit: int = 10,
     ) -> list[NoteMatch]:
         q = query.lower().strip()
         if not q:
             return []
-        scored: list[tuple[float, str, Note]] = []
+        # Decide scoring mode. ``auto`` = hybrid when embedder is
+        # wired, BM25 otherwise. ``semantic`` / ``hybrid`` fall back
+        # to BM25 silently when no embedder is wired — preserves the
+        # backward-compat default-no-embedder behavior.
+        has_embedder = self._embedder is not None
+        effective_mode = mode
+        if effective_mode == "auto":
+            effective_mode = "hybrid" if has_embedder else "bm25"
+        if effective_mode in ("semantic", "hybrid") and not has_embedder:
+            effective_mode = "bm25"
+        candidates: list[Note] = []
         for path in self._walk_note_files(user_id):
             note = await self._load_note(path)
-            title_l = note.title.lower()
-            body_l = note.body.lower()
-            tag_match = any(q in t.lower() for t in note.tags)
-            if q in title_l:
-                scored.append((1.0, note.title, note))
-            elif tag_match:
-                scored.append((0.7, "tags: " + ", ".join(note.tags), note))
-            elif q in body_l:
-                idx = body_l.find(q)
-                start = max(0, idx - 40)
-                end = min(len(note.body), idx + len(q) + 60)
-                snippet = note.body[start:end].replace("\n", " ").strip()
-                if start > 0:
-                    snippet = "…" + snippet
-                if end < len(note.body):
-                    snippet = snippet + "…"
-                scored.append((0.5, snippet, note))
-        scored.sort(key=lambda t: (t[0], t[2].updated_at), reverse=True)
-        out: list[NoteMatch] = []
-        for score, snippet, note in scored[:limit]:
-            out.append(
-                NoteMatch(
-                    summary=summary_from_note(note),
-                    score=score,
-                    snippet=snippet or extract_lede(note.body),
-                )
-            )
+            if namespace is not None and note.namespace != namespace:
+                continue
+            if not include_archived and note.archived_at is not None:
+                continue
+            candidates.append(note)
+        if effective_mode == "bm25":
+            return _score_bm25(q, candidates, limit)
+        # Semantic / hybrid: compute query embedding once.
+        assert self._embedder is not None  # narrow for type-checker
+        try:
+            qvec = await self._embedder.embed(query)
+        except anyio.get_cancelled_exc_class():
+            raise
+        except Exception:  # noqa: BLE001 — fall back to BM25 on embed failure
+            return _score_bm25(q, candidates, limit)
+        if not qvec:
+            return _score_bm25(q, candidates, limit)
+        sem_scores = await self._semantic_scores(qvec, candidates, user_id)
+        if effective_mode == "semantic":
+            return _score_semantic(sem_scores, candidates, limit)
+        # Hybrid: reciprocal rank fusion of BM25 + semantic rankings.
+        bm25 = _score_bm25(q, candidates, limit=len(candidates))
+        return _rrf_fuse(bm25, sem_scores, candidates, limit)
+
+    async def _semantic_scores(
+        self,
+        qvec: list[float],
+        notes: list[Note],
+        user_id: str | None,
+    ) -> dict[str, float]:
+        """Load each candidate's persisted embedding and cosine-
+        score against ``qvec``. Notes without a sidecar (legacy or
+        embed-failure) score zero and effectively fall back to
+        BM25 ranking when hybrid mode fuses the results.
+        """
+        import json
+        out: dict[str, float] = {}
+        for note in notes:
+            path = self._find_note_path(user_id, note.author, note.slug)
+            if path is None:
+                continue
+            sidecar = path.with_suffix(".embedding.json")
+            if not sidecar.exists():
+                continue
+            try:
+                text = await anyio.to_thread.run_sync(sidecar.read_text)
+                payload = json.loads(text)
+                stored_model = payload.get("model")
+                this_model = getattr(self._embedder, "name", "unknown")
+                if stored_model != this_model:
+                    # Stale vector from a different embedder space.
+                    continue
+                vector = payload.get("vector") or []
+                if len(vector) != len(qvec):
+                    continue
+                out[note.slug] = _cosine(qvec, vector)
+            except Exception:  # noqa: BLE001
+                continue
         return out
 
     def _walk_note_files(self, user_id: str | None) -> list[Path]:
+        """Walk live note files, EXCLUDING ``.history`` revisions
+        and any other meta dirs. Without this filter, every
+        revision would appear in ``list_notes`` / ``search_notes``
+        as if it were a separate live note — silently breaking
+        every existing test that asserts on count.
+        """
         notes_root = self._user_root(user_id) / NOTES_DIR
         if not notes_root.exists():
             return []
-        return [p for p in notes_root.rglob("*.md") if p.is_file()]
+        return [
+            p for p in notes_root.rglob("*.md")
+            if p.is_file() and not _is_in_meta_dir(p)
+        ]
 
     async def _load_note(self, path: Path) -> Note:
         text = await anyio.to_thread.run_sync(path.read_text)
@@ -468,3 +790,159 @@ def _sanitise_user_id(value: str) -> str:
 def _sanitise_author(value: str) -> str:
     cleaned = _PATH_UNSAFE.sub("_", value)
     return cleaned or "agent"
+
+
+# ---------------------------------------------------------------------------
+# Walk filters — exclude meta dirs
+# ---------------------------------------------------------------------------
+
+
+def _is_in_meta_dir(path: Path) -> bool:
+    """``True`` when ``path`` is inside ``.history`` (or any other
+    dot-prefixed dir) under the notes tree. Used to filter
+    ``rglob("*.md")`` so historical revisions never surface as
+    live notes in ``list_notes`` / ``search_notes`` / the index.
+    """
+    for part in path.parts:
+        if part.startswith(".") and part not in (".", ".."):
+            return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Scoring helpers — BM25-ish, semantic cosine, RRF fusion
+# ---------------------------------------------------------------------------
+
+
+def _score_bm25(
+    q: str, notes: list[Note], limit: int
+) -> list[NoteMatch]:
+    """Substring-driven BM25-ish scoring (the v0.9 default).
+
+    Three tiers (highest wins): title hit (1.0), tag hit (0.7),
+    body hit (0.5). Snippet is the matched span ±~50 chars when
+    the hit is in the body, the title otherwise.
+    """
+    scored: list[tuple[float, str, Note]] = []
+    for note in notes:
+        title_l = note.title.lower()
+        body_l = note.body.lower()
+        tag_match = any(q in t.lower() for t in note.tags)
+        if q in title_l:
+            scored.append((1.0, note.title, note))
+        elif tag_match:
+            scored.append((0.7, "tags: " + ", ".join(note.tags), note))
+        elif q in body_l:
+            idx = body_l.find(q)
+            start = max(0, idx - 40)
+            end = min(len(note.body), idx + len(q) + 60)
+            snippet = note.body[start:end].replace("\n", " ").strip()
+            if start > 0:
+                snippet = "…" + snippet
+            if end < len(note.body):
+                snippet = snippet + "…"
+            scored.append((0.5, snippet, note))
+    scored.sort(key=lambda t: (t[0], t[2].updated_at), reverse=True)
+    out: list[NoteMatch] = []
+    for score, snippet, note in scored[:limit]:
+        out.append(
+            NoteMatch(
+                summary=summary_from_note(note),
+                score=score,
+                snippet=snippet or extract_lede(note.body),
+            )
+        )
+    return out
+
+
+def _score_semantic(
+    sem_scores: dict[str, float],
+    notes: list[Note],
+    limit: int,
+) -> list[NoteMatch]:
+    """Pure cosine ranking. Notes without embeddings score zero
+    and drop to the tail; ties broken by ``updated_at``."""
+    by_slug = {n.slug: n for n in notes}
+    ranked = sorted(
+        by_slug.values(),
+        key=lambda n: (sem_scores.get(n.slug, 0.0), n.updated_at),
+        reverse=True,
+    )
+    out: list[NoteMatch] = []
+    for note in ranked[:limit]:
+        score = sem_scores.get(note.slug, 0.0)
+        if score <= 0.0:
+            continue
+        out.append(
+            NoteMatch(
+                summary=summary_from_note(note),
+                score=score,
+                snippet=extract_lede(note.body),
+            )
+        )
+    return out
+
+
+def _rrf_fuse(
+    bm25: list[NoteMatch],
+    sem_scores: dict[str, float],
+    notes: list[Note],
+    limit: int,
+    k: int = 60,
+) -> list[NoteMatch]:
+    """Reciprocal rank fusion: combines BM25 ranking and semantic
+    ranking by summing ``1/(k + rank)`` across both. Robust to
+    score-scale differences between the two methods. ``k=60`` is
+    the canonical RRF constant from the original Cormack et al.
+    paper; any value in the 30-100 range works.
+    """
+    rank_bm = {m.summary.slug: i for i, m in enumerate(bm25)}
+    sem_ranked = sorted(
+        sem_scores.keys(),
+        key=lambda s: sem_scores[s],
+        reverse=True,
+    )
+    rank_sem = {slug: i for i, slug in enumerate(sem_ranked)}
+    fused: dict[str, float] = {}
+    for slug in set(rank_bm) | set(rank_sem):
+        score = 0.0
+        if slug in rank_bm:
+            score += 1.0 / (k + rank_bm[slug])
+        if slug in rank_sem:
+            score += 1.0 / (k + rank_sem[slug])
+        fused[slug] = score
+    by_slug = {n.slug: n for n in notes}
+    bm_by_slug = {m.summary.slug: m for m in bm25}
+    ranked_slugs = sorted(
+        fused.keys(), key=lambda s: fused[s], reverse=True
+    )
+    out: list[NoteMatch] = []
+    for slug in ranked_slugs[:limit]:
+        note = by_slug.get(slug)
+        if note is None:
+            continue
+        # Prefer the BM25 snippet when available (more informative
+        # than the lede); otherwise fall back.
+        bm_match = bm_by_slug.get(slug)
+        snippet = bm_match.snippet if bm_match else extract_lede(note.body)
+        out.append(
+            NoteMatch(
+                summary=summary_from_note(note),
+                score=fused[slug],
+                snippet=snippet,
+            )
+        )
+    return out
+
+
+def _cosine(a: list[float], b: list[float]) -> float:
+    """Cosine similarity. Returns 0 on degenerate inputs."""
+    import math
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b, strict=True))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(x * x for x in b))
+    if na == 0.0 or nb == 0.0:
+        return 0.0
+    return dot / (na * nb)

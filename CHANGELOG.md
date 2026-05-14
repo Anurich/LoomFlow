@@ -9,6 +9,68 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 
 ## [0.10.0] — unreleased
 
+### Added — workspace v2: namespacing, archive, versioning, questions, semantic search, shape-aware prompt
+
+Six additions to `loomflow/workspace/`, all backward-compatible. Legacy `.md`
+files load cleanly; existing Agent / Team calls keep working unchanged.
+
+1. **Namespacing** — `write_note(..., namespace="...")` scopes writes to a
+   sub-bucket. `list_notes` / `search_notes` ignore namespace by default
+   (teammates' work in adjacent namespaces stays visible); pass
+   `namespace=` to filter explicitly. `make_workspace_tools(workspace,
+   namespace=...)` scopes a member's WRITES to one namespace.
+
+2. **Archive** — `Workspace.archive_note(slug)` sets `archived_at`.
+   Default behavior of `list_notes` / `search_notes` EXCLUDES archived
+   notes; pass `include_archived=True` to see them. Archived notes
+   remain readable by slug via `read_note`. New `archive_note` tool is
+   on by default in `make_workspace_tools` (opt out via
+   `include_archive=False`).
+
+3. **Revision history** — every `update_note` snapshots the prior body
+   into a `.history/<slug>/0001.md` sequence (4-digit monotonic
+   counter). New methods `list_versions(slug)` / `read_version(slug, n)`
+   on the Workspace protocol. Excluded from `list_notes` via a
+   `_walk_note_files` filter so historical revisions never surface as
+   live notes.
+
+4. **Ask / answer pattern** — opt-in via `make_workspace_tools(...,
+   questions=True)`. Adds `ask_question(title, content)` (writes
+   `kind="question"` with `answered=False`), `answer_question(slug,
+   content)` (writes a child finding + flips the question's
+   `answered=True`), and `list_open_questions()` (lists unanswered).
+   Cross-author safe via a new `mark_answered` carve-out on
+   `update_note` — non-owners can flip the answered flag without
+   touching the question body.
+
+5. **Semantic search** — optional `embedder=` ctor param on
+   `LocalDiskWorkspace` and `InMemoryWorkspace`. When wired,
+   `write_note` also persists an embedding sidecar (with model name
+   for stale-vector detection); `search_notes(query, mode=...)` accepts
+   `"auto"` / `"bm25"` / `"semantic"` / `"hybrid"`. Hybrid mode uses
+   reciprocal rank fusion (RRF) of BM25 + cosine. Default `auto`
+   = hybrid when an embedder is wired, BM25 otherwise.
+
+6. **Shape-aware prompt section** — `workspace_prompt_section` now
+   produces TWO variants. When `teammates` is non-empty, the copy
+   emphasises team coordination ("share findings with teammates"). When
+   `teammates` is None / empty (single-agent cross-run mode), the copy
+   emphasises persistent knowledge across runs ("this is YOUR
+   persistent notebook"). Empirical motivation: Sonnet was skipping
+   the notebook in single-agent mode because the team-language confused
+   it about whether the notebook applied to its situation.
+
+Public additions: `NoteVersion` (Tier 1). New optional fields on `Note` /
+`NoteSummary`: `namespace`, `archived_at`, `answered`, `answered_by`,
+`parent_slug`. `extra="ignore"` on `Note.model_config` for forward-compat
+on future schema bumps.
+
+Protocol additions (breaking for duck-typed `Workspace` implementations
+— accept and document since workspace is young): `archive_note`,
+`list_versions`, `read_version` are now part of `Workspace`. The
+in-tree backends `LocalDiskWorkspace` and `InMemoryWorkspace` implement
+all of them.
+
 ### Added — TodoWrite-style living plan via `living_plan=`
 
 `Agent(living_plan=True)` wires two structured-plan tools onto the

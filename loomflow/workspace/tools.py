@@ -88,19 +88,45 @@ def make_workspace_tools(
     *,
     author: str = "agent",
     tool_prefix: str = "",
+    namespace: str | None = None,
+    questions: bool = False,
+    include_archive: bool = True,
 ) -> list[Tool]:
-    """Build the five agent-facing tools that consume ``workspace``.
+    """Build the agent-facing tools that consume ``workspace``.
 
-    ``author`` is baked into every write so the agent never has
-    to attribute itself. For a single :class:`Agent`, the default
-    ``"agent"`` is fine; :class:`Team` builders override it with
-    the worker's role name so the notebook shows
-    ``researcher``, ``analyst``, etc. instead of generic
-    ``agent`` entries.
+    Default tool set (always-on):
 
-    ``tool_prefix`` namespaces every tool name with ``"<prefix>__"``
-    — useful if you need two workspaces wired to one agent (rare).
-    Default empty string keeps the natural names.
+    * ``note`` / ``read_note`` / ``list_notes`` / ``search_notes``
+      / ``update_note`` — the five-tool core surface.
+    * ``archive_note`` (when ``include_archive=True``, default) —
+      marks a note as archived. Excluded from listings by default;
+      still readable by slug.
+
+    Optional tool set (``questions=True``):
+
+    * ``ask_question`` / ``answer_question`` / ``list_open_questions``
+      — async-message pattern over notes. ``ask_question`` writes
+      a ``kind="question"`` note with ``answered=False``;
+      ``answer_question`` writes a child finding note and flips
+      the question's ``answered=True`` (cross-author safe via the
+      ``mark_answered`` carve-out in :meth:`Workspace.update_note`).
+
+    Kwargs:
+
+    * ``author`` is baked into every write so the agent never has
+      to attribute itself. :class:`Team` builders override it with
+      the worker's role name.
+    * ``tool_prefix`` namespaces every tool name with
+      ``"<prefix>__"`` — for when two workspaces are wired to one
+      agent (rare).
+    * ``namespace`` scopes WRITES to a sub-bucket within this
+      author's notes. ``list_notes`` / ``search_notes`` still see
+      every namespace by default — namespace is metadata, not a
+      filter, so teammates' work in adjacent namespaces stays
+      visible (you can filter explicitly on a per-call basis).
+    * ``questions`` enables the three question tools.
+    * ``include_archive`` (default True) wires the ``archive_note``
+      tool.
     """
 
     def _name(base: str) -> str:
@@ -129,6 +155,7 @@ def make_workspace_tools(
             tags=_coerce_tags(tags),
             user_id=_current_user_id(),
             run_id=_current_run_id(),
+            namespace=namespace,
         )
         return (
             f"Saved as `{note.slug}` (author={note.author}, "
@@ -353,47 +380,330 @@ def make_workspace_tools(
         },
     )
 
-    return [note_tool, read_tool, list_tool, search_tool, update_tool]
+    tools_out: list[Tool] = [
+        note_tool, read_tool, list_tool, search_tool, update_tool,
+    ]
+
+    # ---- Optional: archive_note (default-on) ----------------------------
+
+    if include_archive:
+        async def _archive_note(slug: str) -> str:
+            """Mark a note you wrote as archived.
+
+            Archived notes are excluded from ``list_notes`` /
+            ``search_notes`` by default but remain readable by
+            slug. Use to clean up stale notes without losing the
+            record. You may only archive notes you authored.
+            """
+            try:
+                note = await workspace.archive_note(
+                    author=author,
+                    slug=slug,
+                    user_id=_current_user_id(),
+                )
+            except FileNotFoundError:
+                return f"ERROR: note `{slug}` not found."
+            except PermissionError as exc:
+                return f"ERROR: {exc}"
+            return f"Archived `{note.slug}`."
+
+        archive_tool = Tool(
+            name=_name("archive_note"),
+            description=(
+                "Mark a note as archived. Archived notes are hidden "
+                "from list/search by default but still readable by "
+                "slug. You may only archive your own notes."
+            ),
+            fn=_archive_note,
+            input_schema={
+                "type": "object",
+                "properties": {"slug": {"type": "string"}},
+                "required": ["slug"],
+            },
+        )
+        tools_out.append(archive_tool)
+
+    # ---- Optional: question / answer / list_open_questions --------------
+
+    if questions:
+        async def _ask_question(title: str, content: str) -> str:
+            """Post an open question to the notebook for someone
+            else (or future-you) to answer.
+
+            Writes a ``kind="question"`` note with ``answered=False``.
+            Use ``list_open_questions()`` to find unanswered ones,
+            and ``answer_question(slug, content)`` to respond.
+            """
+            note = await workspace.write_note(
+                author=author,
+                title=title,
+                body=content,
+                kind="question",
+                user_id=_current_user_id(),
+                run_id=_current_run_id(),
+                namespace=namespace,
+                answered=False,
+            )
+            return (
+                f"Asked as `{note.slug}`. Teammates can find this "
+                "via `list_open_questions()` and respond with "
+                f"`answer_question('{note.slug}', ...)`."
+            )
+
+        async def _answer_question(slug: str, content: str) -> str:
+            """Answer an open question and mark it resolved.
+
+            Writes a child ``kind="finding"`` note linked to the
+            question, then flips the question's ``answered=True``
+            (cross-author safe — you can answer questions other
+            agents asked).
+            """
+            question = await workspace.read_note(
+                slug, user_id=_current_user_id()
+            )
+            if question is None:
+                return f"ERROR: question `{slug}` not found."
+            answer = await workspace.write_note(
+                author=author,
+                title=f"Answer: {question.title}",
+                body=content,
+                kind="finding",
+                user_id=_current_user_id(),
+                run_id=_current_run_id(),
+                namespace=namespace,
+                parent_slug=slug,
+            )
+            try:
+                # Cross-author carve-out: pass ``mark_answered`` so
+                # the workspace flips ``answered=True`` even when
+                # `author` doesn't own the question.
+                await workspace.update_note(
+                    author=author,
+                    slug=slug,
+                    body=question.body,
+                    tags=list(question.tags),
+                    user_id=_current_user_id(),
+                    mark_answered=answer.slug,
+                )
+            except Exception as exc:  # noqa: BLE001 — surface as text
+                return (
+                    f"Answer saved as `{answer.slug}` but could not "
+                    f"mark question answered: {exc}"
+                )
+            return (
+                f"Answered. Answer saved as `{answer.slug}` and "
+                f"question `{slug}` is now marked answered."
+            )
+
+        async def _list_open_questions() -> str:
+            """List unanswered questions (``kind="question"`` notes
+            where ``answered`` is False or absent)."""
+            summaries = await workspace.list_notes(
+                kind="question",
+                user_id=_current_user_id(),
+                limit=100,
+            )
+            # The summary doesn't carry the ``answered`` flag
+            # directly; re-fetch the full Notes to filter.
+            open_q: list[str] = []
+            for s in summaries:
+                note = await workspace.read_note(
+                    s.slug, user_id=_current_user_id()
+                )
+                if note is None:
+                    continue
+                if note.answered is True:
+                    continue
+                tag_suffix = (
+                    f" `[{', '.join(note.tags)}]`" if note.tags else ""
+                )
+                open_q.append(
+                    f"- **`{note.slug}`** [{note.author}]{tag_suffix} "
+                    f"— {note.title}"
+                )
+                if note.body:
+                    preview = note.body[:120].replace("\n", " ")
+                    open_q.append(f"  > {preview}")
+            if not open_q:
+                return "No open questions."
+            return (
+                f"# Open questions ({len(open_q) // 2})\n\n"
+                + "\n".join(open_q)
+            )
+
+        tools_out.append(
+            Tool(
+                name=_name("ask_question"),
+                description=(
+                    "Post an open question to the notebook for "
+                    "another agent (or future-you) to answer."
+                ),
+                fn=_ask_question,
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string"},
+                        "content": {"type": "string"},
+                    },
+                    "required": ["title", "content"],
+                },
+            )
+        )
+        tools_out.append(
+            Tool(
+                name=_name("answer_question"),
+                description=(
+                    "Answer an open question and mark it resolved. "
+                    "Cross-author safe — answer anyone's question."
+                ),
+                fn=_answer_question,
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "slug": {"type": "string"},
+                        "content": {"type": "string"},
+                    },
+                    "required": ["slug", "content"],
+                },
+            )
+        )
+        tools_out.append(
+            Tool(
+                name=_name("list_open_questions"),
+                description=(
+                    "List unanswered questions in the notebook — "
+                    "things teammates flagged for someone else to "
+                    "pick up."
+                ),
+                fn=_list_open_questions,
+                input_schema={
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                },
+            )
+        )
+
+    return tools_out
 
 
 def workspace_prompt_section(
     *,
     author: str = "agent",
     teammates: list[str] | None = None,
+    include_archive: bool = True,
+    questions: bool = False,
 ) -> str:
     """Return the markdown chunk :class:`Agent.__init__` appends to
     the system prompt when a workspace is wired.
 
-    Includes the agent's identity and (when provided) the names of
-    teammates so the model knows who else is contributing. Heavy
-    nudging toward "list first, then act" to keep teams from
-    duplicating work.
+    The prompt is **shape-aware**:
+
+    * When ``teammates`` is non-empty (multi-agent team mode), the
+      copy emphasises COORDINATION: "share findings with
+      teammates, list first to avoid duplicating their work."
+    * When ``teammates`` is None / empty (single-agent cross-run
+      mode), the copy emphasises CROSS-RUN PERSISTENCE: "this is
+      YOUR persistent knowledge across runs; check what past-you
+      wrote, leave findings for future-you."
+
+    Why two variants? Empirical: when the prompt mentioned
+    "teammates" but no teammates existed, models concluded the
+    notebook was empty / not relevant and skipped it. The
+    single-agent variant tells the model the notebook IS its
+    own continuity. (Observed in Terminal-Bench runs, May 2026.)
     """
-    team_line = ""
-    if teammates:
-        others = [t for t in teammates if t != author]
-        if others:
-            team_line = (
-                f"Your teammates are: {', '.join(others)}.\n"
-            )
-    return (
-        "## Shared notebook\n\n"
-        f"You are `{author}` on this team. {team_line}"
-        "You share a notebook with teammates. Five tools are "
-        "available:\n\n"
-        "- `list_notes()` — what teammates have already written.\n"
-        "- `read_note(slug_or_title)` — read a specific note.\n"
-        "- `search_notes(query)` — find notes by free-text query.\n"
-        "- `note(title, content, kind=)` — share findings, "
-        "decisions, questions, plans.\n"
-        "- `update_note(slug, content)` — revise your own notes.\n\n"
-        "**Before doing significant work**, call `list_notes()` to "
-        "check whether a teammate has already done it (or flagged it "
-        "as in-progress with a `plan` note). If yes, build on their "
-        "work; don't duplicate.\n\n"
-        "**When you find something worth sharing**, call `note(...)`. "
-        "One note per finding. Be concise — teammates will read this. "
-        "Use `kind=\"question\"` to flag open problems for others to "
-        "pick up; `kind=\"plan\"` to announce you're working on "
-        "something; `kind=\"decision\"` for sticky choices.\n"
+    others = (
+        [t for t in (teammates or []) if t != author] if teammates else []
     )
+    is_team_mode = bool(others)
+    sections: list[str] = []
+
+    # Tool list (shared across both modes).
+    tool_lines = [
+        "- `list_notes()` — see what's already written.",
+        "- `read_note(slug_or_title)` — read a specific note.",
+        "- `search_notes(query)` — find notes by free-text query.",
+        "- `note(title, content, kind=)` — share findings, "
+        "decisions, plans.",
+        "- `update_note(slug, content)` — revise your own notes.",
+    ]
+    if include_archive:
+        tool_lines.append(
+            "- `archive_note(slug)` — mark a stale note archived "
+            "(hidden from listings but still readable by slug)."
+        )
+    if questions:
+        tool_lines.append(
+            "- `ask_question(title, content)` — flag an open "
+            "problem for someone else (or future-you) to answer."
+        )
+        tool_lines.append(
+            "- `answer_question(slug, content)` — answer an open "
+            "question and mark it resolved."
+        )
+        tool_lines.append(
+            "- `list_open_questions()` — see what's unanswered."
+        )
+
+    if is_team_mode:
+        # ---- Multi-agent team variant ----
+        sections.append("## Shared notebook")
+        sections.append("")
+        sections.append(
+            f"You are `{author}` on this team. Your teammates are: "
+            f"{', '.join(others)}."
+        )
+        sections.append("")
+        sections.append(
+            "You share a notebook with teammates. Tools available:"
+        )
+        sections.append("")
+        sections.extend(tool_lines)
+        sections.append("")
+        sections.append(
+            "**Before doing significant work**, call `list_notes()` "
+            "to check whether a teammate has already done it (or "
+            "flagged it as in-progress with a `plan` note). If yes, "
+            "build on their work; don't duplicate."
+        )
+        sections.append("")
+        sections.append(
+            "**When you find something worth sharing**, call "
+            "`note(...)`. One note per finding. Be concise — "
+            "teammates will read this. Use `kind=\"question\"` to "
+            "flag open problems; `kind=\"plan\"` to announce work "
+            "in progress; `kind=\"decision\"` for sticky choices."
+        )
+    else:
+        # ---- Single-agent cross-run variant ----
+        sections.append("## Your persistent notebook")
+        sections.append("")
+        sections.append(
+            f"You are `{author}`. This notebook is YOUR persistent "
+            "knowledge across runs — every note you write now is "
+            "readable by future-you in subsequent runs of this "
+            "agent. Tools available:"
+        )
+        sections.append("")
+        sections.extend(tool_lines)
+        sections.append("")
+        sections.append(
+            "**At the start of every task**, call `list_notes()` "
+            "(or `search_notes(query)` with terms from the task) "
+            "to see what past-you already learned. If a past note "
+            "is relevant, `read_note(slug)` it before diving in. "
+            "The notebook may be empty on your first run — that's "
+            "expected; you're building the knowledge base."
+        )
+        sections.append("")
+        sections.append(
+            "**As you work**, call `note(...)` for findings worth "
+            "preserving. Be concise. Use `kind=\"decision\"` for "
+            "sticky choices you'll want to remember; "
+            "`kind=\"finding\"` for analysis results; "
+            "`kind=\"plan\"` for in-progress strategies. "
+            "Future-you (next task) will thank present-you."
+        )
+
+    return "\n".join(sections) + "\n"

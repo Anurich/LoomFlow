@@ -66,6 +66,8 @@ def summary_from_note(note: Note) -> NoteSummary:
         created_at=note.created_at,
         updated_at=note.updated_at,
         lede=extract_lede(note.body),
+        namespace=note.namespace,
+        archived_at=note.archived_at,
     )
 
 
@@ -79,7 +81,13 @@ _FRONTMATTER_FENCE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
 def render_note_file(note: Note) -> str:
     """Render a :class:`Note` as a markdown file with YAML
     frontmatter. The body lands verbatim under the fence so it
-    round-trips through :func:`parse_note_file` byte-stable."""
+    round-trips through :func:`parse_note_file` byte-stable.
+
+    Optional fields (``user_id``, ``run_id``, ``namespace``,
+    ``archived_at``, ``answered``, ``answered_by``, ``parent_slug``)
+    are emitted ONLY when set, keeping legacy notes' frontmatter
+    minimal and the diff against the v0.9.x file shape small.
+    """
     tags_inline = ", ".join(note.tags) if note.tags else ""
     fm_lines = [
         "---",
@@ -95,6 +103,16 @@ def render_note_file(note: Note) -> str:
         fm_lines.append(f"user_id: {_yaml_quote(note.user_id)}")
     if note.run_id is not None:
         fm_lines.append(f"run_id: {_yaml_quote(note.run_id)}")
+    if note.namespace is not None:
+        fm_lines.append(f"namespace: {_yaml_quote(note.namespace)}")
+    if note.archived_at is not None:
+        fm_lines.append(f"archived_at: {note.archived_at.isoformat()}")
+    if note.answered is not None:
+        fm_lines.append(f"answered: {'true' if note.answered else 'false'}")
+    if note.answered_by is not None:
+        fm_lines.append(f"answered_by: {_yaml_quote(note.answered_by)}")
+    if note.parent_slug is not None:
+        fm_lines.append(f"parent_slug: {_yaml_quote(note.parent_slug)}")
     fm_lines.append("---")
     return "\n".join(fm_lines) + "\n\n" + note.body.rstrip() + "\n"
 
@@ -153,7 +171,13 @@ def _parse_yaml_scalar(text: str) -> Any:
 
 
 def note_from_frontmatter(fm: dict[str, Any], body: str) -> Note:
-    """Reconstruct a :class:`Note` from parsed frontmatter + body."""
+    """Reconstruct a :class:`Note` from parsed frontmatter + body.
+
+    All v0.10.x-and-later fields (``namespace``, ``archived_at``,
+    ``answered``, ``answered_by``, ``parent_slug``) default to
+    ``None`` when absent — legacy v0.9.x notes load cleanly with
+    the new fields just empty.
+    """
     kind: NoteKind = fm.get("kind") or "note"  # type: ignore[assignment]
     tags = fm.get("tags") or []
     if isinstance(tags, str):
@@ -169,6 +193,11 @@ def note_from_frontmatter(fm: dict[str, Any], body: str) -> Note:
         updated_at=_parse_dt(fm.get("updated_at")),
         user_id=fm.get("user_id"),
         run_id=fm.get("run_id"),
+        namespace=fm.get("namespace"),
+        archived_at=_parse_dt_optional(fm.get("archived_at")),
+        answered=_parse_bool_optional(fm.get("answered")),
+        answered_by=fm.get("answered_by"),
+        parent_slug=fm.get("parent_slug"),
     )
 
 
@@ -179,6 +208,35 @@ def _parse_dt(value: Any) -> datetime:
         return datetime.fromisoformat(value)
     from datetime import UTC
     return datetime.now(UTC)
+
+
+def _parse_dt_optional(value: Any) -> datetime | None:
+    """Like :func:`_parse_dt` but returns ``None`` for absent /
+    null values instead of "now"."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        return datetime.fromisoformat(value)
+    return None
+
+
+def _parse_bool_optional(value: Any) -> bool | None:
+    """Tri-state parse — ``None`` stays ``None``; truthy strings
+    (``"true"``, ``"yes"``, ``"1"``) map to True; falsy strings
+    (``"false"``, ``"no"``, ``"0"``) map to False."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        low = value.strip().lower()
+        if low in ("true", "yes", "1"):
+            return True
+        if low in ("false", "no", "0"):
+            return False
+    return None
 
 
 # ---------------------------------------------------------------------------

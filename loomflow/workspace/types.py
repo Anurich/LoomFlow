@@ -50,7 +50,12 @@ class Note(BaseModel):
     match (``read_note("population")``).
     """
 
-    model_config = ConfigDict(frozen=True)
+    # ``extra="ignore"`` makes future schema additions soft: if a
+    # newer-version workspace writes a note with a field this
+    # version doesn't know about, we drop the field rather than
+    # raise. Combined with the optional new fields below, this
+    # gives forward + backward compatibility for free.
+    model_config = ConfigDict(frozen=True, extra="ignore")
 
     slug: str
     """``<NNN>-<slugified-title>`` — stable identifier within the
@@ -84,6 +89,35 @@ class Note(BaseModel):
     """The :class:`RunContext.run_id` that produced this note.
     Useful for replay / per-run filtering."""
 
+    namespace: str | None = None
+    """Optional sub-bucket within the author's notes. Lets one
+    workspace hold multiple logically-distinct sub-projects without
+    spinning up separate workspaces. Defaults to ``None`` (no
+    namespace subdir; behaves exactly like the pre-namespace
+    workspace). See :meth:`Workspace.write_note`."""
+
+    archived_at: datetime | None = None
+    """Set by :meth:`Workspace.archive_note` to mark a stale note
+    as archived. Archived notes are excluded from ``list_notes`` /
+    ``search_notes`` by default (opt-in via ``include_archived=
+    True``) but remain readable by slug via ``read_note``."""
+
+    answered: bool | None = None
+    """For ``kind="question"`` notes: ``False`` = open, ``True`` =
+    answered. ``None`` means "not a question / not tracked" — the
+    tri-state lets non-question notes leave the field absent rather
+    than lie with ``False``. Flipped by
+    :meth:`Workspace.mark_answered`."""
+
+    answered_by: str | None = None
+    """Slug of the answer note that resolved a question. Set by
+    :meth:`Workspace.mark_answered` alongside ``answered=True``."""
+
+    parent_slug: str | None = None
+    """Slug of a parent note this note is a child of (typically an
+    answer pointing back at its question). Lets the workspace build
+    threads / link graphs without a separate edge table."""
+
 
 class NoteSummary(BaseModel):
     """Cheap projection of :class:`Note` for index views.
@@ -93,7 +127,7 @@ class NoteSummary(BaseModel):
     without loading every body into the prompt.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="ignore")
 
     slug: str
     author: str
@@ -105,11 +139,20 @@ class NoteSummary(BaseModel):
     lede: str
     """First ~120 chars of the body for quick scanning."""
 
+    namespace: str | None = None
+    """Optional sub-bucket; mirrors :attr:`Note.namespace`. Surfaced
+    in the summary so callers can render namespace tags without
+    fetching the full body."""
+
+    archived_at: datetime | None = None
+    """Mirrors :attr:`Note.archived_at`. Lets index renderers show
+    an "(archived)" badge without re-reading the body."""
+
 
 class NoteMatch(BaseModel):
     """A search hit — :class:`NoteSummary` plus relevance + snippet."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="ignore")
 
     summary: NoteSummary
     score: float
@@ -120,6 +163,42 @@ class NoteMatch(BaseModel):
     snippet: str
     """A short excerpt around the matched phrase (or the lede when
     the match is title-only). ~140 chars."""
+
+
+class NoteVersion(BaseModel):
+    """One historical revision of a note.
+
+    Returned by :meth:`Workspace.list_versions` (one per revision)
+    and :meth:`Workspace.read_version` (the full body of one
+    revision). Versions are immutable; ``update_note`` appends a
+    new version, never modifies an old one.
+
+    Counter is monotonic per-slug starting at 1; ``0001.md``,
+    ``0002.md``, ... on the disk backend. Re-using version numbers
+    is a bug.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="ignore")
+
+    slug: str
+    """Slug of the live note this is a revision of."""
+
+    author: str
+    """Author of the note at the time of this revision."""
+
+    version: int
+    """Monotonic revision number starting at 1. ``list_versions``
+    returns these in ascending order."""
+
+    created_at: datetime
+    """When this revision was written (i.e. when ``update_note``
+    superseded the prior content)."""
+
+    body_preview: str
+    """First ~120 chars of the historical body. Lets
+    ``list_versions`` render scannable history without loading
+    every revision body. Fetch the full body with
+    :meth:`Workspace.read_version`."""
 
 
 class WorkspaceMembership(BaseModel):

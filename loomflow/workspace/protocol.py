@@ -13,7 +13,14 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from .types import Note, NoteKind, NoteMatch, NoteSummary, WorkspaceMembership
+from .types import (
+    Note,
+    NoteKind,
+    NoteMatch,
+    NoteSummary,
+    NoteVersion,
+    WorkspaceMembership,
+)
 
 
 @runtime_checkable
@@ -37,6 +44,9 @@ class Workspace(Protocol):
         tags: list[str] | None = None,
         user_id: str | None = None,
         run_id: str | None = None,
+        namespace: str | None = None,
+        answered: bool | None = None,
+        parent_slug: str | None = None,
     ) -> Note:
         """Append a new note to the workspace.
 
@@ -44,6 +54,18 @@ class Workspace(Protocol):
         ``slug``. Implementations choose the slug shape (the disk
         backend uses ``<NNN>-<slugified-title>`` numbered per
         author); callers should treat the slug as opaque.
+
+        Optional fields:
+
+        * ``namespace`` — sub-bucket within the author's notes.
+          Defaults to ``None`` (no namespace). Notes in different
+          namespaces are still visible to ``list_notes`` /
+          ``search_notes`` (namespace is metadata, not a partition).
+        * ``answered`` — tri-state flag for ``kind="question"``
+          notes. Set ``False`` when asking, flipped via
+          :meth:`mark_answered`.
+        * ``parent_slug`` — link to a parent note (e.g. an answer
+          pointing at its question).
         """
         ...
 
@@ -58,6 +80,9 @@ class Workspace(Protocol):
         Slug matches win over title matches. Title matching is
         case-insensitive and substring-based; ambiguous title
         matches return the most recently updated one.
+
+        Archived notes ARE returned by this method — only listing
+        and search exclude them by default.
         """
         ...
 
@@ -67,9 +92,19 @@ class Workspace(Protocol):
         author: str | None = None,
         kind: NoteKind | None = None,
         user_id: str | None = None,
+        namespace: str | None = None,
+        include_archived: bool = False,
         limit: int = 50,
     ) -> list[NoteSummary]:
-        """Return notes filtered by author / kind, newest first."""
+        """Return notes filtered by author / kind, newest first.
+
+        Optional filters:
+
+        * ``namespace`` — restrict to notes in this namespace.
+          ``None`` (default) returns notes across all namespaces.
+        * ``include_archived`` — when ``False`` (default), archived
+          notes are excluded. Pass ``True`` to see them.
+        """
         ...
 
     async def search_notes(
@@ -77,11 +112,26 @@ class Workspace(Protocol):
         query: str,
         *,
         user_id: str | None = None,
+        namespace: str | None = None,
+        include_archived: bool = False,
+        mode: str = "auto",
         limit: int = 10,
     ) -> list[NoteMatch]:
         """Text-search notes. Implementations may use BM25, token
-        overlap, or simple substring — return :class:`NoteMatch`
-        objects with backend-specific scores."""
+        overlap, semantic similarity (when an embedder is wired),
+        or hybrid scoring — return :class:`NoteMatch` objects with
+        backend-specific scores.
+
+        ``mode`` selects scoring:
+
+        * ``"auto"`` (default) — hybrid (BM25 + cosine via RRF)
+          when an embedder is wired, BM25 otherwise.
+        * ``"bm25"`` — text-only, even when an embedder is wired.
+        * ``"semantic"`` — cosine-only; falls back to BM25 if no
+          embedder is wired.
+        * ``"hybrid"`` — explicit hybrid; falls back to BM25 if no
+          embedder is wired.
+        """
         ...
 
     async def update_note(
@@ -92,12 +142,76 @@ class Workspace(Protocol):
         body: str,
         tags: list[str] | None = None,
         user_id: str | None = None,
+        mark_answered: str | None = None,
     ) -> Note:
         """Replace the body of a note this author previously wrote.
 
         Raises :class:`PermissionError` if ``author`` doesn't own
         the note. Backends preserve the original ``created_at`` and
         bump ``updated_at``.
+
+        Before overwriting, the prior body is snapshotted into the
+        note's revision history (accessible via
+        :meth:`list_versions` / :meth:`read_version`).
+
+        ``mark_answered`` is the documented cross-author carve-out
+        for the question / answer pattern: passing a non-None slug
+        flips the target note's ``answered=True`` + ``answered_by=
+        <slug>`` even when the calling author doesn't own the
+        note. Used internally by ``answer_question``; rarely
+        needed by user code.
+        """
+        ...
+
+    async def archive_note(
+        self,
+        *,
+        author: str,
+        slug: str,
+        user_id: str | None = None,
+    ) -> Note:
+        """Mark a note as archived in-place. Returns the updated
+        note with ``archived_at`` set.
+
+        Archived notes are excluded from ``list_notes`` /
+        ``search_notes`` by default (opt back in via
+        ``include_archived=True``). They remain directly readable
+        by slug via :meth:`read_note`.
+
+        Raises :class:`PermissionError` if ``author`` doesn't own
+        the note.
+        """
+        ...
+
+    async def list_versions(
+        self,
+        slug: str,
+        *,
+        author: str,
+        user_id: str | None = None,
+    ) -> list[NoteVersion]:
+        """Return the revision history of a note, oldest first.
+
+        Each :meth:`update_note` call snapshots the prior body as
+        version N (monotonic starting at 1). Versions are
+        immutable; deleting them is not part of the public
+        protocol.
+        """
+        ...
+
+    async def read_version(
+        self,
+        slug: str,
+        version: int,
+        *,
+        author: str,
+        user_id: str | None = None,
+    ) -> Note | None:
+        """Return the full :class:`Note` as it was at revision
+        ``version``. Returns ``None`` if the version doesn't exist.
+
+        The returned note's ``updated_at`` reflects the revision
+        timestamp, not the current note's timestamp.
         """
         ...
 

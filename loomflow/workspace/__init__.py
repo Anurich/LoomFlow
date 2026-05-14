@@ -27,7 +27,14 @@ from .inmemory import InMemoryWorkspace
 from .protocol import Workspace
 from .resolver import resolve_workspace
 from .tools import make_workspace_tools, workspace_prompt_section
-from .types import Note, NoteKind, NoteMatch, NoteSummary, WorkspaceMembership
+from .types import (
+    Note,
+    NoteKind,
+    NoteMatch,
+    NoteSummary,
+    NoteVersion,
+    WorkspaceMembership,
+)
 
 __all__ = [
     "InMemoryWorkspace",
@@ -36,6 +43,7 @@ __all__ = [
     "NoteKind",
     "NoteMatch",
     "NoteSummary",
+    "NoteVersion",
     "Workspace",
     "WorkspaceMembership",
     "make_workspace_tools",
