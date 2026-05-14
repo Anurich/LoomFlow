@@ -1494,12 +1494,25 @@ class Agent:
         # a ``finally`` below so the contextvar doesn't leak past
         # this run.
         from ..core.context import (
+            _ambient_citations_var,
             _ambient_living_plan_var,
             _ambient_workspace_var,
         )
 
         ws_token: Any = (
             _ambient_workspace_var.set(self._workspace)
+            if self._workspace is not None
+            else None
+        )
+
+        # Install a fresh per-run citation set when a workspace is
+        # wired. ``Workspace.read_note`` / ``read_version`` log
+        # slugs into this set; ``Workspace.attribute_outcome`` (called
+        # by user code after the run) drains it to update per-note
+        # relevance metadata. Without an active set (no workspace),
+        # the helpers no-op.
+        citation_token: Any = (
+            _ambient_citations_var.set(set())
             if self._workspace is not None
             else None
         )
@@ -1811,6 +1824,8 @@ class Agent:
                 _ambient_workspace_var.reset(ws_token)
             if plan_token is not None:
                 _ambient_living_plan_var.reset(plan_token)
+            if citation_token is not None:
+                _ambient_citations_var.reset(citation_token)
             return result
 
 

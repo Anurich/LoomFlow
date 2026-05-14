@@ -115,6 +115,7 @@ class Workspace(Protocol):
         namespace: str | None = None,
         include_archived: bool = False,
         mode: str = "auto",
+        boost_relevance: bool = False,
         limit: int = 10,
     ) -> list[NoteMatch]:
         """Text-search notes. Implementations may use BM25, token
@@ -131,6 +132,14 @@ class Workspace(Protocol):
           embedder is wired.
         * ``"hybrid"`` — explicit hybrid; falls back to BM25 if no
           embedder is wired.
+
+        ``boost_relevance`` (default ``False``): when ``True``,
+        notes' base scores get a multiplicative boost based on
+        their citation metadata (``cited_count`` +
+        ``success_count``). Frequently-read AND
+        frequently-validated notes rank higher than mere
+        text-matches. Opt-in to preserve back-compat for callers
+        that don't want this signal.
         """
         ...
 
@@ -212,6 +221,40 @@ class Workspace(Protocol):
 
         The returned note's ``updated_at`` reflects the revision
         timestamp, not the current note's timestamp.
+        """
+        ...
+
+    async def attribute_outcome(
+        self,
+        *,
+        success: bool,
+        user_id: str | None = None,
+    ) -> int:
+        """Close the self-improvement loop: take every note the
+        agent cited during the current run (tracked via the
+        ambient ``_ambient_citations_var`` contextvar) and update
+        the per-note relevance metadata.
+
+        Specifically:
+
+        * ``cited_count`` += 1 for every cited note
+        * ``success_count`` += 1 if ``success=True``
+        * ``last_cited_at`` = now for every cited note
+
+        Returns the number of notes whose metadata was updated
+        (zero outside a run, or if the run cited nothing).
+
+        ``attribute_outcome`` is **observation-class** — it does
+        not check author ownership. Anyone with workspace access
+        can report what they cited and the outcome; this is how
+        you know which past notes were USEFUL versus just
+        present.
+
+        Idempotency: calling twice with ``success=True`` for the
+        same run double-counts. Callers should call it once per
+        run. To opt out of citation tracking, simply don't call
+        this method — the per-run citation log evaporates with
+        the contextvar.
         """
         ...
 

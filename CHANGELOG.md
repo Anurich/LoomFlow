@@ -9,6 +9,52 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 
 ## [0.10.0] — unreleased
 
+### Added — workspace self-improvement loop: citation tracking + outcome attribution + relevance-aware search
+
+Three additions that turn the workspace from a passive notebook
+into the substrate for an agent that gets smarter with every run:
+
+1. **Citation tracking via contextvar.** A new
+   ``_ambient_citations_var`` is installed by ``Agent._loop`` for
+   the duration of every run. ``Workspace.read_note`` and
+   ``read_version`` log the slug they returned into this set.
+   Best-effort: outside a run (tests, direct tool calls) the set
+   doesn't exist and the loggers no-op. No author check — citation
+   is OBSERVATION, not authorship.
+
+2. **Outcome attribution via ``Workspace.attribute_outcome(success,
+   user_id)``.** Drains the per-run citation set and updates each
+   cited note's metadata: ``cited_count`` += 1, ``success_count``
+   += 1 when ``success=True``, ``last_cited_at`` = now. Returns
+   the number of notes whose metadata was updated. User code
+   calls this after ``agent.run()`` returns, passing a
+   pass/fail signal — the workspace then knows WHICH past notes
+   actually led to working outcomes.
+
+3. **Relevance-aware search ranking.** ``search_notes`` gains an
+   opt-in ``boost_relevance: bool = False`` kwarg. When True,
+   each result's base score is multiplied by a citation-history
+   boost: ``1 + log(1+cited_count) + 2*log(1+success_count)`` —
+   log scaling so a single runaway-popular note doesn't drown
+   out fresh ones, success-citations weighted 2x mere citations
+   so "verified useful" outranks "merely read." Default off
+   preserves back-compat. Available in all four modes (``auto``
+   / ``bm25`` / ``semantic`` / ``hybrid``).
+
+Public additions: three optional fields on ``Note`` and
+``NoteSummary`` (``cited_count: int = 0``, ``success_count: int = 0``,
+``last_cited_at: datetime | None = None``). Legacy notes (no
+citation history in frontmatter) default to 0 and start
+accumulating from first cite.
+
+This is the **scaffold for self-improvement**, not the full
+loop. The framework now KNOWS which past notes were useful;
+follow-up work would add an offline "dreaming" pass that uses
+that signal to consolidate / promote / archive notes. But just
+the relevance signal alone — usable today — means search results
+improve as the agent's history grows. Search results in run N+1
+are biased toward notes that worked in runs 1..N.
+
 ### Added — workspace v2: namespacing, archive, versioning, questions, semantic search, shape-aware prompt
 
 Six additions to `loomflow/workspace/`, all backward-compatible. Legacy `.md`

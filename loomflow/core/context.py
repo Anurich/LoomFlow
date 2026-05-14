@@ -220,6 +220,25 @@ _ambient_living_plan_var: ContextVar[Any] = ContextVar(
     "loomflow_ambient_living_plan", default=None
 )
 
+# ``Workspace citation tracking`` ambient — per-run set of note
+# slugs the agent READ during this run. ``Workspace.read_note`` /
+# ``read_version`` add to it; ``Workspace.attribute_outcome`` reads
+# it after the run to update each cited note's relevance metadata
+# (``cited_count``, ``success_count``, ``last_cited_at``).
+#
+# Default is ``None`` (no tracking — outside a run, in tests, or
+# when the workspace deliberately disables it). The ``Agent._loop``
+# sets a fresh empty set per run; the contextvar mechanism keeps
+# concurrent runs isolated. Citations are an OBSERVATION, not a
+# write — they don't need author-ownership checks.
+#
+# Implementation note: we use a set wrapper rather than a frozenset
+# so the workspace can mutate the set in-place during the run. The
+# Token returned by .set() resets to the prior value on exit.
+_ambient_citations_var: ContextVar[Any] = ContextVar(
+    "loomflow_ambient_citations", default=None
+)
+
 
 def get_run_context() -> RunContext:
     """Return the :class:`RunContext` for the currently-running agent.

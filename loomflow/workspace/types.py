@@ -118,6 +118,25 @@ class Note(BaseModel):
     answer pointing back at its question). Lets the workspace build
     threads / link graphs without a separate edge table."""
 
+    cited_count: int = 0
+    """Number of agent runs that have read this note. Incremented
+    by :meth:`Workspace.attribute_outcome` after every run that
+    cited it. Drives the relevance boost in
+    ``search_notes(boost_relevance=True)`` — frequently-read notes
+    rank higher."""
+
+    success_count: int = 0
+    """Subset of ``cited_count`` from runs flagged as successful
+    via ``attribute_outcome(success=True)``. The "verified
+    useful" signal: a note that's been cited 10 times in
+    successful runs is more trustworthy than one cited 10 times
+    in mixed-outcome runs."""
+
+    last_cited_at: datetime | None = None
+    """Timestamp of the most recent run that cited this note.
+    Useful for staleness detection — notes not cited in months
+    can be candidates for archive. ``None`` if never cited."""
+
 
 class NoteSummary(BaseModel):
     """Cheap projection of :class:`Note` for index views.
@@ -147,6 +166,17 @@ class NoteSummary(BaseModel):
     archived_at: datetime | None = None
     """Mirrors :attr:`Note.archived_at`. Lets index renderers show
     an "(archived)" badge without re-reading the body."""
+
+    cited_count: int = 0
+    """Mirrors :attr:`Note.cited_count`. Available in summary so
+    listing UIs can sort by popularity without fetching bodies."""
+
+    success_count: int = 0
+    """Mirrors :attr:`Note.success_count`."""
+
+    last_cited_at: datetime | None = None
+    """Mirrors :attr:`Note.last_cited_at`. Lets index renderers
+    flag stale notes."""
 
 
 class NoteMatch(BaseModel):

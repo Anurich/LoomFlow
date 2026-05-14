@@ -68,6 +68,9 @@ def summary_from_note(note: Note) -> NoteSummary:
         lede=extract_lede(note.body),
         namespace=note.namespace,
         archived_at=note.archived_at,
+        cited_count=note.cited_count,
+        success_count=note.success_count,
+        last_cited_at=note.last_cited_at,
     )
 
 
@@ -113,6 +116,16 @@ def render_note_file(note: Note) -> str:
         fm_lines.append(f"answered_by: {_yaml_quote(note.answered_by)}")
     if note.parent_slug is not None:
         fm_lines.append(f"parent_slug: {_yaml_quote(note.parent_slug)}")
+    # Citation fields — emit only when non-default so legacy notes
+    # stay lean. Zero counts and None timestamps are absent.
+    if note.cited_count:
+        fm_lines.append(f"cited_count: {note.cited_count}")
+    if note.success_count:
+        fm_lines.append(f"success_count: {note.success_count}")
+    if note.last_cited_at is not None:
+        fm_lines.append(
+            f"last_cited_at: {note.last_cited_at.isoformat()}"
+        )
     fm_lines.append("---")
     return "\n".join(fm_lines) + "\n\n" + note.body.rstrip() + "\n"
 
@@ -198,7 +211,25 @@ def note_from_frontmatter(fm: dict[str, Any], body: str) -> Note:
         answered=_parse_bool_optional(fm.get("answered")),
         answered_by=fm.get("answered_by"),
         parent_slug=fm.get("parent_slug"),
+        cited_count=_parse_int(fm.get("cited_count")),
+        success_count=_parse_int(fm.get("success_count")),
+        last_cited_at=_parse_dt_optional(fm.get("last_cited_at")),
     )
+
+
+def _parse_int(value: Any) -> int:
+    """Defensive int parse — legacy notes have no cited_count field
+    (returns 0) and human-edited values may be strings."""
+    if value is None:
+        return 0
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return 0
+    return 0
 
 
 def _parse_dt(value: Any) -> datetime:

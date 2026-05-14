@@ -39,6 +39,29 @@ if TYPE_CHECKING:
     from ..core.protocols import Embedder
 
 
+def _log_citation(slug: str) -> None:
+    """Add ``slug`` to the per-run citation set if one is active."""
+    from ..core.context import _ambient_citations_var
+    citations = _ambient_citations_var.get()
+    if citations is None:
+        return
+    try:
+        citations.add(slug)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _drain_citations() -> set[str]:
+    """Snapshot + clear the per-run citation set."""
+    from ..core.context import _ambient_citations_var
+    citations = _ambient_citations_var.get()
+    if citations is None:
+        return set()
+    snapshot = set(citations)
+    citations.clear()
+    return snapshot
+
+
 class InMemoryWorkspace:
     """Dict-backed shared notebook.
 
@@ -202,6 +225,7 @@ class InMemoryWorkspace:
         # readable by slug — only listing / search exclude them.
         direct = self._notes.get((user_id, slug_or_title))
         if direct is not None:
+            _log_citation(direct.slug)
             return direct
         needle = slug_or_title.lower()
         candidates = [
@@ -212,7 +236,9 @@ class InMemoryWorkspace:
         if not candidates:
             return None
         candidates.sort(key=lambda n: n.updated_at, reverse=True)
-        return candidates[0]
+        winner = candidates[0]
+        _log_citation(winner.slug)
+        return winner
 
     async def list_notes(
         self,
@@ -248,6 +274,7 @@ class InMemoryWorkspace:
         namespace: str | None = None,
         include_archived: bool = False,
         mode: str = "auto",
+        boost_relevance: bool = False,
         limit: int = 10,
     ) -> list[NoteMatch]:
         """Substring + tag search (BM25-ish). When an embedder is
@@ -272,17 +299,23 @@ class InMemoryWorkspace:
             effective_mode = "hybrid" if has_embedder else "bm25"
         if effective_mode in ("semantic", "hybrid") and not has_embedder:
             effective_mode = "bm25"
+        def _boost(results: list[NoteMatch]) -> list[NoteMatch]:
+            return (
+                _apply_relevance_boost(results, candidates, limit)
+                if boost_relevance else results
+            )
+
         if effective_mode == "bm25":
-            return _score_bm25(q, candidates, limit)
+            return _boost(_score_bm25(q, candidates, limit))
         assert self._embedder is not None  # narrowed for type-checker
         try:
             qvec = await self._embedder.embed(query)
         except anyio.get_cancelled_exc_class():
             raise
         except Exception:  # noqa: BLE001
-            return _score_bm25(q, candidates, limit)
+            return _boost(_score_bm25(q, candidates, limit))
         if not qvec:
-            return _score_bm25(q, candidates, limit)
+            return _boost(_score_bm25(q, candidates, limit))
         sem_scores: dict[str, float] = {}
         for n in candidates:
             stored = self._embeddings.get((user_id, n.slug))
@@ -290,9 +323,9 @@ class InMemoryWorkspace:
                 continue
             sem_scores[n.slug] = _cosine(qvec, stored)
         if effective_mode == "semantic":
-            return _score_semantic(sem_scores, candidates, limit)
+            return _boost(_score_semantic(sem_scores, candidates, limit))
         bm25 = _score_bm25(q, candidates, limit=len(candidates))
-        return _rrf_fuse(bm25, sem_scores, candidates, limit)
+        return _boost(_rrf_fuse(bm25, sem_scores, candidates, limit))
 
     # ---- versioning ------------------------------------------------------
 
@@ -328,7 +361,39 @@ class InMemoryWorkspace:
         hist = self._history.get((user_id, author, slug), [])
         if version < 1 or version > len(hist):
             return None
+        _log_citation(slug)
         return hist[version - 1]
+
+    async def attribute_outcome(
+        self,
+        *,
+        success: bool,
+        user_id: str | None = None,
+    ) -> int:
+        cited = _drain_citations()
+        if not cited:
+            return 0
+        now = datetime.now(UTC)
+        updated = 0
+        async with self._lock:
+            for slug in cited:
+                key = (user_id, slug)
+                existing = self._notes.get(key)
+                if existing is None:
+                    continue
+                patched = existing.model_copy(
+                    update={
+                        "cited_count": existing.cited_count + 1,
+                        "success_count": (
+                            existing.success_count + 1 if success
+                            else existing.success_count
+                        ),
+                        "last_cited_at": now,
+                    }
+                )
+                self._notes[key] = patched
+                updated += 1
+        return updated
 
     # ---- introspection / lifecycle --------------------------------------
 
@@ -492,3 +557,32 @@ def _cosine(a: list[float], b: list[float]) -> float:
     if na == 0.0 or nb == 0.0:
         return 0.0
     return dot / (na * nb)
+
+
+def _apply_relevance_boost(
+    results: list[NoteMatch],
+    candidates: list[Note],
+    limit: int,
+) -> list[NoteMatch]:
+    """See ``loomflow.workspace.disk._apply_relevance_boost``."""
+    note_by_slug = {n.slug: n for n in candidates}
+    boosted: list[NoteMatch] = []
+    for m in results:
+        n = note_by_slug.get(m.summary.slug)
+        if n is None:
+            boosted.append(m)
+            continue
+        boost = (
+            1.0
+            + math.log(1 + n.cited_count)
+            + 2.0 * math.log(1 + n.success_count)
+        )
+        boosted.append(
+            NoteMatch(
+                summary=m.summary,
+                score=m.score * boost,
+                snippet=m.snippet,
+            )
+        )
+    boosted.sort(key=lambda m: m.score, reverse=True)
+    return boosted[:limit]

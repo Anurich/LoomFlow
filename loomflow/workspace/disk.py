@@ -82,6 +82,35 @@ LOOM_META_DIR = ".loom"
 HISTORY_DIR = ".history"
 
 
+def _log_citation(slug: str) -> None:
+    """Add ``slug`` to the per-run citation set if one is active.
+
+    No-op outside a run (contextvar default is ``None``). Best-
+    effort — failures to log a citation must NEVER break a read.
+    """
+    from ..core.context import _ambient_citations_var
+    citations = _ambient_citations_var.get()
+    if citations is None:
+        return
+    try:
+        citations.add(slug)
+    except Exception:  # noqa: BLE001 — observation, not load-bearing
+        pass
+
+
+def _drain_citations() -> set[str]:
+    """Snapshot + clear the per-run citation set, returning the
+    slugs that were cited. ``Workspace.attribute_outcome`` calls
+    this once at the end of a run."""
+    from ..core.context import _ambient_citations_var
+    citations = _ambient_citations_var.get()
+    if citations is None:
+        return set()
+    snapshot = set(citations)
+    citations.clear()
+    return snapshot
+
+
 class LocalDiskWorkspace:
     """File-backed :class:`Workspace` with a per-user partition.
 
@@ -404,7 +433,56 @@ class LocalDiskWorkspace:
             return None
         text = await anyio.to_thread.run_sync(path.read_text)
         fm, body = parse_note_file(text)
-        return note_from_frontmatter(fm, body)
+        note = note_from_frontmatter(fm, body)
+        _log_citation(slug)
+        return note
+
+    async def attribute_outcome(
+        self,
+        *,
+        success: bool,
+        user_id: str | None = None,
+    ) -> int:
+        cited = _drain_citations()
+        if not cited:
+            return 0
+        now = datetime.now(UTC)
+        updated = 0
+        for slug in cited:
+            # Find the note across authors — citations don't carry
+            # author identity, so scan any author dir.
+            path = self._find_note_by_slug_any_author(user_id, slug)
+            if path is None:
+                continue
+            existing = await self._load_note(path)
+            patched = existing.model_copy(
+                update={
+                    "cited_count": existing.cited_count + 1,
+                    "success_count": (
+                        existing.success_count + 1 if success
+                        else existing.success_count
+                    ),
+                    "last_cited_at": now,
+                }
+            )
+            # Write in-place — citation update is not a "user edit"
+            # so we don't snapshot history.
+            await self._write_note_atomic(path, patched)
+            updated += 1
+        if updated:
+            await self._regenerate_index(user_id)
+        return updated
+
+    def _find_note_by_slug_any_author(
+        self, user_id: str | None, slug: str
+    ) -> Path | None:
+        notes_root = self._user_root(user_id) / NOTES_DIR
+        if not notes_root.exists():
+            return None
+        for p in notes_root.rglob(f"{slug}.md"):
+            if not _is_in_meta_dir(p):
+                return p
+        return None
 
     def _history_dir(
         self, user_id: str | None, author: str, slug: str
@@ -528,21 +606,26 @@ class LocalDiskWorkspace:
         *,
         user_id: str | None = None,
     ) -> Note | None:
+        result: Note | None = None
         # First, try slug match across every author dir under this user.
         for path in self._walk_note_files(user_id):
             if path.stem == slug_or_title:
-                return await self._load_note(path)
-        # Then case-insensitive title substring match.
-        needle = slug_or_title.lower()
-        candidates: list[Note] = []
-        for path in self._walk_note_files(user_id):
-            note = await self._load_note(path)
-            if needle in note.title.lower():
-                candidates.append(note)
-        if not candidates:
-            return None
-        candidates.sort(key=lambda n: n.updated_at, reverse=True)
-        return candidates[0]
+                result = await self._load_note(path)
+                break
+        if result is None:
+            # Then case-insensitive title substring match.
+            needle = slug_or_title.lower()
+            candidates: list[Note] = []
+            for path in self._walk_note_files(user_id):
+                note = await self._load_note(path)
+                if needle in note.title.lower():
+                    candidates.append(note)
+            if not candidates:
+                return None
+            candidates.sort(key=lambda n: n.updated_at, reverse=True)
+            result = candidates[0]
+        _log_citation(result.slug)
+        return result
 
     async def list_notes(
         self,
@@ -577,6 +660,7 @@ class LocalDiskWorkspace:
         namespace: str | None = None,
         include_archived: bool = False,
         mode: str = "auto",
+        boost_relevance: bool = False,
         limit: int = 10,
     ) -> list[NoteMatch]:
         q = query.lower().strip()
@@ -601,7 +685,11 @@ class LocalDiskWorkspace:
                 continue
             candidates.append(note)
         if effective_mode == "bm25":
-            return _score_bm25(q, candidates, limit)
+            results = _score_bm25(q, candidates, limit)
+            return (
+                _apply_relevance_boost(results, candidates, limit)
+                if boost_relevance else results
+            )
         # Semantic / hybrid: compute query embedding once.
         assert self._embedder is not None  # narrow for type-checker
         try:
@@ -609,15 +697,31 @@ class LocalDiskWorkspace:
         except anyio.get_cancelled_exc_class():
             raise
         except Exception:  # noqa: BLE001 — fall back to BM25 on embed failure
-            return _score_bm25(q, candidates, limit)
+            results = _score_bm25(q, candidates, limit)
+            return (
+                _apply_relevance_boost(results, candidates, limit)
+                if boost_relevance else results
+            )
         if not qvec:
-            return _score_bm25(q, candidates, limit)
+            results = _score_bm25(q, candidates, limit)
+            return (
+                _apply_relevance_boost(results, candidates, limit)
+                if boost_relevance else results
+            )
         sem_scores = await self._semantic_scores(qvec, candidates, user_id)
         if effective_mode == "semantic":
-            return _score_semantic(sem_scores, candidates, limit)
+            results = _score_semantic(sem_scores, candidates, limit)
+            return (
+                _apply_relevance_boost(results, candidates, limit)
+                if boost_relevance else results
+            )
         # Hybrid: reciprocal rank fusion of BM25 + semantic rankings.
         bm25 = _score_bm25(q, candidates, limit=len(candidates))
-        return _rrf_fuse(bm25, sem_scores, candidates, limit)
+        results = _rrf_fuse(bm25, sem_scores, candidates, limit)
+        return (
+            _apply_relevance_boost(results, candidates, limit)
+            if boost_relevance else results
+        )
 
     async def _semantic_scores(
         self,
@@ -946,3 +1050,42 @@ def _cosine(a: list[float], b: list[float]) -> float:
     if na == 0.0 or nb == 0.0:
         return 0.0
     return dot / (na * nb)
+
+
+def _apply_relevance_boost(
+    results: list[NoteMatch],
+    candidates: list[Note],
+    limit: int,
+) -> list[NoteMatch]:
+    """Multiply each result's score by a relevance boost based on
+    citation metadata, then re-sort.
+
+    Formula: ``boost = 1 + log(1 + cited_count) + 2*log(1 +
+    success_count)``. Success-citations weighted more than mere
+    citations — a note that's been validated through successful
+    runs is more trustworthy than one that's been read but never
+    associated with success. Log scaling so a runaway-popular
+    note doesn't drown out new ones with a single citation.
+    """
+    import math
+    note_by_slug = {n.slug: n for n in candidates}
+    boosted: list[NoteMatch] = []
+    for m in results:
+        n = note_by_slug.get(m.summary.slug)
+        if n is None:
+            boosted.append(m)
+            continue
+        boost = (
+            1.0
+            + math.log(1 + n.cited_count)
+            + 2.0 * math.log(1 + n.success_count)
+        )
+        boosted.append(
+            NoteMatch(
+                summary=m.summary,
+                score=m.score * boost,
+                snippet=m.snippet,
+            )
+        )
+    boosted.sort(key=lambda m: m.score, reverse=True)
+    return boosted[:limit]
