@@ -35,16 +35,24 @@ Storage:
 
 Lenient input coercion:
 
-The ``steps`` argument of :func:`plan_write` accepts four shapes
-(provider serializations vary):
+The ``steps`` argument of :func:`plan_write` is coerced from
+whatever the model serialised — provider serializations vary
+wildly, and weaker models (gpt-4.1-mini, etc.) are especially
+loose. Accepted shapes:
 
 * native ``list[dict]`` — the ideal shape
-* JSON-string of a list — ``'[{"description": ...}, ...]'``
-* JSON-string of an object — ``'{"steps": [...]}'``
+* ``list[str]`` — a list of plain-text descriptions (each becomes
+  a ``todo`` step)
+* a list with elements that are themselves JSON-string dicts
+* a bare ``dict`` — either a ``{"steps": [...]}`` wrapper or a
+  single step the model forgot to wrap in a list
+* JSON-string of any of the above
 * free-form numbered text — ``'1. step a\\n2. step b'``
 
 This mirrors the lenient-by-default tool-input convention loomflow
-applies elsewhere (str → int coercion for timeouts, etc.).
+applies elsewhere (str → int coercion for timeouts, etc.). The
+rule: salvage anything salvageable; only error when there is
+genuinely nothing to work with.
 """
 
 from __future__ import annotations
@@ -209,58 +217,108 @@ def get_active_plan() -> LivingPlan | None:
     return state.plan
 
 
-def _coerce_steps(value: Any) -> list[dict[str, Any]] | str:
-    """Try to coerce the model's serialization of ``steps`` into a
-    native list-of-dicts. Returns the list on success, or an error
-    message string the tool returns verbatim to the model.
+def _coerce_one_step(item: Any) -> dict[str, Any] | None:
+    """Coerce a single step-ish element into a step dict, or
+    ``None`` if it can't be salvaged.
 
-    Handles four input shapes (see module docstring). Anything else
-    yields a string error message — the tool propagates that back
-    as the tool result so the model sees actionable feedback.
+    Weak models serialise step lists inconsistently — a list of
+    plain strings, a list of stringified-JSON dicts, a mix — so
+    EVERY element of a ``steps`` list goes through here:
+
+    * a ``dict`` is used as-is;
+    * a string that parses as a JSON object becomes that dict;
+    * any other non-empty string becomes a ``todo`` step described
+      by the text;
+    * anything else (int, None, …) yields ``None`` and is dropped.
     """
+    if isinstance(item, dict):
+        return item
+    if isinstance(item, str):
+        s = item.strip()
+        if not s:
+            return None
+        if s[0] in "{[":
+            try:
+                inner = json.loads(s)
+            except json.JSONDecodeError:
+                inner = None
+            if isinstance(inner, dict):
+                return inner
+        return {"description": s, "status": "todo"}
+    return None
+
+
+def _coerce_numbered_text(text: str) -> list[dict[str, Any]]:
+    """Last-resort fallback: turn free-form numbered / bulleted
+    text into ``todo`` steps. Each non-empty line that starts with
+    a number + ``.`` / ``)`` / ``:`` or a ``- `` / ``* `` bullet
+    becomes one step (the prefix is stripped); other non-empty
+    lines are kept verbatim as steps too."""
+    out: list[dict[str, Any]] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        for prefix in ("- ", "* "):
+            if line.startswith(prefix):
+                line = line[len(prefix):]
+                break
+        else:
+            cut = 0
+            while cut < len(line) and line[cut].isdigit():
+                cut += 1
+            if cut and cut < len(line) and line[cut] in ".):":
+                line = line[cut + 1:].strip()
+        if line:
+            out.append({"description": line, "status": "todo"})
+    return out
+
+
+def _coerce_steps(value: Any) -> list[dict[str, Any]] | str:
+    """Coerce the model's serialization of ``steps`` into a native
+    list-of-dicts. Returns the list on success, or an error string
+    the tool returns verbatim so the model sees actionable feedback.
+
+    See the module docstring for the accepted shapes. The guiding
+    rule: salvage anything salvageable; only error when the input
+    is genuinely empty or structurally hopeless.
+    """
+    # A bare dict: either a ``{"steps": [...]}`` wrapper, or a
+    # single step the model forgot to wrap in a list.
+    if isinstance(value, dict):
+        value = value["steps"] if "steps" in value else [value]
     if isinstance(value, list):
-        return [s for s in value if isinstance(s, dict)]
+        out = [
+            step
+            for step in (_coerce_one_step(s) for s in value)
+            if step is not None
+        ]
+        if not out and value:
+            return (
+                "ERROR: `steps` had items but none were usable. "
+                "Each step should be an object with a "
+                "`description` (and optional `status` / `finding`), "
+                "or a plain string description."
+            )
+        return out
     if not isinstance(value, str):
         return (
-            "ERROR: `steps` must be a list of dicts. "
+            "ERROR: `steps` must be a list of step objects. "
             f"Got: {type(value).__name__}"
         )
     text = value.strip()
-    parsed: Any = None
+    if not text:
+        return "ERROR: `steps` was empty."
     try:
         parsed = json.loads(text)
     except json.JSONDecodeError:
-        # Numbered-text fallback. Each non-empty line that starts
-        # with a number + "." / ")" / ":" or a "- " / "* " bullet
-        # becomes one ``todo`` step. Anything else is ignored.
-        out: list[dict[str, Any]] = []
-        for raw in text.splitlines():
-            line = raw.strip()
-            if not line:
-                continue
-            for prefix in ("- ", "* "):
-                if line.startswith(prefix):
-                    line = line[len(prefix):]
-                    break
-            else:
-                cut = 0
-                while cut < len(line) and line[cut].isdigit():
-                    cut += 1
-                if cut and cut < len(line) and line[cut] in ".):":
-                    line = line[cut + 1:].strip()
-            if line:
-                out.append({"description": line, "status": "todo"})
-        return out
-    # Unwrap ``{"steps": [...]}`` if the model wrapped a list in
-    # an outer object.
-    if isinstance(parsed, dict) and "steps" in parsed:
-        parsed = parsed["steps"]
-    if not isinstance(parsed, list):
-        return (
-            "ERROR: parsed `steps` is not a list. "
-            f"Got: {type(parsed).__name__}"
-        )
-    return [s for s in parsed if isinstance(s, dict)]
+        # Not JSON — treat as free-form numbered / bulleted text.
+        return _coerce_numbered_text(text)
+    # Parsed cleanly — recurse so the list / dict / wrapper logic
+    # above handles it uniformly. (Recursion terminates: each JSON
+    # decode strips a layer, and a non-JSON string hits the
+    # numbered-text branch.)
+    return _coerce_steps(parsed)
 
 
 def _current_user_id() -> str | None:

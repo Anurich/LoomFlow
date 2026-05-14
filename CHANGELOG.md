@@ -9,6 +9,22 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 
 ## [0.10.0] — unreleased
 
+### Fixed — LivingPlan `plan_write` rejected weak-model step shapes
+
+`_coerce_steps` filtered `steps` down to `isinstance(s, dict)` —
+so when a weaker model (gpt-4.1-mini and friends) emitted `steps`
+as a list of plain description *strings*, every element was
+dropped and the plan came out empty (`0/0 done`). A bare step
+dict the model forgot to wrap in a list errored outright.
+
+Coercion is now genuinely lenient — it salvages: `list[str]`
+(each string → a `todo` step), a list whose elements are
+stringified-JSON dicts, a bare `dict` (single step, auto-wrapped),
+and any of those inside a JSON string. It only errors when the
+input is empty or has nothing salvageable. Per-element coercion
+moves into `_coerce_one_step`; numbered-text into
+`_coerce_numbered_text`.
+
 ### Fixed — `search_notes` multi-word queries (was returning nothing)
 
 The workspace BM25 scorer tested the *entire query string* as one

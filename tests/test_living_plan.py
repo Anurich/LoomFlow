@@ -133,6 +133,59 @@ def test_coerce_invalid_type_returns_error_message() -> None:
 
 
 # ---------------------------------------------------------------------------
+# _coerce_steps — weak-model shapes (gpt-4.1-mini etc. are loose)
+# ---------------------------------------------------------------------------
+
+
+def test_coerce_list_of_plain_strings() -> None:
+    """gpt-4.1-mini emits ``steps`` as a list of bare description
+    strings. Each must become a ``todo`` step — the old coercion
+    filtered non-dicts out and produced an empty plan."""
+    out = _coerce_steps(["add sub() to calc.py", "wire it into compute()"])
+    assert isinstance(out, list)
+    assert len(out) == 2
+    assert out[0]["description"] == "add sub() to calc.py"
+    assert out[0]["status"] == "todo"
+
+
+def test_coerce_bare_dict_single_step() -> None:
+    """A single step dict the model forgot to wrap in a list is
+    wrapped, not rejected."""
+    out = _coerce_steps({"description": "do the thing", "status": "doing"})
+    assert isinstance(out, list)
+    assert len(out) == 1
+    assert out[0]["description"] == "do the thing"
+
+
+def test_coerce_list_of_stringified_dicts() -> None:
+    """Some models double-encode: a list whose elements are each a
+    JSON-string of a step dict."""
+    out = _coerce_steps(
+        ['{"description": "a", "status": "done"}', '{"description": "b"}']
+    )
+    assert isinstance(out, list)
+    assert len(out) == 2
+    assert out[0]["status"] == "done"
+
+
+def test_coerce_json_string_of_list_of_strings() -> None:
+    """JSON-string wrapping a list of plain strings — combines the
+    string-parse path with the list-of-strings path."""
+    out = _coerce_steps('["first", "second"]')
+    assert isinstance(out, list)
+    assert len(out) == 2
+    assert out[1]["description"] == "second"
+
+
+def test_coerce_list_with_items_but_none_usable_errors() -> None:
+    """A non-empty list that yields nothing salvageable is an
+    actionable error, not a silent empty plan."""
+    out = _coerce_steps([1, 2, None])
+    assert isinstance(out, str)
+    assert "none were usable" in out
+
+
+# ---------------------------------------------------------------------------
 # plan_write / plan_read via direct .execute (ambient state set
 # manually via set_run_context + the contextvar)
 # ---------------------------------------------------------------------------
