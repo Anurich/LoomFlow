@@ -33,11 +33,160 @@ from loomflow.tools import (
     default_workdir,
     edit_tool,
     filesystem_tools,
+    find_tool,
+    grep_tool,
+    ls_tool,
     read_tool,
     write_tool,
 )
 
 pytestmark = pytest.mark.anyio
+
+
+# ---------------------------------------------------------------------------
+# grep_tool / find_tool / ls_tool — the read-only navigation kernel
+# ---------------------------------------------------------------------------
+
+
+async def test_grep_finds_matches(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("def hello():\n    return 1\n")
+    (tmp_path / "b.py").write_text("x = 2\ndef world():\n    pass\n")
+    grep = grep_tool(tmp_path)
+    out = await grep.execute({"pattern": r"def \w+"})
+    assert "a.py:1:" in out
+    assert "b.py:2:" in out
+
+
+async def test_grep_glob_filter(tmp_path: Path) -> None:
+    (tmp_path / "keep.py").write_text("TARGET here\n")
+    (tmp_path / "skip.txt").write_text("TARGET here\n")
+    grep = grep_tool(tmp_path)
+    out = await grep.execute({"pattern": "TARGET", "glob": "*.py"})
+    assert "keep.py" in out
+    assert "skip.txt" not in out
+
+
+async def test_grep_skips_noise_dirs(tmp_path: Path) -> None:
+    (tmp_path / "src.py").write_text("NEEDLE\n")
+    noise = tmp_path / "node_modules"
+    noise.mkdir()
+    (noise / "junk.py").write_text("NEEDLE\n")
+    grep = grep_tool(tmp_path)
+    out = await grep.execute({"pattern": "NEEDLE"})
+    assert "src.py" in out
+    assert "node_modules" not in out
+
+
+async def test_grep_no_match(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("nothing here\n")
+    grep = grep_tool(tmp_path)
+    out = await grep.execute({"pattern": "absent_pattern"})
+    assert "No matches" in out
+
+
+async def test_grep_invalid_regex(tmp_path: Path) -> None:
+    grep = grep_tool(tmp_path)
+    out = await grep.execute({"pattern": "[unclosed"})
+    assert "ERROR" in out
+    assert "invalid regex" in out
+
+
+async def test_grep_ignore_case(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("HELLO World\n")
+    grep = grep_tool(tmp_path)
+    sensitive = await grep.execute({"pattern": "hello"})
+    insensitive = await grep.execute(
+        {"pattern": "hello", "ignore_case": True}
+    )
+    assert "No matches" in sensitive
+    assert "a.py:1:" in insensitive
+
+
+async def test_grep_path_escape_rejected(tmp_path: Path) -> None:
+    grep = grep_tool(tmp_path)
+    out = await grep.execute({"pattern": "x", "path": "../../etc"})
+    assert "ERROR" in out
+
+
+async def test_find_by_glob(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text("")
+    (tmp_path / "test_main.py").write_text("")
+    (tmp_path / "readme.md").write_text("")
+    find = find_tool(tmp_path)
+    py = await find.execute({"glob": "*.py"})
+    assert "main.py" in py
+    assert "test_main.py" in py
+    assert "readme.md" not in py
+
+
+async def test_find_recursive(tmp_path: Path) -> None:
+    sub = tmp_path / "pkg" / "sub"
+    sub.mkdir(parents=True)
+    (sub / "deep.py").write_text("")
+    find = find_tool(tmp_path)
+    out = await find.execute({"glob": "*.py"})
+    assert "pkg/sub/deep.py" in out
+
+
+async def test_find_skips_noise(tmp_path: Path) -> None:
+    (tmp_path / "real.py").write_text("")
+    venv = tmp_path / ".venv"
+    venv.mkdir()
+    (venv / "lib.py").write_text("")
+    find = find_tool(tmp_path)
+    out = await find.execute({"glob": "*.py"})
+    assert "real.py" in out
+    assert ".venv" not in out
+
+
+async def test_find_no_match(tmp_path: Path) -> None:
+    find = find_tool(tmp_path)
+    out = await find.execute({"glob": "*.nonexistent"})
+    assert "No files matching" in out
+
+
+async def test_ls_lists_directory(tmp_path: Path) -> None:
+    (tmp_path / "file.txt").write_text("abc")
+    (tmp_path / "subdir").mkdir()
+    ls = ls_tool(tmp_path)
+    out = await ls.execute({})
+    assert "subdir/" in out
+    assert "file.txt" in out
+
+
+async def test_ls_dirs_first(tmp_path: Path) -> None:
+    (tmp_path / "zzz_file.txt").write_text("")
+    (tmp_path / "aaa_dir").mkdir()
+    ls = ls_tool(tmp_path)
+    out = await ls.execute({})
+    # Directory should be listed before the file despite alpha order.
+    assert out.index("aaa_dir/") < out.index("zzz_file.txt")
+
+
+async def test_ls_empty_directory(tmp_path: Path) -> None:
+    sub = tmp_path / "empty"
+    sub.mkdir()
+    ls = ls_tool(tmp_path)
+    out = await ls.execute({"path": "empty"})
+    assert "empty directory" in out
+
+
+async def test_ls_not_a_directory(tmp_path: Path) -> None:
+    (tmp_path / "f.txt").write_text("x")
+    ls = ls_tool(tmp_path)
+    out = await ls.execute({"path": "f.txt"})
+    assert "ERROR" in out
+    assert "not a directory" in out
+
+
+async def test_filesystem_tools_bundle_now_six(tmp_path: Path) -> None:
+    """filesystem_tools() now returns the 6-tool read-only +
+    mutating kernel (read/write/edit/grep/find/ls), bash excluded."""
+    tools = filesystem_tools(tmp_path)
+    names = {t.name for t in tools}
+    assert names == {
+        "read", "write", "edit", "grep", "find", "ls",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -351,10 +500,15 @@ async def test_bash_tool_marked_destructive() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_filesystem_tools_returns_three(tmp_path: Path) -> None:
+def test_filesystem_tools_returns_kernel(tmp_path: Path) -> None:
+    """``filesystem_tools()`` returns the 6-tool read-only +
+    mutating kernel (v0.10.1: grew from 3 to 6 — added the
+    grep / find / ls navigation tools). ``bash`` stays excluded."""
     tools = filesystem_tools(tmp_path)
-    assert len(tools) == 3
-    assert {t.name for t in tools} == {"read", "write", "edit"}
+    assert len(tools) == 6
+    assert {t.name for t in tools} == {
+        "read", "write", "edit", "grep", "find", "ls",
+    }
     assert all(isinstance(t, Tool) for t in tools)
 
 
@@ -400,8 +554,9 @@ async def test_no_arg_factories_share_default_workdir() -> None:
 
 async def test_filesystem_tools_no_arg_uses_default() -> None:
     tools = filesystem_tools()
-    assert len(tools) == 3
-    # Use them — write then read
+    assert len(tools) == 6
+    # Use them — write then read (read/write are the first two,
+    # order preserved for back-compat).
     await tools[1].execute({"path": "fs_default.txt", "content": "x"})
     out = await tools[0].execute({"path": "fs_default.txt"})
     assert "x" in out

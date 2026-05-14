@@ -621,6 +621,298 @@ def bash_tool(
 
 
 # ---------------------------------------------------------------------------
+# grep_tool — search file contents
+# ---------------------------------------------------------------------------
+
+
+# Directories never worth walking — keeps grep / find / ls fast and
+# their output relevant in real codebases.
+_NOISE_DIRS = frozenset({
+    ".git", ".hg", ".svn", "node_modules", "__pycache__",
+    ".venv", "venv", ".mypy_cache", ".pytest_cache", ".ruff_cache",
+    "dist", "build", ".loom", ".idea", ".vscode", ".tox",
+})
+
+
+def grep_tool(
+    workdir: Path | str | None = None,
+    *,
+    name: str = "grep",
+    max_results: int = 200,
+) -> Tool:
+    """Build a :class:`Tool` that searches file contents for a
+    regex under ``workdir`` — the read-only "find me where X is"
+    tool every coding agent needs.
+
+    The tool's signature seen by the model:
+        ``grep(pattern: str, path: str = ".", glob: str = "*",
+               ignore_case: bool = False)``
+
+    Returns matching lines prefixed ``relpath:lineno: content``,
+    capped at ``max_results``. Skips noise dirs (``.git``,
+    ``node_modules``, ``__pycache__``, ...) so output stays
+    relevant in real repos. Non-text files are skipped silently.
+
+    ``workdir`` is optional; ``None`` uses the framework's default
+    tempdir.
+    """
+    workdir_path = _resolve_workdir(workdir)
+
+    async def _grep(
+        pattern: str,
+        path: str = ".",
+        glob: str = "*",
+        ignore_case: bool = False,
+    ) -> str:
+        try:
+            root = _resolve_within(workdir_path, path)
+        except PathEscapeError as exc:
+            return f"ERROR: {exc}"
+        if not root.exists():
+            return f"ERROR: path not found: {path}"
+        try:
+            flags = re.IGNORECASE if ignore_case else 0
+            rx = re.compile(pattern, flags)
+        except re.error as exc:
+            return f"ERROR: invalid regex {pattern!r}: {exc}"
+
+        def _search() -> list[str]:
+            hits: list[str] = []
+            candidates = (
+                [root] if root.is_file() else sorted(root.rglob(glob))
+            )
+            for fp in candidates:
+                if not fp.is_file():
+                    continue
+                if any(part in _NOISE_DIRS for part in fp.parts):
+                    continue
+                try:
+                    text = fp.read_text()
+                except (UnicodeDecodeError, OSError):
+                    continue  # binary / unreadable — skip
+                rel = fp.relative_to(workdir_path)
+                for i, line in enumerate(text.splitlines(), 1):
+                    if rx.search(line):
+                        hits.append(f"{rel}:{i}: {line.rstrip()}")
+                        if len(hits) >= max_results:
+                            return hits
+            return hits
+
+        hits = await anyio.to_thread.run_sync(_search)
+        if not hits:
+            return f"No matches for {pattern!r} under {path}"
+        out = "\n".join(hits)
+        if len(hits) >= max_results:
+            out += f"\n... (capped at {max_results} matches)"
+        return out
+
+    return Tool(
+        name=name,
+        description=(
+            f"Search file contents for a regex under {str(workdir_path)}. "
+            "Returns matching lines as 'relpath:lineno: content'. "
+            "Skips .git / node_modules / __pycache__ and other noise "
+            "dirs. Use this to locate where a symbol / string / "
+            "pattern lives before reading or editing."
+        ),
+        fn=_grep,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "pattern": {
+                    "type": "string",
+                    "description": "Python regex to search for.",
+                },
+                "path": {
+                    "type": "string",
+                    "description": (
+                        "Directory (or single file) to search "
+                        "under, relative to the workdir. Default '.'."
+                    ),
+                },
+                "glob": {
+                    "type": "string",
+                    "description": (
+                        "Filename glob to restrict the search "
+                        "(e.g. '*.py'). Default '*' (all files)."
+                    ),
+                },
+                "ignore_case": {
+                    "type": "boolean",
+                    "description": "Case-insensitive match. Default false.",
+                },
+            },
+            "required": ["pattern"],
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# find_tool — locate files by name
+# ---------------------------------------------------------------------------
+
+
+def find_tool(
+    workdir: Path | str | None = None,
+    *,
+    name: str = "find",
+    max_results: int = 300,
+) -> Tool:
+    """Build a :class:`Tool` that finds files by name-glob under
+    ``workdir``.
+
+    The tool's signature seen by the model:
+        ``find(glob: str, path: str = ".")``
+
+    Returns matching paths (relative to the workdir), one per
+    line, capped at ``max_results``. Skips noise dirs. Use this
+    to answer "where is the file called X" / "what test files
+    exist" without shelling out.
+
+    ``workdir`` is optional; ``None`` uses the framework's default
+    tempdir.
+    """
+    workdir_path = _resolve_workdir(workdir)
+
+    async def _find(glob: str, path: str = ".") -> str:
+        try:
+            root = _resolve_within(workdir_path, path)
+        except PathEscapeError as exc:
+            return f"ERROR: {exc}"
+        if not root.exists():
+            return f"ERROR: path not found: {path}"
+
+        def _walk() -> list[str]:
+            out: list[str] = []
+            for fp in sorted(root.rglob(glob)):
+                if any(part in _NOISE_DIRS for part in fp.parts):
+                    continue
+                out.append(str(fp.relative_to(workdir_path)))
+                if len(out) >= max_results:
+                    break
+            return out
+
+        matches = await anyio.to_thread.run_sync(_walk)
+        if not matches:
+            return f"No files matching {glob!r} under {path}"
+        result = "\n".join(matches)
+        if len(matches) >= max_results:
+            result += f"\n... (capped at {max_results})"
+        return result
+
+    return Tool(
+        name=name,
+        description=(
+            f"Find files by name-glob under {str(workdir_path)}. "
+            "Returns matching relative paths, one per line. Skips "
+            ".git / node_modules / build dirs. Example globs: "
+            "'*.py', 'test_*.py', '**/config.*'."
+        ),
+        fn=_find,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "glob": {
+                    "type": "string",
+                    "description": (
+                        "Filename glob, e.g. '*.py' or "
+                        "'test_*.py'. Recursive by default."
+                    ),
+                },
+                "path": {
+                    "type": "string",
+                    "description": (
+                        "Directory to search under, relative to "
+                        "the workdir. Default '.'."
+                    ),
+                },
+            },
+            "required": ["glob"],
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# ls_tool — list a directory
+# ---------------------------------------------------------------------------
+
+
+def ls_tool(
+    workdir: Path | str | None = None,
+    *,
+    name: str = "ls",
+) -> Tool:
+    """Build a :class:`Tool` that lists a directory's entries
+    under ``workdir``.
+
+    The tool's signature seen by the model:
+        ``ls(path: str = ".")``
+
+    Returns one entry per line, directories suffixed with ``/``,
+    sorted dirs-first then files. Noise dirs are listed but not
+    recursed (this is a single-level listing). Use this to orient
+    in an unfamiliar part of the tree.
+
+    ``workdir`` is optional; ``None`` uses the framework's default
+    tempdir.
+    """
+    workdir_path = _resolve_workdir(workdir)
+
+    async def _ls(path: str = ".") -> str:
+        try:
+            target = _resolve_within(workdir_path, path)
+        except PathEscapeError as exc:
+            return f"ERROR: {exc}"
+        if not target.exists():
+            return f"ERROR: path not found: {path}"
+        if not target.is_dir():
+            return f"ERROR: not a directory: {path}"
+
+        def _list() -> str:
+            entries = sorted(
+                target.iterdir(),
+                key=lambda p: (p.is_file(), p.name.lower()),
+            )
+            lines: list[str] = []
+            for e in entries:
+                if e.is_dir():
+                    lines.append(f"{e.name}/")
+                else:
+                    try:
+                        size = e.stat().st_size
+                        lines.append(f"{e.name}  ({size}B)")
+                    except OSError:
+                        lines.append(e.name)
+            return "\n".join(lines) or "(empty directory)"
+
+        return await anyio.to_thread.run_sync(_list)
+
+    return Tool(
+        name=name,
+        description=(
+            f"List a directory's entries under {str(workdir_path)}. "
+            "Single-level (not recursive — use find for that). "
+            "Directories are suffixed '/', files show their byte "
+            "size. Sorted dirs-first."
+        ),
+        fn=_ls,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": (
+                        "Directory to list, relative to the "
+                        "workdir. Default '.'."
+                    ),
+                },
+            },
+            "required": [],
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
 # Bundle helper
 # ---------------------------------------------------------------------------
 
@@ -628,17 +920,23 @@ def bash_tool(
 def filesystem_tools(
     workdir: Path | str | None = None,
 ) -> list[Tool]:
-    """Return all three filesystem tools (read + write + edit)
-    bound to a single workdir. ``bash_tool`` is excluded — pair
-    them only when you want shell access too.
+    """Return the read-only + mutating filesystem tools bound to a
+    single workdir: ``read`` + ``write`` + ``edit`` + ``grep`` +
+    ``find`` + ``ls``. ``bash_tool`` is excluded — pair it in only
+    when you want shell access too.
 
-    ``workdir`` is optional; ``None`` uses the framework's default
-    tempdir (shared with bash_tool() called the same way)."""
+    This is the "Claude-Code-shaped" / Pi-kernel tool set minus
+    bash. ``workdir`` is optional; ``None`` uses the framework's
+    default tempdir (shared with bash_tool() called the same way).
+    """
     resolved = _resolve_workdir(workdir)
     return [
         read_tool(resolved),
         write_tool(resolved),
         edit_tool(resolved),
+        grep_tool(resolved),
+        find_tool(resolved),
+        ls_tool(resolved),
     ]
 
 
@@ -648,6 +946,9 @@ __all__ = [
     "default_workdir",
     "edit_tool",
     "filesystem_tools",
+    "find_tool",
+    "grep_tool",
+    "ls_tool",
     "read_tool",
     "write_tool",
 ]
