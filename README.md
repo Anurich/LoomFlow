@@ -1229,6 +1229,7 @@ End-to-end demo: [`examples/03_multi_user_sessions.py`](examples/03_multi_user_s
 | **Telemetry** | OpenTelemetry spans + metrics for every milestone | `NoTelemetry` (top-level); `from loomflow.observability import OTelTelemetry` |
 | **Audit log** | HMAC-signed JSONL or in-memory; tracks every tool call; entries attributed by `user_id` | `InMemoryAuditLog`, `AuditLog` (top-level); `from loomflow.security import FileAuditLog, verify_signature` |
 | **Certified values** | Freshness + lineage policies | `from loomflow.data import FreshnessPolicy, LineagePolicy` |
+| **Living plan (TodoWrite-style)** | Structured plan the agent atomically rewrites each turn. ``Agent(living_plan=True)`` wires ``plan_write`` / ``plan_read`` and, when ``workspace=`` is also set, mirrors the plan as a ``kind="plan"`` note and auto-adds ``recall_past_plans(query)`` for cross-run plan lineage. Plan becomes load-bearing in the conversation (tool result returns the rendered plan) so drift becomes structurally hard. Per-run state via contextvar — concurrent runs on the same Agent have isolated plans. Default is opt-in for v0.10.0; v0.11 flips to smart-default-on for tool-using agents. | `Agent(living_plan=)`; `LivingPlan`, `LivingPlanStep` (top-level); `from loomflow.tools import make_plan_tools, make_recall_past_plans_tool, get_active_plan, living_plan_prompt_section, resolve_living_plan` |
 | **Declarative config** | Build agents from TOML or dicts | `Agent.from_config(path)`, `Agent.from_dict(cfg)` |
 
 ---

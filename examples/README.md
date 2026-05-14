@@ -1,13 +1,13 @@
 # Examples
 
-Seventeen end-to-end examples that exercise Loom's own
+Eighteen end-to-end examples that exercise Loom's own
 primitives — loader, vector store, retriever-as-tool pattern,
 multi-agent architectures, multi-user / session-continuity
 primitives, the workflow + agent composition story, observability
 sinks, the reasoning-effort dial, TOML / dict-form declarative
 config, the shared-notebook workspace for multi-agent coordination,
-and provider-aware prompt caching. Nothing pulled in from outside
-the framework.
+provider-aware prompt caching, and the TodoWrite-style living
+plan primitive. Nothing pulled in from outside the framework.
 
 ## Agent + retrieval + memory
 
@@ -64,6 +64,12 @@ previous one's vocabulary.
 | File | What it shows | Needs API key? |
 |---|---|---|
 | [`17_prompt_caching.py`](17_prompt_caching.py) | `Agent(prompt_caching=True)` — one boolean enables provider-aware prompt caching. **OpenAI**: parses `cached_tokens` from response, applies 0.5x discount automatically. **Anthropic**: injects `cache_control:{type:"ephemeral"}` on the last system block + last tool definition (2 of 4 breakpoints), parses `cache_read_input_tokens` / `cache_creation_input_tokens` from response, applies 0.1x read discount + 1.25x write premium (5m TTL) or 2x (1h TTL). Dict form for advanced: `{"enabled": True, "ttl": "1h", "cache_key": "user_42"}`. Live demo runs the same prompt twice and shows the cache-hit cost drop in `result.cached_tokens_in` + `result.cost_usd`. | OpenAI or Anthropic |
+
+## Living plan (TodoWrite-style structured plan)
+
+| File | What it shows | Needs API key? |
+|---|---|---|
+| [`18_living_plan.py`](18_living_plan.py) | `Agent(living_plan=True)` — wires `plan_write` + `plan_read` tools that maintain a structured `LivingPlan` the agent atomically rewrites each turn. Steps have `{description, status, finding}` where status is `todo`/`doing`/`done`/`blocked`/`skipped`. The plan tool returns the rendered plan back as markdown so it becomes load-bearing in the conversation — drift becomes structurally hard. When `workspace=` is also wired, the plan mirrors to a `kind="plan"` note and `recall_past_plans(query)` is auto-added for cross-run plan lineage. Plan auto-inherits the workspace via ambient when an `Agent` doesn't set its own. Per-run state via contextvar (concurrent runs on the same Agent have isolated plans). Example uses `ScriptedModel` so it runs offline — no API key needed. | No |
 
 The image-bearing examples (01, 02) generate small sample PDFs on
 first run via `reportlab` and cache them under `examples/data/`.
