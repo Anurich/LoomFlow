@@ -134,6 +134,52 @@ async def test_inmemory_search_ranks_title_over_body() -> None:
     assert matches[0].score > matches[1].score
 
 
+@pytest.mark.parametrize("backend", ["inmemory", "disk"])
+async def test_search_multi_word_query_matches(
+    backend: str, tmp_path: Path
+) -> None:
+    """Regression: a multi-word query must match notes that contain
+    the terms *separately*. The earlier scorer tested the whole
+    query as ONE substring, so ``search_notes("conda env conflict")``
+    returned nothing unless that exact phrase appeared verbatim —
+    useless for agent recall, which is mostly multi-word queries."""
+    ws: Workspace = (
+        InMemoryWorkspace()
+        if backend == "inmemory"
+        else LocalDiskWorkspace(tmp_path)
+    )
+    await ws.write_note(
+        author="r",
+        title="Resolving a conda environment conflict",
+        body="pinned numpy then recreated the env from scratch",
+        user_id="u",
+    )
+    await ws.write_note(
+        author="r",
+        title="Unrelated note",
+        body="nothing to see here",
+        user_id="u",
+    )
+    # Every term appears (across title + body) but never as a
+    # contiguous phrase.
+    matches = await ws.search_notes("conda env conflict", user_id="u")
+    assert len(matches) == 1
+    assert "conda" in matches[0].summary.title.lower()
+    # A note matching MORE query terms outranks one matching fewer.
+    await ws.write_note(
+        author="r",
+        title="conda only",
+        body="just conda mentioned",
+        user_id="u",
+    )
+    ranked = await ws.search_notes("conda env conflict", user_id="u")
+    assert (
+        ranked[0].summary.title
+        == "Resolving a conda environment conflict"
+    )
+    assert ranked[0].score > ranked[1].score
+
+
 async def test_inmemory_update_note() -> None:
     ws = InMemoryWorkspace()
     n = await ws.write_note(author="r", title="t", body="v1")

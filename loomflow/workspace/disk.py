@@ -48,6 +48,7 @@ from ._common import (
     slugify_title,
     summary_from_note,
 )
+from ._common import score_bm25 as _score_bm25
 from .types import (
     Note,
     NoteKind,
@@ -1036,47 +1037,6 @@ def _is_in_meta_dir(path: Path) -> bool:
 # ---------------------------------------------------------------------------
 # Scoring helpers — BM25-ish, semantic cosine, RRF fusion
 # ---------------------------------------------------------------------------
-
-
-def _score_bm25(
-    q: str, notes: list[Note], limit: int
-) -> list[NoteMatch]:
-    """Substring-driven BM25-ish scoring (the v0.9 default).
-
-    Three tiers (highest wins): title hit (1.0), tag hit (0.7),
-    body hit (0.5). Snippet is the matched span ±~50 chars when
-    the hit is in the body, the title otherwise.
-    """
-    scored: list[tuple[float, str, Note]] = []
-    for note in notes:
-        title_l = note.title.lower()
-        body_l = note.body.lower()
-        tag_match = any(q in t.lower() for t in note.tags)
-        if q in title_l:
-            scored.append((1.0, note.title, note))
-        elif tag_match:
-            scored.append((0.7, "tags: " + ", ".join(note.tags), note))
-        elif q in body_l:
-            idx = body_l.find(q)
-            start = max(0, idx - 40)
-            end = min(len(note.body), idx + len(q) + 60)
-            snippet = note.body[start:end].replace("\n", " ").strip()
-            if start > 0:
-                snippet = "…" + snippet
-            if end < len(note.body):
-                snippet = snippet + "…"
-            scored.append((0.5, snippet, note))
-    scored.sort(key=lambda t: (t[0], t[2].updated_at), reverse=True)
-    out: list[NoteMatch] = []
-    for score, snippet, note in scored[:limit]:
-        out.append(
-            NoteMatch(
-                summary=summary_from_note(note),
-                score=score,
-                snippet=snippet or extract_lede(note.body),
-            )
-        )
-    return out
 
 
 def _score_semantic(

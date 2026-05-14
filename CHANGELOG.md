@@ -9,6 +9,32 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 
 ## [0.10.0] — unreleased
 
+### Fixed — `search_notes` multi-word queries (was returning nothing)
+
+The workspace BM25 scorer tested the *entire query string* as one
+substring (`q in body`), despite the docstring claiming
+"BM25-ish". So any multi-word query — `search_notes("conda env
+conflict")` — returned nothing unless that exact phrase appeared
+verbatim. Multi-word queries are the norm for agent recall, so
+this silently crippled the self-improvement loop.
+
+Fix: the query is now tokenized; each term is scored independently
+at the three tiers (title 1.0 > tag 0.7 > body 0.5) and the note's
+score is the per-term tiers averaged over the query terms — OR
+semantics ranked by coverage. A single-word query collapses to the
+old substring-tier match, so existing callers are unaffected. The
+scorer is now shared (`_common.score_bm25`) so the disk and
+in-memory backends can't drift.
+
+### Fixed — workspace rooted under a dot-directory listed zero notes
+
+`_is_in_meta_dir` (workspace-v2) flagged *any* dot-prefixed path
+part, intending to exclude `.history` revisions — but a workspace
+rooted under a dot-directory (`.loom/notebook`, `.claude/workspace`)
+has a dotted segment in every note's path, so every note got
+filtered out of `list_notes` / `search_notes` / the index. Now
+checks specifically for the `.history` segment.
+
 ### Fixed — `attribute_outcome` now works AFTER a run (was a silent no-op)
 
 The self-improvement loop had a fatal gap: `attribute_outcome`

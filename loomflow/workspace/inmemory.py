@@ -26,6 +26,7 @@ from ._common import (
     slugify_title,
     summary_from_note,
 )
+from ._common import score_bm25 as _score_bm25
 from .disk import _should_prune
 from .types import (
     Note,
@@ -490,45 +491,12 @@ class InMemoryWorkspace:
 
 
 # ---------------------------------------------------------------------------
-# Scoring helpers — mirrors the disk backend's implementations to
-# keep parity. Tests in tests/test_workspace.py exercise both
-# backends through the same harness so behavior must match.
+# Scoring helpers. BM25 scoring is shared with the disk backend via
+# ``_common.score_bm25`` so the two backends can't drift — tests in
+# tests/test_workspace.py exercise both through the same harness.
+# The semantic + RRF helpers stay local (they operate on this
+# backend's in-memory embedding cache).
 # ---------------------------------------------------------------------------
-
-
-def _score_bm25(
-    q: str, notes: list[Note], limit: int
-) -> list[NoteMatch]:
-    scored: list[tuple[float, str, Note]] = []
-    for note in notes:
-        title_l = note.title.lower()
-        body_l = note.body.lower()
-        tag_match = any(q in t.lower() for t in note.tags)
-        if q in title_l:
-            scored.append((1.0, note.title, note))
-        elif tag_match:
-            scored.append((0.7, "tags: " + ", ".join(note.tags), note))
-        elif q in body_l:
-            idx = body_l.find(q)
-            start = max(0, idx - 40)
-            end = min(len(note.body), idx + len(q) + 60)
-            snippet = note.body[start:end].replace("\n", " ").strip()
-            if start > 0:
-                snippet = "…" + snippet
-            if end < len(note.body):
-                snippet = snippet + "…"
-            scored.append((0.5, snippet, note))
-    scored.sort(key=lambda t: (t[0], t[2].updated_at), reverse=True)
-    out: list[NoteMatch] = []
-    for score, snippet, note in scored[:limit]:
-        out.append(
-            NoteMatch(
-                summary=summary_from_note(note),
-                score=score,
-                snippet=snippet or extract_lede(note.body),
-            )
-        )
-    return out
 
 
 def _score_semantic(

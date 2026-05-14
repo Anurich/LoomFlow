@@ -9,7 +9,7 @@ import re
 from datetime import datetime
 from typing import Any
 
-from .types import Note, NoteKind, NoteSummary
+from .types import Note, NoteKind, NoteMatch, NoteSummary
 
 # ---------------------------------------------------------------------------
 # Slug + lede
@@ -54,6 +54,88 @@ def extract_lede(body: str, *, max_len: int = 120) -> str:
             return stripped[:max_len].rstrip() + "…"
         return stripped
     return ""
+
+
+_QUERY_SPLIT = re.compile(r"[^\w]+")
+
+
+def tokenize_query(q: str) -> list[str]:
+    """Split a search query into lowercased terms.
+
+    Punctuation and whitespace are separators; empty terms drop
+    out. A single-word query yields exactly one term, so
+    single-word search behaves identically to the pre-tokenization
+    substring match.
+    """
+    return [t for t in _QUERY_SPLIT.split(q.lower()) if t]
+
+
+def score_bm25(q: str, notes: list[Note], limit: int) -> list[NoteMatch]:
+    """Tokenized substring scoring — shared by both workspace backends.
+
+    The query is split into terms; each term is scored independently
+    against every note at three tiers (title 1.0 > tag 0.7 > body
+    0.5), and a note's score is those per-term tiers AVERAGED over
+    the query terms:
+
+    * a note matching ALL terms in its title scores 1.0;
+    * a note matching half the terms in its body scores 0.25;
+    * a note matching NONE of the terms is dropped.
+
+    This is OR-semantics ranked by coverage — what an agent expects
+    from ``search_notes("conda env conflict")``. The earlier
+    implementation tested the whole query as ONE substring, so any
+    multi-word query returned nothing unless that exact phrase
+    appeared contiguously. A single-word query still collapses to
+    the old substring-tier match, so existing callers are
+    unaffected.
+    """
+    terms = tokenize_query(q)
+    if not terms:
+        return []
+    scored: list[tuple[float, str, Note]] = []
+    for note in notes:
+        title_l = note.title.lower()
+        body_l = note.body.lower()
+        tags_l = [t.lower() for t in note.tags]
+        total = 0.0
+        snippet = ""
+        for term in terms:
+            if term in title_l:
+                total += 1.0
+            elif any(term in t for t in tags_l):
+                total += 0.7
+            elif term in body_l:
+                total += 0.5
+                # Snippet comes from the FIRST body-matched term,
+                # with ±context; title-/tag-only hits fall back to
+                # the title below.
+                if not snippet:
+                    idx = body_l.find(term)
+                    start = max(0, idx - 40)
+                    end = min(len(note.body), idx + len(term) + 60)
+                    snip = (
+                        note.body[start:end].replace("\n", " ").strip()
+                    )
+                    if start > 0:
+                        snip = "…" + snip
+                    if end < len(note.body):
+                        snip = snip + "…"
+                    snippet = snip
+        if total <= 0.0:
+            continue
+        scored.append((total / len(terms), snippet or note.title, note))
+    scored.sort(key=lambda t: (t[0], t[2].updated_at), reverse=True)
+    out: list[NoteMatch] = []
+    for score, snippet, note in scored[:limit]:
+        out.append(
+            NoteMatch(
+                summary=summary_from_note(note),
+                score=score,
+                snippet=snippet or extract_lede(note.body),
+            )
+        )
+    return out
 
 
 def summary_from_note(note: Note) -> NoteSummary:
