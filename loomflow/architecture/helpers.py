@@ -36,6 +36,7 @@ from .base import Dependencies
 if TYPE_CHECKING:
     from ..agent.api import Agent
     from ..tools.registry import Tool
+    from .base import AgentSession
 
 
 async def text_only_model_call(
@@ -127,6 +128,7 @@ class SubagentInvocation:
         context: RunContext | None = None,
         extra_tools: list[Tool] | None = None,
         buffer_size: int = 128,
+        rollup_into: AgentSession | None = None,
     ) -> None:
         self._agent = agent
         self._prompt = prompt
@@ -146,6 +148,17 @@ class SubagentInvocation:
         self._context = context if context is not None else get_run_context()
         self._extra_tools = extra_tools
         self._buffer_size = buffer_size
+        # When provided, the sub-agent's ``RunResult`` usage (input /
+        # cached / cache-write / output tokens + cost) is rolled into
+        # ``rollup_into.cumulative_usage`` the moment the sub-agent's
+        # ``completed`` event fires. Without this, every architecture
+        # using SubagentInvocation silently under-counts: the
+        # parent's RunResult.cost_usd would reflect only the parent's
+        # own model calls, not the worker's. Architectures pass
+        # ``rollup_into=session`` from their ``run()`` to get correct
+        # accounting "for free." Optional so callers outside the
+        # architecture protocol can still use the helper.
+        self._rollup_into = rollup_into
         self.result: dict[str, Any] = {}
 
     async def events(self) -> AsyncIterator[Event]:
@@ -164,7 +177,30 @@ class SubagentInvocation:
             if ev.kind.value == "completed":
                 # Capture the result dict; don't forward — parent
                 # emits its own COMPLETED at the end of its own loop.
-                self.result.update(ev.payload.get("result", {}) or {})
+                result = ev.payload.get("result", {}) or {}
+                self.result.update(result)
+                # Roll worker usage into the parent session so the
+                # parent's RunResult.cost_usd / tokens reflect work
+                # the sub-agent did. Mind the field-name swap:
+                # RunResult dict uses ``tokens_in`` / ``tokens_out``
+                # / ``cached_tokens_in`` while ``Usage`` uses
+                # ``input_tokens`` / ``output_tokens`` /
+                # ``cached_input_tokens`` — the rest line up.
+                if self._rollup_into is not None:
+                    sub_usage = Usage(
+                        input_tokens=int(result.get("tokens_in", 0) or 0),
+                        cached_input_tokens=int(
+                            result.get("cached_tokens_in", 0) or 0
+                        ),
+                        cache_write_tokens=int(
+                            result.get("cache_write_tokens", 0) or 0
+                        ),
+                        output_tokens=int(result.get("tokens_out", 0) or 0),
+                        cost_usd=float(result.get("cost_usd", 0) or 0),
+                    )
+                    self._rollup_into.cumulative_usage = add_usage(
+                        self._rollup_into.cumulative_usage, sub_usage
+                    )
             elif ev.kind.value == "started":
                 # Suppress sub-agent's STARTED; parent owns framing.
                 return

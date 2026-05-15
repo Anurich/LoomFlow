@@ -304,7 +304,10 @@ class BlackboardArchitecture:
                 f"{session.id}__bb_{decision.next_agent}_round_{round_num}"
             )
             invocation = SubagentInvocation(
-                picked, agent_prompt, session_id=sub_session_id
+                picked,
+                agent_prompt,
+                session_id=sub_session_id,
+                rollup_into=session,
             )
             async for ev in invocation.events():
                 yield ev
@@ -377,7 +380,10 @@ class BlackboardArchitecture:
             f"{session.id}__bb_coord_round_{round_num}"
         )
         invocation = SubagentInvocation(
-            self._coordinator, coord_prompt, session_id=sub_session_id
+            self._coordinator,
+            coord_prompt,
+            session_id=sub_session_id,
+            rollup_into=session,
         )
         async for ev in invocation.events():
             yield ev
@@ -416,7 +422,10 @@ class BlackboardArchitecture:
         )
         sub_session_id = f"{session.id}__bb_decider"
         invocation = SubagentInvocation(
-            self._decider, decide_prompt, session_id=sub_session_id
+            self._decider,
+            decide_prompt,
+            session_id=sub_session_id,
+            rollup_into=session,
         )
         async for ev in invocation.events():
             yield ev

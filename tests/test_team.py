@@ -260,6 +260,117 @@ async def test_supervisor_added_worker_is_callable_in_next_run() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Sub-agent cost rollup — without this the parent's RunResult.cost_usd
+# silently under-counts every architecture that uses SubagentInvocation
+# (Supervisor, Swarm, Router, ActorCritic, Debate, Blackboard). Regression
+# guard so the rollup helper stays wired.
+# ---------------------------------------------------------------------------
+
+
+async def test_supervisor_rolls_up_worker_costs_into_parent_result() -> None:
+    """When the coordinator delegates to a worker, the worker's
+    tokens + cost must be added to the team's RunResult — otherwise
+    every consumer of ``Team.supervisor`` is shown a number that
+    only reflects the coordinator's own model calls and silently
+    omits the workers'."""
+    from loomflow.core.types import Usage
+
+    # Worker emits one turn worth ~$0.05 / 100 in / 20 out.
+    worker = Agent(
+        "worker",
+        model=ScriptedModel(
+            [
+                ScriptedTurn(
+                    text="worker did it",
+                    usage=Usage(
+                        input_tokens=100, output_tokens=20, cost_usd=0.05
+                    ),
+                ),
+            ]
+        ),
+    )
+    # Coordinator: turn 1 delegates (50/10/$0.02), turn 2 finishes
+    # (80/15/$0.01). Expected team total = 230/45/$0.08.
+    coordinator_model = ScriptedModel(
+        [
+            ScriptedTurn(
+                tool_calls=[
+                    ToolCall(
+                        id="c1",
+                        tool="delegate",
+                        args={"worker": "w", "instructions": "go"},
+                    )
+                ],
+                usage=Usage(
+                    input_tokens=50, output_tokens=10, cost_usd=0.02
+                ),
+            ),
+            ScriptedTurn(
+                text="done",
+                usage=Usage(
+                    input_tokens=80, output_tokens=15, cost_usd=0.01
+                ),
+            ),
+        ]
+    )
+    team = Team.supervisor(
+        workers={"w": worker},
+        instructions="manager",
+        model=coordinator_model,
+    )
+    result = await team.run("kick off")
+
+    # Coordinator's two turns + worker's one turn must all roll up.
+    assert result.tokens_in == 50 + 80 + 100, (
+        f"tokens_in={result.tokens_in} — worker tokens missing"
+    )
+    assert result.tokens_out == 10 + 15 + 20, (
+        f"tokens_out={result.tokens_out} — worker tokens missing"
+    )
+    assert result.cost_usd == pytest.approx(0.08), (
+        f"cost_usd={result.cost_usd} — worker cost missing"
+    )
+
+
+async def test_swarm_rolls_up_active_agent_costs_into_parent_result() -> None:
+    """Same invariant for Swarm — its active-agent invocation also
+    goes through SubagentInvocation and must roll up usage."""
+    from loomflow.core.types import Usage
+
+    # Swarm entry agent emits one turn with usage; no handoff.
+    entry = Agent(
+        "entry",
+        model=ScriptedModel(
+            [
+                ScriptedTurn(
+                    text="ok",
+                    usage=Usage(
+                        input_tokens=70, output_tokens=30, cost_usd=0.04
+                    ),
+                ),
+            ]
+        ),
+    )
+    team = Team.swarm(
+        agents={"entry": entry},
+        entry_agent="entry",
+        model="echo",  # swarm's own coordinator model — unused after
+                       # the entry agent runs to completion
+    )
+    result = await team.run("hello")
+
+    assert result.tokens_in >= 70, (
+        f"tokens_in={result.tokens_in} — entry-agent tokens missing"
+    )
+    assert result.tokens_out >= 30, (
+        f"tokens_out={result.tokens_out} — entry-agent tokens missing"
+    )
+    assert result.cost_usd >= 0.04, (
+        f"cost_usd={result.cost_usd} — entry-agent cost missing"
+    )
+
+
+# ---------------------------------------------------------------------------
 # run_architecture standalone helper
 # ---------------------------------------------------------------------------
 

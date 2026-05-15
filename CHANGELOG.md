@@ -7,6 +7,35 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 For development-history detail (per-slice notes, file maps, gate
 counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 
+## [0.10.4] — 2026-05-15
+
+### Fixed — sub-agent costs were silently lost in multi-agent architectures
+
+Every architecture that spawned a sub-`Agent` via the
+`SubagentInvocation` helper — `Supervisor`, `Swarm`, `Router`,
+`ActorCritic`, `MultiAgentDebate`, `BlackboardArchitecture` — was
+discarding the sub-agent's `RunResult` after extracting only its
+`output`. The parent's `RunResult.cost_usd` and token counts
+therefore reflected ONLY the parent's own model calls and silently
+omitted every spawned worker. Anyone using `Team.supervisor` in
+production saw a misleadingly small cost number.
+
+Fix: `SubagentInvocation` gains a `rollup_into: AgentSession | None`
+kwarg. When provided, the helper rolls the sub-agent's usage into
+that session's `cumulative_usage` the moment the sub-agent's
+`completed` event fires. Every architecture using the helper has
+been updated to pass `rollup_into=session`. Supervisor's no-event-
+sink fallback path (legacy `Agent.run()` call) does the rollup
+inline.
+
+Two regression tests in `tests/test_team.py` (Supervisor and Swarm
+representatives) cover the contract — they assert the team's
+`RunResult` reflects coordinator + worker costs combined.
+
+No public API change; bug-fix release. Anyone using `Team.*` builders
+will see their reported costs go up — that's the *real* number that
+should always have been visible.
+
 ## [0.10.0] — unreleased
 
 ### Fixed — LivingPlan `plan_write` rejected weak-model step shapes

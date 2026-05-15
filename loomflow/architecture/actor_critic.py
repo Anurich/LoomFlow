@@ -195,7 +195,10 @@ class ActorCritic:
             phase="generate",
         )
         actor_inv = SubagentInvocation(
-            self._actor, prompt, session_id=f"{session.id}__actor_0"
+            self._actor,
+            prompt,
+            session_id=f"{session.id}__actor_0",
+            rollup_into=session,
         )
         async for ev in actor_inv.events():
             yield ev
@@ -246,6 +249,7 @@ class ActorCritic:
                 self._critic,
                 critique_prompt,
                 session_id=f"{session.id}__critic_{round_num}",
+                rollup_into=session,
             )
             async for ev in critic_inv.events():
                 yield ev
@@ -312,6 +316,7 @@ class ActorCritic:
                 self._actor,
                 refine_prompt,
                 session_id=f"{session.id}__actor_{round_num}",
+                rollup_into=session,
             )
             async for ev in refine_inv.events():
                 yield ev

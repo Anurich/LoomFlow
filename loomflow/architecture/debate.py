@@ -256,6 +256,7 @@ class MultiAgentDebate:
             self._judge,
             judge_prompt,
             session_id=f"{session.id}__judge",
+            rollup_into=session,
         )
         async for ev in judge_inv.events():
             yield ev
@@ -391,7 +392,10 @@ async def _run_one_debater_streaming(
     async with send:
         sub_session_id = f"{session.id}__{name}_round_{round_num}"
         invocation = SubagentInvocation(
-            debater, debater_prompt, session_id=sub_session_id
+            debater,
+            debater_prompt,
+            session_id=sub_session_id,
+            rollup_into=session,
         )
         async for ev in invocation.events():
             await send.send(ev)

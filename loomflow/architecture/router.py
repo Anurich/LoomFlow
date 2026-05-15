@@ -207,7 +207,10 @@ class Router:
             f"{session.id}__route_{chosen.name}"
         )
         invocation = SubagentInvocation(
-            chosen.agent, prompt, session_id=specialist_session_id
+            chosen.agent,
+            prompt,
+            session_id=specialist_session_id,
+            rollup_into=session,
         )
         async for ev in invocation.events():
             yield ev

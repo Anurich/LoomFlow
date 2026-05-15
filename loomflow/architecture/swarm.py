@@ -219,6 +219,7 @@ class Swarm:
                 active_prompt,
                 session_id=sub_session_id,
                 extra_tools=handoff_tools,
+                rollup_into=session,
             )
             async for ev in invocation.events():
                 yield ev

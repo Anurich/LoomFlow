@@ -52,10 +52,10 @@ from anyio.streams.memory import MemoryObjectSendStream
 
 from ..core.context import get_run_context
 from ..core.ids import new_id
-from ..core.types import Event
+from ..core.types import Event, Usage
 from ..tools.registry import Tool
 from .base import AgentSession, Architecture, Dependencies
-from .helpers import SubagentInvocation
+from .helpers import SubagentInvocation, add_usage
 from .react import ReAct
 from .tool_host_wrappers import ExtendedToolHost
 
@@ -194,7 +194,7 @@ class Supervisor:
 
         delegate_tool = _make_delegate_tool(
             self._workers,
-            session.id,
+            session,
             tool_name=self._delegate_name,
             event_sink=send_chan,
             last_outputs=last_outputs,
@@ -301,7 +301,7 @@ class Supervisor:
 
 def _make_delegate_tool(
     workers: dict[str, Agent],
-    parent_session_id: str,
+    session: AgentSession,
     *,
     tool_name: str,
     event_sink: MemoryObjectSendStream[Event] | None = None,
@@ -321,6 +321,11 @@ def _make_delegate_tool(
     outer ``stream(...)`` consumer sees token-by-token output. When
     ``None``, the worker's events are silently dropped (legacy
     behaviour, kept as a fallback).
+
+    Both code paths roll the worker's token / cost usage into the
+    parent ``session.cumulative_usage`` so the parent's
+    ``RunResult.cost_usd`` reflects the worker's spend — without
+    this every consumer of ``Team.supervisor`` silently under-counts.
     """
 
     async def _delegate(worker: str, instructions: str) -> str:
@@ -332,7 +337,7 @@ def _make_delegate_tool(
             )
         suffix = new_id("del")
         worker_session_id = (
-            f"{parent_session_id}__delegate_{worker}_{suffix}"
+            f"{session.id}__delegate_{worker}_{suffix}"
         )
 
         if event_sink is None:
@@ -346,6 +351,19 @@ def _make_delegate_tool(
                 session_id=worker_session_id,
                 context=get_run_context(),
             )
+            # Roll worker usage into the parent's session so cost
+            # accounting is correct (mirrors what
+            # SubagentInvocation does in the streaming branch).
+            session.cumulative_usage = add_usage(
+                session.cumulative_usage,
+                Usage(
+                    input_tokens=result.tokens_in,
+                    cached_input_tokens=result.cached_tokens_in,
+                    cache_write_tokens=result.cache_write_tokens,
+                    output_tokens=result.tokens_out,
+                    cost_usd=result.cost_usd,
+                ),
+            )
             output = result.output
             if last_outputs is not None:
                 last_outputs[worker] = output
@@ -355,7 +373,10 @@ def _make_delegate_tool(
         # using a clone of the send half (clone keeps the channel
         # alive past this tool call's lifetime).
         invocation = SubagentInvocation(
-            agent, instructions, session_id=worker_session_id
+            agent,
+            instructions,
+            session_id=worker_session_id,
+            rollup_into=session,
         )
         async with event_sink.clone() as sink:
             async for ev in invocation.events():

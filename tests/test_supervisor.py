@@ -503,13 +503,14 @@ def test_delegate_tool_enumerates_worker_names_in_schema() -> None:
     """The delegate tool's `worker` arg must include an enum of the
     actual worker names so strict-schema providers reject invalid
     names at the API boundary."""
+    from loomflow.architecture.base import AgentSession
     from loomflow.architecture.supervisor import _make_delegate_tool
 
     coder = _worker("c", "Python coder.")
     writer = _worker("w", "Markdown writer.")
     tool = _make_delegate_tool(
         {"coder": coder, "writer": writer},
-        parent_session_id="parent",
+        AgentSession(id="parent", instructions=""),
         tool_name="delegate",
     )
     worker_schema = tool.input_schema["properties"]["worker"]
