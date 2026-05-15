@@ -31,6 +31,7 @@ from .plan import (
 )
 from .plan_resolver import ResolvedLivingPlan, resolve_living_plan
 from .registry import InProcessToolHost, Tool, tool
+from .web import web_tool
 
 __all__ = [
     "InProcessToolHost",
@@ -53,5 +54,6 @@ __all__ = [
     "read_tool",
     "resolve_living_plan",
     "tool",
+    "web_tool",
     "write_tool",
 ]

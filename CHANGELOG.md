@@ -7,6 +7,42 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 For development-history detail (per-slice notes, file maps, gate
 counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 
+## [0.10.6] — 2026-05-15
+
+### Added — `web_tool` for agent web search (Serper + DuckDuckGo)
+
+`from loomflow.tools import web_tool` — a single tool factory the
+user wires into an Agent's `tools=` list. The model calls it as
+`web_search(query=...)` and gets back a markdown-formatted top-N
+result list (title, URL, snippet per result) — directly readable,
+no JSON parsing in the prompt.
+
+Two backends:
+
+* `web_tool(backend="serper")` — Google via https://serper.dev.
+  Best quality. Needs an API key (env `SERPER_API_KEY` or
+  `api_key=` kwarg). Optional extra: `pip install loomflow[serper]`.
+* `web_tool(backend="duckduckgo")` — Free, no key. Lower /
+  variable quality, DDG rate-limits. Optional extra:
+  `pip install loomflow[duckduckgo]`.
+
+Convenience bundle: `pip install loomflow[web]` (both).
+
+Both backends produce identical output shape so swapping doesn't
+change what the model has learned to parse. Lazy SDK imports —
+`import loomflow.tools` doesn't require either extra. Network
+errors return a `"(web search failed: ...)"` string rather than
+raise, so agents see the failure as a tool result and can decide
+what to do next (retry, ask the user, try a different query).
+
+14 new tests cover backend selection, missing-key ConfigError,
+the result-formatting contract (both backends), the HTTP error
+path, and identical tool shape across backends.
+
+Future expansion: a `web_fetch_tool` for reading specific URLs
+(HTML → markdown), additional backends (Brave, Tavily, Google
+PSE). The `backend=` selector is the seam.
+
 ## [0.10.4] — 2026-05-15
 
 ### Fixed — sub-agent costs were silently lost in multi-agent architectures

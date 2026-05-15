@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "loomflow"
-version = "0.10.5"
+version = "0.10.6"
 description = "Production workflow + agent framework. Multi-tenant, MCP-native, model-agnostic."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -32,6 +32,17 @@ otel = [
     "opentelemetry-api>=1.24.0",
     "opentelemetry-sdk>=1.24.0",
 ]
+# Web-search tool (loomflow.tools.web_tool). Two backends, install
+# whichever you intend to use — or `loomflow[web]` for both. Lazy
+# imports inside the tool fn, so neither extra is pulled in at
+# `import loomflow.tools` time.
+#   - serper: Google search via https://serper.dev. Needs httpx
+#     for the API client + a SERPER_API_KEY env var (or api_key=
+#     kwarg). Free tier = 2,500 lifetime searches.
+#   - duckduckgo: free, no key, lower / more variable quality.
+serper = ["httpx>=0.27.0"]
+duckduckgo = ["duckduckgo-search>=6.0"]
+web = ["httpx>=0.27.0", "duckduckgo-search>=6.0"]
 # PDF loader has two interchangeable backends, picked at load
 # time via `backend="unstructured" | "docling"`. Both produce the
 # same `Document` shape so downstream code doesn't care which
@@ -155,7 +166,7 @@ markers = [
 # release BUMP=patch|minor|major`` is the explicit "this is a release"
 # flag — see the Makefile for usage.
 [tool.bumpversion]
-current_version = "0.10.5"
+current_version = "0.10.6"
 parse = """(?x)
     (?P<major>0|[1-9]\\d*)\\.(?P<minor>0|[1-9]\\d*)\\.(?P<patch>0|[1-9]\\d*)
     (?:\\.(?P<dev_label>dev)(?P<dev_n>\\d+))?
