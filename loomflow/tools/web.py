@@ -229,7 +229,7 @@ async def _ddg_search(
     # an async-fn param. We're forwarding to DDGS which has its
     # own timeout, not blocking ourselves.
     try:
-        from duckduckgo_search import DDGS
+        from duckduckgo_search import DDGS  # type: ignore[import-not-found, import-untyped]
     except ImportError as exc:
         raise ConfigError(
             "web_tool(backend='duckduckgo') needs duckduckgo-search "
