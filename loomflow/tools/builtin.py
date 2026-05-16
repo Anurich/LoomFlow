@@ -490,8 +490,13 @@ def bash_tool(
       rejected before being executed.
     * Commands run with a default ``timeout`` of 30 seconds; the
       subprocess is killed on timeout.
-    * The shell is invoked via ``/bin/sh -c <command>``, so
-      pipelines + redirections work the way you'd expect.
+    * The shell is invoked via ``/bin/sh -c <command>`` on POSIX
+      (macOS, Linux) and ``cmd.exe /c <command>`` on Windows. The
+      command STRING is what the model emits — it must use the
+      shell's native syntax for whichever host runs it. ``ls``
+      and ``rm`` won't work in cmd.exe; ``dir`` and ``del`` won't
+      work in sh. Surface the host platform to the model in the
+      system prompt if you need cross-host commands.
 
     Knobs:
 
@@ -536,11 +541,23 @@ def bash_tool(
         if extra_env:
             env.update(extra_env)
 
+        # Pick the host shell. ``/bin/sh`` doesn't exist on Windows
+        # — invoking it there raises ``FileNotFoundError`` with the
+        # confusing "[WinError 2] system cannot find the file
+        # specified" message. ``cmd.exe`` is the cross-version
+        # Windows fallback (PowerShell would also work but quoting
+        # rules diverge more from sh, so cmd is the safer default).
+        import sys as _sys
+        if _sys.platform == "win32":
+            argv = ["cmd.exe", "/c", command]
+        else:
+            argv = ["/bin/sh", "-c", command]
+
         # Use anyio's subprocess support so we don't block the loop.
         try:
             with anyio.fail_after(effective_timeout):
                 process = await anyio.run_process(
-                    ["/bin/sh", "-c", command],
+                    argv,
                     cwd=str(workdir_path),
                     env=env,
                     check=False,
@@ -585,10 +602,14 @@ def bash_tool(
             sections.append("(no output)")
         return "\n".join(sections)
 
+    import sys as _sys_for_desc
+    host_shell = "cmd.exe" if _sys_for_desc.platform == "win32" else "/bin/sh"
     return Tool(
         name=name,
         description=(
             f"Run a shell command with cwd={str(workdir_path)}. "
+            f"Host shell: {host_shell} (use its native syntax — "
+            f"sh on macOS/Linux, cmd on Windows). "
             f"Default timeout {timeout:.0f}s. Returns stdout + "
             "stderr + exit code in a structured block. The default "
             "deny list rejects obviously-dangerous patterns "
@@ -602,7 +623,8 @@ def bash_tool(
                 "command": {
                     "type": "string",
                     "description": (
-                        "Shell command to run via /bin/sh -c. "
+                        f"Shell command to run via {host_shell} "
+                        "(use the host shell's native syntax). "
                         "Pipelines and redirections work as expected."
                     ),
                 },
@@ -687,7 +709,7 @@ def grep_tool(
                 if any(part in _NOISE_DIRS for part in fp.parts):
                     continue
                 try:
-                    text = fp.read_text()
+                    text = fp.read_text(encoding="utf-8")
                 except (UnicodeDecodeError, OSError):
                     continue  # binary / unreadable — skip
                 rel = fp.relative_to(workdir_path)

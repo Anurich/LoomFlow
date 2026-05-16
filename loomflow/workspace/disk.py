@@ -25,6 +25,15 @@ An ``anyio.Lock`` serialises index regeneration so concurrent
 writers don't tear it. Note bodies have no shared write target
 (each author has their own subdir + unique slug) so they don't
 need the lock.
+
+Text encoding is FORCED to UTF-8 on every read and write. The
+``Path.read_text`` / ``write_text`` defaults pick up the system
+locale codec — on Windows that's ``cp1252`` ("charmap"), which
+can't encode many of the Unicode characters models like to emit
+(``≥``, em-dashes, smart quotes, ...). Forcing UTF-8 here means
+the same notebook works identically across Windows, macOS, and
+Linux hosts, and notebooks created on one platform are readable
+on another.
 """
 
 from __future__ import annotations
@@ -78,6 +87,29 @@ INDEX_FILENAME = "WORKSPACE.md"
 NOTES_DIR = "notes"
 SEEDS_DIR = "seeds"
 LOOM_META_DIR = ".loom"
+
+
+def _read_utf8(path: Path) -> str:
+    """Read a text file as UTF-8, regardless of system locale.
+
+    Used inside ``anyio.to_thread.run_sync(...)`` because
+    ``run_sync(func, *args)`` doesn't forward kwargs in all anyio
+    versions — wrapping the kwarg in a positional helper keeps
+    the callsites simple while forcing the codec.
+    """
+    return path.read_text(encoding="utf-8")
+
+
+def _write_utf8(path: Path, content: str) -> None:
+    """Write text as UTF-8, regardless of system locale.
+
+    On Windows the default ``Path.write_text`` uses ``cp1252``
+    ("charmap"), which can't encode many of the Unicode characters
+    models routinely emit (``≥``, em-dashes, smart quotes,
+    arrows, emoji). Forcing UTF-8 here means notebooks stay
+    portable across Windows / macOS / Linux hosts.
+    """
+    path.write_text(content, encoding="utf-8")
 # Subdir name under each note's parent that holds revision history.
 # Excluded from `_walk_note_files` so historical revisions never
 # appear in `list_notes` / `search_notes` / index renders.
@@ -407,7 +439,7 @@ class LocalDiskWorkspace:
                 version = int(path.stem)
             except ValueError:
                 continue
-            text = await anyio.to_thread.run_sync(path.read_text)
+            text = await anyio.to_thread.run_sync(_read_utf8, path)
             fm, body = parse_note_file(text)
             note = note_from_frontmatter(fm, body)
             out.append(
@@ -433,7 +465,7 @@ class LocalDiskWorkspace:
         path = history_dir / f"{version:04d}.md"
         if not path.exists():
             return None
-        text = await anyio.to_thread.run_sync(path.read_text)
+        text = await anyio.to_thread.run_sync(_read_utf8, path)
         fm, body = parse_note_file(text)
         note = note_from_frontmatter(fm, body)
         _log_citation(slug)
@@ -611,8 +643,8 @@ class LocalDiskWorkspace:
         # Copy the live file's CURRENT content to the version slot.
         # We can't render(note) here because the caller might have
         # already mutated `note` — copy the existing file bytes.
-        content = await anyio.to_thread.run_sync(live_path.read_text)
-        await anyio.to_thread.run_sync(dest.write_text, content)
+        content = await anyio.to_thread.run_sync(_read_utf8, live_path)
+        await anyio.to_thread.run_sync(_write_utf8, dest, content)
 
     def _find_note_path(
         self, user_id: str | None, author: str, slug: str
@@ -649,7 +681,7 @@ class LocalDiskWorkspace:
     async def _write_note_atomic(self, dest: Path, note: Note) -> None:
         body = render_note_file(note)
         tmp = dest.with_suffix(dest.suffix + ".tmp")
-        await anyio.to_thread.run_sync(tmp.write_text, body)
+        await anyio.to_thread.run_sync(_write_utf8, tmp, body)
         await anyio.to_thread.run_sync(os.replace, str(tmp), str(dest))
 
     async def _maybe_write_embedding(
@@ -677,7 +709,9 @@ class LocalDiskWorkspace:
                 "vector": list(vector),
             }
             await anyio.to_thread.run_sync(
-                sidecar.write_text, json.dumps(payload)
+                _write_utf8,
+                sidecar,
+                json.dumps(payload, ensure_ascii=False),
             )
         except anyio.get_cancelled_exc_class():
             raise
@@ -832,7 +866,7 @@ class LocalDiskWorkspace:
             if not sidecar.exists():
                 continue
             try:
-                text = await anyio.to_thread.run_sync(sidecar.read_text)
+                text = await anyio.to_thread.run_sync(_read_utf8, sidecar)
                 payload = json.loads(text)
                 stored_model = payload.get("model")
                 this_model = getattr(self._embedder, "name", "unknown")
@@ -863,7 +897,7 @@ class LocalDiskWorkspace:
         ]
 
     async def _load_note(self, path: Path) -> Note:
-        text = await anyio.to_thread.run_sync(path.read_text)
+        text = await anyio.to_thread.run_sync(_read_utf8, path)
         fm, body = parse_note_file(text)
         return note_from_frontmatter(fm, body)
 
@@ -878,7 +912,7 @@ class LocalDiskWorkspace:
             user_root.mkdir(parents=True, exist_ok=True)
             dest = user_root / INDEX_FILENAME
             tmp = dest.with_suffix(dest.suffix + ".tmp")
-            await anyio.to_thread.run_sync(tmp.write_text, rendered)
+            await anyio.to_thread.run_sync(_write_utf8, tmp, rendered)
             await anyio.to_thread.run_sync(os.replace, str(tmp), str(dest))
 
     async def render_index(

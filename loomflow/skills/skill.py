@@ -123,7 +123,7 @@ class Skill:
                 "directory containing SKILL.md plus optional "
                 "supporting files (REFERENCE.md, scripts/, etc.)."
             )
-        text = skill_md.read_text()
+        text = skill_md.read_text(encoding="utf-8")
         meta, body, tool_specs = _parse_skill(
             text, source_label=source_label
         )

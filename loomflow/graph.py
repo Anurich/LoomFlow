@@ -591,10 +591,11 @@ async def write_graph(
     # operation, and the mermaid.ink fetch (when used) dominates
     # any wall-clock cost.
     if suffix == ".mmd":
-        target.write_text(mermaid)  # noqa: ASYNC240
+        target.write_text(mermaid, encoding="utf-8")  # noqa: ASYNC240
     elif suffix == ".md":
         target.write_text(  # noqa: ASYNC240
-            f"# {graph.title}\n\n```mermaid\n{mermaid}\n```\n"
+            f"# {graph.title}\n\n```mermaid\n{mermaid}\n```\n",
+            encoding="utf-8",
         )
     elif suffix in {".png", ".svg"}:
         fmt = "png" if suffix == ".png" else "svg"
@@ -607,7 +608,7 @@ async def write_graph(
             # user still has something they can paste into a
             # renderer.
             fallback = target.with_suffix(".mmd")
-            fallback.write_text(mermaid)  # noqa: ASYNC240
+            fallback.write_text(mermaid, encoding="utf-8")  # noqa: ASYNC240
             raise RuntimeError(
                 f"Could not reach mermaid.ink ({exc}). "
                 f"Wrote Mermaid source to {fallback} as a fallback. "
@@ -615,7 +616,7 @@ async def write_graph(
             ) from exc
     else:
         # Unknown extension: write Mermaid source.
-        target.write_text(mermaid)  # noqa: ASYNC240
+        target.write_text(mermaid, encoding="utf-8")  # noqa: ASYNC240
 
     return mermaid
 

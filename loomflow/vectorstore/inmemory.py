@@ -326,7 +326,9 @@ class InMemoryVectorStore:
                 for i in range(len(self._ids))
             ],
         }
-        target.write_text(json.dumps(data))  # noqa: ASYNC240 — sync I/O is fine here, persistence is rare and small
+        target.write_text(  # noqa: ASYNC240 — sync I/O is fine here, persistence is rare and small
+            json.dumps(data, ensure_ascii=False), encoding="utf-8"
+        )
 
     @classmethod
     async def load(
@@ -335,7 +337,10 @@ class InMemoryVectorStore:
         """Restore a store previously :meth:`save`-d. Pass the same
         embedder kind/dimensions or queries will produce nonsense
         scores."""
-        data = json.loads(Path(path).read_text())  # noqa: ASYNC240 — sync I/O is fine here, called once at startup
+        # noqa: ASYNC240 — sync I/O is fine here, called once at startup
+        data = json.loads(
+            Path(path).read_text(encoding="utf-8")  # noqa: ASYNC240
+        )
         if data.get("version") != _PERSIST_VERSION:
             raise ValueError(
                 f"Unsupported persist version: "

@@ -7,6 +7,52 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 For development-history detail (per-slice notes, file maps, gate
 counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 
+## [0.10.11] — 2026-05-16
+
+### Fixed — Windows compatibility (charmap codec + bash_tool shell)
+
+Two production-blocking bugs surfaced by a remote loom-code user
+running on Windows:
+
+**1. ``UnicodeEncodeError: 'charmap' codec can't encode character
+'≥'``** — ``LocalDiskWorkspace`` was writing notes via
+``Path.write_text(content)`` without an explicit ``encoding=``,
+so it picked up the system locale codec. On Windows that's
+``cp1252`` ("charmap") which can't represent ``≥``, ``≤``, ``→``,
+``✓``, emoji, and many other Unicode characters models routinely
+emit. Notes containing npm version specifiers (``≥1.0.0``) crashed
+the workspace.
+
+Fix: all nine ``read_text`` / ``write_text`` sites in
+``loomflow/workspace/disk.py`` now force UTF-8 via a pair of
+helpers (``_read_utf8`` / ``_write_utf8``). Same fix applied
+preventively to: ``loomflow/skills/skill.py`` (SKILL.md
+loading), ``loomflow/tools/builtin.py`` (recursive read in the
+search-and-replace path), ``loomflow/graph.py`` (Mermaid output),
+and ``loomflow/vectorstore/inmemory.py`` (vector-store JSON
+persistence — also gained ``ensure_ascii=False``).
+
+**2. ``[WinError 2] The system cannot find the file specified``**
+— ``bash_tool`` invoked the subprocess via ``["/bin/sh", "-c",
+command]``. Windows doesn't have ``/bin/sh`` so the executable
+lookup failed before any command could run.
+
+Fix: detect ``sys.platform == "win32"`` and use
+``["cmd.exe", "/c", command]`` there; keep ``/bin/sh -c`` on
+POSIX. The tool's model-facing description now declares which
+host shell it has (``Host shell: cmd.exe (use its native
+syntax)``) so the model can adapt its commands to the platform.
+
+### Coverage
+
+5 new regression tests in ``tests/test_workspace_windows_encoding.py``
+covering the bug-report scenario (notes containing ``≥``), the
+WORKSPACE.md index regeneration with Unicode titles, and the
+``.history/*.md`` snapshot path. Tests would FAIL on Windows
+pre-fix; on POSIX hosts they pin the encoding via round-trips so
+regressions can't sneak back. Full suite: 1508 passing on macOS;
+the same suite is the contract Windows now has to meet too.
+
 ## [0.10.10] — 2026-05-16
 
 ### Added — Persistent subagents across every `Team.*` builder
