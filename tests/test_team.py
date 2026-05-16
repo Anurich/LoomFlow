@@ -131,6 +131,90 @@ def test_team_supervisor_forwards_agent_kwargs() -> None:
 
 
 # ---------------------------------------------------------------------------
+# prompt_caching= forwarding through every Team.* builder (0.10.12)
+# ---------------------------------------------------------------------------
+#
+# Until 0.10.12 the coordinator Agent built by ``Team.*`` could not have
+# prompt caching enabled — only workers (constructed as plain Agents
+# upstream) could. Mirrors the ``stop_hooks=`` forwarding added in
+# 0.10.10. The check below confirms the kwarg lands on the coordinator's
+# ``_prompt_caching`` and resolves to ``enabled=True``.
+
+
+def _assert_caching_enabled(coord: Agent) -> None:
+    cfg = coord._prompt_caching
+    assert cfg.enabled is True, (
+        f"coordinator prompt_caching did not propagate: {cfg!r}"
+    )
+
+
+def test_team_supervisor_forwards_prompt_caching() -> None:
+    team = Team.supervisor(
+        workers={"a": _scripted("a")}, model="echo", prompt_caching=True
+    )
+    _assert_caching_enabled(team)
+
+
+def test_team_swarm_forwards_prompt_caching() -> None:
+    team = Team.swarm(
+        agents={"a": _scripted("a"), "b": _scripted("b")},
+        entry_agent="a",
+        model="echo",
+        prompt_caching=True,
+    )
+    _assert_caching_enabled(team)
+
+
+def test_team_router_forwards_prompt_caching() -> None:
+    team = Team.router(
+        routes=[RouterRoute(name="r1", description="x", agent=_scripted("a"))],
+        model="echo",
+        prompt_caching=True,
+    )
+    _assert_caching_enabled(team)
+
+
+def test_team_debate_forwards_prompt_caching() -> None:
+    team = Team.debate(
+        debaters=[_scripted("a"), _scripted("b")],
+        rounds=1,
+        model="echo",
+        prompt_caching=True,
+    )
+    _assert_caching_enabled(team)
+
+
+def test_team_actor_critic_forwards_prompt_caching() -> None:
+    team = Team.actor_critic(
+        actor=_scripted("draft"),
+        critic=_scripted('{"score": 1.0, "issues": [], "summary": "ok"}'),
+        model="echo",
+        prompt_caching=True,
+    )
+    _assert_caching_enabled(team)
+
+
+def test_team_blackboard_forwards_prompt_caching() -> None:
+    team = Team.blackboard(
+        agents={"a": _scripted("a")}, model="echo", prompt_caching=True
+    )
+    _assert_caching_enabled(team)
+
+
+def test_team_supervisor_accepts_dict_form_prompt_caching() -> None:
+    """Dict shape (e.g. ``{"enabled": True, "ttl": "1h"}``) propagates
+    through and resolves to a populated PromptCacheConfig."""
+    team = Team.supervisor(
+        workers={"a": _scripted("a")},
+        model="echo",
+        prompt_caching={"enabled": True, "ttl": "1h"},
+    )
+    cfg = team._prompt_caching
+    assert cfg.enabled is True
+    assert cfg.ttl == "1h"
+
+
+# ---------------------------------------------------------------------------
 # Equivalence: Team.supervisor == Agent(architecture=Supervisor(...))
 # ---------------------------------------------------------------------------
 

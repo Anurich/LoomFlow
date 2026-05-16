@@ -51,7 +51,7 @@ yourself::
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any
 
 from .agent.api import DEFAULT_MAX_TURNS, Agent
@@ -154,6 +154,7 @@ class Team:
         living_plan: Any = None,
         stop_hooks: list[Any] | None = None,
         max_stop_hook_iterations: int = 15,
+        prompt_caching: bool | Mapping[str, Any] | None = None,
         # --- supervisor-specific options ---
         instructions_template: str | None = None,
         delegate_tool_name: str = "delegate",
@@ -173,6 +174,11 @@ class Team:
         ``[researcher]`` rather than the generic ``[agent]``).
         Workers pick up the workspace via ambient inheritance from
         the coordinator's run, so you don't have to rebuild them.
+
+        ``prompt_caching=True`` (or the dict form ``{"enabled": True,
+        "ttl": "1h"}``) enables provider-native caching on the
+        coordinator. Workers cache independently — set
+        ``prompt_caching=`` on each worker Agent at construction.
         """
         coord_ws: Any = workspace
         if workspace is not None:
@@ -217,6 +223,7 @@ class Team:
             living_plan=living_plan,
             stop_hooks=stop_hooks,
             max_stop_hook_iterations=max_stop_hook_iterations,
+            prompt_caching=prompt_caching,
             architecture=Supervisor(
                 workers=workers,
                 instructions_template=instructions_template,
@@ -270,6 +277,7 @@ class Team:
         living_plan: Any = None,
         stop_hooks: list[Any] | None = None,
         max_stop_hook_iterations: int = 15,
+        prompt_caching: bool | Mapping[str, Any] | None = None,
         # --- swarm-specific options ---
         max_handoffs: int = 8,
         detect_cycles: bool = True,
@@ -294,6 +302,10 @@ class Team:
         accumulate memory across handoffs and across multiple
         ``Agent.run()`` invocations. Set to ``False`` to restore
         legacy per-handoff stateless behaviour.
+
+        ``prompt_caching=`` enables provider-native caching on the
+        coordinator (see :meth:`Team.supervisor` for accepted shapes).
+        Peers cache independently via their own ``Agent`` ctor.
         """
         entry_ws: Any = workspace
         # Unwrap Handoff configs to plain Agent map up front — needed
@@ -337,6 +349,7 @@ class Team:
             living_plan=living_plan,
             stop_hooks=stop_hooks,
             max_stop_hook_iterations=max_stop_hook_iterations,
+            prompt_caching=prompt_caching,
             architecture=Swarm(
                 agents=agents,
                 entry_agent=entry_agent,
@@ -383,6 +396,7 @@ class Team:
         living_plan: Any = None,
         stop_hooks: list[Any] | None = None,
         max_stop_hook_iterations: int = 15,
+        prompt_caching: bool | Mapping[str, Any] | None = None,
         # --- router-specific options ---
         fallback_route: str | None = None,
         require_confidence_above: float = 0.0,
@@ -399,6 +413,10 @@ class Team:
         to the same specialist reuse memory (the typical case in a
         long REPL: route to ``billing`` once, route to ``billing``
         again — the second call sees the first conversation).
+
+        ``prompt_caching=`` enables provider-native caching on the
+        classifier-coordinator (see :meth:`Team.supervisor` for
+        accepted shapes). Specialists cache via their own ``Agent``.
         """
         worker_registry = None
         role_to_worker_id = None
@@ -426,6 +444,7 @@ class Team:
             living_plan=living_plan,
             stop_hooks=stop_hooks,
             max_stop_hook_iterations=max_stop_hook_iterations,
+            prompt_caching=prompt_caching,
             architecture=Router(
                 routes=routes,
                 fallback_route=fallback_route,
@@ -471,6 +490,7 @@ class Team:
         living_plan: Any = None,
         stop_hooks: list[Any] | None = None,
         max_stop_hook_iterations: int = 15,
+        prompt_caching: bool | Mapping[str, Any] | None = None,
         # --- debate-specific options ---
         rounds: int = 2,
         convergence_check: bool = True,
@@ -489,6 +509,10 @@ class Team:
         session so they remember prior debates across multiple
         ``Agent.run()`` invocations on the same coordinator. Set to
         ``False`` to restore the legacy per-round stateless behaviour.
+
+        ``prompt_caching=`` enables provider-native caching on the
+        coordinator (see :meth:`Team.supervisor` for accepted shapes).
+        Debaters cache via their own ``Agent`` ctor.
         """
         worker_registry = None
         role_to_worker_id = None
@@ -520,6 +544,7 @@ class Team:
             living_plan=living_plan,
             stop_hooks=stop_hooks,
             max_stop_hook_iterations=max_stop_hook_iterations,
+            prompt_caching=prompt_caching,
             architecture=MultiAgentDebate(
                 debaters=debaters,
                 judge=judge,
@@ -568,6 +593,7 @@ class Team:
         living_plan: Any = None,
         stop_hooks: list[Any] | None = None,
         max_stop_hook_iterations: int = 15,
+        prompt_caching: bool | Mapping[str, Any] | None = None,
         # --- actor-critic-specific options ---
         max_rounds: int = 3,
         approval_threshold: float = 0.9,
@@ -584,6 +610,10 @@ class Team:
         their memory carries across rounds AND across multiple
         ``Agent.run()`` invocations — the critic remembers what it
         already flagged; the actor remembers what it already refined.
+
+        ``prompt_caching=`` enables provider-native caching on the
+        coordinator (see :meth:`Team.supervisor` for accepted shapes).
+        Actor/critic cache via their own ``Agent`` ctor.
         """
         worker_registry = None
         role_to_worker_id = None
@@ -610,6 +640,7 @@ class Team:
             living_plan=living_plan,
             stop_hooks=stop_hooks,
             max_stop_hook_iterations=max_stop_hook_iterations,
+            prompt_caching=prompt_caching,
             architecture=ActorCritic(
                 actor=actor,
                 critic=critic,
@@ -658,6 +689,7 @@ class Team:
         living_plan: Any = None,
         stop_hooks: list[Any] | None = None,
         max_stop_hook_iterations: int = 15,
+        prompt_caching: bool | Mapping[str, Any] | None = None,
         # --- blackboard-specific options ---
         max_rounds: int = 10,
         coordinator_instructions: str | None = None,
@@ -680,6 +712,11 @@ class Team:
         provided) with stable sessions so each agent's conversation
         memory carries across rounds AND across multiple
         ``Agent.run()`` invocations.
+
+        ``prompt_caching=`` enables provider-native caching on the
+        outer Agent that wraps the blackboard architecture (see
+        :meth:`Team.supervisor` for accepted shapes). Contributing
+        agents cache via their own ``Agent`` ctor.
         """
         coord_ws: Any = workspace
         if workspace is not None:
@@ -720,6 +757,7 @@ class Team:
             living_plan=living_plan,
             stop_hooks=stop_hooks,
             max_stop_hook_iterations=max_stop_hook_iterations,
+            prompt_caching=prompt_caching,
             architecture=BlackboardArchitecture(
                 agents=agents,
                 coordinator=coordinator,

@@ -7,6 +7,39 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 For development-history detail (per-slice notes, file maps, gate
 counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 
+## [0.10.12] — 2026-05-16
+
+### Added — `prompt_caching=` forwarded through every `Team.*` builder
+
+Closes the same papercut that 0.10.10 closed for `stop_hooks=` /
+`max_stop_hook_iterations=`: `Team.supervisor`, `swarm`, `router`,
+`debate`, `actor_critic`, and `blackboard` now accept
+`prompt_caching: bool | Mapping[str, Any] | None = None` and
+thread it into the coordinator `Agent(...)`. Previously the kwarg
+silently didn't exist on these builders, so callers either had
+to monkey-patch `coordinator._prompt_caching` post-construction
+or live with an uncached coordinator (workers, which are built
+as plain Agents, were already cacheable).
+
+Accepted shapes are unchanged from the underlying Agent API:
+
+```python
+Team.supervisor(..., prompt_caching=True)                          # 5m TTL default
+Team.supervisor(..., prompt_caching={"enabled": True, "ttl": "1h"})
+Team.supervisor(..., prompt_caching={"enabled": True, "cache_key": "session_42"})
+```
+
+This unblocks loom-code's coordinator caching (it was already
+caching workers, never the coordinator — the team-builder gap was
+the reason).
+
+### Coverage
+
+7 new tests in `tests/test_team.py` — one per builder confirming
+the kwarg propagates to the coordinator's `_prompt_caching` and
+resolves to `enabled=True`, plus a dict-shape test confirming
+`ttl="1h"` makes it through end-to-end. Full suite: 1515 passing.
+
 ## [0.10.11] — 2026-05-16
 
 ### Fixed — Windows compatibility (charmap codec + bash_tool shell)
