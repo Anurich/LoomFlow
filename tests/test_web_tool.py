@@ -219,6 +219,11 @@ def _patched_ddgs(results: Any) -> Any:
 
 
 async def test_ddg_happy_path_formats_results() -> None:
+    # ``duckduckgo_search`` is an optional dep (``loomflow[web]``).
+    # In CI environments without the ``web`` extra installed (e.g.
+    # base/dev matrix) the patch target can't resolve and the test
+    # can't run — skip gracefully rather than fail.
+    pytest.importorskip("duckduckgo_search")
     raw = [
         {
             "title": "Async I/O",
@@ -234,6 +239,8 @@ async def test_ddg_happy_path_formats_results() -> None:
 
 
 async def test_ddg_error_returns_failure_string() -> None:
+    # Same optional-dep guard as the happy-path test above.
+    pytest.importorskip("duckduckgo_search")
     # DDG raises various — RatelimitException, etc. We catch
     # broadly and surface as a failure string.
     with _patched_ddgs(RuntimeError("rate limit")):
