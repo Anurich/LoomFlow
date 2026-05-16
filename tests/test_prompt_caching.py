@@ -185,12 +185,13 @@ def test_cache_control_for_1h_adds_ttl() -> None:
     assert block == {"type": "ephemeral", "ttl": "1h"}
 
 
-def test_apply_cache_control_converts_system_string_to_blocks() -> None:
-    """Anthropic accepts ``system`` as a string OR a list of content
-    blocks. To attach cache_control we need the block form."""
+def test_apply_cache_control_converts_single_system_part_to_block() -> None:
+    """Single-part case (back-compat): one content block with one
+    ``cache_control`` marker — same shape every pre-0.10.13 client
+    saw, just constructed via the new list-based helper signature."""
     kwargs: dict[str, object] = {"system": "you are helpful"}
     _apply_anthropic_cache_control(
-        kwargs, "you are helpful", [], {"type": "ephemeral"}
+        kwargs, ["you are helpful"], [], {"type": "ephemeral"}
     )
     assert kwargs["system"] == [
         {
@@ -199,6 +200,78 @@ def test_apply_cache_control_converts_system_string_to_blocks() -> None:
             "cache_control": {"type": "ephemeral"},
         }
     ]
+
+
+def test_apply_cache_control_marks_memory_block_independently() -> None:
+    """The 0.10.13 unlock: when the architecture emits
+    [instructions, memory] as two system parts, the helper renders
+    them as two content blocks BOTH carrying ``cache_control`` — so
+    cached reads hit independently of any per-turn-volatile recall
+    block placed later."""
+    kwargs: dict[str, object] = {}
+    _apply_anthropic_cache_control(
+        kwargs,
+        ["instructions block", "memory block"],
+        [],
+        {"type": "ephemeral"},
+    )
+    blocks = kwargs["system"]
+    assert blocks == [
+        {
+            "type": "text",
+            "text": "instructions block",
+            "cache_control": {"type": "ephemeral"},
+        },
+        {
+            "type": "text",
+            "text": "memory block",
+            "cache_control": {"type": "ephemeral"},
+        },
+    ]
+
+
+def test_apply_cache_control_marks_three_system_parts() -> None:
+    """Three-part case — instructions / memory / recall. All three
+    get ``cache_control`` (3 of Anthropic's 4 breakpoints), leaving
+    the 4th for the tool array."""
+    kwargs: dict[str, object] = {}
+    _apply_anthropic_cache_control(
+        kwargs,
+        ["instructions", "memory", "recall"],
+        [],
+        {"type": "ephemeral"},
+    )
+    blocks = kwargs["system"]
+    # All three blocks should carry the marker.
+    for b in blocks:
+        assert b["cache_control"] == {"type": "ephemeral"}
+
+
+def test_apply_cache_control_caps_system_markers_at_three() -> None:
+    """If an architecture ever emits 4+ system messages, only the
+    LAST 3 carry ``cache_control`` — leaving room for the tool
+    marker without busting Anthropic's 4-breakpoint hard cap."""
+    kwargs: dict[str, object] = {}
+    _apply_anthropic_cache_control(
+        kwargs,
+        ["a", "b", "c", "d"],
+        [],
+        {"type": "ephemeral"},
+    )
+    blocks = kwargs["system"]
+    # First block: no marker. Last three: marked.
+    assert "cache_control" not in blocks[0]
+    assert all("cache_control" in b for b in blocks[1:])
+
+
+def test_apply_cache_control_off_is_noop() -> None:
+    """``cache_ctrl=None`` (caching disabled) leaves ``kwargs``
+    untouched — the caller's pre-set ``system`` string survives."""
+    kwargs: dict[str, object] = {"system": "untouched"}
+    _apply_anthropic_cache_control(
+        kwargs, ["untouched"], [], None
+    )
+    assert kwargs["system"] == "untouched"
 
 
 def test_apply_cache_control_annotates_last_tool() -> None:
@@ -210,7 +283,7 @@ def test_apply_cache_control_annotates_last_tool() -> None:
     ]
     kwargs: dict[str, object] = {"tools": tools}
     _apply_anthropic_cache_control(
-        kwargs, "", tools, {"type": "ephemeral", "ttl": "1h"}
+        kwargs, [], tools, {"type": "ephemeral", "ttl": "1h"}
     )
     # Last tool now has cache_control; first does not.
     assert "cache_control" not in tools[0]
@@ -225,7 +298,9 @@ def test_apply_cache_control_no_op_when_ctrl_is_none() -> None:
     so cache hits from un-cached requests in the same prefix still
     work."""
     kwargs: dict[str, object] = {"system": "x", "tools": [{"name": "t"}]}
-    _apply_anthropic_cache_control(kwargs, "x", [{"name": "t"}], None)
+    _apply_anthropic_cache_control(
+        kwargs, ["x"], [{"name": "t"}], None
+    )
     assert kwargs["system"] == "x"  # untouched
     assert kwargs["tools"] == [{"name": "t"}]
 

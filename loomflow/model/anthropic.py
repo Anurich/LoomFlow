@@ -50,40 +50,66 @@ def _cache_control_for(prompt_caching: Any) -> dict[str, Any] | None:
 
 def _apply_anthropic_cache_control(
     kwargs: dict[str, Any],
-    system: str | None,
+    system_parts: list[str],
     anth_tools: list[dict[str, Any]],
     cache_ctrl: dict[str, Any] | None,
 ) -> None:
     """Inject Anthropic cache breakpoints when caching is enabled.
 
-    We use **two of the four** available breakpoints by default:
+    Anthropic accepts **up to four** ``cache_control`` markers per
+    request, each creating an independent cache entry (the longest
+    matching prefix wins on read). We use them like this:
 
-    1. The LAST block of ``system`` — caches the entire system
-       prompt (typically the largest stable prefix).
-    2. The LAST tool definition — caches the whole tool array.
+    1. The LAST tool definition — caches the entire tool array.
+    2. The LAST *system content block* — caches the full system
+       prompt (catches turns where recall is empty / unchanged).
+    3. Earlier system blocks, working backward — caches stable
+       prefixes (instructions, memory blocks) independently of any
+       per-turn-volatile recall block that sits later.
 
-    The remaining two breakpoints are reserved for future expansion
-    (memory blocks, long pinned messages) without breaking existing
-    cache hits. Mutates ``kwargs`` in place to convert the ``system``
-    string into a content-block list with cache_control, and to add
-    cache_control to ``anth_tools[-1]``.
+    Architectures emit system content as a list of strings (one per
+    semantic chunk — instructions, memory, recall). We render each
+    as its own content block and place ``cache_control`` on the
+    LAST N (N = min(3, num_blocks)) so:
+
+    * Single-block messages still get one marker (back-compat).
+    * Two-block messages (instructions + memory OR instructions +
+      recall) get two markers — both blocks independently cached.
+    * Three-block messages (instructions + memory + recall) use all
+      three system breakpoints, leaving exactly one for tools.
+
+    ``cache_control`` placed beyond block 3 would put us at 5 total
+    markers and Anthropic would reject the request; we cap at 3
+    system + 1 tools = the 4 the API supports.
+
+    Mutates ``kwargs`` in place: rewrites ``kwargs["system"]`` as a
+    content-block list when caching is on, and annotates
+    ``anth_tools[-1]`` with cache_control.
     """
     if cache_ctrl is None:
         return
-    if system:
-        # Convert ``system`` string into a single text block with
-        # cache_control. Anthropic accepts EITHER a string OR a list
-        # of content blocks; the block form is needed for caching.
-        kwargs["system"] = [
-            {
-                "type": "text",
-                "text": system,
-                "cache_control": cache_ctrl,
-            }
-        ]
+    if system_parts:
+        # Build content blocks for each system part; mark the LAST
+        # N with cache_control. Anthropic supports 4 breakpoints
+        # total; we reserve 1 for tools (below) and use the other
+        # 3 for system. With <3 parts, only that many markers fire.
+        max_system_markers = 3
+        n_parts = len(system_parts)
+        n_marked = min(max_system_markers, n_parts)
+        first_marked = n_parts - n_marked
+
+        blocks: list[dict[str, Any]] = []
+        for i, part in enumerate(system_parts):
+            block: dict[str, Any] = {"type": "text", "text": part}
+            if i >= first_marked:
+                block["cache_control"] = cache_ctrl
+            blocks.append(block)
+        kwargs["system"] = blocks
     if anth_tools:
         # Annotate the LAST tool with cache_control; caches every
-        # tool definition up to and including this one.
+        # tool definition up to and including this one. This is the
+        # 4th breakpoint, leaving room for up to 3 system markers
+        # above.
         anth_tools[-1] = {**anth_tools[-1], "cache_control": cache_ctrl}
         kwargs["tools"] = anth_tools
 
@@ -174,7 +200,7 @@ class AnthropicModel:
         client raises (test fakes that only support streaming, or
         transports that don't honour single-shot creation).
         """
-        system, anth_messages = _to_anthropic_messages(messages)
+        system_parts, anth_messages = _to_anthropic_messages(messages)
         anth_tools = [_to_anthropic_tool(t) for t in (tools or [])]
 
         # Structured output: synthesize a forced tool call.
@@ -191,8 +217,11 @@ class AnthropicModel:
             "max_tokens": max_tokens or self._max_tokens,
             "temperature": temperature,
         }
-        if system:
-            kwargs["system"] = system
+        if system_parts:
+            # Default: join into one string (caching-off shape).
+            # ``_apply_anthropic_cache_control`` below rewrites this
+            # into a content-block list when caching is enabled.
+            kwargs["system"] = "\n\n".join(system_parts)
         if anth_tools:
             kwargs["tools"] = anth_tools
         if synthetic_tool_name:
@@ -218,7 +247,9 @@ class AnthropicModel:
         # are set, since the helper rewrites them with cache_control
         # markers when enabled.
         cache_ctrl = _cache_control_for(prompt_caching)
-        _apply_anthropic_cache_control(kwargs, system, anth_tools, cache_ctrl)
+        _apply_anthropic_cache_control(
+            kwargs, system_parts, anth_tools, cache_ctrl
+        )
 
         try:
             response = await self._client.messages.create(**kwargs)
@@ -320,7 +351,7 @@ class AnthropicModel:
         strict_effort: bool = False,
         prompt_caching: Any = None,
     ) -> AsyncIterator[ModelChunk]:
-        system, anth_messages = _to_anthropic_messages(messages)
+        system_parts, anth_messages = _to_anthropic_messages(messages)
         anth_tools = [_to_anthropic_tool(t) for t in (tools or [])]
         synthetic_tool_name = ""
         if output_schema is not None:
@@ -335,8 +366,11 @@ class AnthropicModel:
             "max_tokens": max_tokens or self._max_tokens,
             "temperature": temperature,
         }
-        if system:
-            kwargs["system"] = system
+        if system_parts:
+            # Default: caching-off shape (single joined string). The
+            # cache-control helper rewrites this to a multi-block list
+            # when caching is enabled.
+            kwargs["system"] = "\n\n".join(system_parts)
         if synthetic_tool_name:
             kwargs["tool_choice"] = {
                 "type": "tool",
@@ -352,7 +386,9 @@ class AnthropicModel:
 
         # Prompt cache injection (no-op when caching is disabled).
         cache_ctrl = _cache_control_for(prompt_caching)
-        _apply_anthropic_cache_control(kwargs, system, anth_tools, cache_ctrl)
+        _apply_anthropic_cache_control(
+            kwargs, system_parts, anth_tools, cache_ctrl
+        )
 
         partials: dict[int, _PartialTool] = {}
         agg_input = 0
@@ -491,12 +527,18 @@ async def _consume_anthropic_stream(
 
 def _to_anthropic_messages(
     messages: list[Message],
-) -> tuple[str, list[dict[str, Any]]]:
-    """Convert our messages to ``(system_text, [anthropic_message, ...])``.
+) -> tuple[list[str], list[dict[str, Any]]]:
+    """Convert our messages to ``(system_parts, [anthropic_message, ...])``.
 
     Anthropic requires ``system`` as a top-level field and structures
     tool calls as ``tool_use`` content blocks on the assistant turn,
     with ``tool_result`` blocks returned in the next user turn.
+
+    Returns ``system_parts`` as a list (one string per Role.SYSTEM
+    message) so the cache-control helper can emit one content block
+    per semantic chunk (instructions / memory / recall) with its own
+    cache_control marker. Callers that don't enable caching join
+    with ``\\n\\n`` to recover the old single-string shape.
     """
     system_parts: list[str] = []
     out: list[dict[str, Any]] = []
@@ -545,7 +587,7 @@ def _to_anthropic_messages(
     if pending_results:
         out.append({"role": "user", "content": pending_results})
 
-    return "\n\n".join(system_parts), out
+    return system_parts, out
 
 
 def _to_anthropic_tool(t: ToolDef) -> dict[str, Any]:

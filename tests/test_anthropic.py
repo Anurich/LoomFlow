@@ -177,14 +177,20 @@ async def test_agent_run_with_anthropic_fake_returns_expected_text() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_system_messages_are_concatenated_into_system_field() -> None:
+def test_system_messages_kept_as_list_for_cache_block_emission() -> None:
+    """As of 0.10.13, ``_to_anthropic_messages`` returns
+    ``system_parts: list[str]`` (one entry per Role.SYSTEM message)
+    so the cache-control helper can place independent ``cache_control``
+    markers on the last N parts (instructions / memory / recall).
+    Callers join with ``\\n\\n`` only when caching is off."""
     msgs = [
         Message(role=Role.SYSTEM, content="be terse"),
         Message(role=Role.SYSTEM, content="be polite"),
         Message(role=Role.USER, content="hi"),
     ]
-    system, out = _to_anthropic_messages(msgs)
-    assert system == "be terse\n\nbe polite"
+    system_parts, out = _to_anthropic_messages(msgs)
+    assert system_parts == ["be terse", "be polite"]
+    assert "\n\n".join(system_parts) == "be terse\n\nbe polite"
     assert out == [{"role": "user", "content": "hi"}]
 
 

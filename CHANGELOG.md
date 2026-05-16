@@ -7,6 +7,59 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 For development-history detail (per-slice notes, file maps, gate
 counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 
+## [0.10.13] — 2026-05-16
+
+### Added — Multi-breakpoint Anthropic prompt caching (3rd/4th of 4)
+
+Until 0.10.13 the Anthropic adapter used only 2 of the 4
+``cache_control`` breakpoints the API allows: one on the last
+system block, one on the last tool definition. Architectures emit
+system content as MULTIPLE messages (instructions / memory blocks /
+recall context), but the adapter joined them into a single string
+before marking — so a memory-block change busted the entire cached
+prefix, and the existence of a per-turn recall block (which changes
+every turn) cache-busted EVERYTHING above it.
+
+This release keeps the system parts separated through to the
+cache-control helper and emits one ``cache_control``-marked content
+block per part — up to 3 system markers + 1 tool marker = the full
+4 breakpoints Anthropic supports:
+
+* Single-part system (back-compat shape): 1 marker, identical to
+  the pre-0.10.13 wire format.
+* Two-part system (instructions + memory OR instructions + recall):
+  both blocks marked — each cached independently.
+* Three-part system (instructions + memory + recall): all three
+  blocks marked. Even if the recall block is per-turn-volatile, the
+  instructions + memory blocks still hit cache on every turn via
+  their independent markers.
+* Four+ part system (defensive cap): only the LAST 3 carry markers
+  so we don't exceed the 4-breakpoint hard limit.
+
+Impact on loom-code (the immediate consumer): the ``session_summary``
++ ``loom_index`` working blocks the REPL feeds through
+``Memory.update_block`` finally get their own cache entries — they
+hit cache turn-to-turn without being invalidated by recall churn.
+
+### Cross-provider scope
+
+Only the Anthropic adapter has work. OpenAI handles prompt caching
+server-side without marker hints (`prompt_tokens_details.cached_tokens`
+parsing was already in place); LiteLLM inherits from the upstream
+provider; Echo/Scripted/Retrying accept the flag for signature
+parity but have no backend. Gemini caching is not yet implemented
+in loomflow (would require the separate ``CachedContent.create()``
+endpoint — can't be expressed as a per-call marker).
+
+### Coverage
+
+5 new tests in ``tests/test_prompt_caching.py`` covering: single-part
+back-compat, two-part memory-block marking, three-part full-coverage,
+four-part defensive cap, and the cache-off no-op path. Updated
+``tests/test_anthropic.py::test_system_messages_kept_as_list_for_cache_block_emission``
+to reflect the new ``_to_anthropic_messages -> tuple[list[str], ...]``
+signature. Full suite: 1519 passing.
+
 ## [0.10.12] — 2026-05-16
 
 ### Added — `prompt_caching=` forwarded through every `Team.*` builder
