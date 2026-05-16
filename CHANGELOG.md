@@ -7,6 +7,78 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 For development-history detail (per-slice notes, file maps, gate
 counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 
+## [0.10.14] — 2026-05-16
+
+### Added — Tool-result summarization (Claude Code's `tool_use_summary`)
+
+New opt-in `Agent(tool_result_summarizer=<model>)` kwarg. When
+wired, the ReAct loop hands any tool result whose rendered
+content exceeds `tool_result_summary_threshold` chars (default
+500) to a small fast model (typically Haiku) BEFORE appending the
+result to conversation history. The summary replaces the verbatim
+output — every subsequent turn ships the short version, not the
+original.
+
+The single biggest per-turn token saver Claude Code uses. A 5KB
+`read_file` result that used to occupy 5KB on every subsequent
+turn now occupies ~500 bytes. Over a 10-turn session that
+compounds — and unlike auto-compact (which triggers at 80%
+context window), this kicks in immediately, before history starts
+to bloat.
+
+Failure handling: summariser exception, empty summary, or summary
+larger than the original all fall back to shipping the original
+verbatim. Principle: summarisation must NEVER kill a turn.
+
+API shape:
+
+```python
+agent = Agent(
+    "you help",
+    model="claude-opus-4-7",
+    tool_result_summarizer="claude-haiku-4-5",  # or a Model instance
+    tool_result_summary_threshold=500,           # chars; default
+)
+```
+
+Model-side caveat the developer should know: the agent is
+DECEIVED — its next turn sees the summary as if it were the
+original. If a multi-turn flow truly needs the verbatim text,
+the agent must re-read the file / re-run the command. In
+practice coding agents read → reason → write within one turn, so
+the verbatim is available during the only turn that needs it.
+
+### Implementation
+
+* New module `loomflow/tools/result_summarizer.py` —
+  `summarize_tool_result()` + summary prompt template +
+  `DEFAULT_SUMMARY_THRESHOLD` constant.
+* `Dependencies.tool_result_summarizer` +
+  `Dependencies.tool_result_summary_threshold` +
+  `Dependencies.fast_tool_summary` (auto-True when no summariser
+  wired — hot path is fully short-circuited).
+* `Agent.__init__` accepts `tool_result_summarizer: Model | str |
+  None` and `tool_result_summary_threshold: int`. Summariser is
+  resolved through the same `_resolve_model` path as the main
+  `model=` kwarg, so `tool_result_summarizer="haiku"` shorthand
+  works.
+* ReAct's tool-dispatch loop (`react.py`) gains a single
+  `if not deps.fast_tool_summary` branch right before the
+  `Message(role=Role.TOOL, ...)` append. Emits a new
+  `Event.architecture_event("tool_result_summarized", tool=, ...,
+  original_chars=, summary_chars=)` so telemetry / `/cost`-style
+  UIs can show "saved X chars on this turn."
+
+### Coverage
+
+11 new tests in `tests/test_tool_result_summarizer.py` covering:
+below-threshold pass-through, above-threshold summarisation,
+fall-back on summariser exception, fall-back on empty summary,
+the `DEFAULT_SUMMARY_THRESHOLD` constant, Agent kwarg wiring,
+negative-threshold rejection, end-to-end event emission for
+oversized + undersized tool results, and confirmation that the
+feature is fully off when not opted in. Full suite: 1530 passing.
+
 ## [0.10.13] — 2026-05-16
 
 ### Added — Multi-breakpoint Anthropic prompt caching (3rd/4th of 4)

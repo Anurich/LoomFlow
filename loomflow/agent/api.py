@@ -126,6 +126,8 @@ class Agent:
         living_plan: Any = None,
         stop_hooks: list[StopHook] | None = None,
         max_stop_hook_iterations: int = 15,
+        tool_result_summarizer: Model | str | None = None,
+        tool_result_summary_threshold: int = 500,
     ) -> None:
         # Skills — packaged on-disk playbooks loaded on demand.
         # Build the registry first so frontmatter validation fires
@@ -476,6 +478,29 @@ class Agent:
                 "(0 disables the loop entirely)"
             )
         self._max_stop_hook_iterations: int = max_stop_hook_iterations
+
+        # Tool-result summariser. ``None`` (the default) disables
+        # summarisation — tool results ship verbatim, behaviour
+        # identical to pre-0.10.14. When a model is wired, the
+        # ReAct loop replaces oversized tool results with a model-
+        # generated summary before they enter conversation history
+        # (see :mod:`loomflow.tools.result_summarizer`). Accepts the
+        # same shapes as the main ``model=`` kwarg: a model name
+        # string, a dict config, or a :class:`Model` instance.
+        self._tool_result_summarizer: Model | None = (
+            None
+            if tool_result_summarizer is None
+            else _resolve_model(
+                tool_result_summarizer, secrets=self._secrets
+            )
+        )
+        if tool_result_summary_threshold < 0:
+            raise ValueError(
+                "tool_result_summary_threshold must be >= 0"
+            )
+        self._tool_result_summary_threshold: int = (
+            tool_result_summary_threshold
+        )
 
         # Persistent-subagent registry. Populated by
         # ``Team.supervisor(persistent_subagents=True)`` (the
@@ -1521,6 +1546,13 @@ class Agent:
         # latency promise. Hooks are mostly used for living_plan
         # auto-registration and bespoke consumer-side checks.
         fast_stop_hooks = len(self._stop_hooks) == 0
+        # ``fast_tool_summary`` mirrors the same pattern: True when
+        # no summariser model is wired (the default), so the ReAct
+        # tool-dispatch loop can short-circuit the summarisation
+        # call site and ship tool results verbatim with no extra
+        # allocation. Flips False only when the user passed
+        # ``tool_result_summarizer=`` at Agent construction.
+        fast_tool_summary = self._tool_result_summarizer is None
 
         run_trace: contextlib.AbstractAsyncContextManager[Any] = (
             _NULL_CTX
@@ -1759,6 +1791,11 @@ class Agent:
                 fast_runtime=fast_runtime,
                 fast_budget=fast_budget,
                 fast_stop_hooks=fast_stop_hooks,
+                fast_tool_summary=fast_tool_summary,
+                tool_result_summarizer=self._tool_result_summarizer,
+                tool_result_summary_threshold=(
+                    self._tool_result_summary_threshold
+                ),
                 context=run_ctx,
             )
 

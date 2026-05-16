@@ -362,16 +362,55 @@ class ReAct:
 
                 # 2e. Append tool results to messages in the order calls
                 # were emitted (preserves model's expected ordering).
+                # When a tool-result summariser is wired (Agent
+                # constructed with ``tool_result_summarizer=``) and
+                # the rendered result is larger than the threshold,
+                # we replace the verbatim text with a model-generated
+                # summary before it enters conversation history — see
+                # :mod:`loomflow.tools.result_summarizer` for the
+                # fall-back semantics (failures + empty summaries
+                # both ship the original verbatim).
                 for r, c in zip(results, tool_calls, strict=True):
                     final = (
                         r
                         if r is not None
                         else ToolResult.error_(c.id, "no_result")
                     )
+                    msg_content = _format_tool_message(final)
+                    if (
+                        not deps.fast_tool_summary
+                        and deps.tool_result_summarizer is not None
+                        and len(msg_content)
+                        > deps.tool_result_summary_threshold
+                    ):
+                        # Lazy import: ``tools.result_summarizer``
+                        # would create a tools→architecture cycle
+                        # at module-load time.
+                        from ..tools.result_summarizer import (
+                            summarize_tool_result,
+                        )
+                        original_len = len(msg_content)
+                        msg_content = await summarize_tool_result(
+                            msg_content,
+                            tool_name=c.tool,
+                            summarizer=deps.tool_result_summarizer,
+                            threshold=(
+                                deps.tool_result_summary_threshold
+                            ),
+                        )
+                        if len(msg_content) != original_len:
+                            yield Event.architecture_event(
+                                session.id,
+                                "tool_result_summarized",
+                                tool=c.tool,
+                                call_id=final.call_id,
+                                original_chars=original_len,
+                                summary_chars=len(msg_content),
+                            )
                     session.messages.append(
                         Message(
                             role=Role.TOOL,
-                            content=_format_tool_message(final),
+                            content=msg_content,
                             tool_call_id=final.call_id,
                         )
                     )

@@ -195,6 +195,29 @@ class Dependencies:
     and proceeds to teardown; when False, ``_loop`` wraps the
     architecture in the Ralph-loop bounded by
     ``Agent.max_stop_hook_iterations``."""
+    fast_tool_summary: bool = True
+    """Skip tool-result summarisation when no summariser model was
+    wired via ``Agent(tool_result_summarizer=...)``. When False, the
+    ReAct loop hands each tool result to
+    :func:`loomflow.tools.result_summarizer.summarize_tool_result`
+    before turning it into a ``Role.TOOL`` message — long results
+    get compressed via the summariser model (typically Haiku) so
+    they don't bloat subsequent turns' input tokens."""
+
+    tool_result_summarizer: Model | None = None
+    """Small fast model used to compress oversized tool results
+    before they enter conversation history. ``None`` (the default)
+    disables summarisation entirely — original results ship
+    verbatim. Set ``Agent(tool_result_summarizer=<model>)`` to
+    enable; see :mod:`loomflow.tools.result_summarizer` for the
+    summariser prompt and fall-back semantics."""
+
+    tool_result_summary_threshold: int = 500
+    """Char count below which a tool result is shipped verbatim
+    (the summariser round-trip would cost more than it saves).
+    Default 500 ≈ 100 tokens; tune higher for cheap-model setups
+    where the summariser cost dominates the win, lower for
+    expensive-model setups where every saved token matters."""
 
     # ---------------------------------------------------------------
     # Per-run context — populated from :class:`~loomflow.RunContext`
