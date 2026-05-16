@@ -7,6 +7,52 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 For development-history detail (per-slice notes, file maps, gate
 counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 
+## [0.10.17] — 2026-05-16
+
+### Added — Token counting helper with three-tier fallback
+
+New `loomflow.model.count_tokens.count_tokens(model, messages,
+tools=)` helper. The foundation 0.10.19's auto-compact will
+build on; immediate use case is `/cost`-style UIs that want
+"how close to the context window are we" without a round-trip.
+
+Three-tier fallback chain:
+
+1. **Provider-native** — if the model adapter exposes a
+   `count_tokens(messages, tools=)` method, the helper delegates
+   (exact byte-accurate counts).
+2. **tiktoken** — `cl100k_base` encoding, the GPT-4 / Claude-3+
+   family's tokenizer; accurate enough for budget decisions.
+   Requires the `loader` extra (which already includes tiktoken).
+3. **Char-based estimate** — `chars / 4` (configurable). Last
+   resort, zero deps. Always succeeds — `count_tokens` never
+   raises, since callers (compact triggers, budget bars) have no
+   graceful fallback when counts go missing.
+
+The `Model` protocol is **not** modified — `count_tokens` is
+duck-typed via `hasattr` so custom Model impls inherit the
+fallback automatically.
+
+### Adapter implementations
+
+* **Anthropic** — native via `client.messages.count_tokens(...)`
+  (Anthropic's beta endpoint). Exact byte-accurate count
+  matching what the actual completion would be billed for.
+  Falls back to `client.beta.messages.count_tokens` on older
+  SDKs. Located on `AnthropicModel.count_tokens`.
+* **OpenAI / LiteLLM / Echo / Scripted / Retrying** — no
+  native impl; inherit the tiktoken/char-based fallback for
+  free.
+
+### Coverage
+
+10 new tests in `tests/test_count_tokens.py` covering: char-
+based unit cases (empty / single-message / tools / custom
+ratio), provider-native dispatch + exception fall-through,
+tiktoken-path skipped-when-not-installed, no-native-method
+fallback, tools-increase-total invariant, and the always-
+positive-int contract. Full suite: 1559 passing.
+
 ## [0.10.16] — 2026-05-16
 
 ### Added — Snip: bounded conversation window before each turn

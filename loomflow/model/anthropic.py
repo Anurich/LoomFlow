@@ -166,6 +166,45 @@ class AnthropicModel:
                 resolved_key = os.environ.get("ANTHROPIC_API_KEY")
             self._client = AsyncAnthropic(api_key=resolved_key)
 
+    async def count_tokens(
+        self,
+        messages: list[Message],
+        *,
+        tools: list[ToolDef] | None = None,
+    ) -> int:
+        """Native token count via Anthropic's
+        ``messages.count_tokens`` beta endpoint — exact, no
+        round-trip cost beyond a single API call.
+
+        Mirrors the same ``messages`` / ``tools`` shaping the
+        ``complete`` and ``stream`` paths use, so the count is
+        what the actual completion would be billed for.
+        :func:`loomflow.model.count_tokens.count_tokens` discovers
+        this method via ``hasattr`` and prefers it over the
+        tiktoken / char-based fallbacks.
+        """
+        system_parts, anth_messages = _to_anthropic_messages(messages)
+        anth_tools = [_to_anthropic_tool(t) for t in (tools or [])]
+        kwargs: dict[str, Any] = {
+            "model": self.name,
+            "messages": anth_messages,
+        }
+        if system_parts:
+            kwargs["system"] = "\n\n".join(system_parts)
+        if anth_tools:
+            kwargs["tools"] = anth_tools
+        # The ``count_tokens`` endpoint is on the ``messages``
+        # namespace and returns ``{"input_tokens": N}``. Older
+        # SDKs route it through ``messages.beta.count_tokens``;
+        # we try the modern path first and fall back.
+        try:
+            resp = await self._client.messages.count_tokens(**kwargs)
+        except (AttributeError, TypeError):
+            resp = await self._client.beta.messages.count_tokens(
+                **kwargs
+            )
+        return int(getattr(resp, "input_tokens", 0))
+
     async def complete(
         self,
         messages: list[Message],
