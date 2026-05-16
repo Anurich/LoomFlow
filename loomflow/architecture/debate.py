@@ -58,7 +58,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import AsyncIterator
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import anyio
 from anyio.streams.memory import MemoryObjectSendStream
@@ -69,6 +69,10 @@ from .helpers import SubagentInvocation
 
 if TYPE_CHECKING:
     from ..agent.api import Agent
+
+
+_DebateRegistryT = dict[str, Any]  # worker handle registry
+_DebateRoleMapT = dict[str, str]   # debater_<i>|judge → worker_id
 
 
 DEFAULT_DEBATER_INSTRUCTIONS = """\
@@ -111,6 +115,8 @@ class MultiAgentDebate:
         convergence_similarity: float = 0.85,
         debater_instructions: str | None = None,
         judge_instructions: str | None = None,
+        worker_registry: _DebateRegistryT | None = None,
+        role_to_worker_id: _DebateRoleMapT | None = None,
     ) -> None:
         if len(debaters) < 2:
             raise ValueError("Debate requires at least 2 debaters")
@@ -135,6 +141,14 @@ class MultiAgentDebate:
         self._judge_instructions = (
             judge_instructions or DEFAULT_JUDGE_INSTRUCTIONS
         )
+        # Persistent-subagent wiring — when Team.debate built us with
+        # ``persistent_subagents=True``, debater_<i> and judge each
+        # run under their registered handle's stable session_id, so
+        # the same debaters carry conversation memory across multiple
+        # Agent.run() invocations (e.g. follow-up questions on the
+        # same topic).
+        self._worker_registry = worker_registry
+        self._role_to_worker_id = role_to_worker_id
 
     def declared_workers(self) -> dict[str, Agent]:
         workers: dict[str, Agent] = {
@@ -252,10 +266,19 @@ class MultiAgentDebate:
             "debate.judging",
         )
         judge_prompt = self._build_judge_prompt(prompt, history)
+        from ..agent.worker_registry import resolve_persistent_session
+        judge_sid, judge_handle = resolve_persistent_session(
+            "judge",
+            fallback=f"{session.id}__judge",
+            registry=self._worker_registry,
+            role_to_id=self._role_to_worker_id,
+        )
+        if judge_handle is not None:
+            judge_handle.touch(user_id=deps.context.user_id)
         judge_inv = SubagentInvocation(
             self._judge,
             judge_prompt,
-            session_id=f"{session.id}__judge",
+            session_id=judge_sid,
             rollup_into=session,
         )
         async for ev in judge_inv.events():
@@ -319,6 +342,8 @@ class MultiAgentDebate:
                             round_num,
                             responses,
                             send.clone(),
+                            self._worker_registry,
+                            self._role_to_worker_id,
                         )
 
         async with anyio.create_task_group() as outer_tg:
@@ -385,22 +410,60 @@ async def _run_one_debater_streaming(
     round_num: int,
     responses: dict[str, str],
     send: MemoryObjectSendStream[Event],
+    worker_registry: _DebateRegistryT | None,
+    role_to_worker_id: _DebateRoleMapT | None,
 ) -> None:
     """Single-debater worker for parallel dispatch: run the debater
     via :class:`SubagentInvocation`, forward its events into ``send``,
-    write final output into ``responses[name]``."""
+    write final output into ``responses[name]``.
+
+    When ``worker_registry`` is non-None and the debater has a
+    registered handle, use the handle's stable session_id so the
+    debater carries memory across rounds AND across multiple
+    ``Agent.run()`` invocations. The per-handle lock serialises
+    concurrent debate rounds (uncommon in production but possible).
+    """
     async with send:
-        sub_session_id = f"{session.id}__{name}_round_{round_num}"
-        invocation = SubagentInvocation(
-            debater,
-            debater_prompt,
-            session_id=sub_session_id,
-            rollup_into=session,
+        # Lazy import — circular if hoisted to module scope (the
+        # worker_registry module imports Agent which imports us
+        # through architecture/__init__.py).
+        from ..agent.worker_registry import resolve_persistent_session
+        sub_session_id, handle = resolve_persistent_session(
+            name,
+            fallback=f"{session.id}__{name}_round_{round_num}",
+            registry=worker_registry,
+            role_to_id=role_to_worker_id,
         )
-        async for ev in invocation.events():
-            await send.send(ev)
-        responses[name] = str(invocation.result.get("output", ""))
-        session.turns += int(invocation.result.get("turns", 0) or 0)
+        if handle is not None:
+            async with handle.lock:
+                handle.touch(user_id=None)
+                invocation = SubagentInvocation(
+                    debater,
+                    debater_prompt,
+                    session_id=sub_session_id,
+                    rollup_into=session,
+                )
+                async for ev in invocation.events():
+                    await send.send(ev)
+                responses[name] = str(
+                    invocation.result.get("output", "")
+                )
+                session.turns += int(
+                    invocation.result.get("turns", 0) or 0
+                )
+        else:
+            invocation = SubagentInvocation(
+                debater,
+                debater_prompt,
+                session_id=sub_session_id,
+                rollup_into=session,
+            )
+            async for ev in invocation.events():
+                await send.send(ev)
+            responses[name] = str(invocation.result.get("output", ""))
+            session.turns += int(
+                invocation.result.get("turns", 0) or 0
+            )
 
 
 # ---------------------------------------------------------------------------

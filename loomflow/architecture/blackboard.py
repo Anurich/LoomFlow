@@ -60,7 +60,7 @@ import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ..core.types import Event
 from .base import AgentSession, Dependencies
@@ -68,6 +68,10 @@ from .helpers import SubagentInvocation
 
 if TYPE_CHECKING:
     from ..agent.api import Agent
+
+
+_BBRegistryT = dict[str, Any]  # worker handle registry
+_BBRoleMapT = dict[str, str]   # role → worker_id (incl. __coordinator/__decider)
 
 
 DEFAULT_COORDINATOR_INSTRUCTIONS = """\
@@ -185,6 +189,8 @@ class BlackboardArchitecture:
         max_rounds: int = 10,
         coordinator_instructions: str | None = None,
         decider_instructions: str | None = None,
+        worker_registry: _BBRegistryT | None = None,
+        role_to_worker_id: _BBRoleMapT | None = None,
     ) -> None:
         if not agents:
             raise ValueError(
@@ -203,6 +209,14 @@ class BlackboardArchitecture:
         self._decider_instructions = (
             decider_instructions or DEFAULT_DECIDER_INSTRUCTIONS
         )
+        # Persistent-subagent wiring — when Team.blackboard built us
+        # with ``persistent_subagents=True``, every contributing agent
+        # (plus the coordinator + decider, which are also registered)
+        # runs under its handle's stable session_id. Long-running
+        # blackboard sessions then accumulate per-agent memory across
+        # rounds + runs instead of restarting each round.
+        self._worker_registry = worker_registry
+        self._role_to_worker_id = role_to_worker_id
 
     def declared_workers(self) -> dict[str, Agent]:
         workers = dict(self._agents)
@@ -242,7 +256,7 @@ class BlackboardArchitecture:
             # Coordinator: stream its events through, capture decision.
             decision_holder: list[_CoordinatorDecision] = []
             async for ev in self._coordinate_streaming(
-                session, bb, round_num, decision_holder
+                session, deps, bb, round_num, decision_holder
             ):
                 yield ev
             decision = decision_holder[0]
@@ -300,9 +314,18 @@ class BlackboardArchitecture:
                 round=round_num,
                 agent=decision.next_agent,
             )
-            sub_session_id = (
-                f"{session.id}__bb_{decision.next_agent}_round_{round_num}"
+            from ..agent.worker_registry import resolve_persistent_session
+            sub_session_id, handle = resolve_persistent_session(
+                decision.next_agent,
+                fallback=(
+                    f"{session.id}__bb_{decision.next_agent}"
+                    f"_round_{round_num}"
+                ),
+                registry=self._worker_registry,
+                role_to_id=self._role_to_worker_id,
             )
+            if handle is not None:
+                handle.touch(user_id=deps.context.user_id)
             invocation = SubagentInvocation(
                 picked,
                 agent_prompt,
@@ -330,7 +353,7 @@ class BlackboardArchitecture:
         # === Synthesize ===
         final_holder: list[str] = []
         async for ev in self._decide_final_streaming(
-            session, bb, final_holder
+            session, deps, bb, final_holder
         ):
             yield ev
         final = final_holder[0]
@@ -347,6 +370,7 @@ class BlackboardArchitecture:
     async def _coordinate_streaming(
         self,
         session: AgentSession,
+        deps: Dependencies,
         bb: Blackboard,
         round_num: int,
         decision_holder: list[_CoordinatorDecision],
@@ -376,9 +400,15 @@ class BlackboardArchitecture:
         ) + (
             f"\n\nBlackboard state:\n{bb.render_for('__coordinator')}"
         )
-        sub_session_id = (
-            f"{session.id}__bb_coord_round_{round_num}"
+        from ..agent.worker_registry import resolve_persistent_session
+        sub_session_id, coord_handle = resolve_persistent_session(
+            "__coordinator",
+            fallback=f"{session.id}__bb_coord_round_{round_num}",
+            registry=self._worker_registry,
+            role_to_id=self._role_to_worker_id,
         )
+        if coord_handle is not None:
+            coord_handle.touch(user_id=deps.context.user_id)
         invocation = SubagentInvocation(
             self._coordinator,
             coord_prompt,
@@ -398,6 +428,7 @@ class BlackboardArchitecture:
     async def _decide_final_streaming(
         self,
         session: AgentSession,
+        deps: Dependencies,
         bb: Blackboard,
         final_holder: list[str],
     ) -> AsyncIterator[Event]:
@@ -420,7 +451,15 @@ class BlackboardArchitecture:
         decide_prompt = self._decider_instructions + (
             f"\n\nFull blackboard state:\n{bb.render_for('__decider')}"
         )
-        sub_session_id = f"{session.id}__bb_decider"
+        from ..agent.worker_registry import resolve_persistent_session
+        sub_session_id, dec_handle = resolve_persistent_session(
+            "__decider",
+            fallback=f"{session.id}__bb_decider",
+            registry=self._worker_registry,
+            role_to_id=self._role_to_worker_id,
+        )
+        if dec_handle is not None:
+            dec_handle.touch(user_id=deps.context.user_id)
         invocation = SubagentInvocation(
             self._decider,
             decide_prompt,

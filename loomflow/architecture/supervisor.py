@@ -45,7 +45,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import anyio
 from anyio.streams.memory import MemoryObjectSendStream
@@ -80,6 +80,15 @@ For each task you receive:
 You can delegate multiple workers in a single turn — they will run
 in parallel. Be specific in the ``instructions`` you pass; workers
 do NOT see the user's original message, only what you write.
+
+5. To CONTINUE a conversation with a worker (build on its earlier
+   work rather than starting fresh), call
+   ``send_message(to=<worker_id>, content=...)``. The ``worker_id``
+   is printed at the top of every ``delegate`` response in square
+   brackets like ``[worker_id: worker_coder_01J...]``. The worker
+   remembers its full prior context — use ``send_message`` for
+   iterations / follow-ups and ``delegate`` to start a fresh
+   conversation on a different topic.
 
 Available workers:
 {worker_descriptions}
@@ -128,6 +137,8 @@ class Supervisor:
         instructions_template: str | None = None,
         delegate_tool_name: str = "delegate",
         forward_tool_name: str = "forward_message",
+        worker_registry: dict[str, Any] | None = None,
+        role_to_worker_id: dict[str, str] | None = None,
     ) -> None:
         if not workers:
             raise ValueError("Supervisor requires at least one worker")
@@ -138,6 +149,15 @@ class Supervisor:
         )
         self._delegate_name = delegate_tool_name
         self._forward_name = forward_tool_name
+        # ``worker_registry`` + ``role_to_worker_id`` are the
+        # persistent-subagent wiring. None on both = legacy
+        # stateless-per-delegate behavior (preserved for tests +
+        # callers that explicitly opt out via
+        # ``Team.supervisor(persistent_subagents=False)``).
+        self._worker_registry: dict[str, Any] | None = worker_registry
+        self._role_to_worker_id: dict[str, str] | None = (
+            role_to_worker_id
+        )
 
     def declared_workers(self) -> dict[str, Agent]:
         return dict(self._workers)
@@ -198,6 +218,8 @@ class Supervisor:
             tool_name=self._delegate_name,
             event_sink=send_chan,
             last_outputs=last_outputs,
+            worker_registry=self._worker_registry,
+            role_to_worker_id=self._role_to_worker_id,
         )
         forward_tool = _make_forward_message_tool(
             last_outputs=last_outputs,
@@ -207,11 +229,23 @@ class Supervisor:
         )
 
         # 3. Wrap the parent's ToolHost so the model sees `delegate`
-        #    + `forward_message` alongside whatever tools the parent
-        #    already had.
-        wrapped_host = ExtendedToolHost(
-            deps.tools, [delegate_tool, forward_tool]
-        )
+        #    + `forward_message` (+ `send_message` when persistent
+        #    subagents are enabled) alongside whatever tools the
+        #    parent already had.
+        extra_tools = [delegate_tool, forward_tool]
+        if self._worker_registry is not None:
+            # Lazy import to avoid loomflow.tools → loomflow.agent
+            # circular at module-load. The tool's closure holds a
+            # ref to the same registry dict that ``delegate``
+            # writes to; mutations are visible immediately.
+            from ..tools.send_message import make_send_message_tool
+            send_msg_tool = make_send_message_tool(
+                self._worker_registry,
+                session=session,
+                event_sink=send_chan,
+            )
+            extra_tools.append(send_msg_tool)
+        wrapped_host = ExtendedToolHost(deps.tools, extra_tools)
 
         # 3. Compose instructions: user's domain prompt + supervisor
         #    template (with worker descriptions). Worker descriptions
@@ -306,6 +340,8 @@ def _make_delegate_tool(
     tool_name: str,
     event_sink: MemoryObjectSendStream[Event] | None = None,
     last_outputs: dict[str, str] | None = None,
+    worker_registry: dict[str, Any] | None = None,
+    role_to_worker_id: dict[str, str] | None = None,
 ) -> Tool:
     """Build a :class:`Tool` whose ``execute`` routes to the named
     worker :class:`Agent` and returns its final output.
@@ -335,6 +371,80 @@ def _make_delegate_tool(
             return (
                 f"Error: unknown worker {worker!r}. Known: {known}"
             )
+
+        # Persistent-subagents path: the worker has a stable
+        # session_id in the registry. Reusing it across delegate +
+        # send_message calls is the load-bearing bit — loomflow's
+        # Memory rehydrates prior episodes for the same
+        # (user_id, session_id), so the worker REMEMBERS its
+        # earlier delegations.
+        #
+        # Stateless legacy path (worker_registry is None): generate
+        # a fresh session_id per call. Preserves the pre-0.10.10
+        # behavior for ``Team.supervisor(persistent_subagents=False)``.
+        worker_id_for_return: str | None = None
+        if (
+            worker_registry is not None
+            and role_to_worker_id is not None
+            and worker in role_to_worker_id
+        ):
+            handle = worker_registry[role_to_worker_id[worker]]
+            worker_id_for_return = handle.worker_id
+            # Pin user_id on first touch + reject cross-user.
+            caller_user = get_run_context().user_id
+            if (
+                handle.user_id is not None
+                and caller_user is not None
+                and handle.user_id != caller_user
+            ):
+                return (
+                    f"Error: worker {worker!r} "
+                    f"({handle.worker_id}) belongs to user_id "
+                    f"{handle.user_id!r} but the current run is "
+                    f"user_id {caller_user!r}. Cross-tenant "
+                    "delegation is rejected."
+                )
+            # Lock + touch happen INSIDE the handle so concurrent
+            # delegate-to-same-worker calls serialise.
+            async with handle.lock:
+                handle.touch(user_id=caller_user)
+                worker_session_id = handle.session_id
+                if event_sink is None:
+                    result = await agent.run(
+                        instructions,
+                        session_id=worker_session_id,
+                        context=get_run_context(),
+                    )
+                    session.cumulative_usage = add_usage(
+                        session.cumulative_usage,
+                        Usage(
+                            input_tokens=result.tokens_in,
+                            cached_input_tokens=result.cached_tokens_in,
+                            cache_write_tokens=result.cache_write_tokens,
+                            output_tokens=result.tokens_out,
+                            cost_usd=result.cost_usd,
+                        ),
+                    )
+                    output = result.output
+                else:
+                    invocation = SubagentInvocation(
+                        agent,
+                        instructions,
+                        session_id=worker_session_id,
+                        rollup_into=session,
+                    )
+                    async with event_sink.clone() as sink:
+                        async for ev in invocation.events():
+                            await sink.send(ev)
+                    output = str(invocation.result.get("output", ""))
+            if last_outputs is not None:
+                last_outputs[worker] = output
+            # Prefix return with the worker_id so the model
+            # learns the ID and can use it later via
+            # ``send_message(to=<worker_id>, ...)``.
+            return f"[worker_id: {worker_id_for_return}]\n{output}"
+
+        # Legacy stateless path.
         suffix = new_id("del")
         worker_session_id = (
             f"{session.id}__delegate_{worker}_{suffix}"

@@ -49,7 +49,7 @@ from __future__ import annotations
 import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ..core.types import Event, Message, Role
 from .base import AgentSession, Dependencies
@@ -57,6 +57,10 @@ from .helpers import SubagentInvocation, add_usage, text_only_model_call
 
 if TYPE_CHECKING:
     from ..agent.api import Agent
+
+
+_RouterRegistryT = dict[str, Any]  # registry of worker handles
+_RouterRoleMapT = dict[str, str]   # role → worker_id
 
 
 DEFAULT_CLASSIFIER_PROMPT = """\
@@ -102,6 +106,8 @@ class Router:
         fallback_route: str | None = None,
         require_confidence_above: float = 0.0,
         classifier_prompt: str | None = None,
+        worker_registry: _RouterRegistryT | None = None,
+        role_to_worker_id: _RouterRoleMapT | None = None,
     ) -> None:
         if not routes:
             raise ValueError("Router requires at least one route")
@@ -126,6 +132,13 @@ class Router:
         self._classifier_prompt = (
             classifier_prompt or DEFAULT_CLASSIFIER_PROMPT
         )
+        # Persistent-subagent wiring — when Team.router was built
+        # with ``persistent_subagents=True``, the chosen specialist
+        # runs under its registered handle's stable session_id so
+        # successive routes to the same specialist (e.g. follow-ups
+        # in the same REPL session) reuse memory.
+        self._worker_registry = worker_registry
+        self._role_to_worker_id = role_to_worker_id
 
     def declared_workers(self) -> dict[str, Agent]:
         return {r.name: r.agent for r in self._routes}
@@ -203,9 +216,15 @@ class Router:
         # TOOL_CALL / TOOL_RESULT events into our generator so
         # token-by-token streaming surfaces in the outer
         # `agent.stream(...)` consumer.
-        specialist_session_id = (
-            f"{session.id}__route_{chosen.name}"
+        from ..agent.worker_registry import resolve_persistent_session
+        specialist_session_id, handle = resolve_persistent_session(
+            chosen.name,
+            fallback=f"{session.id}__route_{chosen.name}",
+            registry=self._worker_registry,
+            role_to_id=self._role_to_worker_id,
         )
+        if handle is not None:
+            handle.touch(user_id=deps.context.user_id)
         invocation = SubagentInvocation(
             chosen.agent,
             prompt,

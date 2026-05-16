@@ -7,6 +7,71 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 For development-history detail (per-slice notes, file maps, gate
 counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 
+## [0.10.10] — 2026-05-16
+
+### Added — Persistent subagents across every `Team.*` builder
+
+`Team.supervisor`, `Team.swarm`, `Team.router`, `Team.debate`,
+`Team.actor_critic`, and `Team.blackboard` all gain a
+`persistent_subagents: bool = True` kwarg. When enabled (the
+default), each worker is registered with a stable
+`worker_<role>_<ULID>` ID and a stable `session_id` that is
+reused on every spawn — so workers accumulate conversation memory
+across handoffs, rounds, and ALSO across multiple `Agent.run()`
+invocations on the same coordinator.
+
+This is the Claude-Code parity feature: the supervisor's
+"researcher" is the *same agent* across turn 1 and turn 5; the
+swarm's "billing" peer remembers what it told the user last week;
+the actor-critic pair iterates with full memory of the prior
+critique rounds. Set `persistent_subagents=False` to restore the
+legacy per-spawn stateless behaviour.
+
+New `send_message(to=<worker_id>, content=<message>)` tool — the
+companion to `delegate`. Where `delegate(target, instructions)`
+spawns or re-engages a worker by ROLE, `send_message(to=...)`
+addresses a specific worker by its persistent ID and continues
+the worker's conversation thread. Auto-wired by
+`Team.supervisor` when `persistent_subagents=True`.
+
+Multi-tenant safety: worker handles pin `user_id` on first touch.
+Cross-user `delegate` / `send_message` calls return a clear
+tool-result error string (no raise) and never reach the
+underlying agent. Per-handle `anyio.Lock` serialises concurrent
+calls to the same worker; different workers stay parallel.
+
+New module: `loomflow.agent.worker_registry` —
+`_WorkerHandle`, `new_worker_id`, `build_worker_registry`,
+`resolve_persistent_session` (used by every architecture's
+spawn site). New tool factory:
+`loomflow.tools.send_message.make_send_message_tool`.
+
+### Coverage
+
+All six team architectures (Supervisor, Swarm, Router, Debate,
+ActorCritic, Blackboard) thread the registry through every
+spawn site — judge, debaters per round, coordinator + decider,
+actor + critic across rounds, blackboard contributors, swarm
+handoff targets, router specialists. 21 new tests in
+`tests/test_persistent_subagents.py` covering primitive
+behaviour + opt-in/out across all six builders + error paths
+on `send_message`.
+
+### Added — `stop_hooks=` / `max_stop_hook_iterations=` on every `Team.*` builder
+
+Closes the same papercut that `prompt_caching=` has on Team
+builders today: callers previously had to mutate
+`coordinator._stop_hooks` and `coordinator._max_stop_hook_iterations`
+post-construction. Now passable directly through the builder
+kwargs on `Team.supervisor` / `swarm` / `router` / `debate` /
+`actor_critic` / `blackboard`.
+
+### Added — `examples/20_persistent_subagents.py`
+
+Zero-key example (uses `EchoModel`) demonstrating the persistent
+vs legacy modes side-by-side + showing the registry contents on
+`Team.debate` + `Team.actor_critic` for reference.
+
 ## [0.10.8] — 2026-05-16
 
 ### Added — `StopHook` protocol for framework-level Ralph loop

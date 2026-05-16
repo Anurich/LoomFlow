@@ -477,6 +477,21 @@ class Agent:
             )
         self._max_stop_hook_iterations: int = max_stop_hook_iterations
 
+        # Persistent-subagent registry. Populated by
+        # ``Team.supervisor(persistent_subagents=True)`` (the
+        # default in v0.10.10+) with one :class:`_WorkerHandle` per
+        # worker the coordinator can delegate to. Plain dict for
+        # v1 — concrete-first, extract :class:`WorkerRegistry`
+        # Protocol when a second backend (durable-on-disk for
+        # /resume, Redis for distributed CLI) materialises.
+        #
+        # Empty dict for every non-coordinator Agent (no kwarg,
+        # no overhead — 64 bytes per Agent instance). Mutable
+        # cross-run state by design; durability across
+        # ``Agent.run`` calls IS the feature.
+        from .worker_registry import _WorkerHandle  # noqa: I001 — local to avoid circ
+        self._worker_registry: dict[str, _WorkerHandle] = {}
+
     # ---- hook decorators (user-facing sugar) ----------------------------
 
     def before_tool(self, fn: PreToolHook) -> PreToolHook:

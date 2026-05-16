@@ -152,10 +152,13 @@ class Team:
         skills: list[Any] | None = None,
         workspace: Any | str | None = None,
         living_plan: Any = None,
+        stop_hooks: list[Any] | None = None,
+        max_stop_hook_iterations: int = 15,
         # --- supervisor-specific options ---
         instructions_template: str | None = None,
         delegate_tool_name: str = "delegate",
         forward_tool_name: str = "forward_message",
+        persistent_subagents: bool = True,
     ) -> Agent:
         """Build a coordinator Agent that delegates to ``workers``.
 
@@ -183,7 +186,20 @@ class Team:
                 coord_ws = resolved.member(
                     "coordinator", teammates=list(workers.keys())
                 )
-        return Agent(
+        # Build the registry FIRST so the Supervisor architecture
+        # can take a ref. When ``persistent_subagents=False``, both
+        # dicts stay empty and Supervisor falls back to legacy
+        # stateless-per-delegate behavior (no send_message tool,
+        # no per-handle locks, fresh ULID session_id per delegate).
+        worker_registry: dict[str, Any] = {}
+        role_to_worker_id: dict[str, str] = {}
+        if persistent_subagents:
+            from .agent.worker_registry import build_worker_registry
+            worker_registry, role_to_worker_id = build_worker_registry(
+                workers
+            )
+
+        coordinator = Agent(
             instructions=instructions,
             model=model,
             memory=memory,
@@ -199,13 +215,28 @@ class Team:
             skills=skills,
             workspace=coord_ws,
             living_plan=living_plan,
+            stop_hooks=stop_hooks,
+            max_stop_hook_iterations=max_stop_hook_iterations,
             architecture=Supervisor(
                 workers=workers,
                 instructions_template=instructions_template,
                 delegate_tool_name=delegate_tool_name,
                 forward_tool_name=forward_tool_name,
+                worker_registry=(
+                    worker_registry if persistent_subagents else None
+                ),
+                role_to_worker_id=(
+                    role_to_worker_id if persistent_subagents else None
+                ),
             ),
         )
+        # Stamp the registry onto the coordinator Agent so the
+        # send_message tool's closure (built inside Supervisor.run)
+        # and external introspection (tests, observability) point
+        # at the SAME dict.
+        if persistent_subagents:
+            coordinator._worker_registry.update(worker_registry)
+        return coordinator
 
     # -----------------------------------------------------------------
     # Swarm
@@ -237,11 +268,14 @@ class Team:
         skills: list[Any] | None = None,
         workspace: Any | str | None = None,
         living_plan: Any = None,
+        stop_hooks: list[Any] | None = None,
+        max_stop_hook_iterations: int = 15,
         # --- swarm-specific options ---
         max_handoffs: int = 8,
         detect_cycles: bool = True,
         pass_full_history: bool = True,
         handoff_tool_name: str = "handoff",
+        persistent_subagents: bool = True,
     ) -> Agent:
         """Build a peer-swarm of agents that hand off control via a
         ``handoff`` tool (or per-target ``transfer_to_<name>`` tools
@@ -253,23 +287,39 @@ class Team:
         ``workspace`` wires a shared notebook across every peer.
         Each peer's dict key becomes its author identity in the
         notebook so handoffs leave a clear trail of who wrote what.
+
+        ``persistent_subagents=True`` (default) registers each peer
+        with a stable ``worker_<role>_<ULID>`` ID and reuses one
+        session per peer across every handoff — peer agents
+        accumulate memory across handoffs and across multiple
+        ``Agent.run()`` invocations. Set to ``False`` to restore
+        legacy per-handoff stateless behaviour.
         """
         entry_ws: Any = workspace
+        # Unwrap Handoff configs to plain Agent map up front — needed
+        # for both workspace wiring and the worker registry.
+        raw_agents: dict[str, Agent] = {
+            k: (v.agent if isinstance(v, Handoff) else v)
+            for k, v in agents.items()
+        }
         if workspace is not None:
             # Unwrap Handoff configs so we can mutate the underlying
             # Agent's workspace identity.
-            raw: dict[str, Agent] = {
-                k: (v.agent if isinstance(v, Handoff) else v)
-                for k, v in agents.items()
-            }
-            _attach_workspace_to_workers(raw)
+            _attach_workspace_to_workers(raw_agents)
             from .workspace.resolver import resolve_workspace
             resolved = resolve_workspace(workspace)
             if resolved is not None and hasattr(resolved, "member"):
                 entry_ws = resolved.member(
                     entry_agent, teammates=list(agents.keys())
                 )
-        return Agent(
+        worker_registry = None
+        role_to_worker_id = None
+        if persistent_subagents:
+            from .agent.worker_registry import build_worker_registry
+            worker_registry, role_to_worker_id = build_worker_registry(
+                raw_agents
+            )
+        coordinator = Agent(
             instructions=instructions,
             model=model,
             memory=memory,
@@ -285,6 +335,8 @@ class Team:
             skills=skills,
             workspace=entry_ws,
             living_plan=living_plan,
+            stop_hooks=stop_hooks,
+            max_stop_hook_iterations=max_stop_hook_iterations,
             architecture=Swarm(
                 agents=agents,
                 entry_agent=entry_agent,
@@ -292,8 +344,13 @@ class Team:
                 detect_cycles=detect_cycles,
                 pass_full_history=pass_full_history,
                 handoff_tool_name=handoff_tool_name,
+                worker_registry=worker_registry,
+                role_to_worker_id=role_to_worker_id,
             ),
         )
+        if persistent_subagents and worker_registry is not None:
+            coordinator._worker_registry = worker_registry
+        return coordinator
 
     # -----------------------------------------------------------------
     # Router
@@ -324,16 +381,34 @@ class Team:
         skills: list[Any] | None = None,
         workspace: Any | str | None = None,
         living_plan: Any = None,
+        stop_hooks: list[Any] | None = None,
+        max_stop_hook_iterations: int = 15,
         # --- router-specific options ---
         fallback_route: str | None = None,
         require_confidence_above: float = 0.0,
         classifier_prompt: str | None = None,
+        persistent_subagents: bool = True,
     ) -> Agent:
         """Build a router that classifies once and dispatches to
         ONE specialist :class:`Agent`. Cheaper than Supervisor for
         tasks with clear specialist boundaries (one classifier call
-        + one specialist run, no synthesis pass)."""
-        return Agent(
+        + one specialist run, no synthesis pass).
+
+        ``persistent_subagents=True`` (default) gives each route's
+        specialist a stable persistent session, so successive routes
+        to the same specialist reuse memory (the typical case in a
+        long REPL: route to ``billing`` once, route to ``billing``
+        again — the second call sees the first conversation).
+        """
+        worker_registry = None
+        role_to_worker_id = None
+        if persistent_subagents:
+            from .agent.worker_registry import build_worker_registry
+            route_agents = {r.name: r.agent for r in routes}
+            worker_registry, role_to_worker_id = build_worker_registry(
+                route_agents
+            )
+        coordinator = Agent(
             instructions=instructions,
             model=model,
             memory=memory,
@@ -349,13 +424,20 @@ class Team:
             skills=skills,
             workspace=workspace,
             living_plan=living_plan,
+            stop_hooks=stop_hooks,
+            max_stop_hook_iterations=max_stop_hook_iterations,
             architecture=Router(
                 routes=routes,
                 fallback_route=fallback_route,
                 require_confidence_above=require_confidence_above,
                 classifier_prompt=classifier_prompt,
+                worker_registry=worker_registry,
+                role_to_worker_id=role_to_worker_id,
             ),
         )
+        if persistent_subagents and worker_registry is not None:
+            coordinator._worker_registry = worker_registry
+        return coordinator
 
     # -----------------------------------------------------------------
     # Debate
@@ -387,18 +469,40 @@ class Team:
         skills: list[Any] | None = None,
         workspace: Any | str | None = None,
         living_plan: Any = None,
+        stop_hooks: list[Any] | None = None,
+        max_stop_hook_iterations: int = 15,
         # --- debate-specific options ---
         rounds: int = 2,
         convergence_check: bool = True,
         convergence_similarity: float = 0.85,
         debater_instructions: str | None = None,
         judge_instructions: str | None = None,
+        persistent_subagents: bool = True,
     ) -> Agent:
         """Build a multi-agent debate where ``debaters`` argue for
         ``rounds`` (with optional convergence early-exit). If
         ``judge`` is provided, the judge synthesizes a final
-        answer; otherwise majority vote wins."""
-        return Agent(
+        answer; otherwise majority vote wins.
+
+        ``persistent_subagents=True`` (default) registers each
+        ``debater_<i>`` (and ``judge`` when provided) with a stable
+        session so they remember prior debates across multiple
+        ``Agent.run()`` invocations on the same coordinator. Set to
+        ``False`` to restore the legacy per-round stateless behaviour.
+        """
+        worker_registry = None
+        role_to_worker_id = None
+        if persistent_subagents:
+            from .agent.worker_registry import build_worker_registry
+            debate_agents: dict[str, Agent] = {
+                f"debater_{i}": d for i, d in enumerate(debaters)
+            }
+            if judge is not None:
+                debate_agents["judge"] = judge
+            worker_registry, role_to_worker_id = build_worker_registry(
+                debate_agents
+            )
+        coordinator = Agent(
             instructions=instructions,
             model=model,
             memory=memory,
@@ -414,6 +518,8 @@ class Team:
             skills=skills,
             workspace=workspace,
             living_plan=living_plan,
+            stop_hooks=stop_hooks,
+            max_stop_hook_iterations=max_stop_hook_iterations,
             architecture=MultiAgentDebate(
                 debaters=debaters,
                 judge=judge,
@@ -422,8 +528,13 @@ class Team:
                 convergence_similarity=convergence_similarity,
                 debater_instructions=debater_instructions,
                 judge_instructions=judge_instructions,
+                worker_registry=worker_registry,
+                role_to_worker_id=role_to_worker_id,
             ),
         )
+        if persistent_subagents and worker_registry is not None:
+            coordinator._worker_registry = worker_registry
+        return coordinator
 
     # -----------------------------------------------------------------
     # Actor-Critic
@@ -455,16 +566,33 @@ class Team:
         skills: list[Any] | None = None,
         workspace: Any | str | None = None,
         living_plan: Any = None,
+        stop_hooks: list[Any] | None = None,
+        max_stop_hook_iterations: int = 15,
         # --- actor-critic-specific options ---
         max_rounds: int = 3,
         approval_threshold: float = 0.9,
         critique_template: str | None = None,
         refine_template: str | None = None,
+        persistent_subagents: bool = True,
     ) -> Agent:
         """Build an actor-critic pair where the critic reviews the
         actor's output (with structured JSON scoring + rubric) and
-        the actor refines below ``approval_threshold``."""
-        return Agent(
+        the actor refines below ``approval_threshold``.
+
+        ``persistent_subagents=True`` (default) registers the
+        ``actor`` and ``critic`` agents with stable sessions so
+        their memory carries across rounds AND across multiple
+        ``Agent.run()`` invocations — the critic remembers what it
+        already flagged; the actor remembers what it already refined.
+        """
+        worker_registry = None
+        role_to_worker_id = None
+        if persistent_subagents:
+            from .agent.worker_registry import build_worker_registry
+            worker_registry, role_to_worker_id = build_worker_registry(
+                {"actor": actor, "critic": critic}
+            )
+        coordinator = Agent(
             instructions=instructions,
             model=model,
             memory=memory,
@@ -480,6 +608,8 @@ class Team:
             skills=skills,
             workspace=workspace,
             living_plan=living_plan,
+            stop_hooks=stop_hooks,
+            max_stop_hook_iterations=max_stop_hook_iterations,
             architecture=ActorCritic(
                 actor=actor,
                 critic=critic,
@@ -487,8 +617,13 @@ class Team:
                 approval_threshold=approval_threshold,
                 critique_template=critique_template,
                 refine_template=refine_template,
+                worker_registry=worker_registry,
+                role_to_worker_id=role_to_worker_id,
             ),
         )
+        if persistent_subagents and worker_registry is not None:
+            coordinator._worker_registry = worker_registry
+        return coordinator
 
     # -----------------------------------------------------------------
     # Blackboard
@@ -521,10 +656,13 @@ class Team:
         skills: list[Any] | None = None,
         workspace: Any | str | None = None,
         living_plan: Any = None,
+        stop_hooks: list[Any] | None = None,
+        max_stop_hook_iterations: int = 15,
         # --- blackboard-specific options ---
         max_rounds: int = 10,
         coordinator_instructions: str | None = None,
         decider_instructions: str | None = None,
+        persistent_subagents: bool = True,
     ) -> Agent:
         """Build a blackboard team where ``agents`` collaborate via
         a shared workspace; an optional ``coordinator`` selects who
@@ -536,6 +674,12 @@ class Team:
         across runs and humans can inspect them via the filesystem.
         Each agent's dict key becomes its author identity in the
         notebook.
+
+        ``persistent_subagents=True`` (default) registers each
+        contributing agent (plus the coordinator + decider, when
+        provided) with stable sessions so each agent's conversation
+        memory carries across rounds AND across multiple
+        ``Agent.run()`` invocations.
         """
         coord_ws: Any = workspace
         if workspace is not None:
@@ -546,7 +690,19 @@ class Team:
                 coord_ws = resolved.member(
                     "coordinator", teammates=list(agents.keys())
                 )
-        return Agent(
+        worker_registry = None
+        role_to_worker_id = None
+        if persistent_subagents:
+            from .agent.worker_registry import build_worker_registry
+            bb_workers: dict[str, Agent] = dict(agents)
+            if coordinator is not None:
+                bb_workers["__coordinator"] = coordinator
+            if decider is not None:
+                bb_workers["__decider"] = decider
+            worker_registry, role_to_worker_id = build_worker_registry(
+                bb_workers
+            )
+        coord_agent = Agent(
             instructions=instructions,
             model=model,
             memory=memory,
@@ -562,6 +718,8 @@ class Team:
             skills=skills,
             workspace=coord_ws,
             living_plan=living_plan,
+            stop_hooks=stop_hooks,
+            max_stop_hook_iterations=max_stop_hook_iterations,
             architecture=BlackboardArchitecture(
                 agents=agents,
                 coordinator=coordinator,
@@ -569,8 +727,13 @@ class Team:
                 max_rounds=max_rounds,
                 coordinator_instructions=coordinator_instructions,
                 decider_instructions=decider_instructions,
+                worker_registry=worker_registry,
+                role_to_worker_id=role_to_worker_id,
             ),
         )
+        if persistent_subagents and worker_registry is not None:
+            coord_agent._worker_registry = worker_registry
+        return coord_agent
 
 
 # ---------------------------------------------------------------------------

@@ -130,6 +130,8 @@ class Swarm:
         detect_cycles: bool = True,
         pass_full_history: bool = True,
         handoff_tool_name: str = "handoff",
+        worker_registry: dict[str, Any] | None = None,
+        role_to_worker_id: dict[str, str] | None = None,
     ) -> None:
         if not agents:
             raise ValueError("Swarm requires at least one peer agent")
@@ -162,6 +164,15 @@ class Swarm:
         self._typed_mode = any(
             h.input_type is not None for h in self._handoffs.values()
         )
+        # Persistent-subagent wiring — set when Team.swarm built us
+        # with ``persistent_subagents=True``. The registry maps
+        # ``worker_<role>_<ULID>`` → ``_WorkerHandle``; the
+        # role-to-id map lets us translate the peer key
+        # (e.g. ``"researcher"``) used in this architecture to the
+        # handle. When unset, peers run with per-handoff session_ids
+        # (legacy stateless behavior).
+        self._worker_registry = worker_registry
+        self._role_to_worker_id = role_to_worker_id
 
     def declared_workers(self) -> dict[str, Agent]:
         return dict(self._agents)
@@ -211,9 +222,20 @@ class Swarm:
             # TOOL_CALL / TOOL_RESULT events into our generator so
             # token-by-token streaming surfaces in the outer
             # `agent.stream(...)` consumer.
-            sub_session_id = (
-                f"{session.id}__swarm_{active_name}_{handoff_count}"
+            # Persistent path: the peer has a registered handle, so
+            # use the handle's stable session_id (every handoff to the
+            # same peer reuses the same memory partition). Lock
+            # serialises concurrent calls. Otherwise fall back to a
+            # per-handoff deterministic id (legacy).
+            from ..agent.worker_registry import resolve_persistent_session
+            sub_session_id, handle = resolve_persistent_session(
+                active_name,
+                fallback=f"{session.id}__swarm_{active_name}_{handoff_count}",
+                registry=self._worker_registry,
+                role_to_id=self._role_to_worker_id,
             )
+            if handle is not None:
+                handle.touch(user_id=deps.context.user_id)
             invocation = SubagentInvocation(
                 active_agent,
                 active_prompt,

@@ -64,7 +64,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import AsyncIterator
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 
@@ -74,6 +74,10 @@ from .helpers import SubagentInvocation
 
 if TYPE_CHECKING:
     from ..agent.api import Agent
+
+
+_ACRegistryT = dict[str, Any]  # worker handle registry
+_ACRoleMapT = dict[str, str]   # actor|critic → worker_id
 
 
 DEFAULT_CRITIQUE_TEMPLATE = """\
@@ -160,6 +164,8 @@ class ActorCritic:
         approval_threshold: float = 0.9,
         critique_template: str | None = None,
         refine_template: str | None = None,
+        worker_registry: _ACRegistryT | None = None,
+        role_to_worker_id: _ACRoleMapT | None = None,
     ) -> None:
         if max_rounds < 1:
             raise ValueError("max_rounds must be >= 1")
@@ -177,6 +183,14 @@ class ActorCritic:
         self._refine_template = (
             refine_template or DEFAULT_REFINE_TEMPLATE
         )
+        # Persistent-subagent wiring — when Team.actor_critic built us
+        # with ``persistent_subagents=True``, actor and critic each
+        # run under their handle's stable session_id. All rounds within
+        # a single Agent.run() AND across multiple runs reuse the same
+        # session, so the critic remembers what it already flagged and
+        # the actor remembers what it already refined.
+        self._worker_registry = worker_registry
+        self._role_to_worker_id = role_to_worker_id
 
     def declared_workers(self) -> dict[str, Agent]:
         return {"actor": self._actor, "critic": self._critic}
@@ -194,10 +208,19 @@ class ActorCritic:
             round=0,
             phase="generate",
         )
+        from ..agent.worker_registry import resolve_persistent_session
+        actor_sid_0, actor_handle_0 = resolve_persistent_session(
+            "actor",
+            fallback=f"{session.id}__actor_0",
+            registry=self._worker_registry,
+            role_to_id=self._role_to_worker_id,
+        )
+        if actor_handle_0 is not None:
+            actor_handle_0.touch(user_id=deps.context.user_id)
         actor_inv = SubagentInvocation(
             self._actor,
             prompt,
-            session_id=f"{session.id}__actor_0",
+            session_id=actor_sid_0,
             rollup_into=session,
         )
         async for ev in actor_inv.events():
@@ -245,10 +268,18 @@ class ActorCritic:
                 prompt=prompt,
                 output=current_output,
             )
+            critic_sid, critic_handle = resolve_persistent_session(
+                "critic",
+                fallback=f"{session.id}__critic_{round_num}",
+                registry=self._worker_registry,
+                role_to_id=self._role_to_worker_id,
+            )
+            if critic_handle is not None:
+                critic_handle.touch(user_id=deps.context.user_id)
             critic_inv = SubagentInvocation(
                 self._critic,
                 critique_prompt,
-                session_id=f"{session.id}__critic_{round_num}",
+                session_id=critic_sid,
                 rollup_into=session,
             )
             async for ev in critic_inv.events():
@@ -312,10 +343,18 @@ class ActorCritic:
                 critique=critique.summary or "",
                 issues_bulleted=issues_bulleted,
             )
+            refine_sid, refine_handle = resolve_persistent_session(
+                "actor",
+                fallback=f"{session.id}__actor_{round_num}",
+                registry=self._worker_registry,
+                role_to_id=self._role_to_worker_id,
+            )
+            if refine_handle is not None:
+                refine_handle.touch(user_id=deps.context.user_id)
             refine_inv = SubagentInvocation(
                 self._actor,
                 refine_prompt,
-                session_id=f"{session.id}__actor_{round_num}",
+                session_id=refine_sid,
                 rollup_into=session,
             )
             async for ev in refine_inv.events():
