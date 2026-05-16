@@ -155,6 +155,8 @@ class Team:
         stop_hooks: list[Any] | None = None,
         max_stop_hook_iterations: int = 15,
         prompt_caching: bool | Mapping[str, Any] | None = None,
+        tool_result_summarizer: Model | str | None = None,
+        tool_result_summary_threshold: int = 500,
         # --- supervisor-specific options ---
         instructions_template: str | None = None,
         delegate_tool_name: str = "delegate",
@@ -224,6 +226,10 @@ class Team:
             stop_hooks=stop_hooks,
             max_stop_hook_iterations=max_stop_hook_iterations,
             prompt_caching=prompt_caching,
+            tool_result_summarizer=tool_result_summarizer,
+            tool_result_summary_threshold=(
+                tool_result_summary_threshold
+            ),
             architecture=Supervisor(
                 workers=workers,
                 instructions_template=instructions_template,
@@ -278,6 +284,8 @@ class Team:
         stop_hooks: list[Any] | None = None,
         max_stop_hook_iterations: int = 15,
         prompt_caching: bool | Mapping[str, Any] | None = None,
+        tool_result_summarizer: Model | str | None = None,
+        tool_result_summary_threshold: int = 500,
         # --- swarm-specific options ---
         max_handoffs: int = 8,
         detect_cycles: bool = True,
@@ -350,6 +358,10 @@ class Team:
             stop_hooks=stop_hooks,
             max_stop_hook_iterations=max_stop_hook_iterations,
             prompt_caching=prompt_caching,
+            tool_result_summarizer=tool_result_summarizer,
+            tool_result_summary_threshold=(
+                tool_result_summary_threshold
+            ),
             architecture=Swarm(
                 agents=agents,
                 entry_agent=entry_agent,
@@ -397,6 +409,8 @@ class Team:
         stop_hooks: list[Any] | None = None,
         max_stop_hook_iterations: int = 15,
         prompt_caching: bool | Mapping[str, Any] | None = None,
+        tool_result_summarizer: Model | str | None = None,
+        tool_result_summary_threshold: int = 500,
         # --- router-specific options ---
         fallback_route: str | None = None,
         require_confidence_above: float = 0.0,
@@ -445,6 +459,10 @@ class Team:
             stop_hooks=stop_hooks,
             max_stop_hook_iterations=max_stop_hook_iterations,
             prompt_caching=prompt_caching,
+            tool_result_summarizer=tool_result_summarizer,
+            tool_result_summary_threshold=(
+                tool_result_summary_threshold
+            ),
             architecture=Router(
                 routes=routes,
                 fallback_route=fallback_route,
@@ -491,6 +509,8 @@ class Team:
         stop_hooks: list[Any] | None = None,
         max_stop_hook_iterations: int = 15,
         prompt_caching: bool | Mapping[str, Any] | None = None,
+        tool_result_summarizer: Model | str | None = None,
+        tool_result_summary_threshold: int = 500,
         # --- debate-specific options ---
         rounds: int = 2,
         convergence_check: bool = True,
@@ -545,6 +565,10 @@ class Team:
             stop_hooks=stop_hooks,
             max_stop_hook_iterations=max_stop_hook_iterations,
             prompt_caching=prompt_caching,
+            tool_result_summarizer=tool_result_summarizer,
+            tool_result_summary_threshold=(
+                tool_result_summary_threshold
+            ),
             architecture=MultiAgentDebate(
                 debaters=debaters,
                 judge=judge,
@@ -594,6 +618,8 @@ class Team:
         stop_hooks: list[Any] | None = None,
         max_stop_hook_iterations: int = 15,
         prompt_caching: bool | Mapping[str, Any] | None = None,
+        tool_result_summarizer: Model | str | None = None,
+        tool_result_summary_threshold: int = 500,
         # --- actor-critic-specific options ---
         max_rounds: int = 3,
         approval_threshold: float = 0.9,
@@ -641,6 +667,10 @@ class Team:
             stop_hooks=stop_hooks,
             max_stop_hook_iterations=max_stop_hook_iterations,
             prompt_caching=prompt_caching,
+            tool_result_summarizer=tool_result_summarizer,
+            tool_result_summary_threshold=(
+                tool_result_summary_threshold
+            ),
             architecture=ActorCritic(
                 actor=actor,
                 critic=critic,
@@ -690,6 +720,8 @@ class Team:
         stop_hooks: list[Any] | None = None,
         max_stop_hook_iterations: int = 15,
         prompt_caching: bool | Mapping[str, Any] | None = None,
+        tool_result_summarizer: Model | str | None = None,
+        tool_result_summary_threshold: int = 500,
         # --- blackboard-specific options ---
         max_rounds: int = 10,
         coordinator_instructions: str | None = None,
@@ -758,6 +790,10 @@ class Team:
             stop_hooks=stop_hooks,
             max_stop_hook_iterations=max_stop_hook_iterations,
             prompt_caching=prompt_caching,
+            tool_result_summarizer=tool_result_summarizer,
+            tool_result_summary_threshold=(
+                tool_result_summary_threshold
+            ),
             architecture=BlackboardArchitecture(
                 agents=agents,
                 coordinator=coordinator,

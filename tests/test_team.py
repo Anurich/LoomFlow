@@ -215,6 +215,92 @@ def test_team_supervisor_accepts_dict_form_prompt_caching() -> None:
 
 
 # ---------------------------------------------------------------------------
+# tool_result_summarizer= forwarding through every Team.* builder (0.10.15)
+# ---------------------------------------------------------------------------
+#
+# Same papercut pattern as prompt_caching= (0.10.12) and stop_hooks=
+# (0.10.10). The 0.10.14 feature lands as ``Agent`` kwargs; 0.10.15
+# plumbs them through the Team.* builders so loom-code (and any
+# other Team.supervisor consumer) can wire the summariser onto its
+# coordinator without monkey-patching ``coord._tool_result_summarizer``
+# post-construction.
+
+
+def _assert_summarizer_wired(coord: Agent, *, threshold: int) -> None:
+    assert coord._tool_result_summarizer is not None, (
+        "tool_result_summarizer did not propagate to coordinator"
+    )
+    assert coord._tool_result_summary_threshold == threshold
+
+
+def test_team_supervisor_forwards_tool_result_summarizer() -> None:
+    summariser = _scripted("compressed")
+    team = Team.supervisor(
+        workers={"a": _scripted("a")},
+        model="echo",
+        tool_result_summarizer=summariser,
+        tool_result_summary_threshold=250,
+    )
+    _assert_summarizer_wired(team, threshold=250)
+
+
+def test_team_swarm_forwards_tool_result_summarizer() -> None:
+    team = Team.swarm(
+        agents={"a": _scripted("a"), "b": _scripted("b")},
+        entry_agent="a",
+        model="echo",
+        tool_result_summarizer="echo",
+    )
+    _assert_summarizer_wired(team, threshold=500)
+
+
+def test_team_router_forwards_tool_result_summarizer() -> None:
+    team = Team.router(
+        routes=[RouterRoute(name="r1", description="x", agent=_scripted("a"))],
+        model="echo",
+        tool_result_summarizer="echo",
+    )
+    _assert_summarizer_wired(team, threshold=500)
+
+
+def test_team_debate_forwards_tool_result_summarizer() -> None:
+    team = Team.debate(
+        debaters=[_scripted("a"), _scripted("b")],
+        rounds=1,
+        model="echo",
+        tool_result_summarizer="echo",
+    )
+    _assert_summarizer_wired(team, threshold=500)
+
+
+def test_team_actor_critic_forwards_tool_result_summarizer() -> None:
+    team = Team.actor_critic(
+        actor=_scripted("draft"),
+        critic=_scripted('{"score": 1.0, "issues": [], "summary": "ok"}'),
+        model="echo",
+        tool_result_summarizer="echo",
+    )
+    _assert_summarizer_wired(team, threshold=500)
+
+
+def test_team_blackboard_forwards_tool_result_summarizer() -> None:
+    team = Team.blackboard(
+        agents={"a": _scripted("a")},
+        model="echo",
+        tool_result_summarizer="echo",
+    )
+    _assert_summarizer_wired(team, threshold=500)
+
+
+def test_team_supervisor_summarizer_default_none() -> None:
+    """No kwarg → no summariser wired (back-compat). Confirms the
+    new kwarg doesn't accidentally default to anything truthy."""
+    team = Team.supervisor(workers={"a": _scripted("a")}, model="echo")
+    assert team._tool_result_summarizer is None
+    assert team._tool_result_summary_threshold == 500
+
+
+# ---------------------------------------------------------------------------
 # Equivalence: Team.supervisor == Agent(architecture=Supervisor(...))
 # ---------------------------------------------------------------------------
 

@@ -7,6 +7,36 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 For development-history detail (per-slice notes, file maps, gate
 counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 
+## [0.10.15] — 2026-05-16
+
+### Added — `tool_result_summarizer=` forwarded through every `Team.*` builder
+
+Closes the same papercut closed by 0.10.10 (``stop_hooks=``) and
+0.10.12 (``prompt_caching=``): the 0.10.14 tool-result
+summarisation feature now reaches ``Team.supervisor``, ``swarm``,
+``router``, ``debate``, ``actor_critic``, and ``blackboard``
+coordinators directly via the builder kwargs. Without this,
+``Team.supervisor(tool_result_summarizer="haiku")`` raised
+``TypeError`` and callers had to monkey-patch
+``coord._tool_result_summarizer`` after construction.
+
+```python
+team = Team.supervisor(
+    workers={"coder": coder_agent, "explorer": explorer_agent},
+    model="claude-opus-4-7",
+    tool_result_summarizer="claude-haiku-4-5",
+    tool_result_summary_threshold=500,
+)
+```
+
+### Coverage
+
+7 new tests in ``tests/test_team.py`` — one per builder
+confirming the kwarg + threshold propagate to the coordinator's
+``_tool_result_summarizer`` / ``_tool_result_summary_threshold``,
+plus a default-None test ensuring no kwarg means no summarisation
+(back-compat). Full suite: 1537 passing.
+
 ## [0.10.14] — 2026-05-16
 
 ### Added — Tool-result summarization (Claude Code's `tool_use_summary`)
