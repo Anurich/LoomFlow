@@ -7,6 +7,57 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 For development-history detail (per-slice notes, file maps, gate
 counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 
+## [0.10.16] — 2026-05-16
+
+### Added — Snip: bounded conversation window before each turn
+
+`Agent(snip_window=N)` keeps the last N user-anchored turn groups
+in the rehydrated message list before each model call — pure
+list slicing, no API call. The cheap always-on context-budget
+defence that pairs with `tool_result_summarizer` (0.10.14) and
+the future auto-compact (0.10.19) as the three tiers of context
+management.
+
+```python
+agent = Agent(
+    "you help",
+    model="claude-opus-4-7",
+    snip_window=10,   # keep last 10 user-anchored turns
+)
+```
+
+**Where it fires:** inside `ReAct.run()` right after seed
+messages are rehydrated from memory (architectures rehydrate
+into `session.messages` at the top of each invocation; snip
+happens immediately after that, before the first model call).
+Pairs with `Dependencies.snip_window` + `Dependencies.fast_snip`
+flag — default-disabled, zero-allocation hot path when not
+opted in.
+
+**Slicing rules** (in `loomflow.agent.snip.snip_messages`):
+
+* Snips at `Role.USER` boundaries — never leaves an orphan
+  `tool_result` before its preceding `tool_call`.
+* Leading `Role.SYSTEM` messages survive every snip (they're the
+  identity / instructions, not conversation history).
+* `keep_last_n_turns=0` is a no-op (returns the same list object).
+* No user messages in history → no-op (no anchor to slice at).
+
+**Event:** emits `Event.architecture_event("messages_snipped",
+dropped=N, kept=M, window_turns=W)` when a snip fires — telemetry
++ `/cost`-style UIs can show "trimmed N messages this turn."
+
+### Coverage
+
+12 new tests in `tests/test_snip.py`: 8 unit tests covering the
+slicing helper edge cases (empty / zero-window / under-window /
+exact-fit / over-window / system-head preservation / no-anchor /
+tool-result pairing) + 3 Agent integration tests (negative
+rejection, default behaviour, propagation) + 1 end-to-end via
+`InMemoryMemory` rehydration confirming the snip event fires
+across multiple `agent.run()` calls with a shared `session_id`.
+Full suite: 1549 passing.
+
 ## [0.10.15] — 2026-05-16
 
 ### Added — `tool_result_summarizer=` forwarded through every `Team.*` builder

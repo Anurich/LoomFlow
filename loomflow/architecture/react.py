@@ -104,6 +104,28 @@ class ReAct:
             await _build_seed_messages(deps, session.instructions, prompt)
         )
 
+        # 1a. Snip — bounded-window trim of the rehydrated message
+        # list before the first model call. Pure list slicing; no
+        # API call. ``deps.fast_snip`` short-circuits when
+        # ``snip_window=0`` (the default) so the call site costs
+        # zero allocation. See :mod:`loomflow.agent.snip` for the
+        # slicing rules — snips at user-message boundaries so
+        # tool_call / tool_result pairs stay intact.
+        if not deps.fast_snip:
+            from ..agent.snip import snip_messages
+            snipped, dropped = snip_messages(
+                session.messages, deps.snip_window
+            )
+            if dropped > 0:
+                session.messages = snipped
+                yield Event.architecture_event(
+                    session.id,
+                    "messages_snipped",
+                    dropped=dropped,
+                    kept=len(snipped),
+                    window_turns=deps.snip_window,
+                )
+
         max_turns = (
             self._max_turns_override
             if self._max_turns_override is not None

@@ -219,6 +219,21 @@ class Dependencies:
     where the summariser cost dominates the win, lower for
     expensive-model setups where every saved token matters."""
 
+    fast_snip: bool = True
+    """Skip the snip pass when ``snip_window=0`` (the default).
+    Architectures honour this by short-circuiting the
+    :func:`loomflow.agent.snip.snip_messages` call right after
+    seed-message rehydration."""
+
+    snip_window: int = 0
+    """Number of user-anchored turn groups to keep in the
+    rehydrated message list before sending to the model. Zero
+    (default) disables snipping; positive integer trims older
+    turns. Snip is the cheap always-on context-budget defence
+    that runs alongside ``tool_result_summarizer`` (0.10.14) and
+    the future auto-compact (0.10.19) — see
+    :mod:`loomflow.agent.snip` for the slicing rules."""
+
     # ---------------------------------------------------------------
     # Per-run context — populated from :class:`~loomflow.RunContext`
     # at the top of :meth:`Agent.run`. Architectures forward

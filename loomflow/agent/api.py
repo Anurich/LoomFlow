@@ -128,6 +128,7 @@ class Agent:
         max_stop_hook_iterations: int = 15,
         tool_result_summarizer: Model | str | None = None,
         tool_result_summary_threshold: int = 500,
+        snip_window: int = 0,
     ) -> None:
         # Skills — packaged on-disk playbooks loaded on demand.
         # Build the registry first so frontmatter validation fires
@@ -501,6 +502,21 @@ class Agent:
         self._tool_result_summary_threshold: int = (
             tool_result_summary_threshold
         )
+
+        # Snip — bounded conversation window. ``0`` (default)
+        # disables; positive integer keeps the last N user-
+        # anchored turn groups in ``session.messages`` before
+        # each architecture invocation. See
+        # :mod:`loomflow.agent.snip` for the slicing semantics.
+        # Snipping is pure list-slicing — no API call, no model
+        # required. Pairs with tool_result_summarizer (0.10.14)
+        # and the future auto-compact (0.10.19) as the three
+        # tiers of context-budget defence.
+        if snip_window < 0:
+            raise ValueError(
+                "snip_window must be >= 0 (0 disables snipping)"
+            )
+        self._snip_window: int = snip_window
 
         # Persistent-subagent registry. Populated by
         # ``Team.supervisor(persistent_subagents=True)`` (the
@@ -1553,6 +1569,11 @@ class Agent:
         # allocation. Flips False only when the user passed
         # ``tool_result_summarizer=`` at Agent construction.
         fast_tool_summary = self._tool_result_summarizer is None
+        # ``fast_snip`` mirrors the same pattern. Snip is the
+        # cheap context-budget defence; when disabled (window=0,
+        # the default) the architecture skips the snip pass
+        # entirely.
+        fast_snip = self._snip_window <= 0
 
         run_trace: contextlib.AbstractAsyncContextManager[Any] = (
             _NULL_CTX
@@ -1796,6 +1817,8 @@ class Agent:
                 tool_result_summary_threshold=(
                     self._tool_result_summary_threshold
                 ),
+                fast_snip=fast_snip,
+                snip_window=self._snip_window,
                 context=run_ctx,
             )
 
