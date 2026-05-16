@@ -80,6 +80,15 @@ class ResolvedLivingPlan:
     """Optional pre-seeded plan to populate the run's plan with
     before the model sees its first turn. Useful for resume."""
 
+    auto_stop_hook: bool = True
+    """When ``True`` (default), ``Agent.__init__`` auto-prepends
+    a :class:`StopHook` that re-prompts the model when any plan
+    step is still ``doing``/``todo`` after the architecture's
+    final answer. This is the framework's Ralph-loop default —
+    multi-step plans don't silently exit mid-stream. Set
+    ``living_plan={"auto_stop_hook": False, ...}`` to disable;
+    user-supplied ``stop_hooks=`` still run."""
+
     @classmethod
     def disabled(cls) -> ResolvedLivingPlan:
         return cls(
@@ -89,6 +98,7 @@ class ResolvedLivingPlan:
             task_id=None,
             author=None,
             seed_plan=None,
+            auto_stop_hook=False,
         )
 
 
@@ -187,6 +197,7 @@ def _resolve_dict(
         "task_id",
         "author",
         "seed_plan",
+        "auto_stop_hook",
     }
     extra = set(spec.keys()) - accepted_keys
     if extra:
@@ -255,6 +266,9 @@ def _resolve_dict(
             "(or omit it). Got: " + type(seed_spec).__name__
         )
 
+    # Auto-stop-hook: defaults True; user opts out by passing False.
+    auto_stop_hook = bool(spec.get("auto_stop_hook", True))
+
     return ResolvedLivingPlan(
         enabled=True,
         mirror_to_workspace=mirror,
@@ -262,4 +276,5 @@ def _resolve_dict(
         task_id=task_id,
         author=author,
         seed_plan=seed_plan,
+        auto_stop_hook=auto_stop_hook,
     )

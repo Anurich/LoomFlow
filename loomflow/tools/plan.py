@@ -600,15 +600,25 @@ def living_plan_prompt_section(*, has_workspace_mirror: bool) -> str:
         "The LAST step must be a VERIFY step naming the success "
         "criterion (validator command, expected state, etc.).\n"
         "2. Before each significant action, ``plan_write`` with "
-        "that step's status = ``doing``.\n"
-        "3. After the action, ``plan_write`` again with status = "
-        "``done`` (and a 1-line ``finding``) or ``blocked`` (with "
-        "a finding describing the blocker).\n"
+        "that step's status = ``doing``. **Exactly ONE step should "
+        "be ``doing`` at any time** (not zero, not two) — this "
+        "lets the framework + reviewers tell at a glance what "
+        "you're actually working on right now.\n"
+        "3. After the action, ``plan_write`` IMMEDIATELY with "
+        "status = ``done`` (and a 1-line ``finding``) or "
+        "``blocked`` (with a finding describing the blocker). "
+        "Don't batch completions; mark each step ``done`` the "
+        "moment it's finished so the next step can move to "
+        "``doing``.\n"
         "4. If discovery requires changes, just rewrite the plan. "
         "Insert / remove / reorder steps. The plan is a living "
         "document, not a frozen contract.\n"
         "5. NEVER declare a task done before the VERIFY step is "
         "actually ``done`` (not just optimistically marked so).\n"
+        "6. **You may not emit a final response to the user while "
+        "any step is ``doing`` or ``todo``.** The framework will "
+        "detect this and re-prompt you. Mark every step "
+        "``done`` / ``skipped`` / ``blocked`` first, then respond.\n"
     )
     if has_workspace_mirror:
         body += (
@@ -638,3 +648,116 @@ def living_plan_prompt_section(*, has_workspace_mirror: bool) -> str:
             "plans and bootstrap from what worked.\n"
         )
     return body
+
+
+# ---------------------------------------------------------------------------
+# Stop hook — framework's Ralph-loop default when ``living_plan=True``
+# ---------------------------------------------------------------------------
+
+
+def make_plan_stop_hook(*, name: str = "living_plan") -> Any:
+    """Build a :class:`StopHook` that re-prompts the model when the
+    plan still has incomplete steps after the architecture exits.
+
+    This is the framework's answer to the ReAct exit bug: the model
+    emits text like "Now let me scaffold the backend..." between
+    delegations, ReAct treats that as final-answer and exits, the
+    plan sits with steps still in ``doing``/``todo``. The hook reads
+    the active plan via :func:`get_active_plan` and, if any step is
+    incomplete, returns a :class:`StopHookResult` naming the
+    specific step. ``Agent._loop`` injects the message as a fresh
+    user turn and re-runs the architecture.
+
+    Status taxonomy for the check:
+
+    * ``doing`` / ``todo`` → incomplete, **trigger continuation**.
+    * ``done`` / ``skipped`` → terminal-good, don't trigger.
+    * ``blocked`` → terminal-bad-but-deliberate, don't trigger.
+      ``blocked`` means the model explicitly said "I can't do this
+      without user input." Continuing would be the wrong call —
+      the human needs to unblock.
+
+    First ``doing`` step wins (matches the TodoWriteTool rule that
+    only ONE step should be ``doing`` at a time). If only ``todo``
+    steps exist, the first ``todo`` is named instead — covers the
+    case where the model planned but never started.
+
+    Auto-registered by :class:`Agent.__init__` when
+    ``living_plan=True``; opt out via
+    ``living_plan={"auto_stop_hook": False}``.
+    """
+    # Local import: stop_hooks lives in the agent package, which
+    # imports this module — circular at module-load time without
+    # the deferred import.
+    from ..agent.stop_hooks import StopHookResult
+
+    class _LivingPlanStopHook:
+        # Implements the StopHook Protocol structurally; no need
+        # to subclass anything — Protocol is runtime_checkable.
+        name = ""
+
+        def __init__(self, hook_name: str) -> None:
+            self.name = hook_name
+
+        async def __call__(
+            self,
+            session: Any,
+            deps: Any,
+            *,
+            iteration: int,
+        ) -> StopHookResult | None:
+            plan = get_active_plan()
+            if plan is None or not plan.steps:
+                return None
+            # Prefer ``doing`` over ``todo`` — if the model marked a
+            # step in-progress, that's a deliberate commitment the
+            # framework should hold it to.
+            doing = next(
+                (
+                    (i, s)
+                    for i, s in enumerate(plan.steps, start=1)
+                    if s.status == "doing"
+                ),
+                None,
+            )
+            if doing is not None:
+                idx, step = doing
+                directive = (
+                    f"Your plan's step {idx} "
+                    f"({step.description!r}) is still marked "
+                    "`doing`. Either complete it (call "
+                    "`plan_write` with status=`done`), explicitly "
+                    "mark it `blocked` with a finding the user "
+                    "needs to resolve, or `skipped` with a "
+                    "reason. You may not finish the turn while a "
+                    "step is `doing`."
+                )
+                return StopHookResult(
+                    inject_message=directive,
+                    reason=f"plan_step_{idx}_doing",
+                )
+            todo = next(
+                (
+                    (i, s)
+                    for i, s in enumerate(plan.steps, start=1)
+                    if s.status == "todo"
+                ),
+                None,
+            )
+            if todo is not None:
+                idx, step = todo
+                directive = (
+                    f"Your plan's step {idx} "
+                    f"({step.description!r}) is still `todo` "
+                    "and you emitted a final response. Start it "
+                    "now: mark it `doing` via `plan_write`, then "
+                    "do the work. The plan is a contract — finish "
+                    "every step before returning the final answer."
+                )
+                return StopHookResult(
+                    inject_message=directive,
+                    reason=f"plan_step_{idx}_todo",
+                )
+            return None
+
+    return _LivingPlanStopHook(name)

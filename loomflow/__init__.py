@@ -47,6 +47,7 @@ Public API tiers:
 # ---------------------------------------------------------------------------
 
 from .agent import Agent
+from .agent.stop_hooks import StopHook, StopHookResult
 from .architecture import Architecture, ReAct
 from .core import (
     Budget,
@@ -169,6 +170,8 @@ __all__ = [
     "Secrets",
     "AuditLog",
     "Architecture",
+    "StopHook",
+    "StopHookResult",
     # ----- Default in-memory / no-op backends + always-on architecture -----
     "InMemoryMemory",
     "InMemoryAuditLog",

@@ -186,6 +186,15 @@ class Dependencies:
     fast_budget: bool = True
     """Skip ``budget.allows_step()`` and ``budget.consume(...)``
     when budget is ``NoBudget``."""
+    fast_stop_hooks: bool = True
+    """Skip the stop-hook re-invocation loop when no stop hooks
+    are registered. Auto-set ``False`` when
+    ``Agent(stop_hooks=[...])`` is non-empty OR a framework auto-
+    registered hook fires (e.g. ``living_plan=True``). When True,
+    ``Agent._loop`` runs ``architecture.run(...)`` exactly once
+    and proceeds to teardown; when False, ``_loop`` wraps the
+    architecture in the Ralph-loop bounded by
+    ``Agent.max_stop_hook_iterations``."""
 
     # ---------------------------------------------------------------
     # Per-run context — populated from :class:`~loomflow.RunContext`
@@ -236,6 +245,21 @@ class Architecture(Protocol):
         Implementations are *async generators* — declared
         ``async def run(...) -> AsyncIterator[Event]:`` with ``yield``
         statements in the body.
+
+        **Re-invocation contract.** ``Agent._loop`` MAY call
+        ``run(session, deps, new_prompt)`` a second (or Nth) time
+        on the same ``session`` when a registered
+        :class:`~loomflow.StopHook` votes to continue. The new
+        ``prompt`` should be treated as a fresh user turn
+        appended to the running conversation; implementations
+        MAY assume ``len(session.messages) > 0`` on re-entry and
+        SHOULD append ``prompt`` as a ``Role.USER`` message to
+        preserve the conversation. Built-in architectures (ReAct,
+        Reflexion, Supervisor, …) all honour this contract; third-
+        party architectures that ignore ``prompt`` on re-entry
+        will silently drop the StopHook's directive — document
+        the deviation prominently if your custom architecture
+        differs.
         """
         ...
 

@@ -75,6 +75,7 @@ from ..security.audit import AuditLog
 from ..security.hooks import HookRegistry, PostToolHook, PreToolHook
 from ..security.permissions import AllowAll
 from ..tools.registry import InProcessToolHost, Tool
+from .stop_hooks import StopHook, StopHookResult
 
 DEFAULT_MAX_TURNS = 50
 DEFAULT_STREAM_BUFFER = 128
@@ -123,6 +124,8 @@ class Agent:
         prompt_caching: bool | Mapping[str, Any] | None = None,
         workspace: Any | str | Mapping[str, Any] | None = None,
         living_plan: Any = None,
+        stop_hooks: list[StopHook] | None = None,
+        max_stop_hook_iterations: int = 15,
     ) -> None:
         # Skills — packaged on-disk playbooks loaded on demand.
         # Build the registry first so frontmatter validation fires
@@ -446,6 +449,33 @@ class Agent:
             prompt_caching
         )
         self._architecture: Architecture = resolve_architecture(architecture)
+
+        # Stop hooks — framework-level Ralph loop. Auto-hooks
+        # (today: living_plan in-progress checker) prepend; user-
+        # supplied hooks append. First hook to return a non-None
+        # StopHookResult in each iteration wins. Bounded by
+        # ``max_stop_hook_iterations`` so a flaky hook can't burn
+        # the user's budget unbounded.
+        auto_hooks: list[StopHook] = []
+        if (
+            self._living_plan_spec.enabled
+            and self._living_plan_spec.auto_stop_hook
+        ):
+            # Import here to avoid a circular cycle at module
+            # load: plan.py imports types that resolve back into
+            # the agent package.
+            from ..tools.plan import make_plan_stop_hook
+            auto_hooks.append(make_plan_stop_hook())
+        self._stop_hooks: list[StopHook] = [
+            *auto_hooks,
+            *(stop_hooks or []),
+        ]
+        if max_stop_hook_iterations < 0:
+            raise ValueError(
+                "max_stop_hook_iterations must be >= 0 "
+                "(0 disables the loop entirely)"
+            )
+        self._max_stop_hook_iterations: int = max_stop_hook_iterations
 
     # ---- hook decorators (user-facing sugar) ----------------------------
 
@@ -1471,6 +1501,11 @@ class Agent:
         )
         fast_runtime = isinstance(self._runtime, InProcRuntime)
         fast_budget = isinstance(self._budget, NoBudget)
+        # No registered stop hooks → skip the Ralph-loop wrapper
+        # entirely so the no-op default keeps the LangChain-class
+        # latency promise. Hooks are mostly used for living_plan
+        # auto-registration and bespoke consumer-side checks.
+        fast_stop_hooks = len(self._stop_hooks) == 0
 
         run_trace: contextlib.AbstractAsyncContextManager[Any] = (
             _NULL_CTX
@@ -1708,11 +1743,79 @@ class Agent:
                 fast_hooks=fast_hooks,
                 fast_runtime=fast_runtime,
                 fast_budget=fast_budget,
+                fast_stop_hooks=fast_stop_hooks,
                 context=run_ctx,
             )
 
+            # First architecture pass — same as before.
             async for event in self._architecture.run(session, deps, prompt):
                 await emit(event)
+
+            # Framework Ralph loop — when stop hooks are registered,
+            # run them after the architecture exits. Any hook
+            # returning a StopHookResult triggers a re-invocation
+            # of architecture.run() with the inject_message as a
+            # fresh user prompt. Bounded by
+            # ``self._max_stop_hook_iterations`` so a flaky hook
+            # can't burn budget unbounded.
+            #
+            # First-non-None wins per iteration; remaining hooks
+            # for that iteration are skipped. Re-uses the same
+            # session (messages carry forward as conversation
+            # history) and the same deps (already includes
+            # ``context``, ``fast_*`` flags, the wrapped model +
+            # memory).
+            if not fast_stop_hooks:
+                iter_count = 0
+                while iter_count < self._max_stop_hook_iterations:
+                    hook_result: StopHookResult | None = None
+                    fired_hook_name: str = ""
+                    for hook in self._stop_hooks:
+                        hook_result = await hook(
+                            session, deps, iteration=iter_count
+                        )
+                        if hook_result is not None:
+                            fired_hook_name = getattr(
+                                hook, "name", type(hook).__name__
+                            )
+                            break
+                    if hook_result is None:
+                        # All hooks voted "stop" — natural exit.
+                        break
+                    iter_count += 1
+                    await emit(
+                        Event.architecture_event(
+                            session_id,
+                            "stop_hook.fired",
+                            payload={
+                                "hook": fired_hook_name,
+                                "iteration": iter_count,
+                                "reason": hook_result.reason,
+                            },
+                        )
+                    )
+                    async for event in self._architecture.run(
+                        session, deps, hook_result.inject_message
+                    ):
+                        await emit(event)
+                else:
+                    # Loop exhausted via the cap — record the
+                    # interruption on the session so RunResult
+                    # surfaces it back to the caller.
+                    session.interrupted = True
+                    session.interruption_reason = (
+                        "stop_hook_iterations_exhausted"
+                    )
+                    await emit(
+                        Event.architecture_event(
+                            session_id,
+                            "stop_hook.exhausted",
+                            payload={
+                                "iterations": iter_count,
+                                "limit": self._max_stop_hook_iterations,
+                            },
+                        )
+                    )
 
             # Structured output validation + retry. Only kicks in
             # when the caller requested a schema; happens AFTER the

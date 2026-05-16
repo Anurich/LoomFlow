@@ -7,6 +7,46 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 For development-history detail (per-slice notes, file maps, gate
 counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 
+## [0.10.8] — 2026-05-16
+
+### Added — `StopHook` protocol for framework-level Ralph loop
+
+New `Agent(stop_hooks=[...], max_stop_hook_iterations=15)` lets
+framework or user code force the agent to keep working when the
+architecture would otherwise exit. Fixes the structural failure
+mode where ReAct exits on text-without-tool-call mid-plan ("Now
+let me scaffold the backend..." → ReAct treats as final answer →
+plan sits with steps still in `doing`).
+
+API:
+- `loomflow.StopHook` — Protocol, async-callable. Returns a
+  `StopHookResult` to force continuation, or `None` to vote stop.
+  First non-None per iteration wins.
+- `loomflow.StopHookResult` — frozen dataclass: `inject_message`
+  becomes a user turn; `reason` lands on telemetry + audit.
+- `Agent.max_stop_hook_iterations` — bounded loop; `0` disables.
+- `Dependencies.fast_stop_hooks` — auto-set True when no hooks
+  registered (no-op default keeps LangChain-class latency).
+
+Auto-registration: `Agent(living_plan=True)` prepends a
+LivingPlan stop hook that re-prompts when any step is `doing`/
+`todo` and names the specific step. Opt out via
+`living_plan={"auto_stop_hook": False}`.
+
+LivingPlan tool prompt updated: enforces "exactly ONE `doing` at
+a time", "mark `done` IMMEDIATELY", and "no final response while
+any step is `doing`/`todo` — the framework will re-prompt you."
+
+Telemetry: `Event.architecture_event` with `stop_hook.fired` /
+`stop_hook.exhausted` names. No new EventKind value.
+
+Industry precedent matches Claude Code's `handleStopHooks` +
+TodoWriteTool discipline; AutoGen's `TerminationCondition`;
+Cursor's judge agent; Anthropic `/goal`. Loomflow now has the
+primitive at the framework layer instead of forcing each
+consumer to re-implement the loop. 13 new tests; full 1480-test
+suite green; `mypy --strict` clean.
+
 ## [0.10.6] — 2026-05-15
 
 ### Added — `web_tool` for agent web search (Serper + DuckDuckGo)
