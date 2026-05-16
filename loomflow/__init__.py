@@ -119,7 +119,7 @@ from .workspace import (
     resolve_workspace,
 )
 
-__version__ = "0.10.8"
+__version__ = "0.10.9"
 
 __all__ = [
     "__version__",
