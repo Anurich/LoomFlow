@@ -7,6 +7,51 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 For development-history detail (per-slice notes, file maps, gate
 counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 
+## [0.10.18] — 2026-05-16
+
+### Added — Subagent parent-attribution metadata
+
+When ``SubagentInvocation`` spawns a child agent inside an
+active parent run, the child's :class:`RunContext.metadata` now
+carries two reserved keys recording who spawned it:
+
+* ``_loomflow_parent_session_id`` — the parent's session_id
+* ``_loomflow_parent_run_id`` — the parent's run_id
+
+Useful for telemetry / audit attribution ("this child run was
+spawned by parent X"), cache / memory partitioning by parent,
+and for any custom tool that wants to know "am I running as a
+subagent or directly?" — the keys are absent on direct
+``Agent.run()`` calls.
+
+### Design notes
+
+The Claude Code "renderedSystemPrompt bytes" pattern doesn't
+translate cleanly to loomflow's model — loomflow workers each
+have their own ``instructions`` / ``tools`` / ``memory`` by
+design (different agent, different identity), unlike Claude
+Code's fork-as-copy. Persistent subagents (0.10.10) already
+gives us cache-stable system prompts across delegations to the
+same worker, so the cache-continuity goal is mostly already
+covered.
+
+What WAS missing was a way for the child to know it was
+spawned by a specific parent run. Today's answer: reserved
+metadata keys on the child's RunContext, set additively (never
+clobbers user metadata, never overwrites a deeper ancestor's
+attribution thanks to ``setdefault``).
+
+### Coverage
+
+4 new tests in
+``tests/test_subagent_parent_attribution.py``: child gets parent
+attribution inside an active parent run, child has NO
+attribution when constructed outside any parent run (back-
+compat), explicit ``context=`` overrides still get attribution
+layered on (additive), and the ``setdefault`` rule that
+preserves the OUTERmost ancestor identity through nested
+subagent chains. Full suite: 1563 passing.
+
 ## [0.10.17] — 2026-05-16
 
 ### Added — Token counting helper with three-tier fallback

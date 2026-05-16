@@ -145,7 +145,33 @@ class SubagentInvocation:
         # ``get_run_context`` returns the empty default — sub-agents
         # then run anonymously, same as direct ``Agent.run`` with
         # no kwargs.
-        self._context = context if context is not None else get_run_context()
+        base_ctx = context if context is not None else get_run_context()
+        # Subagent parent-attribution (0.10.18): record the parent's
+        # session_id + run_id under reserved metadata keys so the
+        # child agent (and any downstream telemetry / audit /
+        # custom tools) can attribute its work back to the spawning
+        # parent. Reserved keys are namespaced with ``_loomflow_``
+        # so they can't collide with user metadata. When the
+        # caller supplied an explicit ``context``, we still augment
+        # — the explicit context wins on user_id/session_id, but
+        # parent attribution is additive metadata that helps
+        # observability without overriding intent.
+        parent_session = base_ctx.session_id
+        parent_run = base_ctx.run_id
+        if parent_session or parent_run:
+            merged_metadata: dict[str, Any] = dict(base_ctx.metadata)
+            if parent_session:
+                merged_metadata.setdefault(
+                    "_loomflow_parent_session_id", parent_session
+                )
+            if parent_run:
+                merged_metadata.setdefault(
+                    "_loomflow_parent_run_id", parent_run
+                )
+            base_ctx = base_ctx.with_overrides(
+                metadata=merged_metadata
+            )
+        self._context = base_ctx
         self._extra_tools = extra_tools
         self._buffer_size = buffer_size
         # When provided, the sub-agent's ``RunResult`` usage (input /
