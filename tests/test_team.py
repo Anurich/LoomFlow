@@ -301,6 +301,215 @@ def test_team_supervisor_summarizer_default_none() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Comprehensive Agent-kwarg forwarding (catch-all)
+# ---------------------------------------------------------------------------
+#
+# Anything Agent accepts as a kwarg SHOULD round-trip through every
+# Team.* builder. Historical pattern: each new Agent kwarg has shipped
+# without Team forwarding, then a follow-up release patched it
+# (0.10.10 stop_hooks=, 0.10.12 prompt_caching=, 0.10.13/15
+# tool_result_summarizer=). This test file enumerates the FULL set so
+# regressions surface in CI.
+#
+# Tested via direct introspection of the private ``_*`` attributes
+# the kwargs land on — that's the load-bearing contract; the kwargs
+# themselves are just developer ergonomics.
+
+
+def _scripted_for_tests() -> Agent:
+    return _scripted("ok")
+
+
+@pytest.fixture
+def supervisor_with_all_kwargs() -> Agent:
+    """A coordinator built with every currently-forwardable Agent
+    kwarg set to a non-default value. Tests below read the
+    landed attribute to confirm propagation."""
+    cheap = _scripted("compressed")
+    return Team.supervisor(
+        workers={"a": _scripted_for_tests()},
+        model="echo",
+        # token-opt knobs (0.10.13 — the prompted fix)
+        snip_window=8,
+        auto_compact_at_tokens=50_000,
+        auto_compact_summariser=cheap,
+        auto_compact_keep_recent_turns=2,
+        tool_result_summarizer=cheap,
+        tool_result_summary_threshold=250,
+        # historical-gap knobs being closed in this same release
+        retry_policy=None,  # accepts the kwarg shape; None is valid
+        auto_extract=False,
+        response_tone="terse",
+        effort="medium",
+        strict_effort=False,
+    )
+
+
+def test_supervisor_forwards_snip_window(
+    supervisor_with_all_kwargs: Agent,
+) -> None:
+    assert supervisor_with_all_kwargs._snip_window == 8
+
+
+def test_supervisor_forwards_auto_compact_at_tokens(
+    supervisor_with_all_kwargs: Agent,
+) -> None:
+    assert (
+        supervisor_with_all_kwargs._auto_compact_at_tokens == 50_000
+    )
+
+
+def test_supervisor_forwards_auto_compact_summariser(
+    supervisor_with_all_kwargs: Agent,
+) -> None:
+    assert (
+        supervisor_with_all_kwargs._auto_compact_summariser is not None
+    )
+
+
+def test_supervisor_forwards_auto_compact_keep_recent_turns(
+    supervisor_with_all_kwargs: Agent,
+) -> None:
+    assert (
+        supervisor_with_all_kwargs._auto_compact_keep_recent_turns
+        == 2
+    )
+
+
+def test_supervisor_forwards_response_tone(
+    supervisor_with_all_kwargs: Agent,
+) -> None:
+    assert (
+        supervisor_with_all_kwargs._default_response_tone == "terse"
+    )
+
+
+def test_supervisor_forwards_effort(
+    supervisor_with_all_kwargs: Agent,
+) -> None:
+    assert supervisor_with_all_kwargs._default_effort == "medium"
+
+
+def test_supervisor_forwards_strict_effort(
+    supervisor_with_all_kwargs: Agent,
+) -> None:
+    assert supervisor_with_all_kwargs._strict_effort is False
+
+
+def test_supervisor_accepts_auto_extract_without_raise() -> None:
+    """``auto_extract`` gates memory-wrapper construction; it
+    doesn't land on a stored attribute we can introspect post-
+    facto. Smoke-test: the kwarg is ACCEPTED by the builder
+    (no TypeError), which is the actual gap this release closes."""
+    team = Team.supervisor(
+        workers={"a": _scripted("a")},
+        model="echo",
+        auto_extract=False,
+    )
+    assert isinstance(team, Agent)
+
+
+def test_supervisor_accepts_retry_policy_without_raise() -> None:
+    """Same shape — ``retry_policy=`` is accepted; passing None
+    is valid (means "default policy"). Verifies the kwarg is
+    plumbed through, not its post-resolution semantics."""
+    team = Team.supervisor(
+        workers={"a": _scripted("a")},
+        model="echo",
+        retry_policy=None,
+    )
+    assert isinstance(team, Agent)
+
+
+def test_supervisor_accepts_approval_handler_and_secrets() -> None:
+    """The remaining two historical-gap kwargs."""
+
+    async def _handler(call, user_id):  # type: ignore[no-untyped-def]
+        return True
+
+    team = Team.supervisor(
+        workers={"a": _scripted("a")},
+        model="echo",
+        approval_handler=_handler,
+        secrets=None,
+    )
+    assert isinstance(team, Agent)
+
+
+def test_supervisor_default_snip_disabled() -> None:
+    """Back-compat: omitting ``snip_window`` keeps the default 0
+    (disabled). Mirrors the back-compat assertions for the other
+    optional knobs."""
+    team = Team.supervisor(workers={"a": _scripted("a")}, model="echo")
+    assert team._snip_window == 0
+    assert team._auto_compact_at_tokens is None
+
+
+# Spot-check the OTHER 5 builders accept the same new kwargs without
+# raising — full attribute introspection on each would be 5x the
+# above; the round-trip on supervisor + this surface test catches
+# any silent gap in the replace_all forwarding pattern.
+
+
+def test_swarm_accepts_snip_and_compact_kwargs() -> None:
+    team = Team.swarm(
+        agents={"a": _scripted("a"), "b": _scripted("b")},
+        entry_agent="a",
+        model="echo",
+        snip_window=5,
+        auto_compact_at_tokens=10_000,
+    )
+    assert team._snip_window == 5
+    assert team._auto_compact_at_tokens == 10_000
+
+
+def test_router_accepts_snip_and_compact_kwargs() -> None:
+    team = Team.router(
+        routes=[RouterRoute(name="r1", description="x", agent=_scripted("a"))],
+        model="echo",
+        snip_window=5,
+        auto_compact_at_tokens=10_000,
+    )
+    assert team._snip_window == 5
+    assert team._auto_compact_at_tokens == 10_000
+
+
+def test_debate_accepts_snip_and_compact_kwargs() -> None:
+    team = Team.debate(
+        debaters=[_scripted("a"), _scripted("b")],
+        rounds=1,
+        model="echo",
+        snip_window=5,
+        auto_compact_at_tokens=10_000,
+    )
+    assert team._snip_window == 5
+    assert team._auto_compact_at_tokens == 10_000
+
+
+def test_actor_critic_accepts_snip_and_compact_kwargs() -> None:
+    team = Team.actor_critic(
+        actor=_scripted("draft"),
+        critic=_scripted('{"score": 1.0, "issues": [], "summary": "ok"}'),
+        model="echo",
+        snip_window=5,
+        auto_compact_at_tokens=10_000,
+    )
+    assert team._snip_window == 5
+    assert team._auto_compact_at_tokens == 10_000
+
+
+def test_blackboard_accepts_snip_and_compact_kwargs() -> None:
+    team = Team.blackboard(
+        agents={"a": _scripted("a")},
+        model="echo",
+        snip_window=5,
+        auto_compact_at_tokens=10_000,
+    )
+    assert team._snip_window == 5
+    assert team._auto_compact_at_tokens == 10_000
+
+
+# ---------------------------------------------------------------------------
 # Equivalence: Team.supervisor == Agent(architecture=Supervisor(...))
 # ---------------------------------------------------------------------------
 

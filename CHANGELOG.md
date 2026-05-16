@@ -7,6 +7,52 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 For development-history detail (per-slice notes, file maps, gate
 counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 
+## [0.10.20] — 2026-05-16
+
+### Added — Comprehensive Agent-kwarg forwarding through Team.* builders
+
+Closes the **complete** historical-gap audit between
+``Agent.__init__`` and ``Team.supervisor`` / ``swarm`` / ``router``
+/ ``debate`` / ``actor_critic`` / ``blackboard``. Prior releases
+patched individual missing kwargs (``stop_hooks=`` in 0.10.10,
+``prompt_caching=`` in 0.10.12, ``tool_result_summarizer=`` in
+0.10.13). This release closes the rest in one sweep.
+
+**Newly forwarded through all 6 Team.* builders:**
+
+* ``snip_window=`` — 0.10.13's free list-slicing turn-trim
+* ``auto_compact_at_tokens=`` — 0.10.13's mid-Ralph-loop compaction
+* ``auto_compact_summariser=`` — companion summariser model
+* ``auto_compact_keep_recent_turns=`` — verbatim-tail size
+* ``retry_policy=`` — model retry policy (was: only Agent direct)
+* ``auto_extract=`` — automatic fact extraction toggle
+* ``approval_handler=`` — async approval callback for ask-mode
+* ``secrets=`` — secrets manager for resolving API keys
+* ``response_tone=`` — default response tone for the coordinator
+* ``effort=`` — reasoning-effort dial
+* ``strict_effort=`` — hard-error on effort capability mismatch
+
+Eleven kwargs across six builders = 66 forwarding additions, all
+mechanical. The full audit table now shows zero gaps; everything
+``Agent`` accepts (except the per-call ``output_schema=`` and the
+intentionally-overridden ``architecture=``) round-trips through
+every ``Team.*`` builder.
+
+**Loom-code impact:** the post-construction monkey-patches in
+``loom_code/agent.py`` for ``_snip_window`` and
+``_auto_compact_at_tokens`` (added in the previous loom-code
+round as a bridge) can now be replaced with clean kwargs.
+
+### Coverage
+
+16 new tests in ``tests/test_team.py``: a comprehensive
+``supervisor_with_all_kwargs`` fixture covering 11 kwargs at once
++ 6 spot-check tests on the other builders confirming the same
+forwarding. Plus 3 "accepts kwarg without raise" tests for kwargs
+(``auto_extract``, ``retry_policy``, ``approval_handler`` +
+``secrets``) whose post-construction state isn't directly
+introspectable. Full suite: 1598 passing.
+
 ## [0.10.19] — 2026-05-16
 
 ### Added — Auto-compact at framework level

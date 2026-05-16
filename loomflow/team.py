@@ -157,6 +157,17 @@ class Team:
         prompt_caching: bool | Mapping[str, Any] | None = None,
         tool_result_summarizer: Model | str | None = None,
         tool_result_summary_threshold: int = 500,
+        snip_window: int = 0,
+        auto_compact_at_tokens: int | None = None,
+        auto_compact_summariser: Model | str | None = None,
+        auto_compact_keep_recent_turns: int = 4,
+        retry_policy: Any | None = None,
+        auto_extract: bool | None = None,
+        approval_handler: Any | None = None,
+        secrets: Any | None = None,
+        response_tone: str | None = None,
+        effort: str | None = None,
+        strict_effort: bool = False,
         # --- supervisor-specific options ---
         instructions_template: str | None = None,
         delegate_tool_name: str = "delegate",
@@ -230,6 +241,19 @@ class Team:
             tool_result_summary_threshold=(
                 tool_result_summary_threshold
             ),
+            snip_window=snip_window,
+            auto_compact_at_tokens=auto_compact_at_tokens,
+            auto_compact_summariser=auto_compact_summariser,
+            auto_compact_keep_recent_turns=(
+                auto_compact_keep_recent_turns
+            ),
+            retry_policy=retry_policy,
+            auto_extract=auto_extract,
+            approval_handler=approval_handler,
+            secrets=secrets,
+            response_tone=response_tone,
+            effort=effort,
+            strict_effort=strict_effort,
             architecture=Supervisor(
                 workers=workers,
                 instructions_template=instructions_template,
@@ -286,6 +310,17 @@ class Team:
         prompt_caching: bool | Mapping[str, Any] | None = None,
         tool_result_summarizer: Model | str | None = None,
         tool_result_summary_threshold: int = 500,
+        snip_window: int = 0,
+        auto_compact_at_tokens: int | None = None,
+        auto_compact_summariser: Model | str | None = None,
+        auto_compact_keep_recent_turns: int = 4,
+        retry_policy: Any | None = None,
+        auto_extract: bool | None = None,
+        approval_handler: Any | None = None,
+        secrets: Any | None = None,
+        response_tone: str | None = None,
+        effort: str | None = None,
+        strict_effort: bool = False,
         # --- swarm-specific options ---
         max_handoffs: int = 8,
         detect_cycles: bool = True,
@@ -362,6 +397,19 @@ class Team:
             tool_result_summary_threshold=(
                 tool_result_summary_threshold
             ),
+            snip_window=snip_window,
+            auto_compact_at_tokens=auto_compact_at_tokens,
+            auto_compact_summariser=auto_compact_summariser,
+            auto_compact_keep_recent_turns=(
+                auto_compact_keep_recent_turns
+            ),
+            retry_policy=retry_policy,
+            auto_extract=auto_extract,
+            approval_handler=approval_handler,
+            secrets=secrets,
+            response_tone=response_tone,
+            effort=effort,
+            strict_effort=strict_effort,
             architecture=Swarm(
                 agents=agents,
                 entry_agent=entry_agent,
@@ -411,6 +459,17 @@ class Team:
         prompt_caching: bool | Mapping[str, Any] | None = None,
         tool_result_summarizer: Model | str | None = None,
         tool_result_summary_threshold: int = 500,
+        snip_window: int = 0,
+        auto_compact_at_tokens: int | None = None,
+        auto_compact_summariser: Model | str | None = None,
+        auto_compact_keep_recent_turns: int = 4,
+        retry_policy: Any | None = None,
+        auto_extract: bool | None = None,
+        approval_handler: Any | None = None,
+        secrets: Any | None = None,
+        response_tone: str | None = None,
+        effort: str | None = None,
+        strict_effort: bool = False,
         # --- router-specific options ---
         fallback_route: str | None = None,
         require_confidence_above: float = 0.0,
@@ -463,6 +522,19 @@ class Team:
             tool_result_summary_threshold=(
                 tool_result_summary_threshold
             ),
+            snip_window=snip_window,
+            auto_compact_at_tokens=auto_compact_at_tokens,
+            auto_compact_summariser=auto_compact_summariser,
+            auto_compact_keep_recent_turns=(
+                auto_compact_keep_recent_turns
+            ),
+            retry_policy=retry_policy,
+            auto_extract=auto_extract,
+            approval_handler=approval_handler,
+            secrets=secrets,
+            response_tone=response_tone,
+            effort=effort,
+            strict_effort=strict_effort,
             architecture=Router(
                 routes=routes,
                 fallback_route=fallback_route,
@@ -511,6 +583,17 @@ class Team:
         prompt_caching: bool | Mapping[str, Any] | None = None,
         tool_result_summarizer: Model | str | None = None,
         tool_result_summary_threshold: int = 500,
+        snip_window: int = 0,
+        auto_compact_at_tokens: int | None = None,
+        auto_compact_summariser: Model | str | None = None,
+        auto_compact_keep_recent_turns: int = 4,
+        retry_policy: Any | None = None,
+        auto_extract: bool | None = None,
+        approval_handler: Any | None = None,
+        secrets: Any | None = None,
+        response_tone: str | None = None,
+        effort: str | None = None,
+        strict_effort: bool = False,
         # --- debate-specific options ---
         rounds: int = 2,
         convergence_check: bool = True,
@@ -569,6 +652,19 @@ class Team:
             tool_result_summary_threshold=(
                 tool_result_summary_threshold
             ),
+            snip_window=snip_window,
+            auto_compact_at_tokens=auto_compact_at_tokens,
+            auto_compact_summariser=auto_compact_summariser,
+            auto_compact_keep_recent_turns=(
+                auto_compact_keep_recent_turns
+            ),
+            retry_policy=retry_policy,
+            auto_extract=auto_extract,
+            approval_handler=approval_handler,
+            secrets=secrets,
+            response_tone=response_tone,
+            effort=effort,
+            strict_effort=strict_effort,
             architecture=MultiAgentDebate(
                 debaters=debaters,
                 judge=judge,
@@ -620,6 +716,17 @@ class Team:
         prompt_caching: bool | Mapping[str, Any] | None = None,
         tool_result_summarizer: Model | str | None = None,
         tool_result_summary_threshold: int = 500,
+        snip_window: int = 0,
+        auto_compact_at_tokens: int | None = None,
+        auto_compact_summariser: Model | str | None = None,
+        auto_compact_keep_recent_turns: int = 4,
+        retry_policy: Any | None = None,
+        auto_extract: bool | None = None,
+        approval_handler: Any | None = None,
+        secrets: Any | None = None,
+        response_tone: str | None = None,
+        effort: str | None = None,
+        strict_effort: bool = False,
         # --- actor-critic-specific options ---
         max_rounds: int = 3,
         approval_threshold: float = 0.9,
@@ -671,6 +778,19 @@ class Team:
             tool_result_summary_threshold=(
                 tool_result_summary_threshold
             ),
+            snip_window=snip_window,
+            auto_compact_at_tokens=auto_compact_at_tokens,
+            auto_compact_summariser=auto_compact_summariser,
+            auto_compact_keep_recent_turns=(
+                auto_compact_keep_recent_turns
+            ),
+            retry_policy=retry_policy,
+            auto_extract=auto_extract,
+            approval_handler=approval_handler,
+            secrets=secrets,
+            response_tone=response_tone,
+            effort=effort,
+            strict_effort=strict_effort,
             architecture=ActorCritic(
                 actor=actor,
                 critic=critic,
@@ -722,6 +842,17 @@ class Team:
         prompt_caching: bool | Mapping[str, Any] | None = None,
         tool_result_summarizer: Model | str | None = None,
         tool_result_summary_threshold: int = 500,
+        snip_window: int = 0,
+        auto_compact_at_tokens: int | None = None,
+        auto_compact_summariser: Model | str | None = None,
+        auto_compact_keep_recent_turns: int = 4,
+        retry_policy: Any | None = None,
+        auto_extract: bool | None = None,
+        approval_handler: Any | None = None,
+        secrets: Any | None = None,
+        response_tone: str | None = None,
+        effort: str | None = None,
+        strict_effort: bool = False,
         # --- blackboard-specific options ---
         max_rounds: int = 10,
         coordinator_instructions: str | None = None,
@@ -794,6 +925,19 @@ class Team:
             tool_result_summary_threshold=(
                 tool_result_summary_threshold
             ),
+            snip_window=snip_window,
+            auto_compact_at_tokens=auto_compact_at_tokens,
+            auto_compact_summariser=auto_compact_summariser,
+            auto_compact_keep_recent_turns=(
+                auto_compact_keep_recent_turns
+            ),
+            retry_policy=retry_policy,
+            auto_extract=auto_extract,
+            approval_handler=approval_handler,
+            secrets=secrets,
+            response_tone=response_tone,
+            effort=effort,
+            strict_effort=strict_effort,
             architecture=BlackboardArchitecture(
                 agents=agents,
                 coordinator=coordinator,
