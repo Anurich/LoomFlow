@@ -129,6 +129,9 @@ class Agent:
         tool_result_summarizer: Model | str | None = None,
         tool_result_summary_threshold: int = 500,
         snip_window: int = 0,
+        auto_compact_at_tokens: int | None = None,
+        auto_compact_summariser: Model | str | None = None,
+        auto_compact_keep_recent_turns: int = 4,
     ) -> None:
         # Skills — packaged on-disk playbooks loaded on demand.
         # Build the registry first so frontmatter validation fires
@@ -517,6 +520,47 @@ class Agent:
                 "snip_window must be >= 0 (0 disables snipping)"
             )
         self._snip_window: int = snip_window
+
+        # Auto-compact (0.10.19) — third tier of context-budget
+        # defence. None (default) → disabled. Pass an int (token
+        # threshold) to enable; the summariser defaults to the
+        # main model if not supplied separately. Fires inside
+        # the Ralph loop between iterations when
+        # ``session.messages`` accumulates past the threshold.
+        # See :mod:`loomflow.agent.auto_compact` for the
+        # compaction algorithm and trigger semantics.
+        if (
+            auto_compact_at_tokens is not None
+            and auto_compact_at_tokens <= 0
+        ):
+            raise ValueError(
+                "auto_compact_at_tokens must be > 0 or None "
+                "(None disables auto-compact entirely)"
+            )
+        self._auto_compact_at_tokens: int | None = (
+            auto_compact_at_tokens
+        )
+        # Summariser defaults to the main model when not given.
+        # That keeps the opt-in API to a single kwarg
+        # (``auto_compact_at_tokens=N``) for the common case;
+        # users who want a cheaper model (Haiku for an Opus
+        # main) pass ``auto_compact_summariser="haiku"``.
+        if auto_compact_summariser is None:
+            self._auto_compact_summariser: Model | None = (
+                None if auto_compact_at_tokens is None
+                else self._model
+            )
+        else:
+            self._auto_compact_summariser = _resolve_model(
+                auto_compact_summariser, secrets=self._secrets
+            )
+        if auto_compact_keep_recent_turns < 1:
+            raise ValueError(
+                "auto_compact_keep_recent_turns must be >= 1"
+            )
+        self._auto_compact_keep_recent_turns: int = (
+            auto_compact_keep_recent_turns
+        )
 
         # Persistent-subagent registry. Populated by
         # ``Team.supervisor(persistent_subagents=True)`` (the
@@ -1869,6 +1913,64 @@ class Agent:
                             },
                         )
                     )
+
+                    # Auto-compact between Ralph iterations.
+                    # Counts tokens in session.messages; if past
+                    # threshold, summarises older turns into a
+                    # single system message + keeps the last N
+                    # turn groups verbatim. Pure no-op when not
+                    # opted in (``auto_compact_at_tokens=None``).
+                    # Failures are graceful — the compactor
+                    # NEVER kills a turn.
+                    if (
+                        self._auto_compact_at_tokens is not None
+                        and self._auto_compact_summariser is not None
+                    ):
+                        from ..model.count_tokens import count_tokens
+                        from .auto_compact import maybe_auto_compact
+                        try:
+                            current = await count_tokens(
+                                self._model, session.messages
+                            )
+                        except Exception:  # noqa: BLE001
+                            current = 0
+                        if current > self._auto_compact_at_tokens:
+                            new_msgs, summary = await maybe_auto_compact(
+                                session.messages,
+                                summariser=self._auto_compact_summariser,
+                                at_tokens=self._auto_compact_at_tokens,
+                                current_token_count=current,
+                                keep_recent_turns=(
+                                    self._auto_compact_keep_recent_turns
+                                ),
+                            )
+                            if new_msgs is not None:
+                                dropped = (
+                                    len(session.messages)
+                                    - len(new_msgs)
+                                )
+                                session.messages = new_msgs
+                                await emit(
+                                    Event.architecture_event(
+                                        session_id,
+                                        "auto_compacted",
+                                        payload={
+                                            "tokens_before": current,
+                                            "messages_before": (
+                                                len(session.messages)
+                                                + dropped
+                                            ),
+                                            "messages_after": (
+                                                len(session.messages)
+                                            ),
+                                            "messages_dropped": dropped,
+                                            "summary_chars": (
+                                                len(summary)
+                                            ),
+                                        },
+                                    )
+                                )
+
                     async for event in self._architecture.run(
                         session, deps, hook_result.inject_message
                     ):

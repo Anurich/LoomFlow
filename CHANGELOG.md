@@ -7,6 +7,89 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 For development-history detail (per-slice notes, file maps, gate
 counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 
+## [0.10.19] — 2026-05-16
+
+### Added — Auto-compact at framework level
+
+The third tier of context-budget defence, completing the trio
+that pairs with snip (0.10.16) and tool-result summarisation
+(0.10.14). When ``session.messages`` accumulates past
+``auto_compact_at_tokens`` mid-run, the older half is collapsed
+into a single summary system message via an LLM call; the most
+recent N user-anchored turn groups survive verbatim.
+
+```python
+agent = Agent(
+    "you help",
+    model="claude-opus-4-7",
+    auto_compact_at_tokens=80_000,          # trigger threshold
+    auto_compact_summariser="claude-haiku-4-5",  # defaults to main model
+    auto_compact_keep_recent_turns=4,        # how many to keep verbatim
+)
+```
+
+**Where it fires:** inside ``Agent._loop``'s Ralph loop between
+architecture iterations. The first architecture pass runs untouched
+(zero overhead on short single-turn runs). Before each subsequent
+stop-hook-triggered iteration, we count tokens via the 0.10.17
+``count_tokens`` helper; if the count exceeds the threshold, we
+compact in place.
+
+**What survives the compact:**
+
+* Leading ``Role.SYSTEM`` head — always (identity / instructions).
+* A NEW ``Role.SYSTEM`` message with the summary, prefixed
+  ``[auto-compacted summary of N dropped messages]`` so the model
+  knows what it's reading.
+* The last N user-anchored turn groups — verbatim, so recent tool
+  results / decisions stay concrete.
+
+**Failure handling:** summariser exception, empty / whitespace-only
+output, no anchor to slice at — all result in a graceful no-op
+(conversation continues uncompacted). Framework-level token
+optimisations must NEVER kill a turn.
+
+**Why mid-Ralph, not at agent.run() boundary:** Each ``agent.run()``
+creates a fresh ``AgentSession``; cross-run conversation continuity
+comes from Memory rehydration, not from session.messages persisting.
+Auto-compact's job is "we've been running for a while WITHIN one
+agent.run(), prune before the next model call." The right moment is
+between Ralph-loop iterations after enough turns have accumulated.
+
+### Companion helpers
+
+* ``loomflow.agent.auto_compact.context_window_for(model_name)`` —
+  best-effort substring lookup for known model families
+  (Claude / GPT / Gemini), 8k fallback for unknowns. Lifted from
+  loom-code's local ``compact.py``.
+* ``loomflow.agent.auto_compact.maybe_auto_compact()`` — the core
+  helper, callable standalone from custom architectures.
+* New `Event.architecture_event("auto_compacted", tokens_before=,
+  messages_before=, messages_after=, messages_dropped=,
+  summary_chars=)` for telemetry / ``/cost``-style UIs.
+
+### Coverage
+
+19 new tests in ``tests/test_auto_compact.py`` covering:
+``context_window_for`` substring matching across model families
+(Claude / GPT / unknown-fallback), ``_split_at_user_anchor``
+slicing logic, ``maybe_auto_compact`` flow (under-threshold no-op,
+over-threshold compact, no-anchor no-op, summariser-failure no-op,
+empty-summary no-op, preamble-stripping), and Agent kwarg
+validation (negative / zero threshold rejected, keep_recent
+>= 1 enforced, default disabled, summariser defaults to main
+model, explicit summariser wins). Full suite: 1582 passing.
+
+### Comparison with the three tiers
+
+| Tier | When | Cost | Granularity |
+|---|---|---|---|
+| `snip_window=N` (0.10.16) | Before each turn | Free (list slice) | Whole turn groups |
+| `tool_result_summarizer=` (0.10.14) | Per tool result | 1 LLM call per oversized result | Single tool result |
+| `auto_compact_at_tokens=N` (0.10.19) | Between Ralph iterations | 1 LLM call per compaction | Conversation prefix |
+
+All three opt-in; default-off; compose freely.
+
 ## [0.10.18] — 2026-05-16
 
 ### Added — Subagent parent-attribution metadata
