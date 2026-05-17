@@ -50,8 +50,9 @@ from typing import TYPE_CHECKING, Any
 import anyio
 from anyio.streams.memory import MemoryObjectSendStream
 
-from ..core.context import get_run_context
+from ..core.context import get_run_context, inherit_ambient_memory
 from ..core.ids import new_id
+from ..core.protocols import Memory
 from ..core.types import Event, Usage
 from ..tools.registry import Tool
 from .base import AgentSession, Architecture, Dependencies
@@ -216,6 +217,7 @@ class Supervisor:
             self._workers,
             session,
             tool_name=self._delegate_name,
+            memory=deps.memory,
             event_sink=send_chan,
             last_outputs=last_outputs,
             worker_registry=self._worker_registry,
@@ -242,6 +244,7 @@ class Supervisor:
             send_msg_tool = make_send_message_tool(
                 self._worker_registry,
                 session=session,
+                memory=deps.memory,
                 event_sink=send_chan,
             )
             extra_tools.append(send_msg_tool)
@@ -338,6 +341,7 @@ def _make_delegate_tool(
     session: AgentSession,
     *,
     tool_name: str,
+    memory: Memory,
     event_sink: MemoryObjectSendStream[Event] | None = None,
     last_outputs: dict[str, str] | None = None,
     worker_registry: dict[str, Any] | None = None,
@@ -409,34 +413,42 @@ def _make_delegate_tool(
             async with handle.lock:
                 handle.touch(user_id=caller_user)
                 worker_session_id = handle.session_id
-                if event_sink is None:
-                    result = await agent.run(
-                        instructions,
-                        session_id=worker_session_id,
-                        context=get_run_context(),
-                    )
-                    session.cumulative_usage = add_usage(
-                        session.cumulative_usage,
-                        Usage(
-                            input_tokens=result.tokens_in,
-                            cached_input_tokens=result.cached_tokens_in,
-                            cache_write_tokens=result.cache_write_tokens,
-                            output_tokens=result.tokens_out,
-                            cost_usd=result.cost_usd,
-                        ),
-                    )
-                    output = result.output
-                else:
-                    invocation = SubagentInvocation(
-                        agent,
-                        instructions,
-                        session_id=worker_session_id,
-                        rollup_into=session,
-                    )
-                    async with event_sink.clone() as sink:
-                        async for ev in invocation.events():
-                            await sink.send(ev)
-                    output = str(invocation.result.get("output", ""))
+                # Memory propagation: install the coordinator's
+                # memory as ambient so a worker constructed without
+                # an explicit ``memory=`` inherits it. Matches the
+                # propagation Workflow.stream does. Anyio task-group
+                # spawns inherit the contextvar, so SubagentInvocation
+                # (which fires agent.run inside a task group) also
+                # sees the ambient.
+                with inherit_ambient_memory(memory):
+                    if event_sink is None:
+                        result = await agent.run(
+                            instructions,
+                            session_id=worker_session_id,
+                            context=get_run_context(),
+                        )
+                        session.cumulative_usage = add_usage(
+                            session.cumulative_usage,
+                            Usage(
+                                input_tokens=result.tokens_in,
+                                cached_input_tokens=result.cached_tokens_in,
+                                cache_write_tokens=result.cache_write_tokens,
+                                output_tokens=result.tokens_out,
+                                cost_usd=result.cost_usd,
+                            ),
+                        )
+                        output = result.output
+                    else:
+                        invocation = SubagentInvocation(
+                            agent,
+                            instructions,
+                            session_id=worker_session_id,
+                            rollup_into=session,
+                        )
+                        async with event_sink.clone() as sink:
+                            async for ev in invocation.events():
+                                await sink.send(ev)
+                        output = str(invocation.result.get("output", ""))
             if last_outputs is not None:
                 last_outputs[worker] = output
             # Prefix return with the worker_id so the model
@@ -456,11 +468,15 @@ def _make_delegate_tool(
             # the worker runs in the same namespace partition as the
             # supervisor; ``session_id`` is the worker-specific one
             # we just derived, overriding the parent's session.
-            result = await agent.run(
-                instructions,
-                session_id=worker_session_id,
-                context=get_run_context(),
-            )
+            # Memory propagation: same rationale as the persistent
+            # path above — worker without explicit memory= inherits
+            # the coordinator's.
+            with inherit_ambient_memory(memory):
+                result = await agent.run(
+                    instructions,
+                    session_id=worker_session_id,
+                    context=get_run_context(),
+                )
             # Roll worker usage into the parent's session so cost
             # accounting is correct (mirrors what
             # SubagentInvocation does in the streaming branch).
@@ -488,9 +504,10 @@ def _make_delegate_tool(
             session_id=worker_session_id,
             rollup_into=session,
         )
-        async with event_sink.clone() as sink:
-            async for ev in invocation.events():
-                await sink.send(ev)
+        with inherit_ambient_memory(memory):
+            async with event_sink.clone() as sink:
+                async for ev in invocation.events():
+                    await sink.send(ev)
         output = str(invocation.result.get("output", ""))
         if last_outputs is not None:
             last_outputs[worker] = output

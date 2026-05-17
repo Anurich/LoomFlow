@@ -229,6 +229,27 @@ class PostgresMemory:
                 "CREATE INDEX IF NOT EXISTS episodes_embedding_idx "
                 "ON episodes USING hnsw (embedding vector_cosine_ops);"
             ),
+            # Tool-transcript sidecar table — see the matching
+            # comment in sqlite.py for the design rationale. One
+            # row per captured tool_call / tool_result message,
+            # joined by ``episode_id``. ON DELETE CASCADE keeps
+            # GDPR forget semantics intact. Idempotent across
+            # restarts; pre-existing DBs add the table on next
+            # init without touching existing episodes.
+            (
+                "CREATE TABLE IF NOT EXISTS episode_tool_transcripts ("
+                "  episode_id TEXT NOT NULL "
+                "    REFERENCES episodes(id) ON DELETE CASCADE,"
+                "  sequence INTEGER NOT NULL,"
+                "  message_json TEXT NOT NULL,"
+                "  PRIMARY KEY (episode_id, sequence)"
+                ");"
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS "
+                "episode_tool_transcripts_episode_idx "
+                "ON episode_tool_transcripts (episode_id, sequence);"
+            ),
         ]
 
     async def init_schema(self) -> None:
@@ -334,6 +355,31 @@ class PostgresMemory:
                 episode.output,
                 episode.embedding,
             )
+            # Tool transcript sidecar — DELETE then INSERT to
+            # stay consistent if remember() runs twice with the
+            # same id. Skipped entirely when ``tool_transcript``
+            # is None (default), so users without
+            # ``Agent(persist_tool_transcripts=True)`` pay no
+            # extra round-trip.
+            if episode.tool_transcript is not None:
+                await conn.execute(
+                    "DELETE FROM episode_tool_transcripts "
+                    "WHERE episode_id = $1;",
+                    episode.id,
+                )
+                if episode.tool_transcript:
+                    rows = [
+                        (episode.id, i, msg.model_dump_json())
+                        for i, msg in enumerate(
+                            episode.tool_transcript
+                        )
+                    ]
+                    await conn.executemany(
+                        "INSERT INTO episode_tool_transcripts "
+                        "(episode_id, sequence, message_json) "
+                        "VALUES ($1, $2, $3);",
+                        rows,
+                    )
         return episode.id
 
     async def recall(
@@ -464,12 +510,39 @@ class PostgresMemory:
                 user_id,
                 max_episodes,
             )
-        episodes = _rows_to_episodes(_rows(rows))
-        episodes.sort(key=lambda e: e.occurred_at)
+            episodes = _rows_to_episodes(_rows(rows))
+            episodes.sort(key=lambda e: e.occurred_at)
+            # Bulk-fetch tool transcripts in one round-trip
+            # (asyncpg supports ANY() with a list arg). Returns
+            # an empty dict when no episodes have transcripts —
+            # the typical case for users without
+            # ``persist_tool_transcripts=True``.
+            transcripts: dict[str, list[Message]] = {}
+            if episodes:
+                ep_ids = [ep.id for ep in episodes]
+                ts_rows = await conn.fetch(
+                    "SELECT episode_id, sequence, message_json "
+                    "FROM episode_tool_transcripts "
+                    "WHERE episode_id = ANY($1::TEXT[]) "
+                    "ORDER BY episode_id, sequence",
+                    ep_ids,
+                )
+                for ts_row in ts_rows:
+                    ep_id = ts_row["episode_id"]
+                    transcripts.setdefault(ep_id, []).append(
+                        Message.model_validate_json(
+                            ts_row["message_json"]
+                        )
+                    )
         out: list[Message] = []
         for ep in episodes:
             if ep.input:
                 out.append(Message(role=Role.USER, content=ep.input))
+            # Splice transcript between USER and ASSISTANT so a
+            # resumed worker sees its prior tool work.
+            ep_transcript = transcripts.get(ep.id, [])
+            if ep_transcript:
+                out.extend(ep_transcript)
             if ep.output:
                 out.append(Message(role=Role.ASSISTANT, content=ep.output))
         return out

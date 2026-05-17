@@ -12,6 +12,7 @@ the constructor needs to build a default client.
 """
 
 from .anthropic import AnthropicModel
+from .count_tokens import count_tokens
 from .echo import EchoModel
 from .litellm import LiteLLMModel
 from .openai import OpenAIModel
@@ -24,4 +25,5 @@ __all__ = [
     "OpenAIModel",
     "ScriptedModel",
     "ScriptedTurn",
+    "count_tokens",
 ]

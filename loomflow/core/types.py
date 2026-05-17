@@ -272,6 +272,25 @@ class Episode(BaseModel):
     output: str
     tool_calls: list[ToolCall] = Field(default_factory=list)
     embedding: list[float] | None = None
+    tool_transcript: list[Message] | None = None
+    """Optional intermediate-message log: every tool_call and
+    tool_result the agent emitted between ``input`` (USER) and
+    ``output`` (ASSISTANT) during this episode. ``None`` means
+    "transcript not captured for this episode" — the legacy /
+    default behavior; the field stays out of conversation
+    rehydration. A non-None list means
+    ``Agent(persist_tool_transcripts=True)`` opted in, and the
+    architecture's ``session_messages()`` rehydration will splice
+    these messages between USER and ASSISTANT so the worker sees
+    its prior tool work (file contents read, command output, etc.)
+    on subsequent delegations — the fix for the
+    "persistent_subagents preserves shape but not substance"
+    structural gap. Storage: backends with a relational schema
+    (sqlite, postgres) persist transcripts in a sidecar table keyed
+    by ``episode_id``; non-schema backends (inmemory, vector stores)
+    keep them inline on the Episode object. Per-entry size is
+    capped (default 50KB) at construction in
+    ``loomflow.agent.api`` to keep storage bounded."""
 
     def format(self) -> str:
         return f"[{self.occurred_at.isoformat()}] {self.input!r} -> {self.output!r}"

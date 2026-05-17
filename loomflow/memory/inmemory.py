@@ -340,6 +340,14 @@ class InMemoryMemory:
         for ep in episodes:
             if ep.input:
                 out.append(Message(role=Role.USER, content=ep.input))
+            # Splice tool transcript between USER and ASSISTANT
+            # so a resumed worker sees its prior tool work, not
+            # just the final reply. ``None`` (default) means the
+            # episode was written by an Agent without
+            # ``persist_tool_transcripts=True`` — old behavior
+            # preserved.
+            if ep.tool_transcript:
+                out.extend(ep.tool_transcript)
             if ep.output:
                 out.append(Message(role=Role.ASSISTANT, content=ep.output))
         return out

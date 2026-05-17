@@ -68,6 +68,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 
+from ..core.context import inherit_ambient_memory
 from ..core.types import Event
 from .base import AgentSession, Dependencies
 from .helpers import SubagentInvocation
@@ -196,6 +197,18 @@ class ActorCritic:
         return {"actor": self._actor, "critic": self._critic}
 
     async def run(
+        self,
+        session: AgentSession,
+        deps: Dependencies,
+        prompt: str,
+    ) -> AsyncIterator[Event]:
+        # Memory propagation — actor + critic + refine spawns all
+        # inherit the coordinator's memory. See base helper docstring.
+        with inherit_ambient_memory(deps.memory):
+            async for ev in self._run_inner(session, deps, prompt):
+                yield ev
+
+    async def _run_inner(
         self,
         session: AgentSession,
         deps: Dependencies,

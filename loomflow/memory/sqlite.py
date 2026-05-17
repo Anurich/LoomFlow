@@ -119,6 +119,35 @@ _EPISODES_USER_OCCURRED_INDEX = (
     "ON episodes (user_id, occurred_at DESC)"
 )
 
+# Sidecar table for ``Episode.tool_transcript`` — one row per
+# captured tool-call / tool-result message, joined by ``episode_id``.
+# Stored separately from ``episodes`` so the hot path (recall +
+# session_messages without transcripts) doesn't pay the cost of
+# loading large transcript blobs unless asked. ``sequence`` preserves
+# insertion order so rehydration replays the messages in the order
+# they were emitted. ``message_json`` is the full
+# :class:`Message.model_dump_json()` — round-trips losslessly via
+# ``Message.model_validate_json``.
+#
+# CASCADE delete via the ``ON DELETE CASCADE`` clause + a paired
+# ``forget()`` DELETE on the episodes side keeps GDPR forget
+# semantics intact — the transcript dies with its episode. Foreign
+# keys are enabled per-connection in ``_connect()`` (sqlite default
+# is OFF).
+_TOOL_TRANSCRIPTS_DDL = """
+CREATE TABLE IF NOT EXISTS episode_tool_transcripts (
+    episode_id   TEXT NOT NULL,
+    sequence     INTEGER NOT NULL,
+    message_json TEXT NOT NULL,
+    PRIMARY KEY (episode_id, sequence),
+    FOREIGN KEY (episode_id) REFERENCES episodes(id) ON DELETE CASCADE
+)
+"""
+_TOOL_TRANSCRIPTS_INDEX = (
+    "CREATE INDEX IF NOT EXISTS episode_tool_transcripts_episode_idx "
+    "ON episode_tool_transcripts (episode_id, sequence)"
+)
+
 
 # ---------------------------------------------------------------------------
 # SqliteMemory
@@ -194,6 +223,11 @@ class SqliteMemory:
         share across the worker threads we hop into via
         ``anyio.to_thread.run_sync``."""
         conn = sqlite3.connect(self._path)
+        # Foreign keys are OFF by default in SQLite; enable per-
+        # connection so the ``episode_tool_transcripts`` ON DELETE
+        # CASCADE actually fires when an episode is deleted via
+        # ``forget()``. Cheap pragma; safe on tables without FKs.
+        conn.execute("PRAGMA foreign_keys = ON")
         try:
             yield conn
         finally:
@@ -218,6 +252,13 @@ class SqliteMemory:
                     raise
             conn.execute(_EPISODES_USER_SESSION_INDEX)
             conn.execute(_EPISODES_USER_OCCURRED_INDEX)
+            # Tool-transcript sidecar table — created on first
+            # init, idempotent on subsequent inits. Existing DBs
+            # without it get the table on next connect; episodes
+            # written before this migration simply have no rows
+            # in the sidecar and rehydrate without a transcript.
+            conn.execute(_TOOL_TRANSCRIPTS_DDL)
+            conn.execute(_TOOL_TRANSCRIPTS_INDEX)
             conn.commit()
 
     def _migrate_working_blocks(self, conn: sqlite3.Connection) -> None:
@@ -391,6 +432,35 @@ class SqliteMemory:
                     embedding_blob,
                 ),
             )
+            # Tool transcript sidecar — replace any prior rows for
+            # this episode_id (DELETE then INSERT) so a re-remember
+            # on the same id stays consistent. Skipped entirely
+            # when ``tool_transcript`` is None (the default — opt-in
+            # only via ``Agent(persist_tool_transcripts=True)``),
+            # avoiding any per-write cost for users who haven't
+            # enabled the feature.
+            if episode.tool_transcript is not None:
+                conn.execute(
+                    "DELETE FROM episode_tool_transcripts "
+                    "WHERE episode_id = ?",
+                    (episode.id,),
+                )
+                if episode.tool_transcript:
+                    conn.executemany(
+                        "INSERT INTO episode_tool_transcripts "
+                        "(episode_id, sequence, message_json) "
+                        "VALUES (?, ?, ?)",
+                        [
+                            (
+                                episode.id,
+                                i,
+                                msg.model_dump_json(),
+                            )
+                            for i, msg in enumerate(
+                                episode.tool_transcript
+                            )
+                        ],
+                    )
             conn.commit()
 
     async def recall(
@@ -516,10 +586,24 @@ class SqliteMemory:
         )
         episodes = [_row_to_episode(r) for r in rows]
         episodes.sort(key=lambda e: e.occurred_at)
+        # Batch-fetch tool transcripts for these episodes in ONE
+        # round-trip rather than N follow-up queries. Returns an
+        # empty dict when the sidecar table has no rows for any of
+        # the episode ids — the typical case for users who haven't
+        # enabled ``persist_tool_transcripts=True``.
+        episode_ids = [ep.id for ep in episodes]
+        transcripts = await anyio.to_thread.run_sync(
+            self._fetch_transcripts_sync, episode_ids
+        )
         out: list[Message] = []
         for ep in episodes:
             if ep.input:
                 out.append(Message(role=Role.USER, content=ep.input))
+            # Splice transcript between USER and ASSISTANT so a
+            # resumed worker sees its prior tool work.
+            ep_transcript = transcripts.get(ep.id, [])
+            if ep_transcript:
+                out.extend(ep_transcript)
             if ep.output:
                 out.append(Message(role=Role.ASSISTANT, content=ep.output))
         return out
@@ -535,6 +619,39 @@ class SqliteMemory:
                 "ORDER BY occurred_at DESC LIMIT ?",
                 (session_id, user_id, limit),
             ).fetchall()
+
+    def _fetch_transcripts_sync(
+        self, episode_ids: list[str]
+    ) -> dict[str, list[Message]]:
+        """Bulk-fetch tool transcripts for the given episode IDs.
+
+        Returns ``{episode_id: [Message, ...]}`` ordered by
+        ``sequence``. Episodes without transcript rows simply don't
+        appear in the result dict — the caller's ``.get(ep.id, [])``
+        handles the missing-key case as "no transcript captured."
+
+        One query for N episodes (parameter-binding via the IN
+        clause) rather than N round-trips. SQLite has a default
+        max-parameter-count of 999; we don't expect ``limit=20``
+        runs to push anywhere close to that.
+        """
+        if not episode_ids:
+            return {}
+        with self._connect() as conn:
+            placeholders = ",".join("?" * len(episode_ids))
+            rows = conn.execute(
+                "SELECT episode_id, sequence, message_json "
+                "FROM episode_tool_transcripts "
+                f"WHERE episode_id IN ({placeholders}) "
+                "ORDER BY episode_id, sequence",
+                episode_ids,
+            ).fetchall()
+        result: dict[str, list[Message]] = {}
+        for ep_id, _seq, msg_json in rows:
+            result.setdefault(ep_id, []).append(
+                Message.model_validate_json(msg_json)
+            )
+        return result
 
     # ---- profile / forget / export (GDPR) -------------------------------
 

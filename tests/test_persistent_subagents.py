@@ -35,6 +35,7 @@ from loomflow.agent.worker_registry import (
     resolve_persistent_session,
 )
 from loomflow.architecture.router import RouterRoute
+from loomflow.memory.inmemory import InMemoryMemory
 from loomflow.team import Team
 from loomflow.tools.send_message import make_send_message_tool
 
@@ -285,7 +286,9 @@ class _FakeSession:
 async def test_send_message_unknown_id_returns_error_string() -> None:
     """Unknown worker IDs return an error string (NOT raise)."""
     registry: dict[str, _WorkerHandle] = {}
-    tool = make_send_message_tool(registry, session=_FakeSession())
+    tool = make_send_message_tool(
+        registry, session=_FakeSession(), memory=InMemoryMemory()
+    )
 
     from loomflow.core.context import RunContext, set_run_context
 
@@ -305,7 +308,9 @@ async def test_send_message_cross_tenant_rejected() -> None:
     handle = registry[role_map["alpha"]]
     handle.touch(user_id="alice")  # pin to alice
 
-    tool = make_send_message_tool(registry, session=_FakeSession())
+    tool = make_send_message_tool(
+        registry, session=_FakeSession(), memory=InMemoryMemory()
+    )
 
     from loomflow.core.context import RunContext, set_run_context
 

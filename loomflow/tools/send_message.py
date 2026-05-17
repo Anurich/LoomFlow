@@ -38,7 +38,8 @@ from typing import Any
 
 import anyio
 
-from ..core.context import get_run_context
+from ..core.context import get_run_context, inherit_ambient_memory
+from ..core.protocols import Memory
 from ..core.types import Event
 from .registry import Tool
 
@@ -47,6 +48,7 @@ def make_send_message_tool(
     registry: dict[str, Any],
     *,
     session: object,
+    memory: Memory,
     tool_name: str = "send_message",
     event_sink: object | None = None,
 ) -> Tool:
@@ -156,13 +158,21 @@ def make_send_message_tool(
                 # streaming from the worker reaches the parent's
                 # stream. Without this, send_message would buffer
                 # everything until the worker finishes.
-                async for ev in invocation.events():
-                    if event_sink is not None:
-                        try:
-                            await event_sink.send(ev)  # type: ignore[attr-defined]
-                        except Exception:  # noqa: BLE001
-                            pass
-                output = str(invocation.result.get("output", ""))
+                #
+                # Memory propagation: install the coordinator's
+                # memory as ambient so a worker constructed without
+                # explicit ``memory=`` inherits it. anyio's
+                # contextvar inheritance carries it into the
+                # SubagentInvocation's internal task-group spawn
+                # of ``agent.run``.
+                with inherit_ambient_memory(memory):
+                    async for ev in invocation.events():
+                        if event_sink is not None:
+                            try:
+                                await event_sink.send(ev)  # type: ignore[attr-defined]
+                            except Exception:  # noqa: BLE001
+                                pass
+                    output = str(invocation.result.get("output", ""))
             except anyio.get_cancelled_exc_class():
                 # Cancellation must propagate — the parent's task
                 # group is shutting down. Re-raise immediately;

@@ -47,6 +47,8 @@ Public API tiers:
 # ---------------------------------------------------------------------------
 
 from .agent import Agent
+from .agent.auto_compact import context_window_for, maybe_auto_compact
+from .agent.snip import snip_messages
 from .agent.stop_hooks import StopHook, StopHookResult
 from .architecture import Architecture, ReAct
 from .core import (
@@ -92,6 +94,7 @@ from .core import (
 from .governance import BudgetConfig, NoBudget, StandardBudget
 from .memory import HashEmbedder, InMemoryMemory, resolve_memory
 from .model import EchoModel, ScriptedModel, ScriptedTurn
+from .model.count_tokens import count_tokens
 from .observability import NoTelemetry
 from .runtime import InProcRuntime
 from .security import (
@@ -104,7 +107,7 @@ from .security import (
     NoSandbox,
     StandardPermissions,
 )
-from .tools import LivingPlan, LivingPlanStep, Tool, tool
+from .tools import LivingPlan, LivingPlanStep, Tool, tool, web_tool
 from .workflow import END, START, Workflow, WorkflowResult, step
 from .workspace import (
     InMemoryWorkspace,
@@ -132,6 +135,7 @@ __all__ = [
     "END",
     "tool",
     "Tool",
+    "web_tool",
     "LivingPlan",
     "LivingPlanStep",
     # ----- Run context (always-relevant) -----
@@ -203,6 +207,11 @@ __all__ = [
     "LoomDeprecationWarning",
     # ----- ID utilities -----
     "new_id",
+    # ----- Context-window helpers (sizing, snipping, auto-compact) -----
+    "count_tokens",
+    "snip_messages",
+    "maybe_auto_compact",
+    "context_window_for",
     # ----- Shared workspace (multi-agent notebook) -----
     "Workspace",
     "WorkspaceMembership",

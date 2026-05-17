@@ -203,6 +203,19 @@ class ChromaMemory:
             "output": episode.output,
             "occurred_at": episode.occurred_at.isoformat(),
         }
+        # Tool transcript — Chroma metadata only accepts scalar
+        # values (str/int/float/bool), so we serialise the list of
+        # Message objects to a JSON string and key it under
+        # ``tool_transcript_json``. ``None`` (default — feature
+        # disabled) skips the key entirely so existing rows stay
+        # byte-identical and recall queries don't waste bandwidth
+        # on an empty field. The decoder round-trips the JSON back
+        # into Message objects.
+        if episode.tool_transcript is not None:
+            import json
+            metadata["tool_transcript_json"] = json.dumps(
+                [msg.model_dump(mode="json") for msg in episode.tool_transcript]
+            )
         embedding = list(episode.embedding) if episode.embedding else []
         await anyio.to_thread.run_sync(
             lambda: coll.upsert(
@@ -343,6 +356,12 @@ class ChromaMemory:
         for ep in episodes:
             if ep.input:
                 out.append(Message(role=Role.USER, content=ep.input))
+            # Splice tool transcript between USER and ASSISTANT so
+            # a resumed worker sees its prior tool work. The
+            # decoder already round-tripped ``tool_transcript_json``
+            # into a list of Message objects on the Episode.
+            if ep.tool_transcript:
+                out.extend(ep.tool_transcript)
             if ep.output:
                 out.append(Message(role=Role.ASSISTANT, content=ep.output))
         return out
@@ -547,6 +566,17 @@ def _episodes_from_parallel(
         # Chroma can't store ``None`` so the anonymous bucket is the
         # empty string on the wire; round-trip back to ``None`` here.
         user_id_raw = str(meta.get("user_id", ""))
+        # Round-trip tool_transcript_json → list[Message] if present.
+        # Missing key (pre-feature episodes, or feature disabled at
+        # write time) leaves the field at its default ``None``.
+        transcript_json = meta.get("tool_transcript_json")
+        tool_transcript: list[Message] | None = None
+        if transcript_json:
+            import json
+            tool_transcript = [
+                Message.model_validate(m)
+                for m in json.loads(str(transcript_json))
+            ]
         episodes.append(
             Episode(
                 id=str(eid),
@@ -556,6 +586,7 @@ def _episodes_from_parallel(
                 input=str(meta.get("input", "")),
                 output=str(meta.get("output", "")),
                 embedding=emb,
+                tool_transcript=tool_transcript,
             )
         )
     return episodes

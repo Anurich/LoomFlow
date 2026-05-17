@@ -63,6 +63,7 @@ from typing import TYPE_CHECKING, Any
 import anyio
 from anyio.streams.memory import MemoryObjectSendStream
 
+from ..core.context import inherit_ambient_memory
 from ..core.types import Event
 from .base import AgentSession, Dependencies
 from .helpers import SubagentInvocation
@@ -159,6 +160,23 @@ class MultiAgentDebate:
         return workers
 
     async def run(
+        self,
+        session: AgentSession,
+        deps: Dependencies,
+        prompt: str,
+    ) -> AsyncIterator[Event]:
+        # Memory propagation: install the coordinator's memory as
+        # ambient for the entire debate. Each spawn site below
+        # (debaters via parallel task-group, judge via SubagentInvocation)
+        # inherits this contextvar through anyio's task-context
+        # inheritance + async-generator semantics. Workers with
+        # ``_memory_was_explicit=True`` ignore the ambient; the rest
+        # pick it up via :meth:`Agent._resolve_run_memory`.
+        with inherit_ambient_memory(deps.memory):
+            async for ev in self._run_inner(session, deps, prompt):
+                yield ev
+
+    async def _run_inner(
         self,
         session: AgentSession,
         deps: Dependencies,

@@ -27,10 +27,14 @@ preserving direct-invocation ergonomics.
 from __future__ import annotations
 
 import enum
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .protocols import Memory
 
 __all__ = [
     "IsolationWarning",
@@ -296,3 +300,43 @@ class set_run_context:  # noqa: N801 — context-manager class, lowercase by con
         if self._token is not None:
             _ctx_var.reset(self._token)
             self._token = None
+
+
+@contextmanager
+def inherit_ambient_memory(memory: Memory) -> Iterator[None]:
+    """Install ``memory`` as the ambient memory for the duration of
+    the ``with`` block. A spawned worker :class:`Agent` whose
+    ``memory=`` was NOT explicitly set at construction will pick this
+    up via :meth:`Agent._resolve_run_memory` and use it instead of
+    its private default :class:`InMemoryMemory`.
+
+    Mirrors the propagation :class:`Workflow.stream` does at
+    ``workflow/__init__.py:720``. Multi-agent architectures
+    (Supervisor, Swarm, Router, Debate, ActorCritic, Blackboard) wrap
+    every worker-spawn site with this so workers inherit the
+    coordinator's memory backend — closing the gap where
+    ``Team.supervisor(memory=...)`` was silently NOT propagating to
+    workers that had been constructed without their own ``memory=``.
+
+    Idempotent + nest-safe: contextvars are restored on exit, so
+    nested ``with`` blocks and ``anyio`` task-group spawns interact
+    correctly. Workers that DID set ``memory=`` at construction
+    (``_memory_was_explicit=True``) ignore this — explicit always
+    wins over ambient, matching the workflow precedence rule.
+
+    Example::
+
+        from loomflow.core.context import inherit_ambient_memory
+
+        with inherit_ambient_memory(deps.memory):
+            result = await worker.run(
+                instructions,
+                session_id=worker_session_id,
+                context=get_run_context(),
+            )
+    """
+    token = _ambient_memory_var.set(memory)
+    try:
+        yield
+    finally:
+        _ambient_memory_var.reset(token)

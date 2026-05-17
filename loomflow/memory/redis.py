@@ -242,6 +242,19 @@ class RedisMemory:
             "output": episode.output.encode("utf-8"),
             "embedding": embedding_bytes,
         }
+        # Tool transcript — Redis hash fields are scalar, so we
+        # serialise the list of Message objects to a single JSON
+        # bytestring under ``tool_transcript_json``. ``None``
+        # (default — feature disabled) skips the field entirely so
+        # pre-feature episodes stay byte-identical and the wire
+        # cost is zero for users without
+        # ``persist_tool_transcripts=True``. Decoder round-trips
+        # the JSON back into Message objects on read.
+        if episode.tool_transcript is not None:
+            import json
+            mapping["tool_transcript_json"] = json.dumps(
+                [msg.model_dump(mode="json") for msg in episode.tool_transcript]
+            ).encode("utf-8")
         await self._client.hset(key, mapping=mapping)
         return episode.id
 
@@ -417,6 +430,12 @@ class RedisMemory:
         for ep in episodes:
             if ep.input:
                 out.append(Message(role=Role.USER, content=ep.input))
+            # Splice tool transcript between USER and ASSISTANT so
+            # a resumed worker sees its prior tool work. The
+            # ``_decode_hash`` helper already round-tripped the
+            # ``tool_transcript_json`` field into Message objects.
+            if ep.tool_transcript:
+                out.extend(ep.tool_transcript)
             if ep.output:
                 out.append(Message(role=Role.ASSISTANT, content=ep.output))
         return out
@@ -569,6 +588,19 @@ def _decode_hash(data: dict[Any, Any]) -> Episode | None:
     else:
         embedding = None
     user_id_raw = _decode_field(norm.get("user_id", ""))
+    # Round-trip tool_transcript_json → list[Message]. Missing
+    # field (pre-feature episodes / feature disabled) leaves
+    # the Episode field at its default ``None`` which preserves
+    # legacy session_messages() behavior.
+    transcript_raw = norm.get("tool_transcript_json")
+    tool_transcript: list[Message] | None = None
+    if transcript_raw:
+        import json
+        decoded = _decode_field(transcript_raw)
+        if decoded:
+            tool_transcript = [
+                Message.model_validate(m) for m in json.loads(decoded)
+            ]
     return Episode(
         id=eid,
         session_id=_decode_field(norm.get("session_id", "")),
@@ -577,6 +609,7 @@ def _decode_hash(data: dict[Any, Any]) -> Episode | None:
         input=_decode_field(norm.get("input", "")),
         output=_decode_field(norm.get("output", "")),
         embedding=embedding,
+        tool_transcript=tool_transcript,
     )
 
 

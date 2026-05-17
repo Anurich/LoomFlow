@@ -66,6 +66,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
 
+from ..core.context import inherit_ambient_memory
 from ..core.types import Event
 from ..tools.registry import Tool
 from .base import AgentSession, Dependencies
@@ -243,8 +244,13 @@ class Swarm:
                 extra_tools=handoff_tools,
                 rollup_into=session,
             )
-            async for ev in invocation.events():
-                yield ev
+            # Memory propagation: install the coordinator's memory
+            # as ambient so a worker constructed without explicit
+            # ``memory=`` inherits it. anyio's contextvar inheritance
+            # carries it into the invocation's task-group spawn.
+            with inherit_ambient_memory(deps.memory):
+                async for ev in invocation.events():
+                    yield ev
             session.turns += int(invocation.result.get("turns", 0) or 0)
             last_output = str(invocation.result.get("output", ""))
             interrupted = bool(invocation.result.get("interrupted", False))

@@ -505,6 +505,7 @@ def test_delegate_tool_enumerates_worker_names_in_schema() -> None:
     names at the API boundary."""
     from loomflow.architecture.base import AgentSession
     from loomflow.architecture.supervisor import _make_delegate_tool
+    from loomflow.memory.inmemory import InMemoryMemory
 
     coder = _worker("c", "Python coder.")
     writer = _worker("w", "Markdown writer.")
@@ -512,6 +513,7 @@ def test_delegate_tool_enumerates_worker_names_in_schema() -> None:
         {"coder": coder, "writer": writer},
         AgentSession(id="parent", instructions=""),
         tool_name="delegate",
+        memory=InMemoryMemory(),
     )
     worker_schema = tool.input_schema["properties"]["worker"]
     assert "enum" in worker_schema
@@ -545,9 +547,12 @@ def test_forward_message_tool_enumerates_worker_names_in_schema() -> None:
 def test_make_delegate_tool_returns_a_real_tool_instance() -> None:
     """Smoke-test the helper that builds the delegate tool."""
     from loomflow.architecture.supervisor import _make_delegate_tool
+    from loomflow.memory.inmemory import InMemoryMemory
 
     workers = {"x": _worker("x")}
-    t = _make_delegate_tool(workers, "parent_sess", tool_name="delegate")
+    t = _make_delegate_tool(
+        workers, "parent_sess", tool_name="delegate", memory=InMemoryMemory()
+    )
     assert isinstance(t, Tool)
     assert t.name == "delegate"
     schema = t.input_schema

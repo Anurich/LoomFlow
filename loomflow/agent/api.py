@@ -132,6 +132,8 @@ class Agent:
         auto_compact_at_tokens: int | None = None,
         auto_compact_summariser: Model | str | None = None,
         auto_compact_keep_recent_turns: int = 4,
+        persist_tool_transcripts: bool = False,
+        tool_transcript_max_bytes: int = 50_000,
     ) -> None:
         # Skills — packaged on-disk playbooks loaded on demand.
         # Build the registry first so frontmatter validation fires
@@ -521,6 +523,26 @@ class Agent:
             )
         self._snip_window: int = snip_window
 
+        # Tool-transcript persistence — closes the structural gap
+        # where Memory stored only (input, output) per episode,
+        # losing every tool call + result the worker fired. When
+        # enabled, the architecture's session_messages() rehydration
+        # splices the saved tool transcript between USER and
+        # ASSISTANT so a worker resumed mid-conversation sees its
+        # prior reads / edits / bash output, not just "I was asked
+        # X, I replied Y". Default OFF for backward-compat:
+        # existing users keep current storage cost + behavior;
+        # opt-in unlocks the smarter persistence. Per-entry size
+        # cap (``tool_transcript_max_bytes``) prevents an accidental
+        # large-file read from blowing storage; default 50KB fits
+        # typical source files and bash output.
+        if tool_transcript_max_bytes < 0:
+            raise ValueError(
+                "tool_transcript_max_bytes must be >= 0"
+            )
+        self._persist_tool_transcripts: bool = persist_tool_transcripts
+        self._tool_transcript_max_bytes: int = tool_transcript_max_bytes
+
         # Auto-compact (0.10.19) — third tier of context-budget
         # defence. None (default) → disabled. Pass an int (token
         # threshold) to enable; the summariser defaults to the
@@ -875,6 +897,92 @@ class Agent:
             # value — consistent with "explicit always wins".
             return cast(Memory, ambient)
         return self._wrapped_memory
+
+    def _build_tool_transcript(
+        self, messages: list[Message]
+    ) -> list[Message]:
+        """Extract the tool-call + tool-result transcript from a
+        completed session's message log.
+
+        Filters ``messages`` down to the intermediate work the
+        worker did:
+
+        * **DROP** ``Role.SYSTEM`` — instructions, memory recall,
+          and the prompt-cache markers are reconstructed at next-
+          run rehydration; persisting them duplicates context.
+        * **DROP** the first ``Role.USER`` — already captured as
+          ``episode.input``.
+        * **DROP** the final ``Role.ASSISTANT`` text-only message
+          — already captured as ``episode.output``.
+        * **KEEP** every ``Role.TOOL`` message (tool results) and
+          every ``Role.ASSISTANT`` message carrying ``tool_calls``
+          (the tool-call requests). These are the actual work
+          the worker performed.
+
+        Per-message ``content`` is capped at
+        ``self._tool_transcript_max_bytes`` (UTF-8 bytes) with a
+        ``"…[truncated: <N> bytes]"`` marker; tool_calls metadata
+        (name, args) is preserved unchanged because it's tiny
+        and load-bearing for rehydration. The cap is per-entry,
+        not per-transcript — a session with 50 tool calls keeps
+        all 50 (each capped), so the worker still sees the full
+        sequence of actions on resume.
+
+        Returns ``[]`` when there's nothing worth keeping (a
+        no-tool conversation); the caller stores ``None`` instead
+        in that case so the sidecar write is skipped.
+        """
+        # Skip the first USER (= input) and the final ASSISTANT
+        # text-only message (= output) — they're already on the
+        # Episode. Everything else between is the transcript.
+        if not messages:
+            return []
+        kept: list[Message] = []
+        # Find indices of the first USER and the last ASSISTANT
+        # text-only message so we can exclude exactly those.
+        first_user_idx: int | None = None
+        last_assistant_text_idx: int | None = None
+        for i, msg in enumerate(messages):
+            if first_user_idx is None and msg.role is Role.USER:
+                first_user_idx = i
+            if (
+                msg.role is Role.ASSISTANT
+                and not msg.tool_calls
+            ):
+                last_assistant_text_idx = i
+
+        for i, msg in enumerate(messages):
+            if msg.role is Role.SYSTEM:
+                continue
+            if i == first_user_idx:
+                continue
+            if i == last_assistant_text_idx:
+                continue
+            kept.append(self._cap_message(msg))
+        return kept
+
+    def _cap_message(self, msg: Message) -> Message:
+        """Return a copy of ``msg`` with ``content`` truncated to
+        ``self._tool_transcript_max_bytes`` (UTF-8 bytes). Below the
+        cap or for messages with empty content, returns ``msg``
+        unchanged."""
+        if not msg.content:
+            return msg
+        cap = self._tool_transcript_max_bytes
+        if cap == 0:
+            # 0 = unbounded
+            return msg
+        encoded = msg.content.encode("utf-8", errors="replace")
+        if len(encoded) <= cap:
+            return msg
+        # Truncate on a UTF-8 boundary by decoding with errors='ignore'.
+        truncated_text = encoded[:cap].decode(
+            "utf-8", errors="ignore"
+        )
+        marker = f"\n…[truncated: {len(encoded) - cap} bytes]"
+        return msg.model_copy(
+            update={"content": truncated_text + marker}
+        )
 
     async def _validate_output_with_retry(
         self,
@@ -2011,11 +2119,22 @@ class Agent:
                     deps=deps,
                 )
 
+            # Tool-transcript: when opted in, capture the
+            # intermediate tool_call / tool_result messages so a
+            # resumed worker sees its prior tool work via
+            # session_messages() rehydration. None when disabled —
+            # backends skip the sidecar write entirely.
+            transcript = (
+                self._build_tool_transcript(session.messages)
+                if self._persist_tool_transcripts
+                else None
+            )
             episode = Episode(
                 session_id=session_id,
                 user_id=run_ctx.user_id,
                 input=prompt,
                 output=session.output,
+                tool_transcript=transcript,
             )
             if fast_runtime:
                 await effective_memory.remember(episode)

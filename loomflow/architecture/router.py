@@ -51,6 +51,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from ..core.context import inherit_ambient_memory
 from ..core.types import Event, Message, Role
 from .base import AgentSession, Dependencies
 from .helpers import SubagentInvocation, add_usage, text_only_model_call
@@ -231,8 +232,11 @@ class Router:
             session_id=specialist_session_id,
             rollup_into=session,
         )
-        async for ev in invocation.events():
-            yield ev
+        # Memory propagation — specialist inherits coordinator's
+        # memory backend when it has no explicit memory= of its own.
+        with inherit_ambient_memory(deps.memory):
+            async for ev in invocation.events():
+                yield ev
 
         result_dict = invocation.result
         session.output = str(result_dict.get("output", ""))

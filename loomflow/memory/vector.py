@@ -337,6 +337,13 @@ class VectorMemory:
         for ep in episodes:
             if ep.input:
                 out.append(Message(role=Role.USER, content=ep.input))
+            # Splice tool transcript between USER and ASSISTANT
+            # so a resumed worker sees its prior tool work.
+            # ``None`` (default) preserves the legacy compact-pair
+            # behavior for users without
+            # ``persist_tool_transcripts=True``.
+            if ep.tool_transcript:
+                out.extend(ep.tool_transcript)
             if ep.output:
                 out.append(Message(role=Role.ASSISTANT, content=ep.output))
         return out
