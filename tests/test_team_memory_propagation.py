@@ -160,3 +160,104 @@ async def test_inherit_ambient_memory_restores_on_exception() -> None:
             raise RuntimeError("boom")
     # Restored despite the exception.
     assert _ambient_memory_var.get() is None
+
+
+def test_team_supervisor_forwards_persist_tool_transcripts() -> None:
+    """Team.supervisor now (0.10.16+) forwards
+    ``persist_tool_transcripts`` + ``tool_transcript_max_bytes``
+    to the coordinator Agent. Without this, the coordinator
+    couldn't opt in to tool-transcript persistence even when the
+    framework supported the feature — flag stayed default-off."""
+    worker = Agent(instructions="", model=EchoModel())
+    coordinator = Team.supervisor(
+        workers={"w": worker},
+        instructions="lead",
+        model=EchoModel(),
+        persist_tool_transcripts=True,
+        tool_transcript_max_bytes=12345,
+    )
+    assert coordinator._persist_tool_transcripts is True
+    assert coordinator._tool_transcript_max_bytes == 12345
+
+
+def test_team_supervisor_default_persist_is_off() -> None:
+    """Default stays opt-in so existing callers see no behavior change."""
+    coordinator = Team.supervisor(
+        workers={"w": Agent(instructions="", model=EchoModel())},
+        instructions="lead",
+        model=EchoModel(),
+    )
+    assert coordinator._persist_tool_transcripts is False
+
+
+def test_all_team_builders_forward_persist_tool_transcripts() -> None:
+    """The kwarg has to reach the coordinator from every Team.*
+    builder, not just supervisor. Without this, swarm/router/debate/
+    actor_critic/blackboard users would see the kwarg accepted but
+    silently dropped — the worst kind of API bug. One assertion per
+    builder pins the forwarding."""
+    from loomflow.architecture.router import RouterRoute
+
+    a = Agent(instructions="", model=EchoModel())
+    b = Agent(instructions="", model=EchoModel())
+
+    # Each builder takes a different required-args shape; the
+    # assertion is identical: ``_persist_tool_transcripts`` lands
+    # True on the returned coordinator Agent.
+    cases: list[tuple[str, Agent]] = [
+        (
+            "supervisor",
+            Team.supervisor(
+                workers={"w": a},
+                instructions="",
+                model=EchoModel(),
+                persist_tool_transcripts=True,
+            ),
+        ),
+        (
+            "swarm",
+            Team.swarm(
+                {"a": a, "b": b},
+                "a",
+                model=EchoModel(),
+                persist_tool_transcripts=True,
+            ),
+        ),
+        (
+            "router",
+            Team.router(
+                routes=[
+                    RouterRoute(name="a", description="", agent=a)
+                ],
+                model=EchoModel(),
+                persist_tool_transcripts=True,
+            ),
+        ),
+        (
+            "debate",
+            Team.debate(
+                debaters=[a, b],
+                model=EchoModel(),
+                persist_tool_transcripts=True,
+            ),
+        ),
+        (
+            "actor_critic",
+            Team.actor_critic(
+                actor=a,
+                critic=b,
+                model=EchoModel(),
+                persist_tool_transcripts=True,
+            ),
+        ),
+        (
+            "blackboard",
+            Team.blackboard(
+                agents={"a": a, "b": b},
+                model=EchoModel(),
+                persist_tool_transcripts=True,
+            ),
+        ),
+    ]
+    for name, coord in cases:
+        assert coord._persist_tool_transcripts is True, name

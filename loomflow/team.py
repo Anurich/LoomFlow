@@ -157,6 +157,8 @@ class Team:
         prompt_caching: bool | Mapping[str, Any] | None = None,
         tool_result_summarizer: Model | str | None = None,
         tool_result_summary_threshold: int = 500,
+        persist_tool_transcripts: bool = False,
+        tool_transcript_max_bytes: int = 50_000,
         snip_window: int = 0,
         auto_compact_at_tokens: int | None = None,
         auto_compact_summariser: Model | str | None = None,
@@ -241,6 +243,8 @@ class Team:
             tool_result_summary_threshold=(
                 tool_result_summary_threshold
             ),
+            persist_tool_transcripts=persist_tool_transcripts,
+            tool_transcript_max_bytes=tool_transcript_max_bytes,
             snip_window=snip_window,
             auto_compact_at_tokens=auto_compact_at_tokens,
             auto_compact_summariser=auto_compact_summariser,
@@ -310,6 +314,8 @@ class Team:
         prompt_caching: bool | Mapping[str, Any] | None = None,
         tool_result_summarizer: Model | str | None = None,
         tool_result_summary_threshold: int = 500,
+        persist_tool_transcripts: bool = False,
+        tool_transcript_max_bytes: int = 50_000,
         snip_window: int = 0,
         auto_compact_at_tokens: int | None = None,
         auto_compact_summariser: Model | str | None = None,
@@ -397,6 +403,8 @@ class Team:
             tool_result_summary_threshold=(
                 tool_result_summary_threshold
             ),
+            persist_tool_transcripts=persist_tool_transcripts,
+            tool_transcript_max_bytes=tool_transcript_max_bytes,
             snip_window=snip_window,
             auto_compact_at_tokens=auto_compact_at_tokens,
             auto_compact_summariser=auto_compact_summariser,
@@ -459,6 +467,8 @@ class Team:
         prompt_caching: bool | Mapping[str, Any] | None = None,
         tool_result_summarizer: Model | str | None = None,
         tool_result_summary_threshold: int = 500,
+        persist_tool_transcripts: bool = False,
+        tool_transcript_max_bytes: int = 50_000,
         snip_window: int = 0,
         auto_compact_at_tokens: int | None = None,
         auto_compact_summariser: Model | str | None = None,
@@ -522,6 +532,8 @@ class Team:
             tool_result_summary_threshold=(
                 tool_result_summary_threshold
             ),
+            persist_tool_transcripts=persist_tool_transcripts,
+            tool_transcript_max_bytes=tool_transcript_max_bytes,
             snip_window=snip_window,
             auto_compact_at_tokens=auto_compact_at_tokens,
             auto_compact_summariser=auto_compact_summariser,
@@ -583,6 +595,8 @@ class Team:
         prompt_caching: bool | Mapping[str, Any] | None = None,
         tool_result_summarizer: Model | str | None = None,
         tool_result_summary_threshold: int = 500,
+        persist_tool_transcripts: bool = False,
+        tool_transcript_max_bytes: int = 50_000,
         snip_window: int = 0,
         auto_compact_at_tokens: int | None = None,
         auto_compact_summariser: Model | str | None = None,
@@ -652,6 +666,8 @@ class Team:
             tool_result_summary_threshold=(
                 tool_result_summary_threshold
             ),
+            persist_tool_transcripts=persist_tool_transcripts,
+            tool_transcript_max_bytes=tool_transcript_max_bytes,
             snip_window=snip_window,
             auto_compact_at_tokens=auto_compact_at_tokens,
             auto_compact_summariser=auto_compact_summariser,
@@ -716,6 +732,8 @@ class Team:
         prompt_caching: bool | Mapping[str, Any] | None = None,
         tool_result_summarizer: Model | str | None = None,
         tool_result_summary_threshold: int = 500,
+        persist_tool_transcripts: bool = False,
+        tool_transcript_max_bytes: int = 50_000,
         snip_window: int = 0,
         auto_compact_at_tokens: int | None = None,
         auto_compact_summariser: Model | str | None = None,
@@ -778,6 +796,8 @@ class Team:
             tool_result_summary_threshold=(
                 tool_result_summary_threshold
             ),
+            persist_tool_transcripts=persist_tool_transcripts,
+            tool_transcript_max_bytes=tool_transcript_max_bytes,
             snip_window=snip_window,
             auto_compact_at_tokens=auto_compact_at_tokens,
             auto_compact_summariser=auto_compact_summariser,
@@ -842,6 +862,8 @@ class Team:
         prompt_caching: bool | Mapping[str, Any] | None = None,
         tool_result_summarizer: Model | str | None = None,
         tool_result_summary_threshold: int = 500,
+        persist_tool_transcripts: bool = False,
+        tool_transcript_max_bytes: int = 50_000,
         snip_window: int = 0,
         auto_compact_at_tokens: int | None = None,
         auto_compact_summariser: Model | str | None = None,
@@ -925,6 +947,8 @@ class Team:
             tool_result_summary_threshold=(
                 tool_result_summary_threshold
             ),
+            persist_tool_transcripts=persist_tool_transcripts,
+            tool_transcript_max_bytes=tool_transcript_max_bytes,
             snip_window=snip_window,
             auto_compact_at_tokens=auto_compact_at_tokens,
             auto_compact_summariser=auto_compact_summariser,
