@@ -485,6 +485,7 @@ class Team:
         require_confidence_above: float = 0.0,
         classifier_prompt: str | None = None,
         persistent_subagents: bool = True,
+        conversation_scope: str = "per_route",
     ) -> Agent:
         """Build a router that classifies once and dispatches to
         ONE specialist :class:`Agent`. Cheaper than Supervisor for
@@ -496,6 +497,24 @@ class Team:
         to the same specialist reuse memory (the typical case in a
         long REPL: route to ``billing`` once, route to ``billing``
         again — the second call sees the first conversation).
+
+        ``conversation_scope`` controls whether routes share message
+        history with each other:
+
+        * ``"per_route"`` (default, back-compat) — every route runs
+          under its own derived session_id
+          (``{parent}__route_{name}``). Right primitive for fan-out
+          routing where routes are isolated worlds (multilingual,
+          security domains, A/B experiments).
+
+        * ``"shared"`` — every route runs under the PARENT
+          session_id. All turns contribute to ONE conversation
+          regardless of which route handled each. Right primitive
+          for chat frontends where routes are an implementation
+          detail (e.g. a SIMPLE-vs-COMPLEX classifier) and the user
+          expects continuity across turns. In shared mode,
+          persistent-subagent session_ids are bypassed so all
+          rehydration keys off the parent session.
 
         ``prompt_caching=`` enables provider-native caching on the
         classifier-coordinator (see :meth:`Team.supervisor` for
@@ -554,6 +573,7 @@ class Team:
                 classifier_prompt=classifier_prompt,
                 worker_registry=worker_registry,
                 role_to_worker_id=role_to_worker_id,
+                conversation_scope=conversation_scope,  # type: ignore[arg-type]
             ),
         )
         if persistent_subagents and worker_registry is not None:

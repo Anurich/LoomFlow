@@ -320,6 +320,110 @@ async def test_router_propagates_specialist_interruption() -> None:
 # ---------------------------------------------------------------------------
 
 
+async def test_router_rejects_invalid_conversation_scope() -> None:
+    """Only ``per_route`` and ``shared`` are valid — anything else is
+    a wiring mistake that should fail loud at construction."""
+    with pytest.raises(ValueError, match="conversation_scope"):
+        Router(
+            routes=[
+                RouterRoute(name="a", agent=Agent("x", model="echo"))
+            ],
+            conversation_scope="something_else",  # type: ignore[arg-type]
+        )
+
+
+async def test_router_shared_scope_uses_parent_session_id() -> None:
+    """``conversation_scope='shared'`` makes the specialist run under
+    the PARENT session_id verbatim (no ``__route_<name>`` suffix, no
+    persistent-worker stable id override). That's the contract chat
+    frontends rely on for cross-route history rehydration."""
+    captured: list[str] = []
+
+    class _CaptureModel:
+        name = "capture"
+
+        async def stream(self, messages, *, tools=None, **kwargs):  # type: ignore[no-untyped-def]
+            from loomflow.core.types import ModelChunk, Usage
+            yield ModelChunk(kind="text", text="ok")
+            yield ModelChunk(kind="finish", usage=Usage())
+
+    class _SnoopAgent(Agent):
+        async def run(  # type: ignore[override]
+            self, prompt: str, **kwargs: Any
+        ):
+            captured.append(kwargs["session_id"])
+            return await super().run(prompt, **kwargs)
+
+    specialist = _SnoopAgent("snooper", model=_CaptureModel())  # type: ignore[arg-type]
+    parent_model = ScriptedModel(
+        [ScriptedTurn(text="route: snoop\nconfidence: 0.95")]
+    )
+    agent = Agent(
+        "test",
+        model=parent_model,
+        architecture=Router(
+            routes=[RouterRoute(name="snoop", agent=specialist)],
+            conversation_scope="shared",
+        ),
+    )
+    result = await agent.run("hi")
+    assert len(captured) == 1
+    # Equals — not endswith. Shared scope means EXACTLY the parent's
+    # session_id; no derivation.
+    assert captured[0] == result.session_id
+    assert "__route_" not in captured[0]
+
+
+async def test_router_shared_scope_bypasses_persistent_subagent_id() -> None:
+    """When persistent_subagents are wired (which Team.router does
+    by default) AND scope is 'shared', the parent session_id wins
+    over the persistent-worker handle's stable session_id. Without
+    this guarantee, the shared-conversation feature breaks the
+    moment persistent_subagents is on (which is the default)."""
+    captured: list[str] = []
+
+    class _CaptureModel:
+        name = "capture"
+
+        async def stream(self, messages, *, tools=None, **kwargs):  # type: ignore[no-untyped-def]
+            from loomflow.core.types import ModelChunk, Usage
+            yield ModelChunk(kind="text", text="ok")
+            yield ModelChunk(kind="finish", usage=Usage())
+
+    class _SnoopAgent(Agent):
+        async def run(  # type: ignore[override]
+            self, prompt: str, **kwargs: Any
+        ):
+            captured.append(kwargs["session_id"])
+            return await super().run(prompt, **kwargs)
+
+    specialist = _SnoopAgent("snooper", model=_CaptureModel())  # type: ignore[arg-type]
+    parent_model = ScriptedModel(
+        [ScriptedTurn(text="route: snoop\nconfidence: 0.95")]
+    )
+    # Construct a fake worker registry that WOULD return a stable
+    # session_id if not bypassed — mirrors what Team.router does
+    # when persistent_subagents=True.
+    from loomflow.agent.worker_registry import build_worker_registry
+    registry, role_to_id = build_worker_registry({"snoop": specialist})
+    agent = Agent(
+        "test",
+        model=parent_model,
+        architecture=Router(
+            routes=[RouterRoute(name="snoop", agent=specialist)],
+            worker_registry=registry,
+            role_to_worker_id=role_to_id,
+            conversation_scope="shared",
+        ),
+    )
+    result = await agent.run("hi")
+    assert len(captured) == 1
+    # The persistent-worker handle's session_id starts with
+    # ``persistent_worker_``. Shared scope must NOT use it.
+    assert not captured[0].startswith("persistent_worker_")
+    assert captured[0] == result.session_id
+
+
 async def test_router_uses_deterministic_specialist_session_id() -> None:
     """The specialist's session_id should follow the
     ``{parent}__route_{name}`` pattern so replay finds it."""

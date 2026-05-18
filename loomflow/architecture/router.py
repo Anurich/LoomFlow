@@ -49,7 +49,7 @@ from __future__ import annotations
 import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from ..core.context import inherit_ambient_memory
 from ..core.types import Event, Message, Role
@@ -109,6 +109,7 @@ class Router:
         classifier_prompt: str | None = None,
         worker_registry: _RouterRegistryT | None = None,
         role_to_worker_id: _RouterRoleMapT | None = None,
+        conversation_scope: Literal["per_route", "shared"] = "per_route",
     ) -> None:
         if not routes:
             raise ValueError("Router requires at least one route")
@@ -126,6 +127,11 @@ class Router:
                 f"fallback_route {fallback_route!r} not in routes "
                 f"({', '.join(names)})"
             )
+        if conversation_scope not in ("per_route", "shared"):
+            raise ValueError(
+                "conversation_scope must be 'per_route' or 'shared', "
+                f"got {conversation_scope!r}"
+            )
         self._routes = list(routes)
         self._routes_by_name = {r.name: r for r in routes}
         self._fallback_route = fallback_route
@@ -137,9 +143,26 @@ class Router:
         # with ``persistent_subagents=True``, the chosen specialist
         # runs under its registered handle's stable session_id so
         # successive routes to the same specialist (e.g. follow-ups
-        # in the same REPL session) reuse memory.
+        # in the same REPL session) reuse memory. Has no effect when
+        # ``conversation_scope='shared'`` — see ``run()`` for why.
         self._worker_registry = worker_registry
         self._role_to_worker_id = role_to_worker_id
+        # ``per_route`` (default) — every route runs under its own
+        # derived session_id (``{parent}__route_{name}``) and is its
+        # own conversation. Right primitive for fan-out / isolated-
+        # domain routing (multilingual, security domains, A/B).
+        #
+        # ``shared`` — every route runs under the PARENT session_id
+        # and contributes to one conversation. Right primitive for
+        # chat frontends where routes are an implementation detail
+        # (loom-code's SIMPLE-vs-COMPLEX classifier) and the user
+        # expects "I'm having ONE conversation regardless of which
+        # specialist answered the last turn." In shared mode,
+        # persistent-subagent session_ids are also bypassed so all
+        # turns land under the same parent session for rehydration.
+        self._conversation_scope: Literal["per_route", "shared"] = (
+            conversation_scope
+        )
 
     def declared_workers(self) -> dict[str, Agent]:
         return {r.name: r.agent for r in self._routes}
@@ -211,21 +234,39 @@ class Router:
         )
 
         # === 3. Dispatch to specialist ===
-        # Deterministic specialist session_id: replay finds the same
-        # session under the specialist's own journal.
         # SubagentInvocation forwards the specialist's MODEL_CHUNK /
         # TOOL_CALL / TOOL_RESULT events into our generator so
         # token-by-token streaming surfaces in the outer
         # `agent.stream(...)` consumer.
-        from ..agent.worker_registry import resolve_persistent_session
-        specialist_session_id, handle = resolve_persistent_session(
-            chosen.name,
-            fallback=f"{session.id}__route_{chosen.name}",
-            registry=self._worker_registry,
-            role_to_id=self._role_to_worker_id,
-        )
-        if handle is not None:
-            handle.touch(user_id=deps.context.user_id)
+        #
+        # session_id resolution depends on ``conversation_scope``:
+        #
+        # * ``per_route`` (default): derive ``{parent}__route_{name}``
+        #   so each route is its own conversation, layered under the
+        #   parent's journal. Persistent-subagent registry can
+        #   further override this with a stable per-worker session_id
+        #   (``resolve_persistent_session`` returns that handle).
+        #
+        # * ``shared``: pass the PARENT session_id straight through
+        #   so all routes contribute to ONE conversation. Skip the
+        #   persistent-subagent registry entirely — its whole point
+        #   is per-worker memory across delegations, and in shared
+        #   mode the "memory" IS the parent's session_id. Re-running
+        #   the same prompt on a different route still rehydrates the
+        #   prior turns from the parent session — that's the feature.
+        if self._conversation_scope == "shared":
+            specialist_session_id = session.id
+            handle = None
+        else:
+            from ..agent.worker_registry import resolve_persistent_session
+            specialist_session_id, handle = resolve_persistent_session(
+                chosen.name,
+                fallback=f"{session.id}__route_{chosen.name}",
+                registry=self._worker_registry,
+                role_to_id=self._role_to_worker_id,
+            )
+            if handle is not None:
+                handle.touch(user_id=deps.context.user_id)
         invocation = SubagentInvocation(
             chosen.agent,
             prompt,
