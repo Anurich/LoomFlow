@@ -690,6 +690,31 @@ async def _run_single_tool(
 
     async with tool_trace:
         run_user_id = deps.context.user_id
+        # Stamp ``call.destructive`` from the tool host BEFORE any
+        # permission check. Background: ``ToolCall.destructive``
+        # defaults to False, and model adapters (openai, anthropic)
+        # construct ToolCall from the model's tool_use response
+        # without consulting the original Tool's ``destructive``
+        # flag — so a call to a ``destructive=True`` tool would
+        # arrive at permissions.check with ``destructive=False`` and
+        # auto-approve, bypassing the approval handler entirely.
+        # Tool.to_def() now propagates the flag (registry.py), so
+        # any well-behaved adapter could stamp it themselves; this
+        # block is the defensive backstop that fixes the bug for
+        # adapters (current OpenAI/Anthropic ones included) that
+        # don't. Look up authoritatively from the tool host — the
+        # Tool object's destructive flag is the source of truth.
+        if not call.destructive:
+            try:
+                defs = await deps.tools.list_tools()
+                for d in defs:
+                    if d.name == call.tool and d.destructive:
+                        call = call.model_copy(
+                            update={"destructive": True}
+                        )
+                        break
+            except Exception:  # noqa: BLE001 — best-effort; don't crash on host issues
+                pass
         if deps.fast_hooks:
             hook_decision: PermissionDecision = PermissionDecision.allow_()
         else:

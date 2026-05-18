@@ -40,6 +40,7 @@ class Tool:
             name=self.name,
             description=self.description,
             input_schema=self.input_schema,
+            destructive=self.destructive,
         )
 
     async def execute(self, args: Mapping[str, Any]) -> Any:

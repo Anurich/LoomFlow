@@ -63,6 +63,14 @@ class ToolDef(BaseModel):
     description: str
     input_schema: dict[str, Any] = Field(default_factory=dict)
     server: str | None = None  # MCP server name, if applicable
+    destructive: bool = False
+    """Carries the originating :class:`Tool`'s destructive flag
+    through ``Tool.to_def()`` so downstream consumers (model
+    adapters, the ReAct permissions stamp, MCP listChanged
+    notifications) can decide whether a tool needs an approval
+    gate without needing to look up the Tool object separately.
+    Default ``False`` for backward compat with adapters that
+    constructed ToolDef pre-0.10.17 without setting it."""
 
 
 class ToolCall(BaseModel):
