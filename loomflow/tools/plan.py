@@ -122,11 +122,23 @@ class LivingPlanStep:
     :class:`LivingPlanStep` instances after status coercion. The
     dataclass is exposed for tests + custom architectures reading
     the active plan via :func:`get_active_plan`.
+
+    ``verified_by`` is the list of ``ToolCall.id``\\ s that did this
+    step's work. ``plan_write`` validates that DONE transitions
+    either reference real tool calls fired in the current turn
+    (each id usable by at most one step — kills the "one call,
+    many claims" failure mode where a single edit is claimed to
+    cover N items) OR carry a non-empty ``finding`` (≥20 chars)
+    that justifies why no tool work was needed (analytical steps,
+    pure-reasoning items, etc.). Existing callers that omit
+    ``verified_by`` get the finding-fallback automatically — back-
+    compat preserved during the soft cutover in 0.10.x.
     """
 
     description: str
     status: str = "todo"
     finding: str = ""
+    verified_by: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.status not in VALID_STATUSES:
@@ -195,10 +207,21 @@ class _LivingPlanState:
     the captured workspace-mirror slug (so subsequent
     ``plan_write`` calls within the run update the same note rather
     than creating duplicates).
+
+    ``observed_tool_call_ids`` accumulates every non-plan tool call
+    fired in the current Agent.run() turn (architectures call
+    :func:`record_tool_call` to add). ``plan_write`` reads this set
+    when validating ``verified_by`` references — the set of ids it
+    will accept for new DONE transitions. Architectures that
+    haven't been updated to call ``record_tool_call`` leave this
+    empty, in which case ``plan_write`` falls back to requiring a
+    non-empty ``finding`` on every DONE transition (soft cutover —
+    no behaviour regression for un-upgraded architectures).
     """
 
     plan: LivingPlan = field(default_factory=LivingPlan)
     mirror_slug: str | None = None
+    observed_tool_call_ids: set[str] = field(default_factory=set)
 
 
 def get_active_plan() -> LivingPlan | None:
@@ -215,6 +238,27 @@ def get_active_plan() -> LivingPlan | None:
         return None
     assert isinstance(state, _LivingPlanState)
     return state.plan
+
+
+def record_tool_call(call_id: str) -> None:
+    """Architecture hook: record that a (non-plan_write) tool call
+    fired this turn so subsequent ``plan_write`` calls can verify
+    DONE transitions reference real work.
+
+    Call AFTER each tool dispatch in the architecture's main loop,
+    excluding ``plan_write`` itself (recording plan_write would let
+    the model self-verify steps by simply re-calling the plan tool).
+    No-op when living_plan isn't enabled for this run.
+
+    Soft cutover: architectures that haven't been updated to call
+    this still work — ``plan_write`` falls back to requiring a
+    non-empty ``finding`` (≥20 chars) on every DONE transition
+    when the observed-id set is empty. Upgraded architectures get
+    the stronger ``verified_by`` check + double-claim prevention.
+    """
+    state = _ambient_living_plan_var.get()
+    if isinstance(state, _LivingPlanState):
+        state.observed_tool_call_ids.add(call_id)
 
 
 def _coerce_one_step(item: Any) -> dict[str, Any] | None:
@@ -434,7 +478,16 @@ def make_plan_tools(
           ``WIP`` are auto-normalized.
         * ``finding`` (str, optional) — 1-line note about what
           happened on this step. Most useful for ``done`` and
-          ``blocked`` steps.
+          ``blocked`` steps. **Required (≥20 chars) on any DONE
+          step that has empty ``verified_by``** (see below).
+        * ``verified_by`` (list[str], optional) — the
+          ``tool_call_id``\\ (s) that did this step's work. Each
+          id must reference a real tool call fired earlier in
+          this turn (you can see ids on tool_result messages in
+          your context). Each id can verify AT MOST ONE step —
+          claiming the same tool call for multiple steps is
+          rejected. Strong-mode protection against "I marked
+          all 5 done after one edit" hallucinations.
 
         Returns the rendered plan as a markdown table — read it.
         That table is your source of truth for what's next.
@@ -455,7 +508,10 @@ def make_plan_tools(
            full rewrite.
         4. **Verify before done.** A step like "Run the validator
            and confirm pass" should be in your plan. Do NOT mark
-           it done until the validator actually passes.
+           it done until the validator actually passes. Use
+           ``verified_by=[<tool_call_id>]`` to record the call
+           that did the work; the tool REJECTS DONE transitions
+           with no verifying tool call AND no explanatory finding.
         """
         state = _ambient_living_plan_var.get()
         if not isinstance(state, _LivingPlanState):
@@ -468,6 +524,89 @@ def make_plan_tools(
             # Coerce returned an error message; return verbatim
             # so the model sees actionable feedback.
             return coerced
+
+        # === Strong verification for DONE transitions ===
+        # Before mutating state, validate every DONE step: it
+        # either references a real tool_call from this turn
+        # (each id usable by at most one step → no
+        # "one edit, five claims" gaming) OR carries a
+        # non-empty finding explaining why no tool work was
+        # needed. The previous plan's already-done steps are
+        # exempt — we only validate NEW transitions to DONE,
+        # not historical ones the model is re-asserting.
+        prior_done_descriptions = {
+            s.description for s in state.plan.steps
+            if s.status == "done"
+        }
+        observed = state.observed_tool_call_ids
+        claimed_by_step: dict[str, str] = {}
+        for s in coerced:
+            status = str(s.get("status", "todo"))
+            # Coerce status with the same logic the dataclass
+            # would apply, so synonyms (in_progress → doing) get
+            # normalised before the check.
+            if status not in VALID_STATUSES:
+                status = _STATUS_SYNONYMS.get(status.lower(), "todo")
+            if status != "done":
+                continue
+            desc = str(s.get("description", ""))
+            if desc in prior_done_descriptions:
+                # Already-done in the prior plan — re-asserting,
+                # not transitioning. Skip verification.
+                continue
+            verified_by = s.get("verified_by") or []
+            if not isinstance(verified_by, list):
+                return (
+                    f"ERROR: step {desc!r} has malformed "
+                    f"verified_by — must be a list of tool_call "
+                    f"id strings, got {type(verified_by).__name__}."
+                )
+            finding = str(s.get("finding", ""))
+            if verified_by:
+                # Strong path: each id must be real + unique.
+                for tc_id in verified_by:
+                    tc_id_s = str(tc_id)
+                    if observed and tc_id_s not in observed:
+                        # Only enforce real-id check when the
+                        # architecture is recording calls. If
+                        # observed is empty (pre-upgrade
+                        # architecture) we skip this check and
+                        # fall back to finding-required, below.
+                        return (
+                            f"ERROR: step {desc!r}: verified_by "
+                            f"references unknown tool_call_id "
+                            f"{tc_id_s!r}. Available ids fired "
+                            f"this turn (most recent shown): "
+                            f"{sorted(observed)[-10:] or '(none)'}."
+                        )
+                    if tc_id_s in claimed_by_step:
+                        return (
+                            f"ERROR: step {desc!r}: tool_call_id "
+                            f"{tc_id_s!r} was already claimed by "
+                            f"step {claimed_by_step[tc_id_s]!r}. "
+                            "Each tool call can verify at most "
+                            "one step — split the work or "
+                            "transition the duplicate to 'skipped'."
+                        )
+                    claimed_by_step[tc_id_s] = desc
+            else:
+                # No tool work claimed — require a substantive
+                # finding so analytical/no-tool steps are still
+                # honest. 20 chars rules out empty / "ok" / "done"
+                # without being so strict it blocks real one-line
+                # justifications.
+                if len(finding.strip()) < 20:
+                    return (
+                        f"ERROR: step {desc!r} is DONE with empty "
+                        "verified_by — provide either (a) "
+                        "verified_by=[<tool_call_id>] referencing "
+                        "the call that did the work, or (b) a "
+                        "finding ≥20 chars explaining why no tool "
+                        "work was needed. Hallucinated completion "
+                        "is the most common plan-failure mode; "
+                        "this check rejects it at write time."
+                    )
+
         state.plan = LivingPlan(
             goal=str(goal),
             steps=[
@@ -475,6 +614,7 @@ def make_plan_tools(
                     description=str(s.get("description", "")),
                     status=str(s.get("status", "todo")),
                     finding=str(s.get("finding", "")),
+                    verified_by=list(s.get("verified_by") or []),
                 )
                 for s in coerced
             ],

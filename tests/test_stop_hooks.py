@@ -238,9 +238,23 @@ async def test_living_plan_auto_registers_stop_hook() -> None:
         "goal": "test",
         "steps": [{"description": "do it", "status": "doing"}],
     }
+    # New in 0.10.19: ``plan_write`` rejects DONE transitions with
+    # no ``verified_by`` AND no substantive ``finding`` (≥20 chars).
+    # This test is about stop-hook auto-registration, not the
+    # verification contract — add a finding so the plan_done call
+    # succeeds and the stop-hook behaviour is what's tested.
     plan_done = {
         "goal": "test",
-        "steps": [{"description": "do it", "status": "done"}],
+        "steps": [
+            {
+                "description": "do it",
+                "status": "done",
+                "finding": (
+                    "no tool work needed for this synthetic "
+                    "stop-hook test fixture"
+                ),
+            }
+        ],
     }
     sm = ScriptedModel(
         turns=[

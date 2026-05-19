@@ -490,6 +490,16 @@ async def _run_one_step(
         )
         return
 
+    # Record this tool call for plan_write's strong-mode
+    # verification (no-op when living_plan isn't enabled).
+    # Recording happens for both ok + error paths so the model
+    # can't claim a step DONE on a tool call that actually
+    # failed — failed call_ids ARE in the observed set, but
+    # the model needs to also pass them inspection (the
+    # ToolResult.error in the prior turn message will steer it).
+    from ..tools.plan import record_tool_call
+    record_tool_call(str(tool_result.call_id))
+
     if tool_result.ok:
         out_results[step.id] = ReWOOStepResult(
             step_id=step.id,

@@ -436,6 +436,15 @@ class ReAct:
                             tool_call_id=final.call_id,
                         )
                     )
+                    # Record this tool call for plan_write's
+                    # strong-mode verification. Skip plan_write
+                    # itself — letting the model verify a step by
+                    # the same plan call that marked it done
+                    # defeats the whole point. ``record_tool_call``
+                    # is a no-op when living_plan isn't enabled.
+                    if c.tool != "plan_write":
+                        from ..tools.plan import record_tool_call
+                        record_tool_call(str(final.call_id))
 
 
 # ---------------------------------------------------------------------------

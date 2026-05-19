@@ -22,6 +22,7 @@ from loomflow.tools.plan import (
     get_active_plan,
     make_plan_tools,
     make_recall_past_plans_tool,
+    record_tool_call,
 )
 from loomflow.workspace import InMemoryWorkspace
 
@@ -502,3 +503,277 @@ def test_agent_living_plan_appends_prompt_section() -> None:
     a = Agent("t", model="echo", tools=[_stub_tool], living_plan=True)
     assert "Living plan" in a._instructions
     assert "plan_write" in a._instructions
+
+
+# ---------------------------------------------------------------------------
+# Strong verification on DONE transitions (0.10.19+)
+# ---------------------------------------------------------------------------
+#
+# The contract: a step transitioning to DONE must either reference
+# a real tool_call_id from this turn via ``verified_by``, OR carry
+# a substantive ``finding`` (≥20 chars) for analytical steps that
+# don't involve tools. Each tool_call_id may verify AT MOST ONE
+# step. Soft-cutover: when ``record_tool_call`` has never been
+# called for this run (architectures not yet upgraded), the
+# verified_by real-id check is skipped and only the finding
+# fallback applies.
+
+
+async def test_done_with_empty_verified_by_and_no_finding_rejected() -> None:
+    """The headline bug: marking a step DONE with neither tool
+    call evidence nor a finding is plan-theater. Reject it."""
+    await _with_plan_state()
+    [plan_write, _] = make_plan_tools()
+    out = await _call_tool(
+        plan_write,
+        {
+            "goal": "g",
+            "steps": [{"description": "fix it", "status": "done"}],
+        },
+    )
+    assert out.startswith("ERROR"), (
+        f"expected ERROR, got: {out!r}"
+    )
+    assert "verified_by" in out
+    assert "hallucinated completion" in out.lower()
+
+
+async def test_done_with_substantive_finding_accepted() -> None:
+    """Finding ≥20 chars is the analytical-step path — accepted
+    even with empty verified_by because the step had no tool
+    work to point at."""
+    state = await _with_plan_state()
+    [plan_write, _] = make_plan_tools()
+    out = await _call_tool(
+        plan_write,
+        {
+            "goal": "g",
+            "steps": [
+                {
+                    "description": "analyze the user's intent",
+                    "status": "done",
+                    "finding": (
+                        "user wants a JSON output not YAML — "
+                        "no tool call needed for this conclusion"
+                    ),
+                }
+            ],
+        },
+    )
+    assert not out.startswith("ERROR")
+    assert state.plan.steps[0].status == "done"
+
+
+async def test_done_with_short_finding_rejected() -> None:
+    """A 1-word finding like 'done' or 'ok' is exactly what we
+    want to reject — too vague to be honest verification."""
+    await _with_plan_state()
+    [plan_write, _] = make_plan_tools()
+    out = await _call_tool(
+        plan_write,
+        {
+            "goal": "g",
+            "steps": [
+                {
+                    "description": "do it",
+                    "status": "done",
+                    "finding": "ok",
+                }
+            ],
+        },
+    )
+    assert out.startswith("ERROR")
+    assert "20 chars" in out or "≥20" in out
+
+
+async def test_done_with_verified_by_real_call_id_accepted() -> None:
+    """The strong path: model references a real tool_call_id that
+    was recorded this turn → DONE accepted, the id is now claimed."""
+    state = await _with_plan_state()
+    record_tool_call("call_abc123")
+    [plan_write, _] = make_plan_tools()
+    out = await _call_tool(
+        plan_write,
+        {
+            "goal": "g",
+            "steps": [
+                {
+                    "description": "edit foo.py",
+                    "status": "done",
+                    "verified_by": ["call_abc123"],
+                }
+            ],
+        },
+    )
+    assert not out.startswith("ERROR"), out
+    assert state.plan.steps[0].verified_by == ["call_abc123"]
+
+
+async def test_done_with_verified_by_unknown_id_rejected() -> None:
+    """Strong path with a hallucinated id: model claims work
+    happened via a tool_call_id that doesn't exist in this turn's
+    journal. Reject + tell the model what's actually available."""
+    await _with_plan_state()
+    record_tool_call("call_real")
+    [plan_write, _] = make_plan_tools()
+    out = await _call_tool(
+        plan_write,
+        {
+            "goal": "g",
+            "steps": [
+                {
+                    "description": "edit",
+                    "status": "done",
+                    "verified_by": ["call_fake"],
+                }
+            ],
+        },
+    )
+    assert out.startswith("ERROR")
+    assert "call_fake" in out
+    assert "call_real" in out  # helpful "available ids" listing
+
+
+async def test_one_call_cannot_verify_two_steps() -> None:
+    """The 'one edit, five claims' bug: model marks N steps
+    DONE all referencing the same tool call. Each call_id can
+    only verify ONE step — others must split the work or
+    skip honestly."""
+    await _with_plan_state()
+    record_tool_call("call_one")
+    [plan_write, _] = make_plan_tools()
+    out = await _call_tool(
+        plan_write,
+        {
+            "goal": "g",
+            "steps": [
+                {
+                    "description": "step a",
+                    "status": "done",
+                    "verified_by": ["call_one"],
+                },
+                {
+                    "description": "step b",
+                    "status": "done",
+                    "verified_by": ["call_one"],
+                },
+            ],
+        },
+    )
+    assert out.startswith("ERROR")
+    assert "already claimed" in out
+    assert "call_one" in out
+
+
+async def test_re_asserting_prior_done_is_not_re_verified() -> None:
+    """When the model re-submits the plan with a step that was
+    ALREADY done in the prior version, don't re-validate that
+    step — it's a re-assertion, not a transition. (Otherwise
+    every subsequent plan_write would need to re-cite the
+    original tool calls, which doesn't match how models
+    incrementally update.)"""
+    state = await _with_plan_state()
+    record_tool_call("call_first")
+    [plan_write, _] = make_plan_tools()
+    # Round 1: mark step done with a real call.
+    out1 = await _call_tool(
+        plan_write,
+        {
+            "goal": "g",
+            "steps": [
+                {
+                    "description": "first step",
+                    "status": "done",
+                    "verified_by": ["call_first"],
+                },
+            ],
+        },
+    )
+    assert not out1.startswith("ERROR")
+    assert state.plan.steps[0].status == "done"
+    # Round 2: re-submit WITHOUT verified_by, just re-asserting
+    # the step is done. Should be accepted — not a new
+    # transition.
+    out2 = await _call_tool(
+        plan_write,
+        {
+            "goal": "g",
+            "steps": [
+                {"description": "first step", "status": "done"},
+                {
+                    "description": "second step",
+                    "status": "todo",
+                },
+            ],
+        },
+    )
+    assert not out2.startswith("ERROR"), out2
+
+
+async def test_soft_cutover_no_recorded_calls_requires_finding() -> None:
+    """Backwards compat: when the architecture hasn't been
+    updated to call ``record_tool_call`` (observed set empty),
+    the real-id check is skipped — but the finding fallback
+    still fires. So pre-upgrade architectures get the medium-
+    strength verification instead of nothing."""
+    await _with_plan_state()
+    # NOTE: deliberately NOT calling record_tool_call → observed set empty.
+    [plan_write, _] = make_plan_tools()
+    out = await _call_tool(
+        plan_write,
+        {
+            "goal": "g",
+            "steps": [{"description": "do it", "status": "done"}],
+        },
+    )
+    # Without finding → still rejected.
+    assert out.startswith("ERROR")
+    # With sufficient finding → accepted even though no calls recorded.
+    out2 = await _call_tool(
+        plan_write,
+        {
+            "goal": "g",
+            "steps": [
+                {
+                    "description": "do it",
+                    "status": "done",
+                    "finding": (
+                        "soft-cutover path: pre-upgrade arch with "
+                        "no recorded calls, finding sufficient"
+                    ),
+                }
+            ],
+        },
+    )
+    assert not out2.startswith("ERROR")
+
+
+async def test_skipped_and_blocked_not_verified() -> None:
+    """``skipped`` / ``blocked`` are HONEST non-completion
+    statuses — they shouldn't trigger the verification check.
+    Only DONE transitions need evidence."""
+    state = await _with_plan_state()
+    [plan_write, _] = make_plan_tools()
+    out = await _call_tool(
+        plan_write,
+        {
+            "goal": "g",
+            "steps": [
+                {"description": "a", "status": "skipped"},
+                {"description": "b", "status": "blocked"},
+            ],
+        },
+    )
+    assert not out.startswith("ERROR")
+    assert state.plan.steps[0].status == "skipped"
+    assert state.plan.steps[1].status == "blocked"
+
+
+async def test_record_tool_call_noop_without_living_plan() -> None:
+    """``record_tool_call`` is called from architectures
+    unconditionally; when living_plan isn't enabled the
+    contextvar is unset → should be a no-op, not a crash."""
+    # Explicitly install None so the contextvar is unset.
+    _ambient_living_plan_var.set(None)
+    # Should not raise.
+    record_tool_call("call_xyz")
