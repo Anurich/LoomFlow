@@ -32,6 +32,7 @@ isn't applied.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable
@@ -104,11 +105,38 @@ class AutoExtractMemory:
         on_extract_error: Callable[[BaseException], Awaitable[None]] | None = None,
         telemetry: Telemetry | None = None,
         auto_picked: bool = False,
+        background: bool = True,
     ) -> None:
         self._inner = inner
         self._consolidator = consolidator
         self._on_extract_error = on_extract_error
         self._telemetry = telemetry
+        # ``background=True`` (default in 0.10.20+): ``remember``
+        # schedules the LLM fact-extraction as a fire-and-forget
+        # task so the caller's ``Agent.run()`` returns the moment
+        # the episode is persisted, instead of blocking for 3-10s
+        # on the model round-trip. This fixes the "next prompt
+        # comes back late" UX cost (observed in interactive REPLs
+        # like loom-code: every turn paid a hidden round-trip
+        # between the visible response and the next input).
+        #
+        # ``background=False`` (legacy + tests): ``remember``
+        # awaits extraction synchronously. Used by tests that need
+        # deterministic completion + by callers that explicitly
+        # need facts populated before the caller proceeds.
+        self._background = background
+        # Pending fire-and-forget extraction tasks tracked so
+        # ``aclose()`` can drain them on process shutdown. Using
+        # ``asyncio.create_task`` (not anyio's task group) is the
+        # right tool here despite loomflow's "anyio everywhere"
+        # rule — the rule's rationale is *cancellation
+        # propagation*, but fire-and-forget extraction explicitly
+        # MUST NOT cancel when the caller's task group does
+        # (otherwise we lose facts every time Agent.run() returns).
+        # asyncio.create_task attaches to the running event loop
+        # at the *loop* lifetime, not the caller's scope — which
+        # is exactly what we want here.
+        self._pending: set[asyncio.Task[None]] = set()
         if auto_picked:
             _maybe_emit_default_on_notice()
 
@@ -150,10 +178,76 @@ class AutoExtractMemory:
         function returns its id even when extraction fails. So the
         consolidator's fragility never leaks into the agent's own
         durability guarantees.
+
+        With ``background=True`` (default), extraction is scheduled
+        as a fire-and-forget task and ``remember`` returns the
+        moment the inner write completes — caller doesn't pay the
+        LLM round-trip latency. With ``background=False``,
+        extraction is awaited inline (legacy behaviour, deterministic
+        for tests).
         """
         result: str = await self._inner.remember(episode)
-        await self._maybe_extract(episode)
+        if self._background:
+            try:
+                task = asyncio.create_task(
+                    self._maybe_extract(episode)
+                )
+                self._pending.add(task)
+                # Auto-discard the task from the tracking set when
+                # it finishes — keeps the set bounded across long-
+                # lived processes (REPL sessions accumulate
+                # hundreds of episodes).
+                task.add_done_callback(self._pending.discard)
+            except RuntimeError:
+                # No running loop (defensive — we're inside an
+                # async method so this shouldn't happen, but if
+                # the caller invoked ``remember`` from a context
+                # without a loop, fall back to inline extraction
+                # rather than dropping the episode silently).
+                await self._maybe_extract(episode)
+        else:
+            await self._maybe_extract(episode)
         return result
+
+    async def aclose(
+        self,
+        *,
+        # ``timeout`` IS the drain semantic — caller picks how
+        # long to wait at shutdown. This is NOT a per-operation
+        # deadline that should propagate via cancellation (which
+        # is the general case ASYNC109 warns against).
+        timeout: float = 30.0,  # noqa: ASYNC109
+    ) -> int:
+        """Drain pending fire-and-forget extractions before shutdown.
+
+        Call this from your process's shutdown path (REPL exit,
+        SIGTERM handler, ``__aexit__`` of a long-lived context) to
+        give in-flight fact extractions a bounded chance to
+        complete before the event loop closes.
+
+        ``timeout`` is a deliberate API parameter here — the caller
+        chooses how long to wait. This is the shutdown-drain
+        contract, NOT a per-operation deadline that should
+        propagate through cancellation (which is what the ASYNC109
+        lint is warning against in the general case).
+
+        Returns the count of tasks still in flight when the
+        timeout fired (``0`` = clean drain). No-op when
+        ``background=False`` or no extractions are pending.
+        """
+        if not self._pending:
+            return 0
+        # Snapshot — _pending is mutated by add_done_callback as
+        # tasks finish; iterating it directly would race.
+        pending = list(self._pending)
+        # ``asyncio.wait`` (not ``wait_for``) is deliberate — wait_for
+        # would CANCEL the pending tasks on timeout, which
+        # contradicts our "extractions keep running until the loop
+        # actually closes" contract. ``wait`` just observes; the
+        # tasks live on, and the returned ``not_done`` count tells
+        # the caller how many were still in flight at the deadline.
+        _, not_done = await asyncio.wait(pending, timeout=timeout)
+        return len(not_done)
 
     async def _maybe_extract(self, episode: Episode) -> None:
         """Run the consolidator on a single episode. Catches every

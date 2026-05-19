@@ -83,6 +83,16 @@ def _make_inner() -> InMemoryMemory:
     return inner
 
 
+def _wrap(*args: Any, **kwargs: Any) -> AutoExtractMemory:
+    """Telemetry tests assert against extraction side-effects
+    immediately after ``remember()`` — so they need synchronous
+    extraction. 0.10.20+ defaults to background=True; force
+    background=False here so the test contract (post-remember
+    metrics already emitted) stays meaningful."""
+    kwargs.setdefault("background", False)
+    return AutoExtractMemory(*args, **kwargs)
+
+
 # ---------------------------------------------------------------------------
 # Telemetry: duration + invocation metrics
 # ---------------------------------------------------------------------------
@@ -90,7 +100,7 @@ def _make_inner() -> InMemoryMemory:
 
 async def test_emits_duration_metric_with_user_id_and_ok_status() -> None:
     tel = _RecordingTelemetry()
-    mem = AutoExtractMemory(
+    mem = _wrap(
         _make_inner(),
         _FixedExtractConsolidator(),
         telemetry=tel,
@@ -120,7 +130,7 @@ async def test_emits_error_status_when_consolidator_fails() -> None:
     """Failed extraction must still emit metrics — observability of
     failures is the point. The remember() call still succeeds."""
     tel = _RecordingTelemetry()
-    mem = AutoExtractMemory(
+    mem = _wrap(
         _make_inner(),
         _FixedExtractConsolidator(raise_exc=RuntimeError("boom")),
         telemetry=tel,
@@ -137,7 +147,7 @@ async def test_emits_error_status_when_consolidator_fails() -> None:
 async def test_no_telemetry_means_no_metrics_no_crash() -> None:
     """The wrapper must work the same as before when telemetry is
     None — single-tenant code that never wires OTel is fine."""
-    mem = AutoExtractMemory(
+    mem = _wrap(
         _make_inner(),
         _FixedExtractConsolidator(),
         telemetry=None,
@@ -160,7 +170,7 @@ async def test_telemetry_exporter_failure_does_not_fail_remember() -> None:
         async def trace(self, *_: Any, **__: Any) -> Any:  # pragma: no cover
             raise NotImplementedError
 
-    mem = AutoExtractMemory(
+    mem = _wrap(
         _make_inner(),
         _FixedExtractConsolidator(),
         telemetry=_BrokenTelemetry(),

@@ -75,7 +75,7 @@ async def test_remember_extracts_and_appends_facts() -> None:
         '"object": "Berlin", "confidence": 0.9}]'
     )
     consolidator = Consolidator(model=_ExtractingModel(facts_json))
-    wrapped = AutoExtractMemory(inner, consolidator)
+    wrapped = AutoExtractMemory(inner, consolidator, background=False)
 
     await wrapped.remember(
         Episode(
@@ -101,7 +101,7 @@ async def test_extraction_failure_does_not_break_remember() -> None:
     ``remember`` ALWAYS completes even if extraction blows up."""
     inner = InMemoryMemory()
     consolidator = Consolidator(model=_FailingModel())
-    wrapped = AutoExtractMemory(inner, consolidator)
+    wrapped = AutoExtractMemory(inner, consolidator, background=False)
 
     # No exception expected.
     eid = await wrapped.remember(
@@ -297,6 +297,13 @@ async def test_agent_run_auto_extracts_facts_into_memory() -> None:
         auto_extract=True,
     )
     await agent.run("I love jazz music.", user_id="alice")
+
+    # In 0.10.20+ ``auto_extract=True`` schedules extraction as a
+    # fire-and-forget task so ``Agent.run()`` returns before the
+    # consolidator's LLM call completes. Drain the pending tasks
+    # so this test can deterministically assert the resulting
+    # fact made it into the store.
+    await agent._wrapped_memory.aclose(timeout=5.0)
 
     # The fact extracted from the run is in the inner store under
     # alice's partition.
