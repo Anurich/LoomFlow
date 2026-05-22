@@ -45,7 +45,7 @@ def test_longest_prefix_picks_more_specific_over_generic() -> None:
     """``claude-opus-4-7`` is more specific than ``claude-opus``;
     both are in the table, and the longer key should win."""
     # claude-opus-4-7 and claude-opus both happen to share the same
-    # (15.00, 75.00) pricing — verify by tweaking one in-place so the
+    # (5.00, 25.00) pricing — verify by tweaking one in-place so the
     # two keys disagree, then confirm the longer key wins.
     saved = PRICING_PER_MTOKEN["claude-opus-4-7"]
     try:

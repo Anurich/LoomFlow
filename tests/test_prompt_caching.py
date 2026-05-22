@@ -94,47 +94,54 @@ def test_resolver_rejects_unknown_type() -> None:
 
 
 def test_anthropic_cache_read_costs_one_tenth() -> None:
-    """Claude Opus 4.7: $15/MTok input. 1000 cached tokens should
-    cost (1000 * 15 * 0.1) / 1_000_000 = $0.0015 — 10x cheaper
-    than the $0.015 those tokens would cost uncached."""
+    """Claude Opus 4.7: $5/MTok input. 1000 cached tokens should
+    cost (1000 * 5 * 0.1) / 1_000_000 = $0.0005 — 10x cheaper
+    than the $0.005 those tokens would cost uncached."""
     cached_cost = estimate_cost(
         "claude-opus-4-7", 0, 0, cached_input_tokens=1000
     )
     uncached_cost = estimate_cost("claude-opus-4-7", 1000, 0)
-    assert cached_cost == pytest.approx(0.0015, abs=1e-9)
-    assert uncached_cost == pytest.approx(0.015, abs=1e-9)
+    assert cached_cost == pytest.approx(0.0005, abs=1e-9)
+    assert uncached_cost == pytest.approx(0.005, abs=1e-9)
     # Discount ratio: 10x.
     assert uncached_cost / cached_cost == pytest.approx(10.0, rel=1e-6)
 
 
-def test_openai_cache_read_costs_half() -> None:
-    """gpt-4.1-mini: $0.40/MTok input. 1000 cached tokens cost
-    (1000 * 0.40 * 0.5) / 1e6 = $0.0002 — 2x cheaper."""
-    cached_cost = estimate_cost(
-        "gpt-4.1-mini", 0, 0, cached_input_tokens=1000
+def test_openai_cache_read_rate_is_per_model() -> None:
+    """OpenAI's cache-read discount varies by model family:
+    gpt-4o gives 50% (0.5x), the GPT-4.1 family 75% (0.25x), and the
+    GPT-5.x family 90% (0.1x). 1000 cached tokens each:"""
+    # gpt-4o: $2.50/MTok input × 0.5 → $0.00125
+    assert estimate_cost("gpt-4o", 0, 0, cached_input_tokens=1000) == pytest.approx(
+        0.00125, abs=1e-9
     )
-    uncached_cost = estimate_cost("gpt-4.1-mini", 1000, 0)
-    assert cached_cost == pytest.approx(0.0002, abs=1e-9)
-    assert uncached_cost == pytest.approx(0.0004, abs=1e-9)
+    # gpt-4.1-mini: $0.40/MTok input × 0.25 → $0.0001
+    assert estimate_cost(
+        "gpt-4.1-mini", 0, 0, cached_input_tokens=1000
+    ) == pytest.approx(0.0001, abs=1e-9)
+    # gpt-5.4: $2.50/MTok input × 0.1 → $0.00025
+    assert estimate_cost("gpt-5.4", 0, 0, cached_input_tokens=1000) == pytest.approx(
+        0.00025, abs=1e-9
+    )
 
 
 def test_anthropic_cache_write_5m_costs_1_25x() -> None:
     """5-minute TTL cache writes are billed at 1.25x the base input
-    rate. Opus 4.7 at $15/MTok × 1000 tokens × 1.25 = $0.01875."""
+    rate. Opus 4.7 at $5/MTok × 1000 tokens × 1.25 = $0.00625."""
     cost = estimate_cost(
         "claude-opus-4-7", 0, 0,
         cache_write_tokens=1000, cache_ttl="5m",
     )
-    assert cost == pytest.approx(0.01875, abs=1e-9)
+    assert cost == pytest.approx(0.00625, abs=1e-9)
 
 
 def test_anthropic_cache_write_1h_costs_2x() -> None:
-    """1-hour TTL doubles the write rate. $15 × 1000 × 2 = $0.030."""
+    """1-hour TTL doubles the write rate. $5 × 1000 × 2 = $0.010."""
     cost = estimate_cost(
         "claude-opus-4-7", 0, 0,
         cache_write_tokens=1000, cache_ttl="1h",
     )
-    assert cost == pytest.approx(0.030, abs=1e-9)
+    assert cost == pytest.approx(0.010, abs=1e-9)
 
 
 def test_openai_cache_write_costs_nothing() -> None:
@@ -148,11 +155,11 @@ def test_openai_cache_write_costs_nothing() -> None:
 
 def test_full_breakdown_anthropic_cached_run() -> None:
     """Realistic Anthropic call: 100 uncached input, 5000 cached,
-    500 output. Opus 4.7 ($15 in / $75 out). Expected:
-    100 × $15/M = $0.0015
-    5000 × $15/M × 0.1 = $0.0075
-    500 × $75/M = $0.0375
-    total = $0.0465
+    500 output. Opus 4.7 ($5 in / $25 out). Expected:
+    100 × $5/M = $0.0005
+    5000 × $5/M × 0.1 = $0.0025
+    500 × $25/M = $0.0125
+    total = $0.0155
     """
     cost = estimate_cost(
         "claude-opus-4-7",
@@ -160,7 +167,7 @@ def test_full_breakdown_anthropic_cached_run() -> None:
         output_tokens=500,
         cached_input_tokens=5000,
     )
-    assert cost == pytest.approx(0.0465, abs=1e-9)
+    assert cost == pytest.approx(0.0155, abs=1e-9)
 
 
 # ---------------------------------------------------------------------------
@@ -351,9 +358,9 @@ def test_anthropic_complete_parses_cache_fields() -> None:
     assert usage.cached_input_tokens == 1000
     assert usage.cache_write_tokens == 500
     assert usage.output_tokens == 200
-    # Cost: 50 × $15/M + 1000 × $15/M × 0.1 + 500 × $15/M × 1.25 + 200 × $75/M
-    #     = $0.00075 + $0.0015 + $0.009375 + $0.015 = $0.026625
-    assert usage.cost_usd == pytest.approx(0.026625, abs=1e-9)
+    # Cost: 50 × $5/M + 1000 × $5/M × 0.1 + 500 × $5/M × 1.25 + 200 × $25/M
+    #     = $0.00025 + $0.0005 + $0.003125 + $0.005 = $0.008875
+    assert usage.cost_usd == pytest.approx(0.008875, abs=1e-9)
 
 
 # ---------------------------------------------------------------------------
@@ -407,9 +414,9 @@ def test_openai_complete_normalises_subset_to_separate_buckets() -> None:
     assert usage.cached_input_tokens == 1500
     assert usage.cache_write_tokens == 0  # OpenAI doesn't surface
     assert usage.output_tokens == 300
-    # Cost: 500 × $0.40/M + 1500 × $0.40/M × 0.5 + 300 × $1.60/M
-    #     = $0.0002 + $0.0003 + $0.00048 = $0.00098
-    assert usage.cost_usd == pytest.approx(0.00098, abs=1e-9)
+    # Cost: 500 × $0.40/M + 1500 × $0.40/M × 0.25 + 300 × $1.60/M
+    #     = $0.0002 + $0.00015 + $0.00048 = $0.00083
+    assert usage.cost_usd == pytest.approx(0.00083, abs=1e-9)
 
 
 def test_openai_complete_with_cache_key_forwards_to_api() -> None:

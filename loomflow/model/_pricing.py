@@ -27,10 +27,23 @@ from __future__ import annotations
 import warnings
 
 # Prices in USD per **1 million tokens**, as ``(input, output)``.
-# Cached input tokens (OpenAI 50%, Anthropic ~10%) are NOT yet
-# discounted here — treat the figures as upper bounds.
+# Cached input + cache-write tokens ARE discounted in
+# :func:`estimate_cost` via the multiplier tables below (cache reads
+# can be per-model — see :data:`_CACHE_READ_OVERRIDE`).
 PRICING_PER_MTOKEN: dict[str, tuple[float, float]] = {
     # ----- OpenAI ---------------------------------------------------------
+    # GPT-5.x family (current generation). Cached input is 10% of the
+    # input rate for the whole family — see _CACHE_READ_OVERRIDE.
+    "gpt-5.5":          (5.00,  30.00),
+    "gpt-5.5-pro":      (30.00, 180.00),
+    "gpt-5.4":          (2.50,  15.00),
+    "gpt-5.4-mini":     (0.75,   4.50),
+    "gpt-5.4-nano":     (0.20,   1.25),
+    "gpt-5.4-pro":      (30.00, 180.00),
+    "gpt-5.3-codex":    (1.75,  14.00),
+    "gpt-5":            (1.25,  10.00),
+    "gpt-5-mini":       (0.25,   2.00),
+    "gpt-5-nano":       (0.05,   0.40),
     "gpt-4.1":          (2.00,   8.00),
     "gpt-4.1-mini":     (0.40,   1.60),
     "gpt-4.1-nano":     (0.10,   0.40),
@@ -43,17 +56,19 @@ PRICING_PER_MTOKEN: dict[str, tuple[float, float]] = {
     "o1":               (15.00, 60.00),
     "o1-preview":       (15.00, 60.00),
     "o1-mini":          (3.00,  12.00),
-    "o3":               (10.00, 40.00),
+    "o3-pro":           (20.00, 80.00),
+    "o3":               (2.00,   8.00),
     "o3-mini":          (1.10,   4.40),
     "o4-mini":          (1.10,   4.40),
 
     # ----- Anthropic ------------------------------------------------------
-    "claude-opus-4-7":  (15.00, 75.00),
-    "claude-opus-4-6":  (15.00, 75.00),
-    "claude-opus-4-5":  (15.00, 75.00),
+    # Opus 4.5+ dropped to $5/$25; Opus 4.1 / 4.0 keep the old $15/$75.
+    "claude-opus-4-7":  (5.00,  25.00),
+    "claude-opus-4-6":  (5.00,  25.00),
+    "claude-opus-4-5":  (5.00,  25.00),
     "claude-opus-4-1":  (15.00, 75.00),
     "claude-opus-4-0":  (15.00, 75.00),
-    "claude-opus":      (15.00, 75.00),  # generic fallback
+    "claude-opus":      (5.00,  25.00),  # generic — current-gen rate
     "claude-sonnet-4-6":(3.00,  15.00),
     "claude-sonnet-4-5":(3.00,  15.00),
     "claude-sonnet-4-0":(3.00,  15.00),
@@ -107,6 +122,31 @@ _CACHE_WRITE_MULTIPLIER: dict[str, dict[str, float]] = {
     "gemini": {"5m": 0.0, "1h": 0.0},     # cache storage billed separately
     "litellm": {"5m": 1.25, "1h": 2.0},   # assume Anthropic-style
 }
+
+# Per-model cache-read overrides. OpenAI's cache-read discount is no
+# longer uniform, so the provider-level default above is too coarse:
+#   * GPT-5.x  — cached input costs 10% of the input rate (0.1x).
+#   * GPT-4.1  — 25% (0.25x).
+# Matched by longest-prefix on the model name (like the pricing
+# table). Anything unmatched falls back to the provider default, so
+# gpt-4o keeps its historic 0.5x. Anthropic / Gemini are already
+# uniform at 0.1x and need no per-model entries.
+_CACHE_READ_OVERRIDE: dict[str, float] = {
+    "gpt-5": 0.1,
+    "gpt-4.1": 0.25,
+}
+
+
+def _cache_read_multiplier(model: str, provider: str) -> float:
+    """Cache-read discount for a model: a per-model override
+    (longest-prefix) when one applies, else the provider default."""
+    best: str | None = None
+    for key in _CACHE_READ_OVERRIDE:
+        if model.startswith(key) and (best is None or len(key) > len(best)):
+            best = key
+    if best is not None:
+        return _CACHE_READ_OVERRIDE[best]
+    return _CACHE_READ_MULTIPLIER.get(provider, 0.5)
 
 
 def _provider_for(model: str) -> str:
@@ -173,7 +213,7 @@ def estimate_cost(
     in_rate, out_rate = pricing
 
     provider = _provider_for(model)
-    read_mult = _CACHE_READ_MULTIPLIER.get(provider, 0.5)
+    read_mult = _cache_read_multiplier(model, provider)
     write_mult = _CACHE_WRITE_MULTIPLIER.get(provider, {}).get(
         cache_ttl, 1.25
     )

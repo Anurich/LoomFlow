@@ -71,20 +71,33 @@ if TYPE_CHECKING:
 # turn's prompt + response + tool I/O is the point. Substring match
 # against the model name; first hit wins. Anything unmatched falls
 # back to ``_DEFAULT_CONTEXT_WINDOW``.
+#
+# Order matters: the lookup returns the FIRST substring hit, so the
+# more-specific 1M keys must precede the 200k catch-alls (e.g.
+# "claude-sonnet-4-6" before "claude-sonnet", "gpt-5.4" before
+# "gpt-5").
 _KNOWN_CONTEXT_WINDOWS: dict[str, int] = {
-    # Claude family
-    "claude-opus-4-7": 200_000,
-    "claude-opus-4-6": 200_000,
+    # Claude family — Opus 4.6/4.7 + Sonnet 4.6 expanded to 1M; older
+    # Opus (4.5/4.1/4.0), Sonnet 4.5/4, and Haiku stay at 200k.
+    "claude-opus-4-7": 1_000_000,
+    "claude-opus-4-6": 1_000_000,
     "claude-opus-4": 200_000,
+    "claude-sonnet-4-6": 1_000_000,
     "claude-sonnet": 200_000,
     "claude-haiku": 200_000,
     "claude-3-5": 200_000,
-    # OpenAI family
+    # OpenAI family — GPT-5.x: 5.5 = 1M, 5.4 = 1.05M, 5/codex = 400k.
+    "gpt-5.5": 1_000_000,
+    "gpt-5.4": 1_050_000,
+    "gpt-5.3": 400_000,
+    "gpt-5": 400_000,
     "gpt-4.1": 1_000_000,
     "gpt-4o": 128_000,
     "gpt-4-turbo": 128_000,
     "gpt-4": 8_192,
     "gpt-3.5": 16_385,
+    "o3": 200_000,
+    "o4": 200_000,
     "o1": 200_000,
     # Gemini
     "gemini-1.5": 1_000_000,
