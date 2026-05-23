@@ -58,6 +58,7 @@ genuinely nothing to work with.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -113,6 +114,49 @@ _STATUS_SYNONYMS: dict[str, str] = {
 }
 
 
+# Trailing status markers the model tends to append to a step's
+# DESCRIPTION instead of setting the ``status`` field — e.g.
+# "Summarise app.py DONE". Left unparsed, the status stays ``todo``,
+# the plan reads 0/N done forever, and the agent re-plans in a loop.
+# We promote such a marker to the status field. Deliberately
+# conservative: the words are matched CASE-SENSITIVELY in all-caps
+# (so a description merely ending in lowercase "done" is NOT a false
+# positive), and a separator before the marker is required. Bare
+# "TODO" is intentionally excluded — it's a common code term, and
+# ``todo`` is the harmless default anyway (use ``[ ]`` for explicit
+# todo).
+_TRAILING_MARKER_RE = re.compile(
+    r"[\s\-–—:|]+(DONE|DOING|BLOCKED|SKIPPED|\[[ xX]\]|✓|✗)[\s.)\]]*$"
+)
+_MARKER_STATUS: dict[str, str] = {
+    "DONE": "done",
+    "[x]": "done",
+    "[X]": "done",
+    "✓": "done",
+    "DOING": "doing",
+    "BLOCKED": "blocked",
+    "SKIPPED": "skipped",
+    "✗": "skipped",
+    "[ ]": "todo",
+}
+
+
+def _split_trailing_marker(text: str) -> tuple[str, str | None]:
+    """Return ``(description_without_marker, status_or_None)``.
+
+    Recognises a status marker appended to the END of a step
+    description (the "... DONE" failure mode). Returns the cleaned
+    description plus the canonical status, or ``(text, None)`` when no
+    explicit trailing marker is present."""
+    m = _TRAILING_MARKER_RE.search(text)
+    if m is None:
+        return text, None
+    status = _MARKER_STATUS.get(m.group(1))
+    if status is None:
+        return text, None
+    return text[: m.start()].rstrip(), status
+
+
 @dataclass(slots=True)
 class LivingPlanStep:
     """One step of a :class:`LivingPlan`.
@@ -141,6 +185,16 @@ class LivingPlanStep:
     verified_by: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
+        # Promote a status marker the model appended to the description
+        # (e.g. "... DONE") into the status field — but only when the
+        # field is still the default ``todo`` (never override a status
+        # the model set explicitly). Strip the marker either way so the
+        # rendered description stays clean.
+        cleaned, marker_status = _split_trailing_marker(self.description)
+        if marker_status is not None:
+            self.description = cleaned
+            if self.status == "todo":
+                self.status = marker_status
         if self.status not in VALID_STATUSES:
             low = self.status.lower()
             self.status = _STATUS_SYNONYMS.get(low, "todo")

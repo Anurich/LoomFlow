@@ -69,6 +69,47 @@ def test_step_unknown_status_falls_back_to_todo() -> None:
     assert step.status == "todo"
 
 
+def test_step_trailing_marker_promoted_to_status() -> None:
+    """The model often marks completion by appending "... DONE" to the
+    description instead of setting the status field, which leaves the
+    plan stuck at 0/N done and the agent re-plans in a loop. A trailing
+    marker is promoted to the status field and stripped from the text."""
+    for desc, want_status, want_desc in [
+        ("Summarise app.py DONE", "done", "Summarise app.py"),
+        ("Outline the UI design. DONE", "done", "Outline the UI design."),
+        ("Work on the parser DOING", "doing", "Work on the parser"),
+        ("Investigate the flake BLOCKED", "blocked", "Investigate the flake"),
+        ("Write tests [x]", "done", "Write tests"),
+        ("Draft the API [ ]", "todo", "Draft the API"),
+    ]:
+        step = LivingPlanStep(description=desc)
+        assert step.status == want_status, desc
+        assert step.description == want_desc, desc
+
+
+def test_step_trailing_marker_no_false_positive() -> None:
+    """Conservative: only an explicit ALL-CAPS / checkbox marker at the
+    end promotes. A description that merely ends in lowercase "done", or
+    mentions TODO mid-sentence, is left exactly as-is (status ``todo``)."""
+    for desc in [
+        "ensure the build is done",
+        "add a TODO comment to the file",
+        "rename the done_handler function",
+    ]:
+        step = LivingPlanStep(description=desc)
+        assert step.status == "todo", desc
+        assert step.description == desc, desc
+
+
+def test_step_explicit_status_beats_trailing_marker() -> None:
+    """An explicitly-set non-todo status wins over a conflicting trailing
+    marker (trust the structured field), but the marker is still stripped
+    from the rendered description."""
+    step = LivingPlanStep(description="Step W DONE", status="doing")
+    assert step.status == "doing"
+    assert step.description == "Step W"
+
+
 # ---------------------------------------------------------------------------
 # LivingPlan rendering
 # ---------------------------------------------------------------------------
