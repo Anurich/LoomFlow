@@ -22,6 +22,7 @@ import pytest
 from loomflow import Agent, ConfigError, Episode, InMemoryMemory, resolve_memory
 from loomflow.memory import LazyMemory, SqliteMemory
 from loomflow.memory.embedder import HashEmbedder
+from loomflow.memory.resolver import _default_embedder
 
 pytestmark = pytest.mark.anyio
 
@@ -339,3 +340,18 @@ async def test_lazy_memory_wraps_builder_exception_in_memory_store_error(
     lazy = LazyMemory(bad_builder, description="postgres://no-such")
     with pytest.raises(MemoryStoreError, match="postgres://no-such"):
         await lazy.working()
+
+
+def test_default_embedder_env_override_forces_hash(monkeypatch) -> None:
+    # LOOMFLOW_EMBEDDER wins even when OPENAI_API_KEY is present —
+    # the opt-out that stops cross-provider OpenAI calls on a
+    # Claude/Gemini/local-driven run.
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("LOOMFLOW_EMBEDDER", "hash")
+    assert isinstance(_default_embedder(), HashEmbedder)
+
+
+def test_default_embedder_no_override_uses_hash_without_key(monkeypatch) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("LOOMFLOW_EMBEDDER", raising=False)
+    assert isinstance(_default_embedder(), HashEmbedder)

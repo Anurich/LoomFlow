@@ -372,11 +372,27 @@ def _resolve_embedder(spec: Any) -> Embedder:
 def _default_embedder() -> Embedder:
     """Pick a sensible embedder based on the environment.
 
-    OpenAI by default when ``OPENAI_API_KEY`` is set (production-
-    quality semantic search); falls back to :class:`HashEmbedder`
-    otherwise (deterministic, zero-key — fine for dev / tests, not
-    for production retrieval quality).
+    Resolution order:
+
+    1. ``LOOMFLOW_EMBEDDER`` env var, if set — an explicit global
+       override (same string forms as the ``embedder=`` spec:
+       ``"hash"`` / ``"openai"`` / ``"openai-large"`` / ``"voyage"``
+       / ``"cohere"``). Lets a deployment that drives a *non-OpenAI*
+       chat model (Claude, Gemini, local) force ``"hash"`` so memory
+       recall never makes a cross-provider OpenAI embeddings call —
+       the footgun that otherwise surfaces as an OpenAI 429 during
+       fact recall on an OpenAI-keyed-but-Claude-driven run.
+    2. Otherwise OpenAI when ``OPENAI_API_KEY`` is set (production-
+       quality semantic search).
+    3. Otherwise :class:`HashEmbedder` (deterministic, zero-key —
+       fine for dev / tests, not for production retrieval quality).
     """
+    override = os.environ.get("LOOMFLOW_EMBEDDER")
+    if override:
+        # Reuse the string resolver so the env var accepts every form
+        # ``embedder=`` does, and errors identically on a typo.
+        return _resolve_embedder(override.strip().lower())
+
     if os.environ.get("OPENAI_API_KEY"):
         try:
             from .embedder import OpenAIEmbedder
