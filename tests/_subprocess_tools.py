@@ -39,3 +39,23 @@ async def async_double(x: int) -> int:
     """Async variant of :func:`double` so we exercise the
     ``asyncio.run`` branch in the worker."""
     return x * 2
+
+
+def write_under(path: str, content: str) -> str:
+    """Write ``content`` to ``path`` — used by OSSandbox tests to check
+    write containment. Returns ``"wrote"`` on success; raises on a
+    kernel-denied write so the sandbox surfaces it as a tool error."""
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(content)
+    return "wrote"
+
+
+def reach_network() -> str:
+    """Attempt an outbound TCP connect — used by OSSandbox tests to check
+    network policy. Returns ``"connected"`` if the socket opens; raises
+    otherwise (a kernel-denied connection surfaces as a tool error)."""
+    import socket
+
+    s = socket.create_connection(("1.1.1.1", 53), timeout=3)
+    s.close()
+    return "connected"

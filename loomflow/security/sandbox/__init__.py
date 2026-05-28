@@ -15,12 +15,22 @@ What's here today:
   ``file``, ``directory``, ...) or by the value containing ``/``;
   callers can also pass an explicit ``path_args=`` allowlist.
 
-OS-level isolation backends (Bubblewrap on Linux, Seatbelt on macOS,
-gVisor/Docker for cross-platform) live in subsequent slices.
+* :class:`OSSandbox` — kernel-enforced isolation: Seatbelt
+  (``sandbox-exec``) on macOS, Bubblewrap (``bwrap``) on Linux, and a
+  graceful degrade to ``FilesystemSandbox(SubprocessSandbox(...))`` on
+  platforms with no backend (Windows, or Linux without ``bwrap``). The
+  active backend is reported via ``OSSandbox.mode``.
 """
 
 from .base import NoSandbox
 from .filesystem import FilesystemSandbox
+from .os_sandbox import OSSandbox, SandboxMode
 from .subprocess_ import SubprocessSandbox
 
-__all__ = ["FilesystemSandbox", "NoSandbox", "SubprocessSandbox"]
+__all__ = [
+    "FilesystemSandbox",
+    "NoSandbox",
+    "OSSandbox",
+    "SandboxMode",
+    "SubprocessSandbox",
+]
