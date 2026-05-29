@@ -105,6 +105,7 @@ from .security import (
     InMemoryAuditLog,
     Mode,
     NoSandbox,
+    OSSandbox,
     StandardPermissions,
 )
 from .tools import LivingPlan, LivingPlanStep, Tool, tool, web_tool
@@ -183,6 +184,7 @@ __all__ = [
     "NoBudget",
     "NoTelemetry",
     "NoSandbox",
+    "OSSandbox",
     "AllowAll",
     "Mode",
     "StandardPermissions",

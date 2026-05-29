@@ -12,7 +12,13 @@ from .audit import (
 from .hooks import HookRegistry, PostToolHook, PreToolHook
 from .permissions import AllowAll, Mode, PerUserPermissions, StandardPermissions
 from .permissions_resolver import resolve_permissions
-from .sandbox import FilesystemSandbox, NoSandbox, SubprocessSandbox
+from .sandbox import (
+    FilesystemSandbox,
+    NoSandbox,
+    OSSandbox,
+    SandboxMode,
+    SubprocessSandbox,
+)
 from .secrets import DictSecrets, EnvSecrets
 
 __all__ = [
@@ -28,9 +34,11 @@ __all__ = [
     "InMemoryAuditLog",
     "Mode",
     "NoSandbox",
+    "OSSandbox",
     "PerUserPermissions",
     "PostToolHook",
     "PreToolHook",
+    "SandboxMode",
     "StandardPermissions",
     "SubprocessSandbox",
     "resolve_audit_log",
