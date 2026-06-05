@@ -46,7 +46,7 @@ Public API tiers:
 # Top-level (Tier 1) — the daily-use API surface.
 # ---------------------------------------------------------------------------
 
-from .agent import Agent
+from .agent import Agent, Tuning
 from .agent.auto_compact import context_window_for, maybe_auto_compact
 from .agent.snip import snip_messages
 from .agent.stop_hooks import StopHook, StopHookResult
@@ -129,6 +129,7 @@ __all__ = [
     "__version__",
     # ----- Daily-use building blocks -----
     "Agent",
+    "Tuning",
     "Workflow",
     "WorkflowResult",
     "step",

@@ -29,7 +29,9 @@ from __future__ import annotations
 
 import contextlib
 import json
+import warnings
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from dataclasses import dataclass, fields
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -89,6 +91,81 @@ Emit = Callable[[Event], Awaitable[None]]
 _NULL_CTX: contextlib.AbstractAsyncContextManager[None] = contextlib.nullcontext()
 
 
+@dataclass(frozen=True)
+class Tuning:
+    """Rarely-touched performance / behaviour knobs for an :class:`Agent`.
+
+    Every field has a production-safe default, so ``Tuning()`` alone is a
+    complete, valid config. Pass it as ``Agent(..., tuning=Tuning(...))``
+    to override a knob the 99% never touch::
+
+        Agent("be helpful", model="gpt-4o")                      # common
+        Agent("...", model="...", tuning=Tuning(retry_policy=p)) # rare
+
+    Rule of thumb: if a knob adds a *capability* (a tool, a skill, an
+    architecture, a budget) it stays a top-level ``Agent`` argument. Only
+    knobs that *tune existing behaviour* belong here.
+    """
+
+    retry_policy: RetryPolicy | None = None
+    tool_result_summary_threshold: int = 500
+    auto_compact_summariser: Model | str | None = None
+    auto_compact_keep_recent_turns: int = 4
+    tool_transcript_max_bytes: int = 50_000
+    max_stop_hook_iterations: int = 15
+    stop_hooks: list[StopHook] | None = None
+    secrets: Any | None = None
+    auto_consolidate: bool = False
+    response_tone: str | None = None
+
+
+# The fields that moved from flat ``Agent(...)`` kwargs into ``Tuning``.
+# Used by the deprecation shim to recognise legacy kwargs and forward them.
+_TUNING_FIELDS: frozenset[str] = frozenset(f.name for f in fields(Tuning))
+
+
+def _absorb_legacy_tuning(
+    tuning: Tuning | None, legacy: dict[str, Any]
+) -> Tuning:
+    """Merge legacy flat kwargs into a :class:`Tuning`, warning on each.
+
+    Pre-0.11 callers passed these knobs flat: ``Agent(retry_policy=...)``.
+    They now live on ``Tuning``. For one or two minor versions we keep the
+    flat form working: any recognised legacy kwarg is forwarded onto a
+    ``Tuning`` (with a :class:`DeprecationWarning` naming the exact fix),
+    while genuinely unknown kwargs still raise ``TypeError`` so typos are
+    not silently swallowed. Explicit ``tuning=`` wins over a flat kwarg of
+    the same name.
+    """
+    moved = {k: v for k, v in legacy.items() if k in _TUNING_FIELDS}
+    unknown = {k for k in legacy if k not in _TUNING_FIELDS}
+    if unknown:
+        raise TypeError(
+            "Agent() got unexpected keyword argument(s): "
+            + ", ".join(sorted(unknown))
+        )
+    if not moved:
+        return tuning if tuning is not None else Tuning()
+    warnings.warn(
+        "Passing "
+        + ", ".join(f"{k}=" for k in sorted(moved))
+        + " directly to Agent() is deprecated; pass them via "
+        + "tuning=Tuning(" + ", ".join(f"{k}=..." for k in sorted(moved))
+        + "). The flat form will be removed in a future release.",
+        DeprecationWarning,
+        stacklevel=3,
+    )
+    base = tuning if tuning is not None else Tuning()
+    # Explicit ``tuning=`` wins: only fill fields the caller left at default
+    # AND supplied via a legacy kwarg.
+    overrides = {
+        k: v for k, v in moved.items()
+        if getattr(base, k) == getattr(Tuning(), k)
+    }
+    from dataclasses import replace
+    return replace(base, **overrides)
+
+
 class Agent:
     """A fully-async, MCP-native, model-agnostic agent harness."""
 
@@ -110,31 +187,40 @@ class Agent:
         telemetry: Telemetry | str | Mapping[str, Any] | None = None,
         audit_log: AuditLog | str | Path | dict[str, Any] | None = None,
         max_turns: int = DEFAULT_MAX_TURNS,
-        auto_consolidate: bool = False,
         architecture: Architecture | str | None = None,
         skills: list[Any] | None = None,
-        retry_policy: RetryPolicy | None = None,
         auto_extract: bool | None = None,
         approval_handler: Any | None = None,
-        secrets: Any | None = None,
         output_schema: type[BaseModel] | Any | None = None,
-        response_tone: str | None = None,
         effort: str | None = None,
         strict_effort: bool = False,
         prompt_caching: bool | Mapping[str, Any] | None = None,
         workspace: Any | str | Mapping[str, Any] | None = None,
         living_plan: Any = None,
-        stop_hooks: list[StopHook] | None = None,
-        max_stop_hook_iterations: int = 15,
         tool_result_summarizer: Model | str | None = None,
-        tool_result_summary_threshold: int = 500,
         snip_window: int = 0,
         auto_compact_at_tokens: int | None = None,
-        auto_compact_summariser: Model | str | None = None,
-        auto_compact_keep_recent_turns: int = 4,
         persist_tool_transcripts: bool = False,
-        tool_transcript_max_bytes: int = 50_000,
+        tuning: Tuning | None = None,
+        **_legacy: Any,
     ) -> None:
+        # ``tuning`` carries the rarely-touched knobs (see :class:`Tuning`).
+        # Pre-0.11 callers passed these flat; ``_absorb_legacy_tuning`` keeps
+        # that working (with a DeprecationWarning) and rejects real typos.
+        # We unpack the resolved Tuning into the same local names the body
+        # below already uses, so nothing downstream changes.
+        tuning = _absorb_legacy_tuning(tuning, _legacy)
+        retry_policy = tuning.retry_policy
+        tool_result_summary_threshold = tuning.tool_result_summary_threshold
+        auto_compact_summariser = tuning.auto_compact_summariser
+        auto_compact_keep_recent_turns = tuning.auto_compact_keep_recent_turns
+        tool_transcript_max_bytes = tuning.tool_transcript_max_bytes
+        max_stop_hook_iterations = tuning.max_stop_hook_iterations
+        stop_hooks = tuning.stop_hooks
+        secrets = tuning.secrets
+        auto_consolidate = tuning.auto_consolidate
+        response_tone = tuning.response_tone
+
         # Skills — packaged on-disk playbooks loaded on demand.
         # Build the registry first so frontmatter validation fires
         # at construction time (not later, when the model first
@@ -1304,16 +1390,19 @@ class Agent:
             architecture=architecture,
             effort=effort,
             strict_effort=strict_effort,
-            response_tone=response_tone,
             max_turns=int(max_turns),
-            auto_consolidate=auto_consolidate,
             auto_extract=auto_extract,
             skills=skill_specs or None,
-            secrets=secrets,
             hooks=hooks,
-            retry_policy=retry_policy,
             approval_handler=approval_handler,
             living_plan=living_plan_arg,
+            # Rarely-touched knobs go through Tuning (see loomflow.Tuning).
+            tuning=Tuning(
+                response_tone=response_tone,
+                auto_consolidate=auto_consolidate,
+                secrets=secrets,
+                retry_policy=retry_policy,
+            ),
         )
 
     @classmethod

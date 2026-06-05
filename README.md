@@ -812,7 +812,7 @@ the framework refuses to silently retry errors it doesn't understand.
 Tune the policy per-Agent:
 
 ```python
-from loomflow import Agent
+from loomflow import Agent, Tuning
 from loomflow.governance import RetryPolicy
 
 # Default (production-sensible)
@@ -820,19 +820,19 @@ agent = Agent("...", model="gpt-4.1-mini")
 
 # Aggressive — tolerates long provider blips
 agent = Agent("...", model="gpt-4.1-mini",
-              retry_policy=RetryPolicy.aggressive())
+              tuning=Tuning(retry_policy=RetryPolicy.aggressive()))
 
 # Disabled — handle errors yourself
 agent = Agent("...", model="gpt-4.1-mini",
-              retry_policy=RetryPolicy.disabled())
+              tuning=Tuning(retry_policy=RetryPolicy.disabled()))
 
 # Custom
 agent = Agent("...", model="gpt-4.1-mini",
-              retry_policy=RetryPolicy(
+              tuning=Tuning(retry_policy=RetryPolicy(
                   max_attempts=4,
                   initial_delay_s=0.5,
                   max_delay_s=15.0,
-              ))
+              )))
 ```
 
 Behaviour highlights:
@@ -847,8 +847,8 @@ Behaviour highlights:
   policy.
 * **Custom Models are not auto-wrapped.** The framework only
   wraps its in-tree adapters by default because it knows their
-  error classes. Custom Models opt in by passing `retry_policy=`
-  explicitly to `Agent(...)`.
+  error classes. Custom Models opt in by passing
+  `tuning=Tuning(retry_policy=...)` to `Agent(...)`.
 
 ---
 
@@ -1203,7 +1203,7 @@ End-to-end demo: [`examples/03_multi_user_sessions.py`](examples/03_multi_user_s
 | **Auto fact extraction** | Default ON for real network models. Each `agent.run()` finishes by extracting structured `(subject, predicate, object)` facts from the conversation and writing them to the user-partitioned bi-temporal fact store. "Your bot just remembers" with no manual `Consolidator` calls. Best-effort: failures don't break the run. Emits `loom.auto_extract.duration_ms` + invocations metrics for observability. | `Agent(auto_extract=)`; `from loomflow.memory import AutoExtractMemory, Consolidator` |
 | **Bounded per-user state** | `StandardBudget` and `InMemoryMemory` cap their per-user dicts at 100k users by default with 24h idle-TTL eviction so multi-tenant deployments can't OOM under runaway tenants or one-shot user_id explosions. LRU eviction order; durable backends (Sqlite/Postgres) for callers needing spill-to-disk. | `BoundedDict`, `StandardBudget(max_users=, user_idle_ttl_seconds=)`, `InMemoryMemory(max_users=, user_idle_ttl_seconds=)` |
 | **Approval handler** | Permissions returning `Decision.ask_(...)` route through `Agent(approval_handler=callable)` so destructive tool calls can be gated by a human / Slack / ticket prompt. Without a handler, `ask` falls back to deny — no silent bypass. Handlers that raise are treated as deny too. | `Agent(approval_handler=)`, `ApprovalHandler` |
-| **Secrets protocol** | `Agent(secrets=...)` resolves API keys via `api_key=` → `secrets.lookup_sync` → `os.environ` precedence. `EnvSecrets` (default, env-var backed) and `DictSecrets` (in-memory) ship in-tree; production callers wire their own vault adapter. `redact()` masks common API-key shapes for safe audit log output. | `EnvSecrets`, `DictSecrets`, `Secrets` protocol, `Agent(secrets=)` |
+| **Secrets protocol** | `Agent(tuning=Tuning(secrets=...))` resolves API keys via `api_key=` → `secrets.lookup_sync` → `os.environ` precedence. `EnvSecrets` (default, env-var backed) and `DictSecrets` (in-memory) ship in-tree; production callers wire their own vault adapter. `redact()` masks common API-key shapes for safe audit log output. | `EnvSecrets`, `DictSecrets`, `Secrets` protocol, `Agent(tuning=Tuning(secrets=))` |
 | **Structured outputs** | Pass `output_schema=` to get a typed, validated Pydantic instance back. Framework augments the system prompt with the schema, parses + validates, retries with feedback on failure | `Agent.run(output_schema=)`, `RunResult.parsed`, `OutputValidationError` |
 | **Resilient model calls** | Network adapters auto-wrapped with retry-on-transient (rate limit, 5xx, network blip). Typed error taxonomy. Provider `Retry-After` honoured. | `RetryPolicy`, `RetryPolicy.disabled/aggressive`, `ModelError`, `TransientModelError`, `RateLimitError`, `PermanentModelError`, `AuthenticationError`, `InvalidRequestError`, `ContentFilterError`, `classify_model_error` |
 | **Architecture protocol** | Pluggable agent-loop strategy: 12 architectures shipped. `ReAct` is top-level (the default); the others are accessed via `from loomflow.architecture import SelfRefine, Reflexion, ...` | `Architecture`, `ReAct` (top-level); `loomflow.architecture.{SelfRefine, Reflexion, TreeOfThoughts, PlanAndExecute, ReWOO, Router, Supervisor, ActorCritic, MultiAgentDebate, Swarm, BlackboardArchitecture}` |

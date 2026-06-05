@@ -7,6 +7,48 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 For development-history detail (per-slice notes, file maps, gate
 counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 
+## [Unreleased]
+
+### Added — `Tuning` config object for rarely-touched Agent knobs
+
+`Agent.__init__` had grown to 37 keyword arguments, mixing the four
+everyone uses (`instructions`, `model`, `tools`, `memory`) with a long
+tail of knobs almost nobody sets. The signature is the most-read piece
+of documentation a framework has, and that tail taxed every reader.
+
+Ten of those knobs now live on a single optional, typed
+`Tuning` dataclass (exported as `loomflow.Tuning`). Every field has a
+production-safe default, so `Tuning()` alone is a complete config:
+
+```python
+Agent("be helpful", model="gpt-4o")                       # the 99%
+Agent("...", model="...", tuning=Tuning(retry_policy=p))  # the 1%
+```
+
+**Moved into `Tuning`:** `retry_policy`, `tool_result_summary_threshold`,
+`auto_compact_summariser`, `auto_compact_keep_recent_turns`,
+`tool_transcript_max_bytes`, `max_stop_hook_iterations`, `stop_hooks`,
+`secrets`, `auto_consolidate`, `response_tone`. These were chosen by
+real usage (grepped across loom-code, the desktop sidecar, examples and
+tests) — every knob still set by a real caller stayed top-level.
+
+`Agent.__init__` drops from 37 → 27 top-level kwargs; the six
+`Team.*` builders (`supervisor`/`swarm`/`router`/`debate`/
+`actor_critic`/`blackboard`) now forward these knobs to the coordinator
+as one `Tuning` instead of ten flat kwargs.
+
+### Deprecated — flat form of the moved knobs
+
+Passing any of the ten moved knobs **directly** to `Agent(...)` (the
+pre-`Tuning` form) still works for now but emits a `DeprecationWarning`
+naming the exact replacement (`pass them via tuning=Tuning(...)`). The
+flat form will be removed in a future release. An explicit `tuning=`
+wins over a legacy flat kwarg of the same name, and genuinely unknown
+kwargs still raise `TypeError` (the shim absorbs only recognised
+`Tuning` fields, so typos are not silently swallowed).
+
+No behaviour changes for existing code on upgrade — only a warning.
+
 ## [0.10.20] — 2026-05-16
 
 ### Added — Comprehensive Agent-kwarg forwarding through Team.* builders

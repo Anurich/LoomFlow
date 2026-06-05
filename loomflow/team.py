@@ -54,7 +54,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any
 
-from .agent.api import DEFAULT_MAX_TURNS, Agent
+from .agent.api import DEFAULT_MAX_TURNS, Agent, Tuning
 from .architecture import (
     ActorCritic,
     Architecture,
@@ -232,30 +232,35 @@ class Team:
             telemetry=telemetry,
             audit_log=audit_log,
             max_turns=max_turns,
-            auto_consolidate=auto_consolidate,
             skills=skills,
             workspace=coord_ws,
             living_plan=living_plan,
-            stop_hooks=stop_hooks,
-            max_stop_hook_iterations=max_stop_hook_iterations,
             prompt_caching=prompt_caching,
             tool_result_summarizer=tool_result_summarizer,
-            tool_result_summary_threshold=(
-                tool_result_summary_threshold
-            ),
             persist_tool_transcripts=persist_tool_transcripts,
-            tool_transcript_max_bytes=tool_transcript_max_bytes,
             snip_window=snip_window,
             auto_compact_at_tokens=auto_compact_at_tokens,
-            auto_compact_summariser=auto_compact_summariser,
-            auto_compact_keep_recent_turns=(
-                auto_compact_keep_recent_turns
-            ),
-            retry_policy=retry_policy,
             auto_extract=auto_extract,
             approval_handler=approval_handler,
-            secrets=secrets,
-            response_tone=response_tone,
+            # Rarely-touched knobs forwarded as one Tuning (was 10 flat
+            # kwargs; see loomflow.Tuning). ``auto_consolidate`` joins it
+            # just below at the original call site.
+            tuning=Tuning(
+                stop_hooks=stop_hooks,
+                max_stop_hook_iterations=max_stop_hook_iterations,
+                tool_result_summary_threshold=(
+                    tool_result_summary_threshold
+                ),
+                tool_transcript_max_bytes=tool_transcript_max_bytes,
+                auto_compact_summariser=auto_compact_summariser,
+                auto_compact_keep_recent_turns=(
+                    auto_compact_keep_recent_turns
+                ),
+                retry_policy=retry_policy,
+                secrets=secrets,
+                response_tone=response_tone,
+                auto_consolidate=auto_consolidate,
+            ),
             effort=effort,
             strict_effort=strict_effort,
             architecture=Supervisor(
@@ -392,30 +397,35 @@ class Team:
             telemetry=telemetry,
             audit_log=audit_log,
             max_turns=max_turns,
-            auto_consolidate=auto_consolidate,
             skills=skills,
             workspace=entry_ws,
             living_plan=living_plan,
-            stop_hooks=stop_hooks,
-            max_stop_hook_iterations=max_stop_hook_iterations,
             prompt_caching=prompt_caching,
             tool_result_summarizer=tool_result_summarizer,
-            tool_result_summary_threshold=(
-                tool_result_summary_threshold
-            ),
             persist_tool_transcripts=persist_tool_transcripts,
-            tool_transcript_max_bytes=tool_transcript_max_bytes,
             snip_window=snip_window,
             auto_compact_at_tokens=auto_compact_at_tokens,
-            auto_compact_summariser=auto_compact_summariser,
-            auto_compact_keep_recent_turns=(
-                auto_compact_keep_recent_turns
-            ),
-            retry_policy=retry_policy,
             auto_extract=auto_extract,
             approval_handler=approval_handler,
-            secrets=secrets,
-            response_tone=response_tone,
+            # Rarely-touched knobs forwarded as one Tuning (was 10 flat
+            # kwargs; see loomflow.Tuning). ``auto_consolidate`` joins it
+            # just below at the original call site.
+            tuning=Tuning(
+                stop_hooks=stop_hooks,
+                max_stop_hook_iterations=max_stop_hook_iterations,
+                tool_result_summary_threshold=(
+                    tool_result_summary_threshold
+                ),
+                tool_transcript_max_bytes=tool_transcript_max_bytes,
+                auto_compact_summariser=auto_compact_summariser,
+                auto_compact_keep_recent_turns=(
+                    auto_compact_keep_recent_turns
+                ),
+                retry_policy=retry_policy,
+                secrets=secrets,
+                response_tone=response_tone,
+                auto_consolidate=auto_consolidate,
+            ),
             effort=effort,
             strict_effort=strict_effort,
             architecture=Swarm(
@@ -540,30 +550,35 @@ class Team:
             telemetry=telemetry,
             audit_log=audit_log,
             max_turns=max_turns,
-            auto_consolidate=auto_consolidate,
             skills=skills,
             workspace=workspace,
             living_plan=living_plan,
-            stop_hooks=stop_hooks,
-            max_stop_hook_iterations=max_stop_hook_iterations,
             prompt_caching=prompt_caching,
             tool_result_summarizer=tool_result_summarizer,
-            tool_result_summary_threshold=(
-                tool_result_summary_threshold
-            ),
             persist_tool_transcripts=persist_tool_transcripts,
-            tool_transcript_max_bytes=tool_transcript_max_bytes,
             snip_window=snip_window,
             auto_compact_at_tokens=auto_compact_at_tokens,
-            auto_compact_summariser=auto_compact_summariser,
-            auto_compact_keep_recent_turns=(
-                auto_compact_keep_recent_turns
-            ),
-            retry_policy=retry_policy,
             auto_extract=auto_extract,
             approval_handler=approval_handler,
-            secrets=secrets,
-            response_tone=response_tone,
+            # Rarely-touched knobs forwarded as one Tuning (was 10 flat
+            # kwargs; see loomflow.Tuning). ``auto_consolidate`` joins it
+            # just below at the original call site.
+            tuning=Tuning(
+                stop_hooks=stop_hooks,
+                max_stop_hook_iterations=max_stop_hook_iterations,
+                tool_result_summary_threshold=(
+                    tool_result_summary_threshold
+                ),
+                tool_transcript_max_bytes=tool_transcript_max_bytes,
+                auto_compact_summariser=auto_compact_summariser,
+                auto_compact_keep_recent_turns=(
+                    auto_compact_keep_recent_turns
+                ),
+                retry_policy=retry_policy,
+                secrets=secrets,
+                response_tone=response_tone,
+                auto_consolidate=auto_consolidate,
+            ),
             effort=effort,
             strict_effort=strict_effort,
             architecture=Router(
@@ -675,30 +690,35 @@ class Team:
             telemetry=telemetry,
             audit_log=audit_log,
             max_turns=max_turns,
-            auto_consolidate=auto_consolidate,
             skills=skills,
             workspace=workspace,
             living_plan=living_plan,
-            stop_hooks=stop_hooks,
-            max_stop_hook_iterations=max_stop_hook_iterations,
             prompt_caching=prompt_caching,
             tool_result_summarizer=tool_result_summarizer,
-            tool_result_summary_threshold=(
-                tool_result_summary_threshold
-            ),
             persist_tool_transcripts=persist_tool_transcripts,
-            tool_transcript_max_bytes=tool_transcript_max_bytes,
             snip_window=snip_window,
             auto_compact_at_tokens=auto_compact_at_tokens,
-            auto_compact_summariser=auto_compact_summariser,
-            auto_compact_keep_recent_turns=(
-                auto_compact_keep_recent_turns
-            ),
-            retry_policy=retry_policy,
             auto_extract=auto_extract,
             approval_handler=approval_handler,
-            secrets=secrets,
-            response_tone=response_tone,
+            # Rarely-touched knobs forwarded as one Tuning (was 10 flat
+            # kwargs; see loomflow.Tuning). ``auto_consolidate`` joins it
+            # just below at the original call site.
+            tuning=Tuning(
+                stop_hooks=stop_hooks,
+                max_stop_hook_iterations=max_stop_hook_iterations,
+                tool_result_summary_threshold=(
+                    tool_result_summary_threshold
+                ),
+                tool_transcript_max_bytes=tool_transcript_max_bytes,
+                auto_compact_summariser=auto_compact_summariser,
+                auto_compact_keep_recent_turns=(
+                    auto_compact_keep_recent_turns
+                ),
+                retry_policy=retry_policy,
+                secrets=secrets,
+                response_tone=response_tone,
+                auto_consolidate=auto_consolidate,
+            ),
             effort=effort,
             strict_effort=strict_effort,
             architecture=MultiAgentDebate(
@@ -805,30 +825,35 @@ class Team:
             telemetry=telemetry,
             audit_log=audit_log,
             max_turns=max_turns,
-            auto_consolidate=auto_consolidate,
             skills=skills,
             workspace=workspace,
             living_plan=living_plan,
-            stop_hooks=stop_hooks,
-            max_stop_hook_iterations=max_stop_hook_iterations,
             prompt_caching=prompt_caching,
             tool_result_summarizer=tool_result_summarizer,
-            tool_result_summary_threshold=(
-                tool_result_summary_threshold
-            ),
             persist_tool_transcripts=persist_tool_transcripts,
-            tool_transcript_max_bytes=tool_transcript_max_bytes,
             snip_window=snip_window,
             auto_compact_at_tokens=auto_compact_at_tokens,
-            auto_compact_summariser=auto_compact_summariser,
-            auto_compact_keep_recent_turns=(
-                auto_compact_keep_recent_turns
-            ),
-            retry_policy=retry_policy,
             auto_extract=auto_extract,
             approval_handler=approval_handler,
-            secrets=secrets,
-            response_tone=response_tone,
+            # Rarely-touched knobs forwarded as one Tuning (was 10 flat
+            # kwargs; see loomflow.Tuning). ``auto_consolidate`` joins it
+            # just below at the original call site.
+            tuning=Tuning(
+                stop_hooks=stop_hooks,
+                max_stop_hook_iterations=max_stop_hook_iterations,
+                tool_result_summary_threshold=(
+                    tool_result_summary_threshold
+                ),
+                tool_transcript_max_bytes=tool_transcript_max_bytes,
+                auto_compact_summariser=auto_compact_summariser,
+                auto_compact_keep_recent_turns=(
+                    auto_compact_keep_recent_turns
+                ),
+                retry_policy=retry_policy,
+                secrets=secrets,
+                response_tone=response_tone,
+                auto_consolidate=auto_consolidate,
+            ),
             effort=effort,
             strict_effort=strict_effort,
             architecture=ActorCritic(
@@ -956,30 +981,35 @@ class Team:
             telemetry=telemetry,
             audit_log=audit_log,
             max_turns=max_turns,
-            auto_consolidate=auto_consolidate,
             skills=skills,
             workspace=coord_ws,
             living_plan=living_plan,
-            stop_hooks=stop_hooks,
-            max_stop_hook_iterations=max_stop_hook_iterations,
             prompt_caching=prompt_caching,
             tool_result_summarizer=tool_result_summarizer,
-            tool_result_summary_threshold=(
-                tool_result_summary_threshold
-            ),
             persist_tool_transcripts=persist_tool_transcripts,
-            tool_transcript_max_bytes=tool_transcript_max_bytes,
             snip_window=snip_window,
             auto_compact_at_tokens=auto_compact_at_tokens,
-            auto_compact_summariser=auto_compact_summariser,
-            auto_compact_keep_recent_turns=(
-                auto_compact_keep_recent_turns
-            ),
-            retry_policy=retry_policy,
             auto_extract=auto_extract,
             approval_handler=approval_handler,
-            secrets=secrets,
-            response_tone=response_tone,
+            # Rarely-touched knobs forwarded as one Tuning (was 10 flat
+            # kwargs; see loomflow.Tuning). ``auto_consolidate`` joins it
+            # just below at the original call site.
+            tuning=Tuning(
+                stop_hooks=stop_hooks,
+                max_stop_hook_iterations=max_stop_hook_iterations,
+                tool_result_summary_threshold=(
+                    tool_result_summary_threshold
+                ),
+                tool_transcript_max_bytes=tool_transcript_max_bytes,
+                auto_compact_summariser=auto_compact_summariser,
+                auto_compact_keep_recent_turns=(
+                    auto_compact_keep_recent_turns
+                ),
+                retry_policy=retry_policy,
+                secrets=secrets,
+                response_tone=response_tone,
+                auto_consolidate=auto_consolidate,
+            ),
             effort=effort,
             strict_effort=strict_effort,
             architecture=BlackboardArchitecture(
@@ -1054,7 +1084,7 @@ async def run_architecture(
         telemetry=telemetry,
         audit_log=audit_log,
         max_turns=max_turns,
-        auto_consolidate=auto_consolidate,
+        tuning=Tuning(auto_consolidate=auto_consolidate),
         architecture=architecture,
     )
     return await agent.run(prompt)
