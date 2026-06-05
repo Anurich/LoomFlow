@@ -21,6 +21,7 @@ from .builtin import (
     read_tool,
     write_tool,
 )
+from .lazy import LazyToolHost
 from .plan import (
     LivingPlan,
     LivingPlanStep,
@@ -35,6 +36,7 @@ from .web import web_tool
 
 __all__ = [
     "InProcessToolHost",
+    "LazyToolHost",
     "LivingPlan",
     "LivingPlanStep",
     "PathEscapeError",

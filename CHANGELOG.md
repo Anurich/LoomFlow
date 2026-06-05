@@ -9,6 +9,39 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 
 ## [Unreleased]
 
+### Added — Cache-hit-rate telemetry
+
+`Usage.cache_hit_rate` and `RunResult.cache_hit_rate` expose the standard
+prompt-cache efficacy ratio (`cached / (input + cache_write + cached)`),
+and the ReAct loop now emits `loom.tokens.cached`, `loom.tokens.cache_write`,
+`loom.cache.hit_rate` per turn plus a `loom.session.cache_hit_rate` rollup
+at run end — all behind the existing `fast_telemetry` guard, so the no-op
+path is untouched. Token economics is now measurable: a stable-prefix
+workload with caching on should trend toward 0.7+ once warm. No behaviour
+change; the underlying cache token counts were already parsed by both the
+Anthropic and OpenAI adapters.
+
+### Added — Lazy tool loading (`Tuning(lazy_tools=...)`)
+
+Opt-in token reduction for large tool rosters. Instead of shipping every
+tool's full JSON schema in the `tools` field each turn, the agent sends
+only the eager tools plus one `expand_tool` meta-tool, and a compact tool
+*catalog* (name + one-line description) in the **cached** system prompt.
+The model calls `expand_tool(name)` to see a tool's arguments on demand;
+the real tool still executes whether or not it was expanded first.
+
+The key design property: the exposed tool list is **byte-stable across
+turns**, so the prompt-cache tool breakpoint is never invalidated — you
+get the schema-token savings *without* thrashing the cache (the failure
+mode the caching literature warns about). Measured ~45-55% reduction in
+per-turn tools-array tokens on a 12-16 tool coding roster.
+
+`lazy_tools` accepts `True` (all lazy), `list[str]` (those names stay
+eager), or `dict` (`{"eager": [...], "meta_tool_name": "..."}`). Default
+`False` leaves the tool host untouched. v1 supports an `InProcessToolHost`
+base only (skill / workspace / MCP-wrapped hosts raise `ConfigError`).
+New: `loomflow.tools.LazyToolHost`.
+
 ### Added — `Tuning` config object for rarely-touched Agent knobs
 
 `Agent.__init__` had grown to 37 keyword arguments, mixing the four

@@ -117,6 +117,16 @@ class Tuning:
     secrets: Any | None = None
     auto_consolidate: bool = False
     response_tone: str | None = None
+    lazy_tools: bool | list[str] | dict[str, Any] = False
+    """Opt-in lazy tool loading (0.10.24+). When truthy, only eager tools
+    plus an ``expand_tool`` meta-tool are sent to the model each turn; the
+    rest are disclosed via a compact catalog in the system prompt and
+    expanded on demand. Cuts per-request tool-schema tokens on large
+    rosters while keeping the prompt-cache tool breakpoint stable.
+    ``True`` = all tools lazy; ``list[str]`` = those names stay eager;
+    ``dict`` = ``{"eager": [...], "meta_tool_name": "..."}``. Default
+    ``False`` leaves the tool host untouched. See
+    :class:`loomflow.tools.LazyToolHost`."""
 
 
 # The fields that moved from flat ``Agent(...)`` kwargs into ``Tuning``.
@@ -497,6 +507,35 @@ class Agent:
                 f"{self._instructions.rstrip()}\n\n"
                 f"{_lp_prompt(has_workspace_mirror=self._living_plan_spec.mirror_to_workspace)}"
             )
+
+        # Lazy tools (opt-in via Tuning) — wrap LAST so the catalog
+        # covers skill + workspace + plan tools too. The wrapper keeps
+        # the exposed tool list byte-stable across turns (cache-safe)
+        # and moves the full schemas behind ``expand_tool``. Default
+        # ``False`` skips all of this → the host is untouched.
+        if tuning.lazy_tools:
+            from ..core.errors import ConfigError
+            from ..tools.lazy import LazyToolHost, resolve_lazy_tools
+
+            # v1 supports an InProcessToolHost base only. If skills /
+            # workspace / a custom host wrapped it into something else,
+            # fail loudly rather than silently no-op.
+            if not isinstance(host, InProcessToolHost):
+                raise ConfigError(
+                    "lazy_tools (v1) requires an InProcessToolHost — but the "
+                    f"tool host is a {type(host).__name__} (wrapped by skills, "
+                    "workspace, an MCP backend, or a custom host). Disable "
+                    "lazy_tools for this configuration."
+                )
+            eager, meta_name = resolve_lazy_tools(tuning.lazy_tools)
+            lazy_host = LazyToolHost(host, eager=eager, meta_tool_name=meta_name)
+            catalog = lazy_host.catalog_section()
+            if catalog:
+                self._instructions = (
+                    f"{self._instructions.rstrip()}\n\n{catalog}"
+                )
+            host = lazy_host
+
         self._tool_host: ToolHost = host
 
         # ``self._telemetry`` already initialised above (before the
@@ -2273,6 +2312,16 @@ class Agent:
                     interrupted=session.interrupted,
                     turns=session.turns,
                 )
+                # Per-workload cache-hit rollup — the metric that
+                # tells you whether the stable-prefix layout is
+                # actually earning its keep across the whole run.
+                if result.tokens_in or result.cached_tokens_in:
+                    await self._telemetry.emit_metric(
+                        "loom.session.cache_hit_rate",
+                        result.cache_hit_rate,
+                        session_id=session_id,
+                        model=self._model.name,
+                    )
 
             # Auto-consolidate runs after the response is finalized but
             # before the COMPLETED event so observers see it as part of

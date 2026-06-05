@@ -177,6 +177,21 @@ class Usage(BaseModel):
     from the four token buckets above + the model's pricing entry.
     Zero for unknown models."""
 
+    @property
+    def cache_hit_rate(self) -> float:
+        """Fraction of prompt tokens served from the provider cache.
+
+        ``cached_input_tokens / (input_tokens + cache_write_tokens +
+        cached_input_tokens)`` — the standard cache-efficacy ratio.
+        Returns ``0.0`` when no prompt tokens were billed (so a
+        zero-token call never divides by zero). A stable-prefix
+        workload should trend toward 0.7+ once the cache warms.
+        """
+        denom = self.input_tokens + self.cache_write_tokens + self.cached_input_tokens
+        if denom <= 0:
+            return 0.0
+        return self.cached_input_tokens / denom
+
 
 class PromptCacheConfig(BaseModel):
     """Configuration for **prompt caching** across model providers.
@@ -721,6 +736,20 @@ class RunResult(BaseModel):
     def total_tokens(self) -> int:
         """Convenience: ``tokens_in + tokens_out``."""
         return self.tokens_in + self.tokens_out
+
+    @property
+    def cache_hit_rate(self) -> float:
+        """Run-level prompt-cache hit rate over all turns.
+
+        ``cached_tokens_in / (tokens_in + cache_write_tokens +
+        cached_tokens_in)``. Returns ``0.0`` when no prompt tokens
+        were billed. The run-level analogue of
+        :attr:`Usage.cache_hit_rate`; a stable-prefix workload with
+        caching on should trend toward 0.7+ once warm."""
+        denom = self.tokens_in + self.cache_write_tokens + self.cached_tokens_in
+        if denom <= 0:
+            return 0.0
+        return self.cached_tokens_in / denom
 
     @property
     def duration(self) -> timedelta:

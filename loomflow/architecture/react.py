@@ -322,6 +322,27 @@ class ReAct:
                             session_id=session.id,
                             model=deps.model.name,
                         )
+                    if usage.cached_input_tokens:
+                        await deps.telemetry.emit_metric(
+                            "loom.tokens.cached",
+                            usage.cached_input_tokens,
+                            session_id=session.id,
+                            model=deps.model.name,
+                        )
+                    if usage.cache_write_tokens:
+                        await deps.telemetry.emit_metric(
+                            "loom.tokens.cache_write",
+                            usage.cache_write_tokens,
+                            session_id=session.id,
+                            model=deps.model.name,
+                        )
+                    if usage.input_tokens or usage.cached_input_tokens:
+                        await deps.telemetry.emit_metric(
+                            "loom.cache.hit_rate",
+                            usage.cache_hit_rate,
+                            session_id=session.id,
+                            model=deps.model.name,
+                        )
                 session.cumulative_usage = add_usage(
                     session.cumulative_usage, usage
                 )
