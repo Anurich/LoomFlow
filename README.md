@@ -133,6 +133,25 @@ Three principles govern every line of code:
    tools inside a sandbox; the harness doesn't run inside one.
 3. **Validate state on write, not on read.** Pydantic everywhere.
 
+### Token economics — it's not just feature-rich, it's lean
+
+The features above aren't paid for in tokens. On identical tool-using
+tasks (same model `gpt-4.1-mini`, same typed tools, answer verified
+against ground truth), loomflow matches or beats the other frameworks:
+
+| framework   | simple task (2 tools) | complex task (6 chained tools) |
+|-------------|----------------------:|-------------------------------:|
+| **loomflow**    | **472 tok / $0.000236** | **2409 tok / $0.001126 / 5.1s** |
+| pydantic-ai | 486 tok / $0.000244   | 2465 tok / $0.001153 / 6.7s |
+| langgraph   | 585 tok / $0.000324   | 2409 tok / $0.001133 / 5.9s |
+| raw-openai* | 570 tok / $0.000314   | 2217 tok / $0.001049 / 6.5s |
+
+All frameworks answered correctly. loomflow is the most token-efficient
+on the simple task and the fastest on the complex one; the only thing
+cheaper on the complex task is a hand-rolled OpenAI loop with *no
+framework at all* (\*no memory / audit / permissions / multi-tenancy).
+Reproduce with [`benchmarks/`](benchmarks/).
+
 ---
 
 ## Install

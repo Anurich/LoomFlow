@@ -9,6 +9,40 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 
 ## [Unreleased]
 
+### Fixed — tool-call argument coercion + PEP 563 schema typing
+
+Two related bugs in the `@tool` path that caused typed tools to crash on
+model-supplied arguments, triggering retry storms (2-3× tokens + wrong
+answers). Surfaced by an apples-to-apples framework benchmark.
+
+* **Stringified args are now coerced to their declared schema type.**
+  Models routinely emit numeric / boolean tool args as strings
+  (`rate_pct="8"`, `replace_all="true"`). `Tool.execute` previously
+  passed these straight to the typed Python function, raising
+  `TypeError` (`"8" / 100`); the agent then burned turns retrying. Args
+  are now coerced (`"8"→8`, `"true"→True`) against the tool's
+  `input_schema` before the call. Conservative: only strings are
+  coerced, only when the schema names a primitive, and unparseable
+  values pass through so the function's own error still surfaces.
+* **`@tool` schema typing now works under `from __future__ import
+  annotations`.** PEP 563 turns `offset: int` into the *string* `"int"`,
+  which the schema builder mapped to the `"string"` JSON type — silently
+  mis-typing every tool defined in such a module (and defeating the
+  coercion above). `_schema_from_signature` now resolves stringized
+  annotations via `inspect.signature(..., eval_str=True)`.
+
+Net effect on a tool-using benchmark: loomflow went from worst (2-3× the
+tokens, flaky correctness) to most token-efficient / fastest among
+LangGraph, Pydantic-AI, and a raw OpenAI loop. See `benchmarks/`.
+
+### Added — framework benchmarks
+
+`benchmarks/framework_shootout.py` (2 typed tools) and
+`benchmarks/shootout_complex.py` (6 chained typed tools) compare loomflow
+against LangGraph / Pydantic-AI / raw OpenAI on identical tasks, same
+model, verified answers — and guard the tool-call path against
+regressions.
+
 ### Added — `Tuning` config object for rarely-touched Agent knobs
 
 `Agent.__init__` had grown to 37 keyword arguments, mixing the four

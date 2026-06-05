@@ -25,6 +25,41 @@ _PRIMITIVE_TO_JSON_SCHEMA: dict[type, str] = {
 }
 
 
+def _coerce_to_json_type(value: Any, json_type: str) -> Any:
+    """Best-effort coerce a model-supplied arg to its declared JSON type.
+
+    Models routinely emit numeric / boolean tool arguments as *strings*
+    (``rate_pct="8"``, ``replace_all="true"``) even when the schema says
+    ``integer`` / ``boolean``. Passing those straight to a typed Python
+    function raises ``TypeError`` (``"8" / 100``), which the agent loop
+    then burns turns retrying. We coerce here, matching what mature
+    frameworks do at their schema-validation layer.
+
+    Conservative by design: only string inputs are coerced, only when
+    the schema names a primitive type, and any failure passes the
+    ORIGINAL value through so the function's own error still surfaces
+    rather than being masked.
+    """
+    if not isinstance(value, str):
+        return value
+    try:
+        if json_type == "integer":
+            # ``"8"`` and ``"8.0"`` both → 8; reject true floats.
+            return int(value) if value.strip().lstrip("-").isdigit() else int(float(value))
+        if json_type == "number":
+            return float(value)
+        if json_type == "boolean":
+            low = value.strip().lower()
+            if low in ("true", "1", "yes"):
+                return True
+            if low in ("false", "0", "no", ""):
+                return False
+            return value  # unrecognised → pass through
+    except (ValueError, TypeError):
+        return value
+    return value
+
+
 @dataclass
 class Tool:
     """A registered tool: definition plus the callable that executes it."""
@@ -51,6 +86,15 @@ class Tool:
         block the event loop.
         """
         kwargs = dict(args)
+        # Coerce stringified args to their declared schema types before
+        # calling — models often send numbers / bools as strings, which
+        # would otherwise crash typed functions and trigger retry storms.
+        props = self.input_schema.get("properties", {})
+        if props:
+            for name, val in list(kwargs.items()):
+                spec = props.get(name)
+                if isinstance(spec, dict) and "type" in spec:
+                    kwargs[name] = _coerce_to_json_type(val, spec["type"])
         if inspect.iscoroutinefunction(self.fn):
             return await self.fn(**kwargs)
         return await anyio.to_thread.run_sync(lambda: self.fn(**kwargs))
@@ -89,7 +133,16 @@ def tool(
     """
 
     def _make(f: Callable[..., Any]) -> Tool:
-        sig = inspect.signature(f)
+        # ``eval_str=True`` resolves PEP 563 stringized annotations
+        # (``from __future__ import annotations`` turns ``offset: int``
+        # into the *string* "int", which would otherwise fall back to
+        # the "string" JSON type and defeat arg coercion). Fall back to
+        # the raw signature if evaluation fails (forward refs to names
+        # not importable at decoration time).
+        try:
+            sig = inspect.signature(f, eval_str=True)
+        except (NameError, TypeError):
+            sig = inspect.signature(f)
         schema = _schema_from_signature(sig)
         return Tool(
             name=name or f.__name__,
