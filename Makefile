@@ -47,7 +47,7 @@ release:
 	@echo "→ Pre-flight: gates green?"
 	@ruff check loomflow tests examples
 	@mypy --strict loomflow
-	@pytest -q
+	@pytest -q -p no:logfire
 	@echo "→ Bumping version ($(BUMP)) + committing + tagging..."
 	bump-my-version bump $(BUMP) --verbose
 	@echo "→ Pushing commit + tag to origin..."
@@ -105,7 +105,7 @@ first-release:
 	  echo "  → finalizing $$CURRENT → $$FINAL"; \
 	  ruff check loomflow tests examples && \
 	  mypy --strict loomflow && \
-	  pytest -q && \
+	  pytest -q -p no:logfire && \
 	  bump-my-version replace --new-version "$$FINAL" && \
 	  git add pyproject.toml loomflow/__init__.py && \
 	  git commit -m "Release v$$FINAL" && \
