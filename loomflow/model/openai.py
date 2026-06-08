@@ -420,7 +420,22 @@ def _to_openai_messages(messages: list[Message]) -> list[dict[str, Any]]:
         if m.role == Role.SYSTEM:
             out.append({"role": "system", "content": m.content})
         elif m.role == Role.USER:
-            out.append({"role": "user", "content": m.content})
+            if m.images:
+                # Vision: OpenAI wants content as a list of parts — the
+                # text, then each image as a base64 data-URI image_url.
+                parts: list[dict[str, Any]] = []
+                if m.content:
+                    parts.append({"type": "text", "text": m.content})
+                for img in m.images:
+                    parts.append({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:{img.media_type};base64,{img.data}"
+                        },
+                    })
+                out.append({"role": "user", "content": parts})
+            else:
+                out.append({"role": "user", "content": m.content})
         elif m.role == Role.ASSISTANT:
             msg: dict[str, Any] = {"role": "assistant"}
             if m.content:

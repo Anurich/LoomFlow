@@ -27,6 +27,7 @@ import anyio
 from ..core._deprecation import warn_legacy_protocol
 from ..core.types import (
     Event,
+    Image,
     Message,
     PermissionDecision,
     Role,
@@ -549,7 +550,31 @@ async def _build_seed_messages(
             history = []
         messages.extend(history)
 
-    messages.append(Message(role=Role.USER, content=prompt))
+    # Vision: attach any images passed for this run (carried on the run
+    # context's metadata under ``_loom_images`` as a list of Image — or
+    # of dicts with {data, media_type}). Adapters fold them into the
+    # provider's multimodal format. Empty/absent → a plain text message.
+    images: tuple[Image, ...] = ()
+    try:
+        from ..core import get_run_context
+
+        ctx = get_run_context()
+        raw = (ctx.metadata or {}).get("_loom_images") if ctx else None
+        if raw:
+            coerced: list[Image] = []
+            for it in raw:
+                if isinstance(it, Image):
+                    coerced.append(it)
+                elif isinstance(it, dict) and it.get("data"):
+                    coerced.append(Image(
+                        data=str(it["data"]),
+                        media_type=str(it.get("media_type", "image/png")),
+                    ))
+            images = tuple(coerced)
+    except Exception:  # noqa: BLE001 — vision is best-effort, never break a run
+        images = ()
+
+    messages.append(Message(role=Role.USER, content=prompt, images=images))
     return messages
 
 

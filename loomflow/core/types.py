@@ -91,6 +91,23 @@ class ToolCall(BaseModel):
         return deterministic_hash(self.tool, self.args)
 
 
+class Image(BaseModel):
+    """An image attached to a message, for vision-capable models.
+
+    ``data`` is the raw image bytes encoded as a base64 string;
+    ``media_type`` is its MIME type (``image/png``, ``image/jpeg``,
+    ``image/gif``, ``image/webp``). Provider adapters format this into
+    the shape each API expects (OpenAI ``image_url`` data-URI vs
+    Anthropic ``image`` base64 source). Empty by default everywhere, so
+    text-only callers and adapters are unaffected.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    data: str  # base64-encoded image bytes
+    media_type: str = "image/png"
+
+
 class Message(BaseModel):
     """A single chat message in the model's conversation.
 
@@ -98,6 +115,10 @@ class Message(BaseModel):
     calls in the previous turn — real provider adapters (Anthropic
     ``tool_use`` blocks, OpenAI ``tool_calls`` array) need to reconstruct
     the right wire format from this.
+
+    ``images`` carries optional vision input on a USER message; adapters
+    fold it into the provider's multimodal content format. Empty tuple =
+    a plain text message (the common case).
     """
 
     model_config = ConfigDict(frozen=True)
@@ -107,6 +128,7 @@ class Message(BaseModel):
     name: str | None = None
     tool_call_id: str | None = None
     tool_calls: tuple[ToolCall, ...] = ()
+    images: tuple[Image, ...] = ()
 
 
 class ToolResult(BaseModel):

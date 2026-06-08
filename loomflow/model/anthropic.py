@@ -595,7 +595,24 @@ def _to_anthropic_messages(
             pending_results = []
 
         if m.role == Role.USER:
-            out.append({"role": "user", "content": m.content})
+            if m.images:
+                # Vision: Anthropic wants content as a list of blocks —
+                # the text, then each image as a base64 source block.
+                blocks_u: list[dict[str, Any]] = []
+                if m.content:
+                    blocks_u.append({"type": "text", "text": m.content})
+                for img in m.images:
+                    blocks_u.append({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": img.media_type,
+                            "data": img.data,
+                        },
+                    })
+                out.append({"role": "user", "content": blocks_u})
+            else:
+                out.append({"role": "user", "content": m.content})
 
         elif m.role == Role.ASSISTANT:
             blocks: list[dict[str, Any]] = []
