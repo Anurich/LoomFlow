@@ -341,11 +341,13 @@ class PostgresMemory:
             episode = episode.model_copy(update={"embedding": holder[0]})
 
         async with self._pool.acquire() as conn:
-            await conn.execute(
+            insert_episode = (
                 "INSERT INTO episodes(id, namespace, session_id, user_id, "
                 "                     occurred_at, input, output, embedding) "
                 "VALUES ($1, $2, $3, $4, $5, $6, $7, $8) "
-                "ON CONFLICT (id) DO NOTHING;",
+                "ON CONFLICT (id) DO NOTHING;"
+            )
+            episode_args = (
                 episode.id,
                 self._namespace,
                 episode.session_id,
@@ -360,26 +362,36 @@ class PostgresMemory:
             # same id. Skipped entirely when ``tool_transcript``
             # is None (default), so users without
             # ``Agent(persist_tool_transcripts=True)`` pay no
-            # extra round-trip.
-            if episode.tool_transcript is not None:
-                await conn.execute(
-                    "DELETE FROM episode_tool_transcripts "
-                    "WHERE episode_id = $1;",
-                    episode.id,
-                )
-                if episode.tool_transcript:
-                    rows = [
-                        (episode.id, i, msg.model_dump_json())
-                        for i, msg in enumerate(
-                            episode.tool_transcript
-                        )
-                    ]
-                    await conn.executemany(
-                        "INSERT INTO episode_tool_transcripts "
-                        "(episode_id, sequence, message_json) "
-                        "VALUES ($1, $2, $3);",
-                        rows,
+            # extra round-trip — the single INSERT is atomic on
+            # its own. The multi-statement sidecar path runs in
+            # one explicit transaction so a cancellation (e.g.
+            # ``Agent(timeout=)`` firing mid-write) rolls back
+            # cleanly instead of leaving an episode row without
+            # its transcript (or a deleted transcript with no
+            # replacement).
+            if episode.tool_transcript is None:
+                await conn.execute(insert_episode, *episode_args)
+            else:
+                async with conn.transaction():
+                    await conn.execute(insert_episode, *episode_args)
+                    await conn.execute(
+                        "DELETE FROM episode_tool_transcripts "
+                        "WHERE episode_id = $1;",
+                        episode.id,
                     )
+                    if episode.tool_transcript:
+                        rows = [
+                            (episode.id, i, msg.model_dump_json())
+                            for i, msg in enumerate(
+                                episode.tool_transcript
+                            )
+                        ]
+                        await conn.executemany(
+                            "INSERT INTO episode_tool_transcripts "
+                            "(episode_id, sequence, message_json) "
+                            "VALUES ($1, $2, $3);",
+                            rows,
+                        )
         return episode.id
 
     async def recall(
