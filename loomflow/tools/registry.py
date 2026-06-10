@@ -9,11 +9,13 @@ type hints. :class:`InProcessToolHost` is the simplest
 from __future__ import annotations
 
 import inspect
+import json
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, overload
 
 import anyio
+from pydantic import TypeAdapter
 
 from ..core.types import ToolDef, ToolEvent, ToolResult
 
@@ -69,6 +71,13 @@ class Tool:
     fn: Callable[..., Any]
     input_schema: dict[str, Any] = field(default_factory=dict)
     destructive: bool = False
+    # Validators for non-primitive params (Pydantic models, lists,
+    # dicts, Literals, ...) keyed by param name — populated by the
+    # ``@tool`` decorator so ``execute`` can turn the model's raw
+    # dict / JSON-string args back into the annotated Python types.
+    param_adapters: dict[str, TypeAdapter[Any]] = field(
+        default_factory=dict, repr=False
+    )
 
     def to_def(self) -> ToolDef:
         return ToolDef(
@@ -92,9 +101,31 @@ class Tool:
         props = self.input_schema.get("properties", {})
         if props:
             for name, val in list(kwargs.items()):
+                if name in self.param_adapters:
+                    continue  # complex params validate below
                 spec = props.get(name)
                 if isinstance(spec, dict) and "type" in spec:
                     kwargs[name] = _coerce_to_json_type(val, spec["type"])
+        # Complex params: validate the model-supplied value back into
+        # the annotated type (dict → BaseModel instance, ["8"] →
+        # [8], ...). Models also sometimes send nested objects as a
+        # JSON *string*; decode and retry once. Conservative like
+        # ``_coerce_to_json_type``: any failure passes the ORIGINAL
+        # value through so the function's own error still surfaces.
+        for name, adapter in self.param_adapters.items():
+            if name not in kwargs:
+                continue
+            val = kwargs[name]
+            try:
+                kwargs[name] = adapter.validate_python(val)
+                continue
+            except Exception:  # noqa: BLE001 — fall through to JSON retry
+                pass
+            if isinstance(val, str):
+                try:
+                    kwargs[name] = adapter.validate_python(json.loads(val))
+                except Exception:  # noqa: BLE001 — keep original value
+                    pass
         if inspect.iscoroutinefunction(self.fn):
             return await self.fn(**kwargs)
         return await anyio.to_thread.run_sync(lambda: self.fn(**kwargs))
@@ -128,8 +159,12 @@ def tool(
     """Promote a callable to a :class:`Tool`.
 
     Use as ``@tool`` (bare) or ``@tool(name=..., description=..., destructive=...)``.
-    The schema is derived from parameter annotations; primitive types map
-    to their JSON-Schema equivalents, anything else falls back to ``string``.
+    The schema is derived from parameter annotations: primitive types map
+    to their JSON-Schema equivalents, and complex types (Pydantic models,
+    ``list[...]``, ``dict[...]``, ``Literal``, optionals, ...) get a full
+    recursive schema via :class:`pydantic.TypeAdapter` — at call time the
+    model's raw args are validated back into the annotated Python types.
+    Annotations Pydantic cannot handle fall back to ``string``.
     """
 
     def _make(f: Callable[..., Any]) -> Tool:
@@ -143,13 +178,14 @@ def tool(
             sig = inspect.signature(f, eval_str=True)
         except (NameError, TypeError):
             sig = inspect.signature(f)
-        schema = _schema_from_signature(sig)
+        schema, adapters = _schema_from_signature(sig)
         return Tool(
             name=name or f.__name__,
             description=(description or (f.__doc__ or "")).strip().split("\n")[0],
             fn=f,
             input_schema=schema,
             destructive=destructive,
+            param_adapters=adapters,
         )
 
     if fn is not None:
@@ -157,9 +193,23 @@ def tool(
     return _make
 
 
-def _schema_from_signature(sig: inspect.Signature) -> dict[str, Any]:
+def _schema_from_signature(
+    sig: inspect.Signature,
+) -> tuple[dict[str, Any], dict[str, TypeAdapter[Any]]]:
+    """Derive ``(input_schema, param_adapters)`` from a signature.
+
+    Primitives map straight to their JSON-Schema type (and stay on the
+    cheap string-coercion path in :meth:`Tool.execute`). Anything else
+    goes through :class:`pydantic.TypeAdapter` for a full recursive
+    schema — nested ``$defs`` are hoisted to the schema root so
+    ``#/$defs/...`` refs stay valid inside the tool definition.
+    Annotations Pydantic cannot model fall back to ``string`` exactly
+    as before.
+    """
     properties: dict[str, dict[str, Any]] = {}
     required: list[str] = []
+    defs: dict[str, Any] = {}
+    adapters: dict[str, TypeAdapter[Any]] = {}
     for pname, param in sig.parameters.items():
         if pname in ("self", "cls"):
             continue
@@ -169,15 +219,30 @@ def _schema_from_signature(sig: inspect.Signature) -> dict[str, Any]:
         ):
             continue
         ann = param.annotation
-        json_type = _PRIMITIVE_TO_JSON_SCHEMA.get(ann, "string")
-        properties[pname] = {"type": json_type}
+        if ann is inspect.Parameter.empty:
+            properties[pname] = {"type": "string"}
+        elif ann in _PRIMITIVE_TO_JSON_SCHEMA:
+            properties[pname] = {"type": _PRIMITIVE_TO_JSON_SCHEMA[ann]}
+        else:
+            try:
+                adapter: TypeAdapter[Any] = TypeAdapter(ann)
+                piece = adapter.json_schema()
+            except Exception:  # noqa: BLE001 — unmodellable → legacy fallback
+                properties[pname] = {"type": "string"}
+            else:
+                defs.update(piece.pop("$defs", {}))
+                properties[pname] = piece
+                adapters[pname] = adapter
         if param.default is inspect.Parameter.empty:
             required.append(pname)
-    return {
+    schema: dict[str, Any] = {
         "type": "object",
         "properties": properties,
         "required": required,
     }
+    if defs:
+        schema["$defs"] = defs
+    return schema, adapters
 
 
 # ---------------------------------------------------------------------------
