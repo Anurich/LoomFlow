@@ -58,6 +58,7 @@ level token optimisations must NEVER kill a turn.
 from __future__ import annotations
 
 import re
+import warnings
 from typing import TYPE_CHECKING
 
 from ..core.types import Message, Role
@@ -109,6 +110,11 @@ _KNOWN_CONTEXT_WINDOWS: dict[str, int] = {
 # always override via ``auto_compact_at_tokens=`` explicitly.
 _DEFAULT_CONTEXT_WINDOW = 8_192
 
+# Model names we've already warned about falling back to the default
+# window — once per process per name, so a hot loop calling
+# ``context_window_for`` doesn't spam stderr.
+_warned_unknown_models: set[str] = set()
+
 # Default trigger fraction of the window. 0.8 leaves headroom for
 # the current turn's prompt + tool I/O + response without bumping
 # the actual limit.
@@ -119,7 +125,8 @@ def context_window_for(model_name: str) -> int:
     """Best-effort context-window lookup by model-name substring.
 
     Returns the largest matching known window; falls back to
-    :data:`_DEFAULT_CONTEXT_WINDOW` (8192) for unrecognised models.
+    :data:`_DEFAULT_CONTEXT_WINDOW` (8192) for unrecognised models,
+    warning once per model name so the squeeze is never silent.
     Substring match is intentional — model names drift (suffixes
     like ``-20250115`` or ``-preview``) and we want the lookup to
     survive that drift.
@@ -128,6 +135,17 @@ def context_window_for(model_name: str) -> int:
     for hint, window in _KNOWN_CONTEXT_WINDOWS.items():
         if hint in lowered:
             return window
+    if model_name not in _warned_unknown_models:
+        _warned_unknown_models.add(model_name)
+        warnings.warn(
+            f"context_window_for: unknown model {model_name!r} — "
+            f"falling back to the conservative default of "
+            f"{_DEFAULT_CONTEXT_WINDOW} tokens. If the real window is "
+            f"larger, compaction thresholds derived from this value "
+            f"will fire far too early; pass an explicit "
+            f"auto_compact_at_tokens= instead.",
+            stacklevel=2,
+        )
     return _DEFAULT_CONTEXT_WINDOW
 
 

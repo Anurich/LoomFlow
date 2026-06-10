@@ -22,9 +22,12 @@ Coverage:
 
 from __future__ import annotations
 
+import warnings
+
 import pytest
 
 from loomflow import Agent, ScriptedModel, ScriptedTurn
+from loomflow.agent import auto_compact as _auto_compact_mod
 from loomflow.agent.auto_compact import (
     DEFAULT_AUTO_COMPACT_PCT,
     _split_at_user_anchor,
@@ -55,7 +58,12 @@ def test_context_window_unknown_model_falls_back() -> None:
     """Anything not in the table returns the conservative
     8k default — users can override via auto_compact_at_tokens
     if their model has a known larger window."""
-    out = context_window_for("ollama/some-weird-thing-7b")
+    # Unknown names also warn-once (covered separately); suppress
+    # here so this test stays focused on the fallback value and
+    # survives a future strict-warnings filter.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        out = context_window_for("ollama/some-weird-thing-7b")
     assert out == 8_192
 
 
@@ -63,6 +71,60 @@ def test_default_pct_constant_is_sensible() -> None:
     """Pinned via constant so a future tuning round is one
     line."""
     assert 0.0 < DEFAULT_AUTO_COMPACT_PCT < 1.0
+
+
+# ---------------------------------------------------------------------------
+# context_window_for — warn-once-per-process fallback
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def _clear_warned_models() -> None:
+    """Reset the module-level warn-once dedupe set for isolation.
+
+    The set persists for the life of the process, so a test that
+    asserts "warns" must start from an empty set (otherwise a prior
+    test that already warned about the same name would suppress it).
+    """
+    _auto_compact_mod._warned_unknown_models.clear()  # noqa: SLF001
+
+
+def test_unknown_model_warns_once_and_returns_default(
+    _clear_warned_models: None,
+) -> None:
+    """First lookup of an unrecognised name → UserWarning + the
+    conservative 8k fallback. The squeeze is never silent."""
+    with pytest.warns(UserWarning, match="unknown model"):
+        out = context_window_for("totally-made-up-model-xyz")
+    assert out == 8_192
+
+
+def test_unknown_model_warns_only_once_per_name(
+    _clear_warned_models: None,
+) -> None:
+    """Second + subsequent lookups of the SAME name must NOT warn —
+    a hot loop calling ``context_window_for`` shouldn't spam stderr."""
+    name = "another-made-up-model-abc"
+    # Prime the set via a first call (this one warns; we suppress).
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        context_window_for(name)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        out = context_window_for(name)
+    assert out == 8_192
+    assert caught == []
+
+
+def test_known_model_never_warns(_clear_warned_models: None) -> None:
+    """A name that matches the table returns its real window and
+    emits no warning at all."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        out = context_window_for("gpt-4o")
+    assert out == 128_000
+    assert caught == []
 
 
 # ---------------------------------------------------------------------------
