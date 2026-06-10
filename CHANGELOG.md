@@ -9,6 +9,105 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 
 ## [Unreleased]
 
+### Added — `Agent(timeout=)` wall-clock guard
+
+A run with a hung tool or model call previously hung forever — the only
+defence was wrapping `agent.run()` in `asyncio.wait_for` yourself.
+
+* **New `timeout=` kwarg** (top-level, sibling of `max_turns`). Wall-clock
+  ceiling in seconds for the *whole* run: setup, every model call, every
+  tool call (including parallel dispatch and sub-agents), and teardown.
+  Default `None` preserves today's unbounded behaviour with zero overhead
+  (the guard is a single `is None` check on the no-timeout path).
+* **New `RunTimeout` error** (exported at top level, `LoomError` subclass,
+  carries `.seconds`). `run()` raises it directly; `stream()` consumers
+  see an `ERROR` event and the producer's `ExceptionGroup` carries the
+  `RunTimeout` (existing stream error semantics).
+* Enforced via `anyio.fail_after`, so cancellation propagates correctly
+  through structured concurrency. Also TOML-expressible
+  (`timeout = 30.0` via `Agent.from_config`).
+
+### Added — recursive tool schemas for complex parameter types
+
+`@tool` previously mapped only `str`/`int`/`float`/`bool` annotations to
+JSON-Schema types; a Pydantic model, `list[int]`, or `Literal` parameter
+silently degraded to `{"type": "string"}`, hiding the real shape from the
+model.
+
+* **Full recursive schema generation** for non-primitive annotations via
+  `pydantic.TypeAdapter` — nested Pydantic models, `list[...]`,
+  `dict[...]`, `Literal`, optionals/unions, enums. Nested `$defs` are
+  hoisted to the tool-schema root so `#/$defs/...` refs stay valid.
+* **Call-time validation back into Python types.** The model's raw dict
+  arg arrives at your function as a real `BaseModel` instance;
+  `["1", "2"]` for a `list[int]` param arrives as `[1, 2]`. Args sent as
+  a JSON *string* (a common model quirk) are decoded and retried once.
+  Conservative like the existing primitive coercion: any validation
+  failure passes the original value through so the function's own error
+  surfaces.
+* Primitive params keep the existing cheap coercion path unchanged;
+  annotations Pydantic cannot model still fall back to `string`.
+
+### Fixed — atomic episode + tool-transcript writes on Postgres
+
+`PostgresMemory.remember` ran the episode INSERT and the
+tool-transcript DELETE/INSERT as three separate implicit transactions,
+so a cancellation mid-write (e.g. the new `Agent(timeout=)` firing, or
+a process kill) could leave an episode row without its transcript — or
+a deleted transcript with no replacement. The sidecar path now runs in
+one explicit transaction and rolls back cleanly; the common
+no-transcript path is unchanged (a single INSERT was already atomic,
+and still pays no extra round-trip). SQLite was already atomic: one
+deferred transaction committed at the end, executed on a worker thread
+that cancellation cannot interrupt mid-statement.
+
+### Changed — `context_window_for` warns on unknown models
+
+The substring lookup silently returned the conservative 8 192-token
+default for unrecognised model names, so compaction thresholds derived
+from it fired far too early with no signal. It now emits a `UserWarning`
+once per process per unknown name; pass an explicit
+`auto_compact_at_tokens=` to silence it.
+
+### Added — `run_until=` run-until-done loop (the `/goal` pattern)
+
+`Agent(run_until=...)` keeps re-prompting the agent until a small, fast
+**checker model** confirms a *measurable* stop condition holds — the
+"Ralph Wiggum" / `/goal` autonomous loop, built on loomflow's existing
+framework-level stop-hook machinery (no new architecture; it wraps any
+architecture for free).
+
+* **New `GoalStopHook`** (exported at top level). After each
+  architecture pass it runs the checker (`deps.goal_checker`, falling
+  back to the main model) asking DONE / NOT_DONE against the condition;
+  on NOT_DONE it injects a re-prompt and the agent runs again.
+* **Three first-class guardrails** — because an unbounded run-until loop
+  is the #1 autonomous-agent failure mode: `max_iterations` (hard
+  re-prompt cap), `max_no_progress` (bail when N consecutive passes
+  change nothing observable), and `max_cost_usd` (hard cost ceiling; also
+  honours the Agent-wide `Budget`). The stop reason is recorded under
+  `session.metadata["run_until.exit"]` (`condition_met` / `max_iterations`
+  / `no_progress` / `cost_cap` / `budget:*`). A guardrail stop (anything
+  but `condition_met`) also sets `RunResult.interrupted` +
+  `interruption_reason="run_until:<reason>"`, so a caller can tell "goal
+  met" from "hit the cap" without reading metadata.
+* **API.** `run_until="all tests pass"` (str sugar) or a dict with
+  `condition` (required), `checker` (`Model | str | dict`),
+  `max_iterations`, `max_no_progress`, `max_cost_usd`, `checker_prompt`.
+  Also TOML-expressible via `Agent.from_config`. The checker is resolved
+  through the same `_resolve_model` path as `model=` /
+  `tool_result_summarizer=`.
+* **`text_only_model_call(..., model=)`** gains an optional model
+  override (defaults to `deps.model`) so the checker model is used for
+  the judgement; existing callers are unchanged.
+* Multi-tenant-safe (all per-run state in `session.metadata`; every
+  budget call forwards `user_id`) and fast-mode-safe (the existing
+  `fast_stop_hooks` gate flips automatically — no new flag).
+* `Team.supervisor`/`swarm`/`router`/`debate`/`blackboard` forward
+  `run_until=` to their coordinator (sibling to the existing
+  `living_plan=`), so a multi-agent team can run-until-done too.
+* Example: `examples/22_run_until_goal.py` (offline, `ScriptedModel`).
+
 ### Fixed — tool-call argument coercion + PEP 563 schema typing
 
 Two related bugs in the `@tool` path that caused typed tools to crash on

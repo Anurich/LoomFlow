@@ -156,12 +156,20 @@ async def main():
             max_cost_usd=20.0,
             max_wall_clock=timedelta(hours=2),
         )),
+        timeout=2 * 60 * 60,  # hard wall-clock cap — a hung tool or
+                              # model call raises RunTimeout instead
+                              # of hanging the run forever
     )
     result = await agent.run("Research the state of agent harnesses in 2026.")
     print(result.output)
 
 asyncio.run(main())
 ```
+
+``budget.max_wall_clock`` and ``timeout=`` are complementary: the
+budget stops the loop *between* steps once the clock is exceeded,
+while ``timeout=`` cancels the run outright — including a model or
+tool call that is stuck mid-await.
 
 Every model call and every tool dispatch is journaled by
 ``(session_id, step_name)``. On a process restart, instantiating a
@@ -349,6 +357,9 @@ Before shipping an agent to production, verify each of these:
 - [ ] **Budget**: ``StandardBudget`` with ``max_tokens``,
   ``max_cost_usd``, ``max_wall_clock``. Soft warnings at 80%.
 - [ ] **Max turns cap**: default 50; lower if your tools are expensive.
+- [ ] **Run timeout**: ``Agent(timeout=...)`` so a hung tool or model
+  call raises ``RunTimeout`` instead of hanging the run forever.
+  Default ``None`` is unbounded.
 
 ### Observability
 

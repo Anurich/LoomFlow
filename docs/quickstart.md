@@ -76,7 +76,12 @@ agent = Agent(
 ## 3. Tools
 
 The `@tool` decorator takes a regular Python callable (sync or async)
-and derives its JSON schema from type hints.
+and derives its JSON schema from type hints. Non-primitive
+annotations — Pydantic models, `list[T]`, `dict`, `Literal`,
+optionals — generate a full recursive JSON schema, and the model's
+raw args are validated back into the real Python types before your
+function runs (a dict arrives as the `BaseModel` instance, `["1",
+"2"]` for a `list[int]` param arrives as `[1, 2]`).
 
 ```python
 from loomflow import Agent, tool
@@ -105,6 +110,11 @@ Sync functions are dispatched to a worker thread via
 `anyio.to_thread.run_sync`, so they never block the event loop. Tool
 calls in the same model turn run **in parallel** through an
 `anyio.create_task_group`.
+
+A hung tool (or model call) doesn't have to hang the run: pass
+`Agent(..., timeout=30.0)` to cap the whole run by wall-clock. On
+expiry `run()` raises `RunTimeout` (a `LoomError` carrying
+`.seconds`); the default `None` keeps runs unbounded.
 
 ## 4. Streaming events
 
