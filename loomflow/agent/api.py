@@ -47,7 +47,7 @@ from ..architecture import (
 )
 from ..architecture.tool_host_wrappers import ExtendedToolHost
 from ..core.context import RunContext, set_run_context
-from ..core.errors import OutputValidationError
+from ..core.errors import OutputValidationError, RunTimeout
 from ..core.ids import new_id
 from ..core.protocols import (
     Budget,
@@ -77,7 +77,7 @@ from ..security.audit import AuditLog
 from ..security.hooks import HookRegistry, PostToolHook, PreToolHook
 from ..security.permissions import AllowAll
 from ..tools.registry import InProcessToolHost, Tool
-from .stop_hooks import StopHook, StopHookResult
+from .stop_hooks import GoalStopHook, StopHook, StopHookResult
 
 DEFAULT_MAX_TURNS = 50
 DEFAULT_STREAM_BUFFER = 128
@@ -187,6 +187,7 @@ class Agent:
         telemetry: Telemetry | str | Mapping[str, Any] | None = None,
         audit_log: AuditLog | str | Path | dict[str, Any] | None = None,
         max_turns: int = DEFAULT_MAX_TURNS,
+        timeout: float | None = None,
         architecture: Architecture | str | None = None,
         skills: list[Any] | None = None,
         auto_extract: bool | None = None,
@@ -197,6 +198,7 @@ class Agent:
         prompt_caching: bool | Mapping[str, Any] | None = None,
         workspace: Any | str | Mapping[str, Any] | None = None,
         living_plan: Any = None,
+        run_until: str | Mapping[str, Any] | None = None,
         tool_result_summarizer: Model | str | None = None,
         snip_window: int = 0,
         auto_compact_at_tokens: int | None = None,
@@ -504,6 +506,15 @@ class Agent:
         from ..security.audit import resolve_audit_log
         self._audit_log: AuditLog | None = resolve_audit_log(audit_log)
         self._max_turns = max_turns
+        # Wall-clock ceiling for a whole run (setup + every model /
+        # tool call + teardown). ``None`` (default) preserves today's
+        # unbounded behaviour; a hung tool or model call otherwise
+        # hangs the run forever. Enforced via ``anyio.fail_after``
+        # around ``_loop`` in both ``run()`` and ``stream()``;
+        # expiry raises :class:`~loomflow.RunTimeout`.
+        if timeout is not None and timeout <= 0:
+            raise ValueError("timeout must be > 0 seconds or None")
+        self._timeout: float | None = timeout
         self._auto_consolidate = auto_consolidate
         # Approval handler resolves :class:`Decision.ask_` outcomes
         # from the permissions layer. Without one, ``ask`` falls
@@ -560,6 +571,24 @@ class Agent:
             # the agent package.
             from ..tools.plan import make_plan_stop_hook
             auto_hooks.append(make_plan_stop_hook())
+        # ``run_until=`` — the /goal run-until-done loop. Appended to
+        # auto_hooks (so it runs AFTER the living_plan hook when both
+        # are set: finish the plan first, then the goal check). The
+        # checker model is resolved here and forwarded via deps; the
+        # hook itself holds no model. Registering before
+        # ``self._stop_hooks`` is assembled means ``fast_stop_hooks``
+        # (computed later from len(self._stop_hooks)) flips correctly
+        # with no new fast-mode flag.
+        run_until_spec = _normalize_run_until_spec(run_until)
+        self._goal_checker: Model | None = None
+        if run_until_spec is not None:
+            checker_spec = run_until_spec.pop("checker", None)
+            self._goal_checker = (
+                None
+                if checker_spec is None
+                else _resolve_model(checker_spec, secrets=self._secrets)
+            )
+            auto_hooks.append(GoalStopHook(**run_until_spec))
         self._stop_hooks: list[StopHook] = [
             *auto_hooks,
             *(stop_hooks or []),
@@ -1281,6 +1310,7 @@ class Agent:
 
         # ----- scalar agent-level toggles -----------------------------
         max_turns = cfg.get("max_turns", DEFAULT_MAX_TURNS)
+        timeout = cfg.get("timeout")
         auto_consolidate = bool(cfg.get("auto_consolidate", False))
         architecture = cfg.get("architecture")
         effort = cfg.get("effort")
@@ -1376,6 +1406,8 @@ class Agent:
         # forms as the constructor kwarg. The resolver inside
         # ``Agent.__init__`` does the validation.
         living_plan_arg: Any = cfg.get("living_plan")
+        # ``run_until`` — str condition or dict; validated in __init__.
+        run_until_arg: Any = cfg.get("run_until")
 
         return cls(
             instructions,
@@ -1391,11 +1423,13 @@ class Agent:
             effort=effort,
             strict_effort=strict_effort,
             max_turns=int(max_turns),
+            timeout=float(timeout) if timeout is not None else None,
             auto_extract=auto_extract,
             skills=skill_specs or None,
             hooks=hooks,
             approval_handler=approval_handler,
             living_plan=living_plan_arg,
+            run_until=run_until_arg,
             # Rarely-touched knobs go through Tuning (see loomflow.Tuning).
             tuning=Tuning(
                 response_tone=response_tone,
@@ -1590,7 +1624,7 @@ class Agent:
         :class:`~loomflow.OutputValidationError`. Set retries to
         0 to fail fast.
         """
-        return await self._loop(
+        return await self._loop_guarded(
             prompt,
             emit=emit if emit is not None else _noop_emit,
             user_id=user_id,
@@ -1685,7 +1719,7 @@ class Agent:
 
         async def _produce() -> None:
             try:
-                await self._loop(
+                await self._loop_guarded(
                     prompt,
                     emit=send.send,
                     user_id=user_id,
@@ -1715,6 +1749,22 @@ class Agent:
                 tg.cancel_scope.cancel()
 
     # ---- the loop --------------------------------------------------------
+
+    async def _loop_guarded(self, prompt: str, **kwargs: Any) -> RunResult:
+        """Apply the agent-level wall-clock ``timeout`` around :meth:`_loop`.
+
+        ``timeout=None`` (the default) is a zero-overhead passthrough.
+        On expiry the whole run — pending model calls, parallel tool
+        dispatch, sub-agents — is cancelled via the ``fail_after``
+        scope and :class:`~loomflow.RunTimeout` is raised.
+        """
+        if self._timeout is None:
+            return await self._loop(prompt, **kwargs)
+        try:
+            with anyio.fail_after(self._timeout):
+                return await self._loop(prompt, **kwargs)
+        except TimeoutError as exc:
+            raise RunTimeout(self._timeout) from exc
 
     async def _loop(
         self,
@@ -2055,6 +2105,7 @@ class Agent:
                 fast_stop_hooks=fast_stop_hooks,
                 fast_tool_summary=fast_tool_summary,
                 tool_result_summarizer=self._tool_result_summarizer,
+                goal_checker=self._goal_checker,
                 tool_result_summary_threshold=(
                     self._tool_result_summary_threshold
                 ),
@@ -2652,6 +2703,81 @@ def _resolve_prompt_caching(
         f"prompt_caching= unrecognised value {spec!r}. Use True / False / "
         "None, or a dict like {'enabled': True, 'ttl': '5m'|'1h', "
         "'cache_key': '<session-id>'}."
+    )
+
+
+_RUN_UNTIL_KEYS = frozenset(
+    {
+        "condition",
+        "checker",
+        "max_iterations",
+        "max_no_progress",
+        "max_cost_usd",
+        "checker_prompt",
+    }
+)
+
+
+def _normalize_run_until_spec(
+    run_until: str | Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Normalise the ``run_until=`` kwarg to GoalStopHook kwargs.
+
+    Accepts:
+
+    * ``None`` -> ``None`` (no hook registered).
+    * ``str`` -> ``{"condition": <str>}`` (all guardrails defaulted).
+    * ``Mapping`` -> validated dict. Recognised keys: ``condition``
+      (required, non-empty), ``checker`` (``Model | str | dict``),
+      ``max_iterations``, ``max_no_progress``, ``max_cost_usd``,
+      ``checker_prompt``.
+
+    Returns a dict whose ``checker`` (if present) the caller pops and
+    resolves to a :class:`Model`; the remaining keys are GoalStopHook
+    constructor kwargs. Raises :class:`~loomflow.core.errors.ConfigError`
+    on an empty condition or an unrecognised key.
+    """
+    if run_until is None:
+        return None
+    from ..core.errors import ConfigError
+
+    if isinstance(run_until, str):
+        condition = run_until.strip()
+        if not condition:
+            raise ConfigError(
+                "run_until='' is empty — pass a measurable stop "
+                "condition, e.g. run_until='all tests pass'."
+            )
+        return {"condition": condition}
+
+    if isinstance(run_until, Mapping):
+        unknown = set(run_until) - _RUN_UNTIL_KEYS
+        if unknown:
+            raise ConfigError(
+                f"run_until got unrecognised key(s) {sorted(unknown)}; "
+                f"recognised keys are {sorted(_RUN_UNTIL_KEYS)}."
+            )
+        condition = str(run_until.get("condition", "")).strip()
+        if not condition:
+            raise ConfigError(
+                "run_until requires a non-empty 'condition' — a "
+                "measurable stop condition, e.g. 'all tests pass'."
+            )
+        spec: dict[str, Any] = {"condition": condition}
+        for key in (
+            "checker",
+            "max_iterations",
+            "max_no_progress",
+            "max_cost_usd",
+            "checker_prompt",
+        ):
+            if key in run_until:
+                spec[key] = run_until[key]
+        return spec
+
+    raise ConfigError(
+        "run_until must be a str (the condition) or a dict; got "
+        f"{type(run_until).__name__}."
     )
 
 

@@ -134,6 +134,20 @@ def test_from_dict_minimal_config() -> None:
     assert agent._max_turns == 50  # noqa: SLF001 — default
 
 
+def test_from_dict_reads_timeout() -> None:
+    """``timeout`` is float-coerced from the config dict and passed
+    through to the wall-clock guard."""
+    agent = Agent.from_dict(
+        {"instructions": "x", "model": "echo", "timeout": 0.5}
+    )
+    assert agent._timeout == 0.5  # noqa: SLF001
+
+
+def test_from_dict_timeout_absent_is_none() -> None:
+    agent = Agent.from_dict({"instructions": "x", "model": "echo"})
+    assert agent._timeout is None  # noqa: SLF001
+
+
 def test_from_dict_with_budget() -> None:
     agent = Agent.from_dict(
         {

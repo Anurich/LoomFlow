@@ -212,6 +212,15 @@ class Dependencies:
     enable; see :mod:`loomflow.tools.result_summarizer` for the
     summariser prompt and fall-back semantics."""
 
+    goal_checker: Model | None = None
+    """Small fast model the :class:`~loomflow.GoalStopHook`
+    (``Agent(run_until=...)``) uses to judge whether the run's stop
+    condition is met after each architecture pass. ``None`` (the
+    default) means the hook falls back to ``deps.model`` — correct but
+    slower; set ``Agent(run_until={"checker": <model>})`` to wire a
+    cheap checker (typically Haiku). Forwarded into the hook via
+    ``deps``; the hook never holds its own model."""
+
     tool_result_summary_threshold: int = 500
     """Char count below which a tool result is shipped verbatim
     (the summariser round-trip would cost more than it saves).

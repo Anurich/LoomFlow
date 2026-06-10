@@ -64,6 +64,22 @@ class CancelledByUser(LoomError):
     """A user-driven interruption (signal, timeout) ended the run."""
 
 
+class RunTimeout(LoomError):
+    """The run exceeded the wall-clock limit set via ``Agent(timeout=)``.
+
+    Distinct from :class:`TransientModelError` timeouts (a single
+    model call timing out, which the retry layer handles) — this is
+    the whole-run ceiling: setup, every model call, every tool call,
+    and teardown together took longer than ``seconds``.
+    """
+
+    def __init__(self, seconds: float) -> None:
+        super().__init__(
+            f"agent run exceeded its wall-clock timeout of {seconds}s"
+        )
+        self.seconds = seconds
+
+
 class OutputValidationError(LoomError):
     """The model's final answer did not validate against the supplied
     ``output_schema``.

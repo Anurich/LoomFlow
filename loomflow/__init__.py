@@ -49,7 +49,7 @@ Public API tiers:
 from .agent import Agent, Tuning
 from .agent.auto_compact import context_window_for, maybe_auto_compact
 from .agent.snip import snip_messages
-from .agent.stop_hooks import StopHook, StopHookResult
+from .agent.stop_hooks import GoalStopHook, StopHook, StopHookResult
 from .architecture import Architecture, ReAct
 from .core import (
     Budget,
@@ -80,6 +80,7 @@ from .core import (
     RunContext,
     RunResult,
     Runtime,
+    RunTimeout,
     Sandbox,
     Secrets,
     Telemetry,
@@ -178,6 +179,7 @@ __all__ = [
     "Secrets",
     "AuditLog",
     "Architecture",
+    "GoalStopHook",
     "StopHook",
     "StopHookResult",
     # ----- Default in-memory / no-op backends + always-on architecture -----
@@ -208,6 +210,7 @@ __all__ = [
     "OutputValidationError",
     "IsolationWarning",
     "BudgetExceeded",
+    "RunTimeout",
     "ConfigError",
     "LoomDeprecationWarning",
     # ----- ID utilities -----

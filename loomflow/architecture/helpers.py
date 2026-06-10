@@ -35,6 +35,7 @@ from .base import Dependencies
 
 if TYPE_CHECKING:
     from ..agent.api import Agent
+    from ..core.protocols import Model
     from ..tools.registry import Tool
     from .base import AgentSession
 
@@ -43,6 +44,7 @@ async def text_only_model_call(
     deps: Dependencies,
     step_name: str,
     messages: list[Message],
+    model: Model | None = None,
 ) -> tuple[str, Usage]:
     """Run a single text-only model call through ``runtime.step``.
 
@@ -50,13 +52,18 @@ async def text_only_model_call(
     deterministic, but no tools are exposed — used for one-shot
     structured prompts (critique, evaluation, classification,
     planning).
+
+    ``model`` overrides which model handles the call; it defaults to
+    ``deps.model`` so existing callers are unchanged. The
+    :class:`~loomflow.GoalStopHook` passes ``deps.goal_checker`` here so
+    a cheap checker model can judge the stop condition.
     """
     text_parts: list[str] = []
     usage = Usage()
 
     chunks = deps.runtime.stream_step(
         step_name,
-        deps.model.stream,
+        (model or deps.model).stream,
         messages,
         tools=None,
         effort=deps.effort,
