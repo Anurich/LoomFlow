@@ -77,7 +77,13 @@ class InMemoryVectorStore:
         embedder: Embedder,
         ids: list[str] | None = None,
     ) -> InMemoryVectorStore:
-        """One-shot: construct an InMemoryVectorStore + add ``chunks``."""
+        """One-shot: construct an InMemoryVectorStore + add ``chunks``.
+
+        FACTORY — builds and returns a NEW store. To add to an
+        EXISTING store call ``store.add(chunks)`` (or
+        ``index_document(path, store)``); calling this in a loop
+        creates throwaway stores and drops writes.
+        """
         store = cls(embedder=embedder)
         await store.add(chunks, ids=ids)
         return store
@@ -327,7 +333,12 @@ class InMemoryVectorStore:
             ],
         }
         target.write_text(  # noqa: ASYNC240 — sync I/O is fine here, persistence is rare and small
-            json.dumps(data, ensure_ascii=False), encoding="utf-8"
+            # ``default=str`` is the safety net so an exotic metadata
+            # value can never crash save(); lists/dicts (e.g. a
+            # MarkdownChunker ``headers`` list) serialise natively and
+            # round-trip on load().
+            json.dumps(data, ensure_ascii=False, default=str),
+            encoding="utf-8",
         )
 
     @classmethod

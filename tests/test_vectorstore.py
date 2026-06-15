@@ -816,6 +816,172 @@ async def test_load_unsupported_version_raises(
 
 
 # ---------------------------------------------------------------------------
+# Persistence — metadata consistency (FIX 2: json.dumps default=str so a
+# list/dict metadata never crashes save(), and round-trips natively).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_save_with_list_metadata_does_not_raise(
+    tmp_path: Path,
+) -> None:
+    # The original crash: a MarkdownChunker ``headers`` list reached
+    # json.dumps with a non-default serialiser. save() must not raise.
+    store = InMemoryVectorStore(embedder=HashEmbedder(dimensions=8))
+    await store.add(
+        [Chunk(content="x", metadata={"headers": ["A", "B"]})]
+    )
+    await store.save(tmp_path / "db.json")
+
+
+@pytest.mark.anyio
+async def test_load_list_metadata_round_trips_as_native_list(
+    tmp_path: Path,
+) -> None:
+    store = InMemoryVectorStore(embedder=HashEmbedder(dimensions=8))
+    ids = await store.add(
+        [Chunk(content="x", metadata={"headers": ["A", "B"]})]
+    )
+    path = tmp_path / "db.json"
+    await store.save(path)
+
+    loaded = await InMemoryVectorStore.load(
+        path, embedder=HashEmbedder(dimensions=8)
+    )
+    got = await loaded.get_by_ids(ids)
+    # NATIVE list, not a stringified one.
+    assert got[0].metadata["headers"] == ["A", "B"]
+
+
+@pytest.mark.anyio
+async def test_load_scalar_metadata_survives_with_type(
+    tmp_path: Path,
+) -> None:
+    store = InMemoryVectorStore(embedder=HashEmbedder(dimensions=8))
+    ids = await store.add(
+        [Chunk(content="x", metadata={"page": 3, "src": "a.md"})]
+    )
+    path = tmp_path / "db.json"
+    await store.save(path)
+
+    loaded = await InMemoryVectorStore.load(
+        path, embedder=HashEmbedder(dimensions=8)
+    )
+    md = (await loaded.get_by_ids(ids))[0].metadata
+    assert md["page"] == 3
+    assert isinstance(md["page"], int)
+    assert md["src"] == "a.md"
+
+
+@pytest.mark.anyio
+async def test_save_non_serialisable_metadata_does_not_raise(
+    tmp_path: Path,
+) -> None:
+    # A set isn't JSON-serialisable; default=str is the safety net.
+    store = InMemoryVectorStore(embedder=HashEmbedder(dimensions=8))
+    await store.add(
+        [Chunk(content="x", metadata={"tags": {"a", "b"}})]
+    )
+    await store.save(tmp_path / "db.json")
+
+
+@pytest.mark.anyio
+async def test_load_non_serialisable_metadata_comes_back_as_string(
+    tmp_path: Path,
+) -> None:
+    store = InMemoryVectorStore(embedder=HashEmbedder(dimensions=8))
+    ids = await store.add(
+        [Chunk(content="x", metadata={"tags": {"a", "b"}})]
+    )
+    path = tmp_path / "db.json"
+    await store.save(path)
+
+    loaded = await InMemoryVectorStore.load(
+        path, embedder=HashEmbedder(dimensions=8)
+    )
+    tags = (await loaded.get_by_ids(ids))[0].metadata["tags"]
+    assert isinstance(tags, str)
+
+
+# ---------------------------------------------------------------------------
+# FAISS — cross-store cosine SCORE CONTRACT (FIX 1). Gated on the
+# vectorstore-faiss extra; the import name is ``faiss``.
+# ---------------------------------------------------------------------------
+
+_FAISS_CORPUS = [
+    Chunk(content="routers forward packets between networks"),
+    Chunk(content="photosynthesis converts sunlight into sugar"),
+    Chunk(content="the violin is a stringed musical instrument"),
+]
+
+
+@pytest.mark.anyio
+async def test_faiss_ip_top_result_matches_query_and_score_in_bounds() -> (
+    None
+):
+    pytest.importorskip("faiss")
+    from loomflow.vectorstore import FAISSVectorStore
+
+    embedder = HashEmbedder(dimensions=128)
+    store = FAISSVectorStore(embedder=embedder)  # default metric="ip"
+    await store.add(_FAISS_CORPUS)
+
+    query = _FAISS_CORPUS[0].content
+    results = await store.search(query, k=3)
+
+    assert results
+    assert results[0].chunk.content == query
+    # Cosine contract: every score in [-1, 1] (the old raw dot product
+    # on non-unit vectors could exceed 1).
+    for r in results:
+        assert -1.0 <= r.score <= 1.0 + 1e-6
+
+
+@pytest.mark.anyio
+async def test_faiss_ip_ranking_and_scores_match_inmemory() -> None:
+    pytest.importorskip("faiss")
+    from loomflow.vectorstore import FAISSVectorStore
+
+    # Same embedder kind => identical embeddings => comparable scores.
+    faiss_store = FAISSVectorStore(embedder=HashEmbedder(dimensions=128))
+    mem_store = InMemoryVectorStore(embedder=HashEmbedder(dimensions=128))
+    await faiss_store.add(_FAISS_CORPUS)
+    await mem_store.add(_FAISS_CORPUS)
+
+    query = _FAISS_CORPUS[0].content
+    faiss_res = await faiss_store.search(query, k=3)
+    mem_res = await mem_store.search(query, k=3)
+
+    # Same top-ranked chunk across backends.
+    assert faiss_res[0].chunk.content == mem_res[0].chunk.content
+    # And comparable top scores (cosine on both sides).
+    assert abs(faiss_res[0].score - mem_res[0].score) < 0.05
+
+
+@pytest.mark.anyio
+async def test_faiss_l2_scores_in_bounds_and_higher_is_better() -> None:
+    pytest.importorskip("faiss")
+    from loomflow.vectorstore import FAISSVectorStore
+
+    store = FAISSVectorStore(
+        embedder=HashEmbedder(dimensions=128),
+        index_factory_string="Flat",
+        metric="l2",
+    )
+    await store.add(_FAISS_CORPUS)
+
+    query = _FAISS_CORPUS[0].content
+    results = await store.search(query, k=3)
+
+    assert results
+    for r in results:
+        assert -1.0 <= r.score <= 1.0 + 1e-6
+    # The exact-match chunk outscores a poor match (higher-is-better).
+    by_content = {r.chunk.content: r.score for r in results}
+    assert by_content[query] > min(by_content.values())
+
+
+# ---------------------------------------------------------------------------
 # Postgres filter SQL translation (no DB required — pure unit test)
 # ---------------------------------------------------------------------------
 

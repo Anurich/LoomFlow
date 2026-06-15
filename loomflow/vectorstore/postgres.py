@@ -27,6 +27,8 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
+import anyio
+
 from ..core.ids import new_id
 from ..core.protocols import Embedder
 from ..loader.base import Chunk
@@ -59,6 +61,7 @@ class PostgresVectorStore:
         dsn: str,
         table: str = "jeeves_vectors",
         dimension: int | None = None,
+        pool_size: int = 10,
     ) -> None:
         if embedder is None:
             raise ValueError("embedder is required")
@@ -67,6 +70,9 @@ class PostgresVectorStore:
         self._table = table
         self._dimension = dimension
         self._initialized = False
+        self._pool_size = pool_size
+        self._pool_obj: Any = None
+        self._pool_lock = anyio.Lock()
 
     @property
     def embedder(self) -> Embedder:
@@ -87,7 +93,13 @@ class PostgresVectorStore:
         table: str = "jeeves_vectors",
         dimension: int | None = None,
     ) -> PostgresVectorStore:
-        """One-shot: construct a PostgresVectorStore + add ``chunks``."""
+        """One-shot: construct a PostgresVectorStore + add ``chunks``.
+
+        FACTORY — builds and returns a NEW store. To add to an
+        EXISTING store call ``store.add(chunks)`` (or
+        ``index_document(path, store)``); calling this in a loop
+        creates throwaway stores and drops writes.
+        """
         store = cls(
             embedder=embedder,
             dsn=dsn,
@@ -121,7 +133,20 @@ class PostgresVectorStore:
             dimension=dimension,
         )
 
-    async def _connect(self) -> Any:
+    async def _pool(self) -> Any:
+        """Lazily create + cache a connection POOL, then reuse it.
+
+        Every op previously opened a brand-new asyncpg connection and
+        closed it — 10 searches meant 10 TCP+auth handshakes, an
+        order-of-magnitude slower than the in-process stores and a
+        silent scaling footgun. A pooled store amortises that to ~one
+        connection's cost. Created once on first use (under a lock so
+        concurrent first calls don't each build a pool); ``aclose()``
+        tears it down. A bad DSN now surfaces HERE, on the first
+        operation, with a clear asyncpg error rather than per-call.
+        """
+        if self._pool_obj is not None:
+            return self._pool_obj
         try:
             import asyncpg  # type: ignore[import-not-found, import-untyped]
         except ImportError as exc:  # pragma: no cover
@@ -130,13 +155,40 @@ class PostgresVectorStore:
                 "Install with: pip install "
                 "'loomflow[vectorstore-postgres]'."
             ) from exc
-        return await asyncpg.connect(self._dsn)
+        async with self._pool_lock:
+            if self._pool_obj is None:
+                self._pool_obj = await asyncpg.create_pool(
+                    self._dsn, min_size=1, max_size=self._pool_size
+                )
+        return self._pool_obj
+
+    def _acquire(self) -> Any:
+        """``async with self._acquire() as conn:`` — borrow a pooled
+        connection (returned to the pool on exit, never closed)."""
+
+        store = self
+
+        class _Acquire:
+            async def __aenter__(self) -> Any:
+                self._pool = await store._pool()
+                self._conn = await self._pool.acquire()
+                return self._conn
+
+            async def __aexit__(self, *exc: Any) -> None:
+                await self._pool.release(self._conn)
+
+        return _Acquire()
+
+    async def aclose(self) -> None:
+        """Close the connection pool. Call on shutdown; idempotent."""
+        if self._pool_obj is not None:
+            await self._pool_obj.close()
+            self._pool_obj = None
 
     async def init_schema(self, dimension: int) -> None:
         """Create the table + HNSW index. Idempotent."""
         self._dimension = dimension
-        conn = await self._connect()
-        try:
+        async with self._acquire() as conn:
             await conn.execute(
                 "CREATE EXTENSION IF NOT EXISTS vector"
             )
@@ -159,8 +211,6 @@ class PostgresVectorStore:
                 """
             )
             self._initialized = True
-        finally:
-            await conn.close()
 
     async def add(
         self,
@@ -192,17 +242,21 @@ class PostgresVectorStore:
             else [new_id("vec") for _ in chunks]
         )
 
-        conn = await self._connect()
-        try:
-            rows = [
-                (
-                    assigned[i],
-                    chunks[i].content,
-                    json.dumps(chunks[i].metadata or {}),
-                    _vec_to_pg(vectors[i]),
-                )
-                for i in range(len(chunks))
-            ]
+        rows = [
+            (
+                assigned[i],
+                chunks[i].content,
+                # JSONB round-trips lists/dicts natively (so a
+                # MarkdownChunker ``headers`` list comes back a
+                # list, unlike Chroma's scalar-only store).
+                # ``default=str`` is the safety net so an exotic
+                # value can never crash the insert.
+                json.dumps(chunks[i].metadata or {}, default=str),
+                _vec_to_pg(vectors[i]),
+            )
+            for i in range(len(chunks))
+        ]
+        async with self._acquire() as conn:
             await conn.executemany(
                 f"""
                 INSERT INTO {self._table} (id, content, metadata, embedding)
@@ -214,27 +268,21 @@ class PostgresVectorStore:
                 """,
                 rows,
             )
-        finally:
-            await conn.close()
         return assigned
 
     async def delete(self, ids: list[str]) -> None:
         if not ids:
             return
-        conn = await self._connect()
-        try:
+        async with self._acquire() as conn:
             await conn.execute(
                 f"DELETE FROM {self._table} WHERE id = ANY($1::text[])",
                 list(ids),
             )
-        finally:
-            await conn.close()
 
     async def get_by_ids(self, ids: list[str]) -> list[Chunk]:
         if not ids:
             return []
-        conn = await self._connect()
-        try:
+        async with self._acquire() as conn:
             rows = await conn.fetch(
                 f"""
                 SELECT id, content, metadata
@@ -243,8 +291,6 @@ class PostgresVectorStore:
                 """,
                 list(ids),
             )
-        finally:
-            await conn.close()
         by_id: dict[str, Chunk] = {}
         for row in rows:
             md = row["metadata"]
@@ -295,11 +341,8 @@ class PostgresVectorStore:
             LIMIT ${len(params)}
         """
 
-        conn = await self._connect()
-        try:
+        async with self._acquire() as conn:
             rows = await conn.fetch(sql, *params)
-        finally:
-            await conn.close()
 
         candidates: list[SearchResult] = []
         cand_vecs: list[list[float]] = []
@@ -329,14 +372,11 @@ class PostgresVectorStore:
         return [candidates[i] for i in chosen]
 
     async def count(self) -> int:
-        conn = await self._connect()
-        try:
+        async with self._acquire() as conn:
             row = await conn.fetchrow(
                 f"SELECT COUNT(*) AS n FROM {self._table}"
             )
             return int(row["n"]) if row else 0
-        finally:
-            await conn.close()
 
 
 # ---------------------------------------------------------------------------

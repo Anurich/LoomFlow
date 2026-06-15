@@ -95,7 +95,22 @@ class VectorStore(Protocol):
         """Embed ``query`` and return the top-``k`` chunks ranked
         by similarity. ``filter`` (optional) restricts candidates
         by metadata. ``diversity`` (optional, 0..1) enables MMR
-        reranking for varied results."""
+        reranking for varied results.
+
+        Cross-store contract (so all four backends behave alike):
+
+        * **Score** is cosine similarity, higher-is-better, in
+          ``[-1, 1]`` — comparable across Chroma / FAISS / Postgres /
+          InMemory, so a rerank/fusion pipeline can mix backends.
+        * **filter** uses the same Mongo-style language everywhere
+          (``$eq`` / ``$in`` / ``$gt`` / ``$and`` / ``$exists`` …).
+          Chroma and Postgres push it into the engine (always returns
+          ``k`` if ``k`` match). FAISS and InMemory POST-filter an
+          over-fetched candidate pool, so a very tight filter on a
+          large store may return FEWER than ``k`` even when more
+          matches exist — best-effort, not guaranteed-``k``. Prefer
+          Chroma/Postgres when an exact-``k`` filtered result matters.
+        """
         ...
 
     async def search_by_vector(

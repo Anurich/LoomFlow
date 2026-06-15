@@ -87,7 +87,13 @@ class FAISSVectorStore:
         index_factory_string: str = "HNSW32",
         metric: str = "ip",
     ) -> FAISSVectorStore:
-        """One-shot: construct a FAISSVectorStore + add ``chunks``."""
+        """One-shot: construct a FAISSVectorStore + add ``chunks``.
+
+        FACTORY — builds and returns a NEW store. To add to an
+        EXISTING store call ``store.add(chunks)`` (or
+        ``index_document(path, store)``); calling this in a loop
+        creates throwaway stores and drops writes.
+        """
         store = cls(
             embedder=embedder,
             dimension=dimension,
@@ -285,9 +291,20 @@ class FAISSVectorStore:
             chunk = self._chunks[idx]
             if not evaluate_filter(filter, chunk.metadata):
                 continue
+            # Normalise to the cross-store SCORE CONTRACT: cosine
+            # similarity, higher-is-better. Vectors are L2-normalised
+            # for the ``ip`` metric (see _embed_and_store / search_by_
+            # vector), so inner product IS cosine in [-1, 1] — return
+            # it directly. For ``l2`` on unit vectors, the squared L2
+            # distance d relates to cosine c by d = 2(1 - c), so
+            # c = 1 - d/2 recovers the same [-1, 1] cosine score
+            # instead of the old, differently-scaled ``1 - d``. Either
+            # metric now yields scores directly comparable with
+            # Chroma / Postgres / InMemory.
             score = (
-                float(dist) if self._metric == "ip"
-                else max(0.0, 1.0 - float(dist))
+                float(dist)
+                if self._metric == "ip"
+                else 1.0 - float(dist) / 2.0
             )
             candidates.append(
                 SearchResult(

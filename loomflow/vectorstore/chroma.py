@@ -16,6 +16,7 @@ direct).
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from typing import Any
 
@@ -83,6 +84,30 @@ def _xlate_field(condition: Any) -> dict[str, Any]:
     return {"$eq": condition}
 
 
+def _flatten_metadata(meta: Mapping[str, Any]) -> dict[str, Any]:
+    """Coerce a chunk's metadata into what chromadb accepts.
+
+    chromadb stores ONLY scalar metadata values (str / int / float /
+    bool / None). The framework's own chunkers emit non-scalars —
+    ``MarkdownChunker`` writes a ``headers`` LIST — so a bare
+    ``store.add(chunker.split(...))`` would crash on its own loader's
+    output. Scalars pass through untouched (equality / range filters
+    on them are unchanged); anything else is JSON-serialised to a
+    stable, round-trippable string (``json.loads`` it back on read —
+    reads are NOT auto-parsed, since a legitimately string value could
+    look like JSON). ``default=str`` guards exotic objects so this can
+    never itself raise. Postgres (JSONB) / InMemory / FAISS keep dicts
+    natively and never hit this path.
+    """
+    out: dict[str, Any] = {}
+    for key, value in meta.items():
+        if value is None or isinstance(value, (str, int, float, bool)):
+            out[key] = value
+        else:
+            out[key] = json.dumps(value, default=str)
+    return out
+
+
 class ChromaVectorStore:
     """Vector store backed by ``chromadb``."""
 
@@ -137,7 +162,13 @@ class ChromaVectorStore:
         persist_directory: str | None = None,
         client: Any = None,
     ) -> ChromaVectorStore:
-        """One-shot: construct a ChromaVectorStore + add ``chunks``."""
+        """One-shot: construct a ChromaVectorStore + add ``chunks``.
+
+        FACTORY — builds and returns a NEW store. To add to an
+        EXISTING store call ``store.add(chunks)`` (or
+        ``index_document(path, store)``); calling this in a loop
+        creates throwaway stores and drops writes.
+        """
         store = cls(
             embedder=embedder,
             collection_name=collection_name,
@@ -161,7 +192,14 @@ class ChromaVectorStore:
     ) -> ChromaVectorStore:
         """One-shot: construct a ChromaVectorStore from raw text
         strings (each becomes a :class:`Chunk` with the matching
-        metadata dict, or empty if ``metadatas`` is None)."""
+        metadata dict, or empty if ``metadatas`` is None).
+
+        FACTORY — builds and returns a NEW store. ``embedder`` is
+        required here because there is no instance yet to inherit it
+        from. To add more to an EXISTING store (whose embedder you
+        already gave at construction) call ``store.add(chunks)`` or
+        ``index_document(path, store)`` — no embedder repeat there.
+        """
         return await cls.from_chunks(
             _chunks_from_texts(texts, metadatas),
             embedder=embedder,
@@ -202,9 +240,10 @@ class ChromaVectorStore:
             else [new_id("vec") for _ in chunks]
         )
         contents = [c.content for c in chunks]
-        # Chroma rejects empty-dict metadatas; supply a sentinel.
+        # Chroma rejects empty-dict metadatas AND non-scalar values;
+        # flatten (lists/dicts → JSON strings) + sentinel the empties.
         metadatas = [
-            {**c.metadata} if c.metadata else {"_empty": True}
+            _flatten_metadata(c.metadata) if c.metadata else {"_empty": True}
             for c in chunks
         ]
 

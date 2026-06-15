@@ -9,6 +9,55 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 
 ## [Unreleased]
 
+### Fixed — vector-store cross-backend consistency
+
+Learn one store, use all four with no surprises. Three drifts closed:
+
+* **Non-scalar chunk metadata no longer crashes any backend.** The
+  framework's own `MarkdownChunker` emits a `headers` *list*, which
+  crashed `PostgresVectorStore.add` and `InMemoryVectorStore.save`
+  (Chroma was fixed separately, below). Both now `json.dumps(...,
+  default=str)`: lists/dicts round-trip natively (Postgres JSONB /
+  InMemory JSON come back as real lists), and an exotic value can
+  never crash the write.
+* **FAISS scores now honour the cross-store contract.** Its default
+  inner-product metric returned a raw dot product while the other
+  stores returned cosine in `[-1, 1]` — so scores weren't comparable
+  across backends (broke rerank/fusion). FAISS vectors are already
+  L2-normalised, so IP *is* cosine; the `l2` metric now maps via
+  `1 - d/2` to the same range. Scores are comparable everywhere.
+* **`PostgresVectorStore` uses a connection POOL.** Every op
+  previously opened and closed a fresh asyncpg connection (10
+  searches = 10 handshakes); it now lazily creates a pool
+  (`pool_size=`, default 10) and reuses it — call `aclose()` on
+  shutdown. A bad DSN surfaces on first use instead of per-call.
+
+The `VectorStore.search` docstring now states the contract (cosine
+score direction + the FAISS/InMemory post-filter "best-effort, may
+return <k" caveat vs Chroma/Postgres engine-side filtering).
+
+### Fixed — Chroma now accepts the framework's own chunk metadata
+
+`ChromaVectorStore.add` crashed on list/dict metadata values — which
+the framework's own chunkers produce (`MarkdownChunker` writes a
+`headers` list), so `store.add(chunker.split(...))` failed on
+loomflow's own loader output and forced callers to hand-flatten every
+chunk. Non-scalar metadata values are now JSON-serialised on write
+(`json.loads` them back on read; reads are not auto-parsed) and scalar
+keys pass through untouched and stay filterable. Postgres (JSONB) /
+InMemory / FAISS were never affected.
+
+### Added — `index_document(path, store)` one-liner ingest
+
+`from loomflow.vectorstore import index_document` — loads, chunks, and
+adds a file to any existing vector store in one call (LangChain-parity
+with `Chroma.from_documents`), returning the new chunk ids. Defaults to
+`RecursiveChunker`; pass `chunker=` to override. Unlike the
+`from_texts` / `from_chunks` **factories** (which build a NEW store each
+call — a footgun in a loop, now warned in their docstrings), this ADDS
+to the store you pass, the right primitive for growing an index over
+time.
+
 ### Added — `Agent(timeout=)` wall-clock guard
 
 A run with a hung tool or model call previously hung forever — the only

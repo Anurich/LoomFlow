@@ -45,6 +45,7 @@ Optional dependencies::
     pip install 'loomflow[vectorstore]'              # all of the above
 """
 
+from ._ingest import index_document
 from .base import SearchResult, VectorStore
 from .chroma import ChromaVectorStore
 from .faiss import FAISSVectorStore
@@ -58,4 +59,5 @@ __all__ = [
     "PostgresVectorStore",
     "SearchResult",
     "VectorStore",
+    "index_document",
 ]
