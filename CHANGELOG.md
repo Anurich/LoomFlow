@@ -9,6 +9,29 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 
 ## [Unreleased]
 
+## [0.10.28] — 2026-06-30
+
+### Fixed — durable runtime now honours `idempotency_key`
+
+`JournaledRuntime.step` accepted an `idempotency_key` but never used it,
+keying the journal purely by step name. Identical tool calls issued on
+different turns therefore re-executed their side effects. The journal now
+keys by the `idempotency_key` (namespaced under `idem:`) when one is
+supplied, else the step name — so logically identical steps deduplicate
+to a single execution per session, which the ReAct loop already relies on
+(it passes `call.idempotency_key()`, a content hash of tool + args).
+
+### Improved — native hybrid `recall_scored` on every embedding backend
+
+`recall_scored` on `SqliteMemory`, `PostgresMemory`, `ChromaMemory`, and
+`RedisMemory` previously delegated to a neutral-score shim (every match
+scored `1.0`, no component breakdown). All four now run a real BM25 +
+cosine + RRF fusion matching `VectorMemory`, with `bm25_score` and
+`vector_score` populated on each `EpisodeMatch`. Candidates come from each
+backend's embedding-carrying fetch (SQL scan / pgvector ANN over-fetch /
+Chroma `get` / Redis hash scan); `user_id` partition and `time_range`
+filtering are preserved.
+
 ### Fixed — vector-store cross-backend consistency
 
 Learn one store, use all four with no surprises. Three drifts closed:
