@@ -100,6 +100,31 @@ docs = [
     "linkify-it-py>=2.0",
 ]
 
+[tool.hatch.build.targets.sdist]
+# The sdist defaults to sweeping the whole repo, which dragged in the
+# pre-built Sphinx site (``docs/_build/``, ~10MB of generated HTML
+# carrying the OLD ``jeevesagent`` name) plus dev cruft. Ship only the
+# package, tests, and the docs/example SOURCES — a lean, reproducible
+# source archive.
+include = [
+    "loomflow",
+    "tests",
+    "examples",
+    "docs",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "pyproject.toml",
+]
+exclude = [
+    "docs/_build",
+    "**/__pycache__",
+    "**/*.pyc",
+    ".env",
+    "dist",
+    "build",
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["loomflow"]
 # PEP 561: ``py.typed`` marker tells IDEs and type-checkers
