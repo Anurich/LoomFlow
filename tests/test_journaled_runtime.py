@@ -213,8 +213,13 @@ async def test_agent_run_journals_each_tool_call() -> None:
     store = runtime.store
     assert isinstance(store, InMemoryJournalStore)
     step_names = {n for s, n in store.step_keys() if s == result.session_id}
-    # `tool_call_<turn>_<slot>` is the key pattern from the loop.
-    assert any(name.startswith("tool_call_") for name in step_names)
+    # The loop now passes ``idempotency_key=call.idempotency_key()`` for
+    # every tool dispatch, so the journal keys land under the ``idem:``
+    # namespace (content-hash of tool + args) rather than the positional
+    # ``tool_call_<turn>_<slot>`` name. This is the intended behaviour
+    # change: identical tool calls across turns dedupe to one execution.
+    assert any(name.startswith("idem:") for name in step_names)
+    assert not any(name.startswith("tool_call_") for name in step_names)
 
 
 async def test_replay_a_full_run_against_same_session_id() -> None:
@@ -269,3 +274,108 @@ async def test_replay_a_full_run_against_same_session_id() -> None:
 
 async def _call_tool_directly(tool_obj: Any, args: dict[str, Any]) -> Any:
     return await tool_obj.execute(args)
+
+
+# ---------------------------------------------------------------------------
+# idempotency_key wiring (step())
+# ---------------------------------------------------------------------------
+
+
+async def test_idempotency_key_dedupes_across_different_step_names() -> None:
+    """Same ``idempotency_key`` under two *different* positional step
+    names must dedupe to a single execution — the whole point of the
+    key is to survive the loop's per-turn/slot naming."""
+    counter = {"calls": 0}
+
+    async def run() -> int:
+        counter["calls"] += 1
+        return counter["calls"]
+
+    runtime = JournaledRuntime(InMemoryJournalStore())
+    async with runtime.session("s1"):
+        first = await runtime.step(
+            "tool_call_1_0", run, idempotency_key="abc"
+        )
+        # Different positional name, same idempotency key.
+        second = await runtime.step(
+            "tool_call_2_0", run, idempotency_key="abc"
+        )
+
+    assert first == 1
+    assert second == 1
+    assert counter["calls"] == 1
+
+
+async def test_different_idempotency_keys_run_independently() -> None:
+    counter = {"calls": 0}
+
+    async def run() -> int:
+        counter["calls"] += 1
+        return counter["calls"]
+
+    runtime = JournaledRuntime(InMemoryJournalStore())
+    async with runtime.session("s1"):
+        first = await runtime.step("step", run, idempotency_key="k1")
+        second = await runtime.step("step", run, idempotency_key="k2")
+
+    assert first == 1
+    assert second == 2
+    assert counter["calls"] == 2
+
+
+async def test_idempotency_key_is_namespaced_under_idem_prefix() -> None:
+    """The key lands under ``idem:`` so a content-hash can't collide
+    with a positional step name like ``idem:`` would never be a real
+    ``tool_call_*`` name."""
+
+    async def run() -> str:
+        return "ok"
+
+    store = InMemoryJournalStore()
+    runtime = JournaledRuntime(store)
+    async with runtime.session("s1"):
+        await runtime.step("tool_call_1_0", run, idempotency_key="hash123")
+
+    names = {n for s, n in store.step_keys() if s == "s1"}
+    assert names == {"idem:hash123"}
+
+
+async def test_no_idempotency_key_falls_back_to_positional_name() -> None:
+    async def run() -> str:
+        return "ok"
+
+    store = InMemoryJournalStore()
+    runtime = JournaledRuntime(store)
+    async with runtime.session("s1"):
+        await runtime.step("tool_call_1_0", run)
+
+    names = {n for s, n in store.step_keys() if s == "s1"}
+    assert names == {"tool_call_1_0"}
+
+
+async def test_idem_namespace_separates_from_positional_loop_names() -> None:
+    """The ``idem:`` prefix exists so a content-hash idempotency key
+    can never alias a positional loop name like
+    ``tool_call_<turn>_<slot>``. A positional step and an
+    idempotency-keyed step sharing the *same raw string* land on
+    different journal keys (``tool_call_1_0`` vs ``idem:tool_call_1_0``)
+    and both execute independently."""
+    counter = {"calls": 0}
+
+    async def run() -> int:
+        counter["calls"] += 1
+        return counter["calls"]
+
+    store = InMemoryJournalStore()
+    runtime = JournaledRuntime(store)
+    async with runtime.session("s1"):
+        a = await runtime.step("tool_call_1_0", run)
+        b = await runtime.step(
+            "tool_call_1_0", run, idempotency_key="tool_call_1_0"
+        )
+
+    assert a == 1
+    assert b == 2  # distinct journal keys => both executed
+    assert counter["calls"] == 2
+    names = {n for s, n in store.step_keys() if s == "s1"}
+    assert names == {"tool_call_1_0", "idem:tool_call_1_0"}

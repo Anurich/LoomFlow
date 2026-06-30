@@ -35,8 +35,7 @@ from ..core.types import (
     Message,
     Role,
 )
-from ._embedding_util import pack_float32, unpack_float32
-from ._hybrid import default_recall_scored
+from ._embedding_util import cosine, pack_float32, unpack_float32
 from .embedder import HashEmbedder
 
 DEFAULT_KEY_PREFIX = "jeeves:episode:"
@@ -334,18 +333,70 @@ class RedisMemory:
         user_id: str | None = None,
         alpha: float = 0.5,
     ) -> list[EpisodeMatch]:
-        # Redis already does vector recall via RediSearch HNSW
-        # (or brute-force cosine fallback). This shim wraps the
-        # results with neutral scores; a future revision could
-        # plumb HNSW distances into ``vector_score``.
-        eps = await self.recall(
-            query,
-            kind=kind,
-            limit=limit,
-            time_range=time_range,
-            user_id=user_id,
+        """Native hybrid recall: BM25 lexical + cosine vector, fused
+        via Reciprocal Rank Fusion. Mirrors
+        :meth:`VectorMemory.recall_scored`.
+
+        Candidates come from the hash scan (``_scan_all_episodes``),
+        which carries the stored ``embedding`` blob on every episode —
+        unlike the RediSearch index path, whose ``FT.SEARCH`` reply
+        omits the vector. We then apply the user partition and
+        time-range filter and score in process so both component scores
+        can be populated. Empty queries fall through to recency with
+        neutral ``1.0`` scores; a no-match query falls through to
+        recency with ``0.0``.
+        """
+        from ._hybrid import _BM25, hybrid_rank
+
+        await self.ensure_index()
+
+        if not query.strip():
+            recent = await self._recall_recent(limit, time_range, user_id)
+            return [EpisodeMatch(episode=e, score=1.0) for e in recent]
+
+        episodes = await self._scan_all_episodes()
+        episodes = [e for e in episodes if e.user_id == user_id]
+        if time_range is not None:
+            lo, hi = time_range
+            episodes = [e for e in episodes if lo <= e.occurred_at <= hi]
+        candidates = [e for e in episodes if e.embedding is not None]
+        if not candidates:
+            return []
+
+        # Vector arm — cosine over candidate embeddings; drop
+        # non-positive sims so RRF doesn't promote them.
+        query_embedding = await self._embedder.embed(query)
+        vector_scores: list[tuple[int, float]] = []
+        for i, ep in enumerate(candidates):
+            assert ep.embedding is not None
+            sim = cosine(query_embedding, ep.embedding)
+            if sim > 0:
+                vector_scores.append((i, sim))
+        vector_scores.sort(key=lambda x: x[1], reverse=True)
+
+        # BM25 arm — lexical ranking over the same candidate pool.
+        texts = [f"{e.input}\n{e.output}" for e in candidates]
+        bm25_ranking = _BM25(texts).rank(query)
+
+        fused = hybrid_rank(
+            bm25_ranking=bm25_ranking,
+            vector_ranking=vector_scores,
+            alpha=alpha,
         )
-        return default_recall_scored(eps)
+        if not fused:
+            recent = sorted(
+                candidates, key=lambda e: e.occurred_at, reverse=True
+            )[:limit]
+            return [EpisodeMatch(episode=e, score=0.0) for e in recent]
+        return [
+            EpisodeMatch(
+                episode=candidates[idx],
+                score=score,
+                bm25_score=bm25_score,
+                vector_score=vector_score,
+            )
+            for idx, score, bm25_score, vector_score in fused[:limit]
+        ]
 
     async def _recall_brute_force(
         self, query_embedding: list[float], limit: int

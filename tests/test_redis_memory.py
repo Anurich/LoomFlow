@@ -157,6 +157,57 @@ async def test_ensure_index_invokes_ft_create_in_vector_mode() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Native hybrid recall_scored — offline via the brute-force hash scan
+# ---------------------------------------------------------------------------
+
+
+async def test_recall_scored_populates_both_score_components() -> None:
+    """The native hybrid path sources candidates from the hash scan
+    (which carries embeddings) and scores BM25 + cosine in process."""
+    fake = _FakeRedis()
+    mem = RedisMemory(
+        fake, embedder=HashEmbedder(dimensions=64), use_vector_index=False
+    )
+    # output="" so the embedded text == input, giving an exact vector
+    # match for an identical-text query (vector_score > 0).
+    await mem.remember(_ep("docker container networking"))
+    matches = await mem.recall_scored("docker container networking")
+    assert matches
+    top = matches[0]
+    assert top.bm25_score is not None and top.bm25_score > 0
+    assert top.vector_score is not None and top.vector_score > 0
+
+
+async def test_recall_scored_empty_query_neutral_scores() -> None:
+    fake = _FakeRedis()
+    mem = RedisMemory(
+        fake, embedder=HashEmbedder(dimensions=32), use_vector_index=False
+    )
+    await mem.remember(_ep("first", "x"))
+    matches = await mem.recall_scored("")
+    assert matches
+    assert all(m.score == 1.0 for m in matches)
+
+
+async def test_recall_scored_respects_user_partition() -> None:
+    fake = _FakeRedis()
+    mem = RedisMemory(
+        fake, embedder=HashEmbedder(dimensions=32), use_vector_index=False
+    )
+    await mem.remember(
+        Episode(session_id="s1", input="alice docker", output="",
+                user_id="alice", occurred_at=datetime.now(UTC))
+    )
+    await mem.remember(
+        Episode(session_id="s2", input="bob docker", output="",
+                user_id="bob", occurred_at=datetime.now(UTC))
+    )
+    matches = await mem.recall_scored("docker", user_id="alice")
+    assert matches
+    assert all(m.episode.user_id == "alice" for m in matches)
+
+
+# ---------------------------------------------------------------------------
 # Live integration — only runs with a real Redis
 # ---------------------------------------------------------------------------
 

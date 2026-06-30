@@ -35,7 +35,7 @@ from ..core.types import (
     Message,
     Role,
 )
-from ._hybrid import default_recall_scored
+from ._embedding_util import cosine
 from .embedder import HashEmbedder
 
 DEFAULT_NAMESPACE = "default"
@@ -442,18 +442,86 @@ class PostgresMemory:
         user_id: str | None = None,
         alpha: float = 0.5,
     ) -> list[EpisodeMatch]:
-        # Postgres + pgvector already does HNSW cosine. This shim
-        # wraps with neutral scores; a future revision could plumb
-        # the L2/cosine distance into ``vector_score`` (the SELECT
-        # would need to return the operator's distance column).
-        eps = await self.recall(
-            query,
-            kind=kind,
-            limit=limit,
-            time_range=time_range,
-            user_id=user_id,
+        """Native hybrid recall: BM25 lexical + cosine vector, fused
+        via Reciprocal Rank Fusion. Mirrors
+        :meth:`VectorMemory.recall_scored`.
+
+        We over-fetch a candidate pool via the pgvector HNSW ANN
+        (``max(limit * 8, 40)`` rows ordered by ``embedding <=>
+        query``) — wide enough that the lexical (BM25) arm has real
+        candidates to re-rank even when they aren't the nearest
+        vectors — then compute cosine and BM25 in process so both
+        component scores ride along on each :class:`EpisodeMatch`.
+        Empty queries fall through to recency with neutral ``1.0``
+        scores; a no-match query falls through to recency with
+        ``0.0``.
+        """
+        from ._hybrid import _BM25, hybrid_rank
+
+        if not query.strip():
+            recent = await self._recall_recent(limit, time_range, user_id)
+            return [EpisodeMatch(episode=e, score=1.0) for e in recent]
+
+        query_embedding = await self._embedder.embed(query)
+        lo = time_range[0] if time_range is not None else None
+        hi = time_range[1] if time_range is not None else None
+        fetch_limit = max(limit * 8, 40)
+
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT id, session_id, user_id, occurred_at, input, output, embedding "
+                "FROM episodes "
+                "WHERE namespace = $1 "
+                "  AND user_id IS NOT DISTINCT FROM $2 "
+                "  AND ($3::timestamptz IS NULL OR occurred_at >= $3) "
+                "  AND ($4::timestamptz IS NULL OR occurred_at <= $4) "
+                "ORDER BY embedding <=> $5 "
+                "LIMIT $6",
+                self._namespace,
+                user_id,
+                lo,
+                hi,
+                query_embedding,
+                fetch_limit,
+            )
+        candidates = _rows_to_episodes(_rows(rows))
+        candidates = [e for e in candidates if e.embedding is not None]
+        if not candidates:
+            return []
+
+        # Vector arm — cosine over candidate embeddings; drop
+        # non-positive sims so RRF doesn't promote them.
+        vector_scores: list[tuple[int, float]] = []
+        for i, ep in enumerate(candidates):
+            assert ep.embedding is not None
+            sim = cosine(query_embedding, ep.embedding)
+            if sim > 0:
+                vector_scores.append((i, sim))
+        vector_scores.sort(key=lambda x: x[1], reverse=True)
+
+        # BM25 arm — lexical ranking over the same candidate pool.
+        texts = [f"{e.input}\n{e.output}" for e in candidates]
+        bm25_ranking = _BM25(texts).rank(query)
+
+        fused = hybrid_rank(
+            bm25_ranking=bm25_ranking,
+            vector_ranking=vector_scores,
+            alpha=alpha,
         )
-        return default_recall_scored(eps)
+        if not fused:
+            recent = sorted(
+                candidates, key=lambda e: e.occurred_at, reverse=True
+            )[:limit]
+            return [EpisodeMatch(episode=e, score=0.0) for e in recent]
+        return [
+            EpisodeMatch(
+                episode=candidates[idx],
+                score=score,
+                bm25_score=bm25_score,
+                vector_score=vector_score,
+            )
+            for idx, score, bm25_score, vector_score in fused[:limit]
+        ]
 
     async def _recall_recent(
         self,

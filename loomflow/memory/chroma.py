@@ -28,7 +28,7 @@ from ..core.types import (
     Message,
     Role,
 )
-from ._hybrid import default_recall_scored
+from ._embedding_util import cosine
 from .embedder import HashEmbedder
 
 DEFAULT_COLLECTION = "jeeves_episodes"
@@ -272,21 +272,78 @@ class ChromaMemory:
         user_id: str | None = None,
         alpha: float = 0.5,
     ) -> list[EpisodeMatch]:
-        # Chroma already does vector recall under the hood; for now
-        # we wrap its results with neutral scores. A future revision
-        # could plumb Chroma's distance scores into ``vector_score``
-        # — that needs the underlying ``query`` call to request
-        # distances and a transform from L2/IP distance into a
-        # comparable cosine similarity. Out of scope for this
-        # protocol-evolution shim.
-        eps = await self.recall(
-            query,
-            kind=kind,
-            limit=limit,
-            time_range=time_range,
-            user_id=user_id,
+        """Native hybrid recall: BM25 lexical + cosine vector, fused
+        via Reciprocal Rank Fusion. Mirrors
+        :meth:`VectorMemory.recall_scored`.
+
+        We fetch the user's candidate pool with embeddings via
+        ``coll.get`` (the same path :meth:`_recall_recent` uses — it
+        carries the stored vectors, unlike ``coll.query`` which we'd
+        otherwise have to re-rank by Chroma's distance), then compute
+        cosine and BM25 in process so we can populate both component
+        scores. Empty queries fall through to recency with neutral
+        ``1.0`` scores; a no-match query falls through to recency with
+        ``0.0``.
+        """
+        from ._hybrid import _BM25, hybrid_rank
+
+        coll = await self._get_collection()
+
+        if not query.strip():
+            recent = await self._recall_recent(
+                coll, limit, time_range, user_id
+            )
+            return [EpisodeMatch(episode=e, score=1.0) for e in recent]
+
+        where_filter = {"user_id": user_id or ""}
+        result = await anyio.to_thread.run_sync(
+            lambda: coll.get(
+                where=where_filter,
+                include=["metadatas", "documents", "embeddings"],
+            )
         )
-        return default_recall_scored(eps)
+        episodes = _decode_get_result(result)
+        if time_range is not None:
+            lo, hi = time_range
+            episodes = [e for e in episodes if lo <= e.occurred_at <= hi]
+        candidates = [e for e in episodes if e.embedding is not None]
+        if not candidates:
+            return []
+
+        # Vector arm — cosine over candidate embeddings; drop
+        # non-positive sims so RRF doesn't promote them.
+        query_embedding = list(await self._embedder.embed(query))
+        vector_scores: list[tuple[int, float]] = []
+        for i, ep in enumerate(candidates):
+            assert ep.embedding is not None
+            sim = cosine(query_embedding, ep.embedding)
+            if sim > 0:
+                vector_scores.append((i, sim))
+        vector_scores.sort(key=lambda x: x[1], reverse=True)
+
+        # BM25 arm — lexical ranking over the same candidate pool.
+        texts = [f"{e.input}\n{e.output}" for e in candidates]
+        bm25_ranking = _BM25(texts).rank(query)
+
+        fused = hybrid_rank(
+            bm25_ranking=bm25_ranking,
+            vector_ranking=vector_scores,
+            alpha=alpha,
+        )
+        if not fused:
+            recent = sorted(
+                candidates, key=lambda e: e.occurred_at, reverse=True
+            )[:limit]
+            return [EpisodeMatch(episode=e, score=0.0) for e in recent]
+        return [
+            EpisodeMatch(
+                episode=candidates[idx],
+                score=score,
+                bm25_score=bm25_score,
+                vector_score=vector_score,
+            )
+            for idx, score, bm25_score, vector_score in fused[:limit]
+        ]
 
     async def _recall_recent(
         self,

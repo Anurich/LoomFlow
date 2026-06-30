@@ -7,7 +7,30 @@ here keeps the two backends from drifting apart.
 
 from __future__ import annotations
 
+import math
 import struct
+
+
+def cosine(a: list[float], b: list[float]) -> float:
+    """Cosine similarity of two equal-length vectors, range ``[-1, 1]``.
+
+    Returns ``0.0`` for empty, mismatched-length, or zero-norm inputs
+    (which would otherwise produce ``nan``). Shared by the native
+    hybrid ``recall_scored`` implementations across the persistent
+    memory backends so they don't each carry their own copy.
+    """
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = 0.0
+    na = 0.0
+    nb = 0.0
+    for x, y in zip(a, b, strict=False):
+        dot += x * y
+        na += x * x
+        nb += y * y
+    if na <= 0.0 or nb <= 0.0:
+        return 0.0
+    return dot / (math.sqrt(na) * math.sqrt(nb))
 
 
 def pack_float32(values: list[float]) -> bytes:

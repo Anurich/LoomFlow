@@ -278,6 +278,70 @@ async def test_recall_with_time_range_passes_bounds() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Native hybrid recall_scored — offline via the fake pool
+# ---------------------------------------------------------------------------
+
+
+async def test_recall_scored_overfetches_and_populates_components() -> None:
+    """The native hybrid path over-fetches the candidate pool
+    (``max(limit*8, 40)``) via the pgvector ANN, then scores BM25 +
+    cosine in process. With an embedding that matches the query's,
+    both component scores must be populated."""
+    embedder = HashEmbedder(dimensions=32)
+    store = _FakeStore()
+    pool = _FakePool(store)
+    mem = PostgresMemory(pool=pool, embedder=embedder)
+
+    text = "docker container networking"
+    emb = await embedder.embed(text)
+    store.next_rows = [
+        {
+            "id": "ep_1",
+            "session_id": "s",
+            "user_id": None,
+            "occurred_at": datetime.now(UTC),
+            "input": text,
+            "output": "bridge mode is the default",
+            "embedding": emb,
+        }
+    ]
+
+    matches = await mem.recall_scored("docker networking", limit=5)
+    assert matches
+    top = matches[0]
+    assert top.bm25_score is not None and top.bm25_score > 0
+    assert top.vector_score is not None
+
+    # Over-fetch limit is in the SELECT args (position 6 -> args[5]).
+    _, args = store.queried[0]
+    assert args[5] == max(5 * 8, 40)
+
+
+async def test_recall_scored_empty_query_neutral_scores() -> None:
+    embedder = HashEmbedder(dimensions=32)
+    store = _FakeStore()
+    pool = _FakePool(store)
+    mem = PostgresMemory(pool=pool, embedder=embedder)
+    store.next_rows = [
+        {
+            "id": "ep_1",
+            "session_id": "s",
+            "user_id": None,
+            "occurred_at": datetime.now(UTC),
+            "input": "x",
+            "output": "y",
+            "embedding": [0.0] * 32,
+        }
+    ]
+    matches = await mem.recall_scored("   ")
+    assert matches
+    assert all(m.score == 1.0 for m in matches)
+    # Empty-query path hits the recency SELECT, not the ANN over-fetch.
+    sql, _ = store.queried[0]
+    assert "ORDER BY occurred_at DESC" in sql
+
+
+# ---------------------------------------------------------------------------
 # Live integration — only runs with a real Postgres
 # ---------------------------------------------------------------------------
 

@@ -58,8 +58,7 @@ from ..core.types import (
     Message,
     Role,
 )
-from ._embedding_util import pack_float32, unpack_float32
-from ._hybrid import default_recall_scored
+from ._embedding_util import cosine, pack_float32, unpack_float32
 from .embedder import HashEmbedder
 from .facts import FactStore
 from .sqlite_facts import SqliteFactStore
@@ -510,17 +509,78 @@ class SqliteMemory:
         user_id: str | None = None,
         alpha: float = 0.5,
     ) -> list[EpisodeMatch]:
-        # Sqlite recall already does cosine over candidate
-        # embeddings; this shim wraps with neutral scores. A future
-        # revision could plumb the cosine value into ``vector_score``.
-        eps = await self.recall(
-            query,
-            kind=kind,
-            limit=limit,
-            time_range=time_range,
-            user_id=user_id,
+        """Native hybrid recall: BM25 lexical + cosine vector, fused
+        via Reciprocal Rank Fusion. Mirrors
+        :meth:`VectorMemory.recall_scored`.
+
+        The candidate pool is the same SQL scan ``recall`` uses (user
+        partition + time-range filter applied at the SQL layer);
+        ``bm25_score`` and ``vector_score`` ride along on each
+        :class:`EpisodeMatch`. Empty queries fall through to recency
+        with neutral ``1.0`` scores; a query that matches nothing falls
+        through to recency with ``0.0``.
+        """
+        from ._hybrid import _BM25, hybrid_rank
+
+        # Footgun protection — mirror ``recall``.
+        if user_id is None:
+            await self._maybe_warn_isolation()
+
+        if not query.strip():
+            recent = await self._recall_recent(limit, time_range, user_id)
+            return [EpisodeMatch(episode=e, score=1.0) for e in recent]
+
+        rows = await anyio.to_thread.run_sync(
+            self._scan_episodes_sync, user_id, time_range
         )
-        return default_recall_scored(eps)
+        candidates: list[Episode] = []
+        embeddings: list[list[float]] = []
+        for row in rows:
+            blob = row[6]  # embedding column
+            if not blob:
+                continue
+            try:
+                vec = unpack_float32(bytes(blob))
+            except (TypeError, ValueError):
+                continue
+            candidates.append(_row_to_episode(row))
+            embeddings.append(vec)
+        if not candidates:
+            return []
+
+        # Vector arm — cosine over candidate embeddings; drop
+        # non-positive sims so RRF doesn't promote them.
+        query_vector = await self._embedder.embed(query)
+        vector_scores: list[tuple[int, float]] = []
+        for i, vec in enumerate(embeddings):
+            sim = cosine(query_vector, vec)
+            if sim > 0:
+                vector_scores.append((i, sim))
+        vector_scores.sort(key=lambda x: x[1], reverse=True)
+
+        # BM25 arm — lexical ranking over the same candidate pool.
+        texts = [f"{e.input}\n{e.output}" for e in candidates]
+        bm25_ranking = _BM25(texts).rank(query)
+
+        fused = hybrid_rank(
+            bm25_ranking=bm25_ranking,
+            vector_ranking=vector_scores,
+            alpha=alpha,
+        )
+        if not fused:
+            recent = sorted(
+                candidates, key=lambda e: e.occurred_at, reverse=True
+            )[:limit]
+            return [EpisodeMatch(episode=e, score=0.0) for e in recent]
+        return [
+            EpisodeMatch(
+                episode=candidates[idx],
+                score=score,
+                bm25_score=bm25_score,
+                vector_score=vector_score,
+            )
+            for idx, score, bm25_score, vector_score in fused[:limit]
+        ]
 
     async def _recall_recent(
         self,

@@ -2,10 +2,11 @@
 
 Covers the new :class:`EpisodeMatch`-returning surface added to the
 ``Memory`` protocol: ``InMemoryMemory`` ships a BM25-only hybrid;
-``VectorMemory`` ships full BM25 + cosine + RRF; backends without
-native hybrid (Chroma / Sqlite / Postgres / Redis / AutoExtract /
-Lazy) delegate to ``recall()`` and wrap with neutral scores via
-``default_recall_scored``.
+``VectorMemory``, ``SqliteMemory``, ``ChromaMemory``, ``PostgresMemory``
+and ``RedisMemory`` ship full BM25 + cosine + RRF over their own
+candidate pools; the remaining wrappers without a native scoring
+surface (AutoExtract pass-through, Lazy) delegate to ``recall()`` and
+wrap with neutral scores via ``default_recall_scored``.
 
 Tests focus on observable contract, not internals — assert on
 score-component presence, ordering, and back-compat with ``recall()``.
@@ -13,7 +14,8 @@ score-component presence, ordering, and back-compat with ``recall()``.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 
@@ -223,6 +225,202 @@ async def test_vector_recall_scored_empty_query_neutral_scores() -> None:
     )
     matches = await mem.recall_scored("", user_id="alice")
     assert all(m.score == 1.0 for m in matches)
+
+
+# ---------------------------------------------------------------------------
+# SqliteMemory — native BM25 + cosine + RRF over its SQL candidate scan
+# ---------------------------------------------------------------------------
+
+
+async def test_sqlite_recall_scored_populates_both_score_components(
+    tmp_path: Any,
+) -> None:
+    from loomflow.memory.sqlite import SqliteMemory
+
+    mem = SqliteMemory(str(tmp_path / "m.db"), with_facts=False)
+    await mem.remember(
+        Episode(
+            input="docker container networking",
+            output="bridge mode is the default",
+            user_id="alice", session_id="s1",
+        )
+    )
+    matches = await mem.recall_scored("docker networking", user_id="alice")
+    assert matches
+    top = matches[0]
+    assert top.bm25_score is not None and top.bm25_score > 0
+    assert top.vector_score is not None
+
+
+async def test_sqlite_recall_scored_ranks_lexical_match_first(
+    tmp_path: Any,
+) -> None:
+    from loomflow.memory.sqlite import SqliteMemory
+
+    mem = SqliteMemory(str(tmp_path / "m.db"), with_facts=False)
+    await mem.remember(
+        Episode(
+            input="GitHub Actions workflow",
+            output="defined in .github/workflows",
+            user_id="alice", session_id="s1",
+        )
+    )
+    await mem.remember(
+        Episode(
+            input="random unrelated chat",
+            output="weather is fine today",
+            user_id="alice", session_id="s1",
+        )
+    )
+    matches = await mem.recall_scored(
+        "GitHub Actions", user_id="alice", alpha=0.0
+    )
+    assert matches
+    assert "GitHub" in matches[0].episode.input
+
+
+async def test_sqlite_recall_scored_empty_query_neutral_scores(
+    tmp_path: Any,
+) -> None:
+    from loomflow.memory.sqlite import SqliteMemory
+
+    mem = SqliteMemory(str(tmp_path / "m.db"), with_facts=False)
+    await mem.remember(
+        Episode(
+            input="x", output="y", user_id="alice", session_id="s1",
+            occurred_at=datetime(2026, 5, 1),
+        )
+    )
+    matches = await mem.recall_scored("", user_id="alice")
+    assert matches
+    assert all(m.score == 1.0 for m in matches)
+
+
+async def test_sqlite_recall_scored_respects_user_partition(
+    tmp_path: Any,
+) -> None:
+    from loomflow.memory.sqlite import SqliteMemory
+
+    mem = SqliteMemory(str(tmp_path / "m.db"), with_facts=False)
+    await mem.remember(
+        Episode(
+            input="alice docker note", output="a",
+            user_id="alice", session_id="s1",
+        )
+    )
+    await mem.remember(
+        Episode(
+            input="bob docker note", output="b",
+            user_id="bob", session_id="s2",
+        )
+    )
+    matches = await mem.recall_scored("docker", user_id="alice")
+    assert matches
+    assert all(m.episode.user_id == "alice" for m in matches)
+
+
+# ---------------------------------------------------------------------------
+# ChromaMemory — native BM25 + cosine + RRF over its coll.get candidate pool
+# ---------------------------------------------------------------------------
+
+
+async def test_chroma_recall_scored_populates_both_score_components() -> None:
+    import uuid
+
+    pytest.importorskip("chromadb")
+    from loomflow.memory import ChromaMemory
+
+    mem = ChromaMemory.ephemeral(
+        collection_name=f"jeeves_test_{uuid.uuid4().hex}"
+    )
+    await mem.remember(
+        Episode(
+            input="docker container networking",
+            output="bridge mode is the default",
+            user_id="alice", session_id="s1",
+        )
+    )
+    matches = await mem.recall_scored("docker networking", user_id="alice")
+    assert matches
+    top = matches[0]
+    assert top.bm25_score is not None and top.bm25_score > 0
+    assert top.vector_score is not None
+
+
+async def test_chroma_recall_scored_ranks_lexical_match_first() -> None:
+    import uuid
+
+    pytest.importorskip("chromadb")
+    from loomflow.memory import ChromaMemory
+
+    mem = ChromaMemory.ephemeral(
+        collection_name=f"jeeves_test_{uuid.uuid4().hex}"
+    )
+    await mem.remember(
+        Episode(
+            input="GitHub Actions workflow",
+            output="defined in .github/workflows",
+            user_id="alice", session_id="s1",
+        )
+    )
+    await mem.remember(
+        Episode(
+            input="random unrelated chat",
+            output="weather is fine today",
+            user_id="alice", session_id="s1",
+        )
+    )
+    matches = await mem.recall_scored(
+        "GitHub Actions", user_id="alice", alpha=0.0
+    )
+    assert matches
+    assert "GitHub" in matches[0].episode.input
+
+
+async def test_chroma_recall_scored_empty_query_neutral_scores() -> None:
+    import uuid
+
+    pytest.importorskip("chromadb")
+    from loomflow.memory import ChromaMemory
+
+    mem = ChromaMemory.ephemeral(
+        collection_name=f"jeeves_test_{uuid.uuid4().hex}"
+    )
+    await mem.remember(
+        Episode(
+            input="x", output="y", user_id="alice", session_id="s1",
+            occurred_at=datetime(2026, 5, 1, tzinfo=UTC),
+        )
+    )
+    matches = await mem.recall_scored("", user_id="alice")
+    assert matches
+    assert all(m.score == 1.0 for m in matches)
+
+
+async def test_chroma_recall_scored_respects_user_partition() -> None:
+    import uuid
+
+    pytest.importorskip("chromadb")
+    from loomflow.memory import ChromaMemory
+
+    mem = ChromaMemory.ephemeral(
+        collection_name=f"jeeves_test_{uuid.uuid4().hex}"
+    )
+    await mem.remember(
+        Episode(
+            input="alice docker note", output="a",
+            user_id="alice", session_id="s1",
+        )
+    )
+    await mem.remember(
+        Episode(
+            input="bob docker note", output="b",
+            user_id="bob", session_id="s2",
+        )
+    )
+    matches = await mem.recall_scored("docker", user_id="alice")
+    assert matches
+    assert all(m.episode.user_id == "alice" for m in matches)
 
 
 # ---------------------------------------------------------------------------
