@@ -155,7 +155,13 @@ ignore = [
 
 [tool.mypy]
 strict = true
-python_version = "3.11"
+# No ``python_version`` pin: mypy targets the interpreter it runs under.
+# Pinning 3.11 made mypy parse installed stubs with the 3.11 grammar, and
+# numpy 2.3+ stubs use PEP 695 ``type X = ...`` statements — which crash
+# the parser under 3.11 ("Type statement is only supported in Python 3.12
+# and greater"). On each CI leg the locally-installed numpy stubs match
+# that leg's Python, so following the runtime version is correct. We still
+# require 3.11 at runtime via ``requires-python`` and CI's 3.11 matrix leg.
 # ``unused-ignore`` is suppressed because lazy SDK imports
 # (asyncpg, pgvector, mcp.client.*, redis.asyncio) raise different
 # mypy error codes depending on whether the package is installed in
@@ -167,18 +173,6 @@ disable_error_code = ["unused-ignore"]
 warn_redundant_casts = true
 warn_unreachable = true
 disallow_untyped_decorators = false  # pydantic decorators
-
-# numpy 2.3+ ships stubs that use Python 3.12 ``type X = ...`` statement
-# syntax. With ``python_version = "3.11"`` mypy parses those installed
-# stubs and rejects the 3.12-only syntax — a crash inside a *library's*
-# stubs, not our code (it surfaced only on the 3.12 CI leg, where the
-# newer numpy is present). Don't follow / typecheck numpy's internals;
-# we already ``type: ignore`` the import sites in vectorstore/faiss.py.
-[[tool.mypy.overrides]]
-module = ["numpy", "numpy.*"]
-follow_imports = "skip"
-ignore_errors = true
-ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 # ``live`` tests hit paid endpoints and are deselected by default;
