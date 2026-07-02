@@ -127,6 +127,18 @@ exclude = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["loomflow"]
+# Never sweep local dotfiles (e.g. an accidental .env), generated
+# vector-store data, or stray nested dirs into a built artifact.
+exclude = [
+    "**/.env",
+    "**/.env.*",
+    "**/*.sqlite3",
+    "**/.chroma_*",
+    "loomflow/loomflow",
+    "loomflow/tests",
+    "loomflow/docs",
+    "loomflow/examples",
+]
 # PEP 561: ``py.typed`` marker tells IDEs and type-checkers
 # (Pylance, Pyright, mypy) that this package ships inline type
 # hints. Without it, autocomplete and go-to-definition for our
