@@ -11,8 +11,9 @@ Covers:
   discovery of multiple skills under one source.
 * :class:`SkillRegistry` last-source-wins override semantics + the
   catalog section format injected into system prompts.
-* The ``load_skill`` tool: enum on its ``name`` arg, returns the
-  full body, returns a clean error for unknown names.
+* The ``load_skill`` tool: catalog in its description, returns the
+  full body, returns a clean error for unknown names (validated at
+  call time, no schema enum).
 * End-to-end: ``Agent(skills=[...])`` adds the catalog to the
   system prompt and surfaces ``load_skill`` in the tool list.
 * ``Team.supervisor(skills=[...])`` forwards skills to the
@@ -377,8 +378,11 @@ def test_load_skill_tool_enumerates_skill_names(tmp_path: Path) -> None:
     registry = SkillRegistry([tmp_path])
     tool = make_load_skill_tool(registry)
     name_schema = tool.input_schema["properties"]["name"]
-    assert "enum" in name_schema
-    assert set(name_schema["enum"]) == {"alpha", "beta"}
+    # No enum: skills added to the registry after construction must
+    # remain loadable (names are validated at call time instead).
+    assert "enum" not in name_schema
+    assert "alpha" in name_schema["description"]
+    assert "beta" in name_schema["description"]
     # Tool description includes the catalog.
     assert "alpha" in tool.description
     assert "beta" in tool.description

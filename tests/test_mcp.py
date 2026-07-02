@@ -364,10 +364,11 @@ async def test_call_reconnects_and_retries_after_transport_error() -> None:
 async def test_retry_failure_surfaces_error_not_silently_succeeds() -> None:
     """If the reconnect succeeds but the retried call ALSO fails,
     the registry must surface the second error — not pretend the
-    call succeeded just because reconnect worked."""
+    call succeeded just because reconnect worked. (Connection-style
+    errors, so the reconnect-and-retry path actually engages.)"""
 
     async def always_boom(name: str, args: dict[str, Any]) -> Any:
-        raise RuntimeError("still broken")
+        raise ConnectionError("still broken")
 
     s1 = _FakeMcpSession([_FakeMcpTool(name="t")], call_handler=always_boom)
     s2 = _FakeMcpSession([_FakeMcpTool(name="t")], call_handler=always_boom)
@@ -388,10 +389,11 @@ async def test_retry_failure_surfaces_error_not_silently_succeeds() -> None:
 async def test_reconnect_failure_surfaces_first_error() -> None:
     """When reconnection itself can't establish a fresh session,
     the registry returns the ORIGINAL exception (not the reconnect
-    failure) — that's what tells the caller why their call failed."""
+    failure) — that's what tells the caller why their call failed.
+    (A connection-style error, so the reconnect path engages.)"""
 
     async def boom(name: str, args: dict[str, Any]) -> Any:
-        raise RuntimeError("original cause")
+        raise ConnectionError("original cause")
 
     s = _FakeMcpSession([_FakeMcpTool(name="t")], call_handler=boom)
 

@@ -2,17 +2,15 @@
 
 We inject ONE tool — ``load_skill(name)`` — into the agent's tool
 host whenever a non-empty :class:`SkillRegistry` is configured. The
-tool's input schema enumerates the registered skill names as an
-``enum`` so:
+skill name is validated at *call time* against the registry (typos
+return a tool error listing the valid set), NOT via a schema
+``enum``: skills can be registered after agent construction with
+:meth:`SkillRegistry.add`, and a baked-in enum would make strict-
+schema providers reject those late additions forever.
 
-* Strict-schema providers (Anthropic / OpenAI strict mode) reject
-  hallucinated skill names at the API boundary
-* The model sees every available skill name in the schema docs
-* Typos return a tool error with the valid set listed
-
-The tool's *description* also lists every skill with its short
-description, giving the model the full catalog at metadata cost
-without loading any bodies.
+The tool's *description* lists every skill known at construction
+with its short description, giving the model the full catalog at
+metadata cost without loading any bodies.
 
 When a skill ships pending Tools (Mode B from ``tools.py`` or
 Mode C from frontmatter ``tools:`` manifest), ``load_skill`` ALSO
@@ -22,7 +20,10 @@ The model sees the new tools in its toolset on the next turn.
 
 from __future__ import annotations
 
+from functools import partial
 from typing import TYPE_CHECKING
+
+import anyio.to_thread
 
 from ..tools.registry import InProcessToolHost, Tool
 from .registry import SkillRegistry
@@ -73,8 +74,19 @@ def make_load_skill_tool(
         from ..core.context import get_run_context
 
         ctx = get_run_context()
+        # Validate against the LIVE registry (not a baked-in enum) so
+        # skills added after agent construction are loadable and typos
+        # get a helpful error listing what IS valid.
+        if name not in registry:
+            valid = ", ".join(sorted(registry.names())) or "(none registered)"
+            return f"Error: Unknown skill {name!r}. Available skills: {valid}"
         try:
-            body, pending = registry.load_with_tools(name, ctx=ctx)
+            # ``load_with_tools`` may import the skill's ``tools.py``
+            # (arbitrary module-level code) — run it in a worker thread
+            # so a slow or blocking import can't stall the event loop.
+            body, pending = await anyio.to_thread.run_sync(
+                partial(registry.load_with_tools, name, ctx=ctx)
+            )
         except SkillError as exc:
             return f"Error: {exc}"
 
@@ -110,10 +122,14 @@ def make_load_skill_tool(
             "properties": {
                 "name": {
                     "type": "string",
-                    "enum": skill_names,
+                    # No ``enum`` here on purpose: skills can be added
+                    # to the registry after this schema is built, and
+                    # an enum would reject them at the API boundary.
+                    # Names are validated at call time instead.
                     "description": (
-                        "The skill name to load. Must be one of: "
-                        f"{', '.join(skill_names) or '(no skills registered)'}."
+                        "The skill name to load. Known skills: "
+                        f"{', '.join(skill_names) or '(no skills registered)'}. "
+                        "Skills registered later are also accepted."
                     ),
                 }
             },

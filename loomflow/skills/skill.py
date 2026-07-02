@@ -28,15 +28,16 @@ loaded simultaneously don't collide.
 
 from __future__ import annotations
 
-import asyncio
 import importlib.util
 import re
 import shlex
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
+
+import anyio
 
 from ..tools.registry import Tool
 from ._frontmatter import FrontmatterError, parse_frontmatter
@@ -45,6 +46,10 @@ _NAME_RE = re.compile(r"^[a-z0-9-]+$")
 _RESERVED_WORDS = ("anthropic", "claude")
 _MAX_NAME_LEN = 64
 _MAX_DESC_LEN = 1024
+#: Wall-clock cap for one Mode C subprocess-tool invocation. Generous —
+#: it exists to stop a wedged script from hanging the agent loop forever,
+#: not to police normal runtimes.
+_SUBPROCESS_TIMEOUT_S = 300.0
 
 
 class SkillError(ValueError):
@@ -508,18 +513,27 @@ def _make_subprocess_tool(
         # Convert kwargs to positional argv in declaration order.
         argv = [str(kwargs.get(arg_name, "")) for arg_name in arg_order]
         cmd = [*interpreter, str(script_full), *argv]
+        # anyio.run_process (not asyncio.create_subprocess_exec) so
+        # subprocess tools work on any anyio backend, including trio.
+        # The fail_after guard kills a wedged script instead of
+        # hanging the agent loop forever.
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-            )
+            with anyio.fail_after(_SUBPROCESS_TIMEOUT_S):
+                completed = await anyio.run_process(
+                    cmd,
+                    check=False,
+                    stderr=subprocess.STDOUT,
+                )
         except FileNotFoundError as exc:
             return f"Error: failed to launch {shlex.join(cmd)}: {exc}"
-        stdout_bytes, _ = await proc.communicate()
-        out = stdout_bytes.decode("utf-8", errors="replace")
-        if proc.returncode != 0:
-            return f"Error (exit={proc.returncode}):\n{out}"
+        except TimeoutError:
+            return (
+                f"Error: {shlex.join(cmd)} timed out after "
+                f"{_SUBPROCESS_TIMEOUT_S:.0f}s and was killed."
+            )
+        out = completed.stdout.decode("utf-8", errors="replace")
+        if completed.returncode != 0:
+            return f"Error (exit={completed.returncode}):\n{out}"
         return out
 
     return Tool(
@@ -657,15 +671,11 @@ def _import_python_tools(
                 f"build_tools(ctx) in {tools_py} must return a "
                 f"list[Tool]; got {type(built).__name__}."
             )
-        return [
-            Tool(
-                name=f"{prefix}{t.name}",
-                description=t.description,
-                fn=t.fn,
-                input_schema=t.input_schema,
-            )
-            for t in built
-        ]
+        # dataclasses.replace keeps EVERY other field intact —
+        # rebuilding the Tool by hand silently dropped ``destructive``
+        # (laundering destructive tools past the permission gate) and
+        # ``param_adapters`` (disabling complex-arg coercion).
+        return [replace(t, name=f"{prefix}{t.name}") for t in built]
 
     # 2. Back-compat — module-level @tool discovery.
     tools: list[Tool] = []
@@ -674,12 +684,5 @@ def _import_python_tools(
             continue
         obj = getattr(module, attr_name)
         if isinstance(obj, Tool):
-            tools.append(
-                Tool(
-                    name=f"{prefix}{obj.name}",
-                    description=obj.description,
-                    fn=obj.fn,
-                    input_schema=obj.input_schema,
-                )
-            )
+            tools.append(replace(obj, name=f"{prefix}{obj.name}"))
     return tools
