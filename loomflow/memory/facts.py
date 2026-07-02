@@ -29,7 +29,7 @@ import math
 import warnings
 from collections.abc import Iterable
 from datetime import datetime
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 import anyio
 
@@ -64,6 +64,15 @@ class FactStore(Protocol):
     ) -> list[Fact]: ...
 
     async def all_facts(self) -> list[Fact]: ...
+
+    async def delete(
+        self,
+        *,
+        user_id: str | None = None,
+        before: datetime | None = None,
+    ) -> int: ...
+
+    async def count(self, *, user_id: str | None = None) -> int: ...
 
     async def aclose(self) -> None: ...
 
@@ -168,6 +177,11 @@ class InMemoryFactStore:
         """
         async with self._lock:
             for existing_id, existing in list(self._facts.items()):
+                # Supersession is namespace-scoped (same rule as
+                # ``append``): alice's facts never invalidate bob's,
+                # anonymous facts never invalidate named-user facts.
+                if existing.user_id != fact.user_id:
+                    continue
                 if existing.subject != fact.subject:
                     continue
                 if existing.predicate != fact.predicate:
@@ -309,6 +323,36 @@ class InMemoryFactStore:
         async with self._lock:
             return list(self._facts.values())
 
+    async def delete(
+        self,
+        *,
+        user_id: str | None = None,
+        before: datetime | None = None,
+    ) -> int:
+        """Delete every fact in the ``user_id`` partition (optionally
+        only those recorded before ``before``). Returns the number of
+        facts actually removed. This is the GDPR-forget surface —
+        memory backends delegate here instead of poking store
+        internals."""
+        async with self._lock:
+            to_delete = [
+                fid
+                for fid, f in self._facts.items()
+                if f.user_id == user_id
+                and (before is None or f.recorded_at < before)
+            ]
+            for fid in to_delete:
+                self._facts.pop(fid, None)
+                self._embeddings.pop(fid, None)
+            return len(to_delete)
+
+    async def count(self, *, user_id: str | None = None) -> int:
+        """Number of facts in the ``user_id`` partition."""
+        async with self._lock:
+            return sum(
+                1 for f in self._facts.values() if f.user_id == user_id
+            )
+
     async def aclose(self) -> None:
         return None
 
@@ -316,6 +360,38 @@ class InMemoryFactStore:
 
     def snapshot(self) -> dict[str, Fact]:
         return dict(self._facts)
+
+
+# ---------------------------------------------------------------------------
+# Cross-backend GDPR helpers
+# ---------------------------------------------------------------------------
+
+
+async def count_facts(store: Any, *, user_id: str | None) -> int:
+    """Count facts in a store's ``user_id`` partition via the
+    :meth:`FactStore.count` method when the store implements it,
+    falling back to a bounded ``query`` scan for third-party stores
+    that predate the protocol method."""
+    counter = getattr(store, "count", None)
+    if callable(counter):
+        return int(await counter(user_id=user_id))
+    return len(await store.query(user_id=user_id, limit=100_000))
+
+
+async def delete_facts(
+    store: Any,
+    *,
+    user_id: str | None,
+    before: datetime | None = None,
+) -> int:
+    """Delete facts in a store's ``user_id`` partition via the
+    :meth:`FactStore.delete` method. Stores that don't implement
+    ``delete`` (third-party, pre-protocol) return ``0`` — memory
+    backends no longer poke store privates on their behalf."""
+    deleter = getattr(store, "delete", None)
+    if callable(deleter):
+        return int(await deleter(user_id=user_id, before=before))
+    return 0
 
 
 # ---------------------------------------------------------------------------

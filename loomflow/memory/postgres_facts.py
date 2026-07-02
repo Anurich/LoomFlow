@@ -145,43 +145,85 @@ class PostgresFactStore:
             embedding = await self._embedder.embed(triple)
 
         async with self._pool.acquire() as conn:
-            # Supersession is namespace-scoped — a fact from user A
-            # never invalidates user B's claim on the same (subject,
-            # predicate). ``IS NOT DISTINCT FROM`` makes the
-            # ``NULL = NULL`` case (anonymous bucket) work correctly.
-            await conn.execute(
-                "UPDATE facts SET valid_until = $1 "
-                "WHERE user_id IS NOT DISTINCT FROM $2 "
-                "AND subject = $3 AND predicate = $4 "
-                "AND object != $5 AND valid_until IS NULL",
-                fact.valid_from,
-                fact.user_id,
-                fact.subject,
-                fact.predicate,
-                fact.object,
-            )
-            await conn.execute(
-                "INSERT INTO facts "
-                "(id, user_id, subject, predicate, object, confidence, "
-                " valid_from, valid_until, recorded_at, sources, embedding) "
-                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) "
-                "ON CONFLICT (id) DO NOTHING;",
-                fact.id,
-                fact.user_id,
-                fact.subject,
-                fact.predicate,
-                fact.object,
-                fact.confidence,
-                fact.valid_from,
-                fact.valid_until,
-                fact.recorded_at,
-                list(fact.sources),
-                embedding,
-            )
+            await self._append_on_conn(conn, fact, embedding)
         return fact.id
 
     async def append_many(self, facts: Iterable[Fact]) -> list[str]:
-        return [await self.append(f) for f in facts]
+        """Batched append: ONE ``embed_batch`` call for all triples
+        and ONE pooled connection + transaction for the whole batch
+        (instead of a per-fact acquire + embed + supersede + insert).
+
+        The supersede UPDATE and INSERT still run per fact *inside*
+        the transaction — a single executemany of all UPDATEs before
+        all INSERTs would break intra-batch supersession (fact B in
+        the batch must be able to close off fact A appended just
+        before it). The transaction makes the batch atomic: a
+        cancellation mid-batch rolls back cleanly.
+        """
+        materialised = list(facts)
+        if not materialised:
+            return []
+
+        embeddings: list[list[float] | None]
+        if self._embedder is not None:
+            triples = [
+                f"{f.subject} {f.predicate} {f.object}"
+                for f in materialised
+            ]
+            embeddings = list(await self._embedder.embed_batch(triples))
+        else:
+            embeddings = [None] * len(materialised)
+
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                for fact, embedding in zip(
+                    materialised, embeddings, strict=True
+                ):
+                    await self._append_on_conn(conn, fact, embedding)
+        return [f.id for f in materialised]
+
+    async def _append_on_conn(
+        self,
+        conn: Any,
+        fact: Fact,
+        embedding: list[float] | None,
+    ) -> None:
+        """Supersede + insert one fact on an already-acquired
+        connection. Shared by :meth:`append` and :meth:`append_many`.
+        """
+        # Supersession is namespace-scoped — a fact from user A
+        # never invalidates user B's claim on the same (subject,
+        # predicate). ``IS NOT DISTINCT FROM`` makes the
+        # ``NULL = NULL`` case (anonymous bucket) work correctly.
+        await conn.execute(
+            "UPDATE facts SET valid_until = $1 "
+            "WHERE user_id IS NOT DISTINCT FROM $2 "
+            "AND subject = $3 AND predicate = $4 "
+            "AND object != $5 AND valid_until IS NULL",
+            fact.valid_from,
+            fact.user_id,
+            fact.subject,
+            fact.predicate,
+            fact.object,
+        )
+        await conn.execute(
+            "INSERT INTO facts "
+            "(id, user_id, subject, predicate, object, confidence, "
+            " valid_from, valid_until, recorded_at, sources, embedding) "
+            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) "
+            "ON CONFLICT (id) DO NOTHING;",
+            fact.id,
+            fact.user_id,
+            fact.subject,
+            fact.predicate,
+            fact.object,
+            fact.confidence,
+            fact.valid_from,
+            fact.valid_until,
+            fact.recorded_at,
+            list(fact.sources),
+            embedding,
+        )
 
     # ---- queries ---------------------------------------------------------
 
@@ -340,10 +382,53 @@ class PostgresFactStore:
             )
         return [_row_to_fact(r) for r in rows]
 
+    # ---- GDPR surface ------------------------------------------------------
+
+    async def delete(
+        self,
+        *,
+        user_id: str | None = None,
+        before: datetime | None = None,
+    ) -> int:
+        """Delete every fact in the ``user_id`` partition (optionally
+        only those recorded before ``before``). Returns the number of
+        rows removed."""
+        clauses = ["user_id IS NOT DISTINCT FROM $1"]
+        params: list[Any] = [user_id]
+        if before is not None:
+            clauses.append("recorded_at < $2")
+            params.append(before)
+        sql = "DELETE FROM facts WHERE " + " AND ".join(clauses)
+        async with self._pool.acquire() as conn:
+            result = await conn.execute(sql, *params)
+        return _parse_delete_count(result)
+
+    async def count(self, *, user_id: str | None = None) -> int:
+        """``SELECT COUNT(*)`` over the ``user_id`` partition."""
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT COUNT(*) AS c FROM facts "
+                "WHERE user_id IS NOT DISTINCT FROM $1",
+                user_id,
+            )
+        return int(row["c"]) if row else 0
+
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _parse_delete_count(asyncpg_result: str) -> int:
+    """asyncpg's ``Connection.execute`` returns a status string like
+    ``"DELETE 17"``; parse the trailing count (``0`` when absent)."""
+    parts = str(asyncpg_result).strip().split()
+    if not parts:
+        return 0
+    try:
+        return int(parts[-1])
+    except ValueError:
+        return 0
 
 
 def _row_to_fact(row: Any) -> Fact:

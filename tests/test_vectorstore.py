@@ -999,7 +999,10 @@ def test_postgres_filter_range_translation() -> None:
 
     sql, params = _build_where_sql({"page": {"$gte": 5}}, [])
     assert ">=" in sql
-    assert params == ["5"]
+    # Numeric operands compare numerically ("10" < "9" as text!) —
+    # the extracted value is cast and the operand binds as a number.
+    assert "::numeric" in sql
+    assert params == [5]
 
 
 def test_postgres_filter_logical_translation() -> None:

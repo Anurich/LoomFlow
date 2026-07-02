@@ -33,6 +33,7 @@ import anyio
 from ..core.protocols import Embedder
 from ..core.types import Fact, _normalize_predicate
 from ._embedding_util import pack_float32, unpack_float32
+from ._user_key import decode_legacy_user_id, encode_user_id
 from .embedder import HashEmbedder
 
 DEFAULT_KEY_PREFIX = "jeeves:fact:"
@@ -98,9 +99,11 @@ class RedisFactStore:
         ts = str(fact.valid_from.timestamp()).encode("utf-8")
         async for key, data in self._scan_facts():
             # Namespace-scoped supersession: alice's facts never
-            # invalidate bob's. Anonymous bucket (None / empty) is
-            # its own namespace.
-            other_user = _decode_field(data.get(b"user_id", b"")) or None
+            # invalidate bob's. Anonymous bucket (sentinel, or legacy
+            # empty encoding) is its own namespace.
+            other_user = decode_legacy_user_id(
+                _decode_field(data.get(b"user_id", b""))
+            )
             if other_user != fact.user_id:
                 continue
             if _decode_field(data.get(b"subject", b"")) != fact.subject:
@@ -131,9 +134,10 @@ class RedisFactStore:
         mapping = {
             b"id": fact.id.encode("utf-8"),
             # Persist ``user_id`` so recall queries can filter by
-            # namespace partition. Empty bytes for the anonymous
-            # bucket; round-trip back to ``None`` on read.
-            b"user_id": (fact.user_id or "").encode("utf-8"),
+            # namespace partition. The anonymous bucket uses the
+            # shared sentinel (see ``memory._user_key``); legacy rows
+            # encoded it as empty bytes and still decode correctly.
+            b"user_id": encode_user_id(fact.user_id).encode("utf-8"),
             b"subject": fact.subject.encode("utf-8"),
             b"predicate": fact.predicate.encode("utf-8"),
             b"object": fact.object.encode("utf-8"),
@@ -218,6 +222,49 @@ class RedisFactStore:
         out.sort(key=lambda f: f.recorded_at, reverse=True)
         return out
 
+    # ---- GDPR surface ------------------------------------------------------
+
+    async def delete(
+        self,
+        *,
+        user_id: str | None = None,
+        before: datetime | None = None,
+    ) -> int:
+        """Delete every fact in the ``user_id`` partition (optionally
+        only those recorded before ``before``). Keys are removed in
+        one batched ``UNLINK`` (``DEL`` fallback). Returns the number
+        of facts removed."""
+        keys: list[bytes] = []
+        async for key, data in self._scan_facts():
+            fact = _hash_to_fact(data)
+            if fact is None:
+                continue
+            if fact.user_id != user_id:
+                continue
+            if before is not None and fact.recorded_at >= before:
+                continue
+            keys.append(key)
+        if not keys:
+            return 0
+        unlink = getattr(self._client, "unlink", None)
+        if unlink is not None:
+            result = await unlink(*keys)
+        else:
+            result = await self._client.delete(*keys)
+        try:
+            return int(result)
+        except (TypeError, ValueError):
+            return len(keys)
+
+    async def count(self, *, user_id: str | None = None) -> int:
+        """Key-scan count of the ``user_id`` partition."""
+        total = 0
+        async for _key, data in self._scan_facts():
+            fact = _hash_to_fact(data)
+            if fact is not None and fact.user_id == user_id:
+                total += 1
+        return total
+
     # ---- scanning helpers ------------------------------------------------
 
     def _key_for(self, fact_id: str) -> bytes:
@@ -294,10 +341,12 @@ def _hash_to_fact(data: dict[bytes, Any]) -> Fact | None:
         confidence = float(_decode_field(data.get(b"confidence", "1.0")))
     except ValueError:
         confidence = 1.0
-    user_id_raw = _decode_field(data.get(b"user_id", b""))
+    user_id_val = decode_legacy_user_id(
+        _decode_field(data.get(b"user_id", b""))
+    )
     return Fact(
         id=eid,
-        user_id=user_id_raw or None,
+        user_id=user_id_val,
         subject=_decode_field(data.get(b"subject", b"")),
         predicate=_decode_field(data.get(b"predicate", b"")),
         object=_decode_field(data.get(b"object", b"")),

@@ -23,8 +23,11 @@ this module never drags in the loader.
 
 from __future__ import annotations
 
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+import anyio.to_thread
 
 if TYPE_CHECKING:
     from ..loader.chunking import Chunker
@@ -54,8 +57,13 @@ async def index_document(
             "Install with: pip install 'loomflow[loader]'."
         ) from exc
 
-    doc = load(path)
+    # ``load`` (PDF / DOCX parsing) and ``chunker.split`` are
+    # CPU-bound sync work — offload to a worker thread so the event
+    # loop stays responsive during large-document ingest.
+    doc = await anyio.to_thread.run_sync(load, path)
     used = chunker if chunker is not None else RecursiveChunker()
     source = str(doc.metadata.get("source", path))
-    chunks = used.split(doc.content, source=source)
+    chunks = await anyio.to_thread.run_sync(
+        partial(used.split, doc.content, source=source)
+    )
     return await store.add(chunks)

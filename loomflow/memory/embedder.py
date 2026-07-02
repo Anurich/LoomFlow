@@ -19,9 +19,40 @@ import hashlib
 import math
 import os
 import random
+import warnings
 from typing import Any
 
 DEFAULT_HASH_DIMENSIONS = 384
+
+# Process-wide flag — the HashEmbedder-fallback warning fires once no
+# matter how many persistent backends get constructed without an
+# embedder (mirrors the one-shot notice pattern in auto_extract.py).
+_HASH_FALLBACK_WARNED = False
+
+
+def warn_hash_embedder_fallback(backend: str) -> None:
+    """One-shot warning when a persistent / vector-capable memory
+    backend silently falls back to :class:`HashEmbedder`.
+
+    The HashEmbedder is deterministic but NOT semantic — recall only
+    ranks exact-text matches well, so users who expected "semantic
+    memory" from e.g. ``PostgresMemory`` get silently degraded
+    results. Warn loudly, once per process.
+    """
+    global _HASH_FALLBACK_WARNED
+    if _HASH_FALLBACK_WARNED:
+        return
+    _HASH_FALLBACK_WARNED = True
+    warnings.warn(
+        f"{backend} was constructed without an embedder and is "
+        "falling back to HashEmbedder, which is deterministic but "
+        "NOT semantic — vector recall will only match near-identical "
+        "text. Pass a real embedder for semantic recall, e.g. "
+        "embedder=OpenAIEmbedder() (or VoyageEmbedder / "
+        "CohereEmbedder from loomflow.memory).",
+        UserWarning,
+        stacklevel=3,
+    )
 
 
 class HashEmbedder:

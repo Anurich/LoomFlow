@@ -31,7 +31,7 @@ from ..core.types import (
 )
 from .consolidator import Consolidator
 from .embedder import HashEmbedder
-from .facts import FactStore, InMemoryFactStore
+from .facts import FactStore, InMemoryFactStore, count_facts, delete_facts
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
@@ -363,8 +363,7 @@ class VectorMemory:
             sample_facts = list(
                 await self.facts.query(user_id=user_id, limit=10)
             )
-            all_facts = await self.facts.query(user_id=user_id, limit=100_000)
-            fact_count = len(all_facts)
+            fact_count = await count_facts(self.facts, user_id=user_id)
 
         seen: set[str] = set()
         recent_sessions: list[str] = []
@@ -410,14 +409,12 @@ class VectorMemory:
             for eid in to_delete:
                 self._episodes.pop(eid, None)
             deleted += len(to_delete)
+        # Facts: delegate to the FactStore's public ``delete`` so the
+        # count reflects rows actually removed.
         if session_id is None and self.facts is not None:
-            facts = await self.facts.query(user_id=user_id, limit=100_000)
-            if before is not None:
-                facts = [f for f in facts if f.recorded_at < before]
-            for f in facts:
-                if hasattr(self.facts, "_facts"):
-                    self.facts._facts.pop(f.id, None)  # type: ignore[attr-defined]
-                deleted += 1
+            deleted += await delete_facts(
+                self.facts, user_id=user_id, before=before
+            )
         return deleted
 
     async def export(

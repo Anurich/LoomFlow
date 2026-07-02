@@ -28,6 +28,11 @@ import anyio
 
 from ..core.protocols import Embedder
 from ..core.types import Fact, _normalize_predicate
+from ._user_key import (
+    decode_legacy_user_id,
+    encode_user_id,
+    user_id_where_clause,
+)
 from .embedder import HashEmbedder
 
 DEFAULT_FACTS_COLLECTION = "jeeves_facts"
@@ -114,7 +119,7 @@ class ChromaFactStore:
                 lambda: coll.get(
                     where={
                         "$and": [
-                            {"user_id": fact.user_id or ""},
+                            user_id_where_clause(fact.user_id),
                             {"subject": fact.subject},
                             {"predicate": fact.predicate},
                             {"currently_valid": True},
@@ -223,6 +228,48 @@ class ChromaFactStore:
         )
         return _decode_get(result)
 
+    # ---- GDPR surface ------------------------------------------------------
+
+    async def delete(
+        self,
+        *,
+        user_id: str | None = None,
+        before: datetime | None = None,
+    ) -> int:
+        """Delete every fact in the ``user_id`` partition (optionally
+        only those recorded before ``before``). Returns the number of
+        facts removed."""
+        coll = await self._get_collection()
+        where = user_id_where_clause(user_id)
+        result = await anyio.to_thread.run_sync(
+            lambda: coll.get(where=where, include=["metadatas"])
+        )
+        ids = [str(i) for i in (result.get("ids") or [])]
+        if before is not None:
+            metas = list(result.get("metadatas") or [])
+            before_ts = before.timestamp()
+            kept: list[str] = []
+            for i, fid in enumerate(ids):
+                meta = metas[i] if i < len(metas) and metas[i] else {}
+                recorded = float(meta.get("recorded_at_ts", 0.0) or 0.0)
+                if recorded < before_ts:
+                    kept.append(fid)
+            ids = kept
+        if ids:
+            await anyio.to_thread.run_sync(lambda: coll.delete(ids=ids))
+        return len(ids)
+
+    async def count(self, *, user_id: str | None = None) -> int:
+        """Count facts in the ``user_id`` partition without decoding
+        them into :class:`Fact` models — metadata-only ``get`` and a
+        ``len`` over the returned ids."""
+        coll = await self._get_collection()
+        where = user_id_where_clause(user_id)
+        result = await anyio.to_thread.run_sync(
+            lambda: coll.get(where=where, include=["metadatas"])
+        )
+        return len(result.get("ids") or [])
+
     async def aclose(self) -> None:
         return None
 
@@ -251,9 +298,10 @@ def _triple_text(fact: Fact) -> str:
 
 def _fact_to_metadata(fact: Fact) -> dict[str, Any]:
     return {
-        # Empty string is the anonymous bucket — Chroma rejects None
-        # metadata values, so we substitute and round-trip on read.
-        "user_id": fact.user_id or "",
+        # Chroma rejects None metadata values — the anonymous bucket
+        # uses the shared sentinel (see ``memory._user_key``); legacy
+        # rows used the empty string and still decode on read.
+        "user_id": encode_user_id(fact.user_id),
         "subject": fact.subject,
         "predicate": fact.predicate,
         "object": fact.object,
@@ -282,10 +330,10 @@ def _metadata_to_fact(eid: str, meta: dict[str, Any]) -> Fact:
     until_ts = meta.get("valid_until_ts", 0.0) or 0.0
     if not meta.get("currently_valid", True) and until_ts > 0:
         valid_until = datetime.fromtimestamp(float(until_ts), tz=UTC)
-    user_id_raw = str(meta.get("user_id", ""))
+    user_id_val = decode_legacy_user_id(str(meta.get("user_id", "")))
     return Fact(
         id=eid,
-        user_id=user_id_raw or None,
+        user_id=user_id_val,
         subject=str(meta.get("subject", "")),
         predicate=str(meta.get("predicate", "")),
         object=str(meta.get("object", "")),
@@ -333,10 +381,10 @@ def _build_where(
     user_id: str | None,
 ) -> dict[str, Any] | None:
     """Compose Chroma ``where`` from optional filters. Always pins
-    ``user_id`` (empty string for the anonymous bucket) so recall is
-    namespace-partitioned by default. Multiple filters fold into a
-    single ``$and``."""
-    clauses: list[dict[str, Any]] = [{"user_id": user_id or ""}]
+    ``user_id`` (sentinel or legacy empty string for the anonymous
+    bucket) so recall is namespace-partitioned by default. Multiple
+    filters fold into a single ``$and``."""
+    clauses: list[dict[str, Any]] = [user_id_where_clause(user_id)]
     if subject is not None:
         clauses.append({"subject": subject})
     if predicate is not None:

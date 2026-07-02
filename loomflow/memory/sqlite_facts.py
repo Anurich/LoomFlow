@@ -89,6 +89,15 @@ class SqliteFactStore:
         # New connection per call; SQLite connections aren't safe to
         # share across the worker threads we hop into.
         conn = sqlite3.connect(self._path)
+        # Concurrency pragmas: WAL lets readers proceed during a
+        # write (persisted in the DB file once set); synchronous
+        # NORMAL is the recommended pairing; busy_timeout makes a
+        # second writer wait up to 5s instead of failing immediately
+        # with "database is locked". The latter two are
+        # per-connection, hence set on every connect.
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA busy_timeout=5000")
         try:
             yield conn
         finally:
@@ -326,6 +335,46 @@ class SqliteFactStore:
             return conn.execute(
                 "SELECT * FROM facts ORDER BY recorded_at DESC"
             ).fetchall()
+
+    # ---- GDPR surface ------------------------------------------------------
+
+    async def delete(
+        self,
+        *,
+        user_id: str | None = None,
+        before: datetime | None = None,
+    ) -> int:
+        """Delete every fact in the ``user_id`` partition (optionally
+        only those recorded before ``before``). Returns the number of
+        rows removed."""
+        return await anyio.to_thread.run_sync(
+            self._delete_sync, user_id, before
+        )
+
+    def _delete_sync(
+        self, user_id: str | None, before: datetime | None
+    ) -> int:
+        with self._connect() as conn:
+            sql = "DELETE FROM facts WHERE user_id IS ?"
+            params: list[Any] = [user_id]
+            if before is not None:
+                sql += " AND recorded_at < ?"
+                params.append(_to_epoch(before))
+            cursor = conn.execute(sql, params)
+            conn.commit()
+            return int(cursor.rowcount or 0)
+
+    async def count(self, *, user_id: str | None = None) -> int:
+        """``SELECT COUNT(*)`` over the ``user_id`` partition."""
+        return await anyio.to_thread.run_sync(self._count_sync, user_id)
+
+    def _count_sync(self, user_id: str | None) -> int:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM facts WHERE user_id IS ?",
+                (user_id,),
+            ).fetchone()
+            return int(row[0]) if row else 0
 
     async def aclose(self) -> None:
         return None

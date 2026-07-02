@@ -29,7 +29,13 @@ from ..core.types import (
     Role,
 )
 from ._embedding_util import cosine
-from .embedder import HashEmbedder
+from ._user_key import (
+    decode_legacy_user_id,
+    encode_user_id,
+    user_id_where_clause,
+)
+from .embedder import HashEmbedder, warn_hash_embedder_fallback
+from .facts import count_facts, delete_facts
 
 DEFAULT_COLLECTION = "jeeves_episodes"
 
@@ -50,7 +56,10 @@ class ChromaMemory:
         fact_store: Any | None = None,
     ) -> None:
         self._client = client
-        self._embedder: Embedder = embedder if embedder is not None else HashEmbedder()
+        if embedder is None:
+            warn_hash_embedder_fallback("ChromaMemory")
+            embedder = HashEmbedder()
+        self._embedder: Embedder = embedder
         self._collection_name = collection_name
         self._collection: Any | None = None
         # Working blocks partition by ``user_id``; key is ``(user_id, name)``.
@@ -194,11 +203,12 @@ class ChromaMemory:
         document = _embedding_text(episode)
         # Store ``user_id`` as a metadata field so Chroma's ``where``
         # filter can partition recall queries natively. Chroma rejects
-        # ``None`` metadata values, so we substitute the empty string
-        # for the anonymous bucket and round-trip on read.
+        # ``None`` metadata values, so the anonymous bucket uses the
+        # shared sentinel (see ``memory._user_key``); legacy rows used
+        # the empty string and are still matched/decoded on read.
         metadata = {
             "session_id": episode.session_id,
-            "user_id": episode.user_id or "",
+            "user_id": encode_user_id(episode.user_id),
             "input": episode.input,
             "output": episode.output,
             "occurred_at": episode.occurred_at.isoformat(),
@@ -245,8 +255,8 @@ class ChromaMemory:
 
         # Hard namespace partition by ``user_id``, pushed into Chroma's
         # native ``where`` filter so we don't waste a round-trip on
-        # other users' rows. Empty string is the anonymous bucket.
-        where_filter = {"user_id": user_id or ""}
+        # other users' rows.
+        where_filter = user_id_where_clause(user_id)
 
         result = await anyio.to_thread.run_sync(
             lambda: coll.query(
@@ -255,7 +265,7 @@ class ChromaMemory:
                 where=where_filter,
             )
         )
-        episodes = _decode_query_result(result)
+        episodes = [ep for ep, _ in _decode_query_result_pairs(result)]
 
         if time_range is not None:
             lo, hi = time_range
@@ -295,7 +305,10 @@ class ChromaMemory:
             )
             return [EpisodeMatch(episode=e, score=1.0) for e in recent]
 
-        where_filter = {"user_id": user_id or ""}
+        # Sentinel-aware partition filter (matches legacy ""-encoded
+        # rows too) — NOT the raw ``user_id or ""`` form this method
+        # used before the shared ``_user_key`` encoding landed.
+        where_filter = user_id_where_clause(user_id)
         result = await anyio.to_thread.run_sync(
             lambda: coll.get(
                 where=where_filter,
@@ -352,7 +365,7 @@ class ChromaMemory:
         time_range: tuple[datetime, datetime] | None,
         user_id: str | None,
     ) -> list[Episode]:
-        where_filter = {"user_id": user_id or ""}
+        where_filter = user_id_where_clause(user_id)
         result = await anyio.to_thread.run_sync(
             lambda: coll.get(
                 limit=None,  # we'll sort + slice ourselves
@@ -392,10 +405,10 @@ class ChromaMemory:
     ) -> list[Message]:
         coll = await self._get_collection()
         # Native ``where`` filter — namespace partition on user_id +
-        # session pin. Empty-string is the anonymous bucket on disk.
+        # session pin.
         where_filter = {
             "$and": [
-                {"user_id": user_id or ""},
+                user_id_where_clause(user_id),
                 {"session_id": session_id},
             ]
         }
@@ -429,7 +442,7 @@ class ChromaMemory:
         self, *, user_id: str | None = None
     ) -> MemoryProfile:
         coll = await self._get_collection()
-        where_filter = {"user_id": user_id or ""}
+        where_filter = user_id_where_clause(user_id)
         result = await anyio.to_thread.run_sync(
             lambda: coll.get(
                 where=where_filter, include=["metadatas", "documents", "embeddings"]
@@ -454,8 +467,7 @@ class ChromaMemory:
             sample_facts = list(
                 await self.facts.query(user_id=user_id, limit=10)
             )
-            all_facts = await self.facts.query(user_id=user_id, limit=100_000)
-            fact_count = len(all_facts)
+            fact_count = await count_facts(self.facts, user_id=user_id)
         return MemoryProfile(
             user_id=user_id,
             episode_count=len(episodes),
@@ -473,14 +485,14 @@ class ChromaMemory:
         before: datetime | None = None,
     ) -> int:
         coll = await self._get_collection()
-        where_filter: dict[str, Any] = {"user_id": user_id or ""}
+        where_filter: dict[str, Any] = user_id_where_clause(user_id)
         # Chroma's where filter doesn't natively support "<" on
         # numeric strings; fetch then post-filter for the time-range
         # case. Session filter we can push down.
         if session_id is not None:
             where_filter = {
                 "$and": [
-                    {"user_id": user_id or ""},
+                    user_id_where_clause(user_id),
                     {"session_id": session_id},
                 ]
             }
@@ -506,21 +518,11 @@ class ChromaMemory:
             await anyio.to_thread.run_sync(lambda: coll.delete(ids=ids))
         deleted = len(ids)
 
-        # Facts: rely on the FactStore's ``query`` + per-id deletion.
+        # Facts: delegate to the FactStore's public ``delete``.
         if session_id is None and self.facts is not None:
-            facts = await self.facts.query(user_id=user_id, limit=100_000)
-            if before is not None:
-                facts = [f for f in facts if f.recorded_at < before]
-            # ChromaFactStore stores facts in its own collection;
-            # rely on the public ``query`` + private ``_collection``
-            # for delete (no public delete method yet).
-            if facts and hasattr(self.facts, "_collection"):
-                fact_coll = self.facts._collection  # type: ignore[attr-defined]
-                fact_ids = [f.id for f in facts]
-                await anyio.to_thread.run_sync(
-                    lambda: fact_coll.delete(ids=fact_ids)
-                )
-                deleted += len(fact_ids)
+            deleted += await delete_facts(
+                self.facts, user_id=user_id, before=before
+            )
         return deleted
 
     async def export(
@@ -529,7 +531,7 @@ class ChromaMemory:
         coll = await self._get_collection()
         result = await anyio.to_thread.run_sync(
             lambda: coll.get(
-                where={"user_id": user_id or ""},
+                where=user_id_where_clause(user_id),
                 include=["metadatas", "documents", "embeddings"],
             )
         )
@@ -590,17 +592,33 @@ def _safe_list(result: dict[str, Any], key: str) -> list[Any]:
     return list(val) if val is not None else []
 
 
-def _decode_query_result(result: dict[str, Any]) -> list[Episode]:
-    """Translate a Chroma ``query()`` result into our Episodes."""
+def _decode_query_result_pairs(
+    result: dict[str, Any],
+) -> list[tuple[Episode, float | None]]:
+    """Translate a Chroma ``query()`` result into
+    ``(episode, similarity)`` pairs. The similarity is derived from
+    Chroma's returned distance via the monotone transform
+    ``1 / (1 + distance)`` (``None`` when the query didn't include
+    distances)."""
     ids_lists = _safe_list(result, "ids")
     metas_lists = _safe_list(result, "metadatas")
     embeds_lists = _safe_list(result, "embeddings")
+    dists_lists = _safe_list(result, "distances")
 
     ids = list(ids_lists[0]) if ids_lists else []
     metas = list(metas_lists[0]) if metas_lists else []
     embeds = list(embeds_lists[0]) if embeds_lists else []
+    dists = list(dists_lists[0]) if dists_lists else []
 
-    return _episodes_from_parallel(ids, metas, embeds)
+    episodes = _episodes_from_parallel(ids, metas, embeds)
+    out: list[tuple[Episode, float | None]] = []
+    for i, ep in enumerate(episodes):
+        score: float | None = None
+        if i < len(dists) and dists[i] is not None:
+            distance = max(0.0, float(dists[i]))
+            score = 1.0 / (1.0 + distance)
+        out.append((ep, score))
+    return out
 
 
 def _decode_get_result(result: dict[str, Any]) -> list[Episode]:
@@ -620,9 +638,10 @@ def _episodes_from_parallel(
     for i, eid in enumerate(ids):
         meta = metas[i] if i < len(metas) and metas[i] is not None else {}
         emb = list(embeds[i]) if i < len(embeds) else None
-        # Chroma can't store ``None`` so the anonymous bucket is the
-        # empty string on the wire; round-trip back to ``None`` here.
-        user_id_raw = str(meta.get("user_id", ""))
+        # Chroma can't store ``None`` — the anonymous bucket is the
+        # shared sentinel on the wire (legacy rows: empty string);
+        # both decode back to ``None`` here.
+        user_id_val = decode_legacy_user_id(str(meta.get("user_id", "")))
         # Round-trip tool_transcript_json → list[Message] if present.
         # Missing key (pre-feature episodes, or feature disabled at
         # write time) leaves the field at its default ``None``.
@@ -638,7 +657,7 @@ def _episodes_from_parallel(
             Episode(
                 id=str(eid),
                 session_id=str(meta.get("session_id", "")),
-                user_id=user_id_raw or None,
+                user_id=user_id_val,
                 occurred_at=_parse_occurred(meta),
                 input=str(meta.get("input", "")),
                 output=str(meta.get("output", "")),

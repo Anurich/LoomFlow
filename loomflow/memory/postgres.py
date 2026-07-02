@@ -22,8 +22,6 @@ from collections.abc import Iterable
 from datetime import datetime
 from typing import Any
 
-import anyio
-
 from ..core.protocols import Embedder
 from ..core.types import (
     Episode,
@@ -36,7 +34,9 @@ from ..core.types import (
     Role,
 )
 from ._embedding_util import cosine
-from .embedder import HashEmbedder
+from ._user_key import ANON_USER_ID, decode_user_id, encode_user_id
+from .embedder import HashEmbedder, warn_hash_embedder_fallback
+from .facts import count_facts, delete_facts
 
 DEFAULT_NAMESPACE = "default"
 
@@ -44,30 +44,13 @@ DEFAULT_NAMESPACE = "default"
 # anonymous bucket needs a non-NULL representation on the wire.
 # Earlier versions used the empty string ``''`` for this — that
 # silently conflicts with anyone who passes ``""`` as a real
-# user_id and looks like a hack in the schema. M10 replaces it
-# with this reserved sentinel that's guaranteed not to collide
-# with any sane real user_id (the double-underscore-jeeves prefix
-# is a hard rule callers must not violate; we raise if they try).
-_ANON_USER_ID = "__jeeves_anon_user__"
-
-
-def _encode_user_id(user_id: str | None) -> str:
-    """Map Python ``user_id`` (``None`` for anonymous) to the
-    on-wire representation. Rejects callers who try to use the
-    sentinel value as a real user_id — that would let one user
-    silently impersonate the anonymous bucket."""
-    if user_id == _ANON_USER_ID:
-        raise ValueError(
-            f"user_id {_ANON_USER_ID!r} is reserved by Loom for "
-            "the anonymous bucket; choose a different identifier."
-        )
-    return user_id if user_id is not None else _ANON_USER_ID
-
-
-def _decode_user_id(wire_value: str) -> str | None:
-    """Inverse of :func:`_encode_user_id`: reverse the sentinel
-    back to ``None`` for the in-memory model."""
-    return None if wire_value == _ANON_USER_ID else wire_value
+# user_id and looks like a hack in the schema. M10 replaced it with
+# a reserved sentinel; the encoding now lives in the shared
+# ``memory._user_key`` module so every backend agrees on it. The
+# old private names are kept as aliases for back-compat imports.
+_ANON_USER_ID = ANON_USER_ID
+_encode_user_id = encode_user_id
+_decode_user_id = decode_user_id
 
 
 class PostgresMemory:
@@ -87,7 +70,10 @@ class PostgresMemory:
         fact_store: Any | None = None,
     ) -> None:
         self._pool = pool
-        self._embedder: Embedder = embedder if embedder is not None else HashEmbedder()
+        if embedder is None:
+            warn_hash_embedder_fallback("PostgresMemory")
+            embedder = HashEmbedder()
+        self._embedder: Embedder = embedder
         self._namespace = namespace
         # ``facts`` is left as ``None`` by default to avoid forcing the
         # facts schema on users who don't want it. Pass an explicit
@@ -225,6 +211,13 @@ class PostgresMemory:
                 "CREATE INDEX IF NOT EXISTS episodes_user_id_idx "
                 "ON episodes (namespace, user_id, occurred_at DESC);"
             ),
+            # ``session_messages`` filters on (namespace, session_id)
+            # and sorts by occurred_at — without this index it scans
+            # the whole namespace partition.
+            (
+                "CREATE INDEX IF NOT EXISTS episodes_session_idx "
+                "ON episodes (namespace, session_id, occurred_at DESC);"
+            ),
             (
                 "CREATE INDEX IF NOT EXISTS episodes_embedding_idx "
                 "ON episodes USING hnsw (embedding vector_cosine_ops);"
@@ -327,18 +320,10 @@ class PostgresMemory:
     async def remember(self, episode: Episode) -> str:
         if episode.embedding is None:
             text = "\n".join(p for p in (episode.input, episode.output) if p)
-
-            # Embed in parallel with the connection acquire to amortise
-            # latency. (No-op for HashEmbedder; meaningful for OpenAI.)
-            async with anyio.create_task_group() as tg:
-                holder: list[list[float] | None] = [None]
-
-                async def _do_embed() -> None:
-                    holder[0] = await self._embedder.embed(text)
-
-                tg.start_soon(_do_embed)
-            assert holder[0] is not None
-            episode = episode.model_copy(update={"embedding": holder[0]})
+            # Embed before touching the pool — embedders may make
+            # network calls and shouldn't hold a connection hostage.
+            embedding = await self._embedder.embed(text)
+            episode = episode.model_copy(update={"embedding": embedding})
 
         async with self._pool.acquire() as conn:
             insert_episode = (
@@ -658,8 +643,7 @@ class PostgresMemory:
             sample_facts = list(
                 await self.facts.query(user_id=user_id, limit=10)
             )
-            all_facts = await self.facts.query(user_id=user_id, limit=100_000)
-            fact_count = len(all_facts)
+            fact_count = await count_facts(self.facts, user_id=user_id)
 
         return MemoryProfile(
             user_id=user_id,
@@ -696,16 +680,13 @@ class PostgresMemory:
         # asyncpg returns "DELETE <n>" — parse the count.
         deleted = _parse_delete_count(result)
 
+        # Facts are user-scoped, not session-scoped — erase them via
+        # the FactStore's own delete surface (not raw SQL against its
+        # table) unless the caller narrowed by session_id.
         if session_id is None and self.facts is not None:
-            f_clauses = ["user_id IS NOT DISTINCT FROM $1"]
-            f_params: list[Any] = [user_id]
-            if before is not None:
-                f_clauses.append("recorded_at < $2")
-                f_params.append(before)
-            f_sql = "DELETE FROM facts WHERE " + " AND ".join(f_clauses)
-            async with self._pool.acquire() as conn:
-                f_result = await conn.execute(f_sql, *f_params)
-            deleted += _parse_delete_count(f_result)
+            deleted += await delete_facts(
+                self.facts, user_id=user_id, before=before
+            )
         return deleted
 
     async def export(

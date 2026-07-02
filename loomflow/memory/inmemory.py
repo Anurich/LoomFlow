@@ -28,7 +28,7 @@ from ..core.types import (
 )
 from ._hybrid import _BM25, hybrid_rank
 from .consolidator import Consolidator
-from .facts import FactStore, InMemoryFactStore
+from .facts import FactStore, InMemoryFactStore, count_facts, delete_facts
 
 _DEFAULT_MAX_USERS = 100_000
 _DEFAULT_USER_TTL_SECONDS = 24 * 3600  # 24h idle
@@ -364,7 +364,7 @@ class InMemoryMemory:
         # Sample of most-recent facts; the fact store handles the
         # filter for us via ``query``.
         sample = await self.facts.query(user_id=user_id, limit=10)
-        fact_count = len(await self.facts.query(user_id=user_id, limit=10_000))
+        fact_count = await count_facts(self.facts, user_id=user_id)
 
         # Sessions, newest-first, dedup'd.
         seen: set[str] = set()
@@ -416,24 +416,13 @@ class InMemoryMemory:
         # Facts are also user-scoped; erase them in the same call
         # unless the caller narrowed by session_id (facts have no
         # session, so a session-scoped forget shouldn't touch them).
+        # Delegates to the FactStore's public ``delete`` so the count
+        # reflects rows actually removed (no over-counting for stores
+        # that don't support deletion).
         if session_id is None:
-            facts_to_delete = await self.facts.query(
-                user_id=user_id, limit=100_000
+            deleted += await delete_facts(
+                self.facts, user_id=user_id, before=before
             )
-            if before is not None:
-                facts_to_delete = [
-                    f for f in facts_to_delete
-                    if f.recorded_at < before
-                ]
-            for f in facts_to_delete:
-                # InMemoryFactStore exposes _facts; we'd rather use a
-                # public delete but the protocol doesn't have one
-                # (yet). Best-effort.
-                if hasattr(self.facts, "_facts"):
-                    self.facts._facts.pop(f.id, None)  # type: ignore[attr-defined]
-                    if hasattr(self.facts, "_embeddings"):
-                        self.facts._embeddings.pop(f.id, None)  # type: ignore[attr-defined]
-                deleted += 1
 
         # Working blocks aren't user-scoped today (one set per
         # Memory instance); don't touch them.

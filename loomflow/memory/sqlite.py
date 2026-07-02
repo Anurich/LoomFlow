@@ -59,8 +59,8 @@ from ..core.types import (
     Role,
 )
 from ._embedding_util import cosine, pack_float32, unpack_float32
-from .embedder import HashEmbedder
-from .facts import FactStore
+from .embedder import HashEmbedder, warn_hash_embedder_fallback
+from .facts import FactStore, count_facts, delete_facts
 from .sqlite_facts import SqliteFactStore
 
 __all__ = ["SqliteMemory"]
@@ -189,7 +189,12 @@ class SqliteMemory:
         # Hash embedder is the zero-key default — same convention as
         # the other persistent backends. Real production runs pass an
         # OpenAI / Voyage embedder via the resolver or constructor.
-        self._embedder: Embedder = embedder if embedder is not None else HashEmbedder()
+        # Warn (once per process) so the non-semantic fallback isn't
+        # silent.
+        if embedder is None:
+            warn_hash_embedder_fallback("SqliteMemory")
+            embedder = HashEmbedder()
+        self._embedder: Embedder = embedder
         # Coordinate writes — sqlite handles cross-connection locking
         # but the python-side Episode/working state still benefits
         # from a single mutator at a time.
@@ -227,6 +232,16 @@ class SqliteMemory:
         # CASCADE actually fires when an episode is deleted via
         # ``forget()``. Cheap pragma; safe on tables without FKs.
         conn.execute("PRAGMA foreign_keys = ON")
+        # Concurrency pragmas: WAL lets readers proceed during a
+        # write (WAL mode persists in the DB file once set);
+        # synchronous NORMAL is the recommended WAL pairing;
+        # busy_timeout makes a competing writer wait up to 5s
+        # instead of raising "database is locked" immediately.
+        # busy_timeout / synchronous are per-connection, hence set
+        # on every connect.
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA busy_timeout=5000")
         try:
             yield conn
         finally:
@@ -478,9 +493,20 @@ class SqliteMemory:
         if not query.strip():
             return await self._recall_recent(limit, time_range, user_id)
 
-        # Brute-force cosine over every candidate in the user's
-        # partition. Time-range filter happens at the SQL layer to
-        # cut the candidate set first.
+        pairs = await self._recall_pairs(query, limit, time_range, user_id)
+        return [ep for ep, _ in pairs]
+
+    async def _recall_pairs(
+        self,
+        query: str,
+        limit: int,
+        time_range: tuple[datetime, datetime] | None,
+        user_id: str | None,
+    ) -> list[tuple[Episode, float]]:
+        """Brute-force cosine over every candidate in the user's
+        partition, best-first, WITH the cosine similarity attached.
+        Time-range filter happens at the SQL layer to cut the
+        candidate set first."""
         query_vector = await self._embedder.embed(query)
         rows = await anyio.to_thread.run_sync(
             self._scan_episodes_sync, user_id, time_range
@@ -497,7 +523,7 @@ class SqliteMemory:
                 continue
             scored.append((_cosine(query_vector, vec), row))
         scored.sort(key=lambda pair: pair[0], reverse=True)
-        return [_row_to_episode(r) for _, r in scored[:limit]]
+        return [(_row_to_episode(r), s) for s, r in scored[:limit]]
 
     async def recall_scored(
         self,
@@ -744,8 +770,7 @@ class SqliteMemory:
             sample_facts = list(
                 await self.facts.query(user_id=user_id, limit=10)
             )
-            all_facts = await self.facts.query(user_id=user_id, limit=100_000)
-            fact_count = len(all_facts)
+            fact_count = await count_facts(self.facts, user_id=user_id)
 
         return MemoryProfile(
             user_id=user_id,
@@ -771,12 +796,13 @@ class SqliteMemory:
                 before,
             )
 
-        # Facts: erase only when not narrowed by session_id (facts have
-        # no session). Bi-temporal store has no public delete; drop
-        # to the underlying SQL.
+        # Facts: erase only when not narrowed by session_id (facts
+        # have no session). Delegates to the FactStore's own
+        # ``delete`` — which also works when ``fact_store=`` points
+        # at a different file than this memory's ``.db``.
         if session_id is None and self.facts is not None:
-            deleted += await anyio.to_thread.run_sync(
-                self._forget_facts_sync, user_id, before
+            deleted += await delete_facts(
+                self.facts, user_id=user_id, before=before
             )
         return deleted
 
@@ -794,22 +820,6 @@ class SqliteMemory:
                 params.append(session_id)
             if before is not None:
                 sql += " AND occurred_at < ?"
-                params.append(_to_epoch(before))
-            cursor = conn.execute(sql, params)
-            conn.commit()
-            return int(cursor.rowcount or 0)
-
-    def _forget_facts_sync(
-        self, user_id: str | None, before: datetime | None
-    ) -> int:
-        # We share the .db file with SqliteFactStore so we can delete
-        # facts directly. The store's own connection isolation
-        # guarantees this is safe.
-        with self._connect() as conn:
-            sql = "DELETE FROM facts WHERE user_id IS ?"
-            params: list[Any] = [user_id]
-            if before is not None:
-                sql += " AND recorded_at < ?"
                 params.append(_to_epoch(before))
             cursor = conn.execute(sql, params)
             conn.commit()

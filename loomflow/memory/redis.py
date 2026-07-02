@@ -36,7 +36,9 @@ from ..core.types import (
     Role,
 )
 from ._embedding_util import cosine, pack_float32, unpack_float32
-from .embedder import HashEmbedder
+from ._user_key import decode_legacy_user_id, encode_user_id
+from .embedder import HashEmbedder, warn_hash_embedder_fallback
+from .facts import count_facts, delete_facts
 
 DEFAULT_KEY_PREFIX = "jeeves:episode:"
 DEFAULT_INDEX_NAME = "jeeves_idx"
@@ -56,7 +58,10 @@ class RedisMemory:
         fact_store: Any | None = None,
     ) -> None:
         self._client = client
-        self._embedder: Embedder = embedder if embedder is not None else HashEmbedder()
+        if embedder is None:
+            warn_hash_embedder_fallback("RedisMemory")
+            embedder = HashEmbedder()
+        self._embedder: Embedder = embedder
         self._key_prefix = key_prefix
         self._index_name = index_name
         self._use_vector_index = use_vector_index
@@ -127,6 +132,17 @@ class RedisMemory:
 
         Skipped silently when ``use_vector_index=False`` or when
         RediSearch isn't available on the server.
+
+        Schema migration: indexes created before ``user_id`` was a
+        TAG field are upgraded in place via ``FT.ALTER … SCHEMA ADD``
+        — the least invasive option (no index rebuild, no key
+        renames). RediSearch only applies a new attribute to
+        documents (re)indexed AFTER the ALTER, so episodes written
+        before the upgrade won't match the tag filter until they're
+        rewritten; the Python-side post-filter in :meth:`recall`
+        still keeps results correct, just potentially sparse for old
+        data. ``FT.ALTER`` failing (attribute already exists, or an
+        old server) is ignored.
         """
         if self._index_ready or not self._use_vector_index:
             self._index_ready = True
@@ -142,6 +158,12 @@ class RedisMemory:
                 self._key_prefix,
                 "SCHEMA",
                 "session_id",
+                "TAG",
+                # ``user_id`` is indexed as a TAG so KNN queries can
+                # apply the tenant partition inside RediSearch (hybrid
+                # ``(@user_id:{…})=>[KNN …]``) instead of over-fetching
+                # globally and post-filtering in Python.
+                "user_id",
                 "TAG",
                 "occurred_at",
                 "NUMERIC",
@@ -166,6 +188,23 @@ class RedisMemory:
             msg = str(exc).lower()
             if "already exists" not in msg:
                 self._use_vector_index = False
+            else:
+                # Pre-existing index — make sure it carries the
+                # ``user_id`` TAG field (no-op if it already does).
+                try:
+                    await self._client.execute_command(
+                        "FT.ALTER",
+                        self._index_name,
+                        "SCHEMA",
+                        "ADD",
+                        "user_id",
+                        "TAG",
+                    )
+                except Exception:  # noqa: BLE001, S110
+                    # Attribute already present / server too old —
+                    # keep the vector path; worst case the tag filter
+                    # returns nothing and the caller sees fewer rows.
+                    pass
         self._index_ready = True
 
     # ---- working blocks --------------------------------------------------
@@ -231,11 +270,12 @@ class RedisMemory:
         mapping = {
             "id": episode.id.encode("utf-8"),
             "session_id": episode.session_id.encode("utf-8"),
-            # Persist ``user_id`` so recall queries can filter
-            # by namespace partition. Encoded as the empty bytestring
-            # for ``None`` so we can round-trip it (Redis doesn't
-            # natively distinguish missing fields from empty values).
-            "user_id": (episode.user_id or "").encode("utf-8"),
+            # Persist ``user_id`` so recall queries can filter by
+            # namespace partition. The anonymous bucket uses the
+            # shared sentinel (see ``memory._user_key``); legacy rows
+            # encoded it as the empty bytestring and are still
+            # decoded correctly on read.
+            "user_id": encode_user_id(episode.user_id).encode("utf-8"),
             "occurred_at": str(episode.occurred_at.timestamp()).encode("utf-8"),
             "input": episode.input.encode("utf-8"),
             "output": episode.output.encode("utf-8"),
@@ -271,32 +311,61 @@ class RedisMemory:
         if not query.strip():
             return await self._recall_recent(limit, time_range, user_id)
 
+        pairs = await self._recall_pairs(query, limit, time_range, user_id)
+        return [ep for ep, _ in pairs]
+
+    async def _recall_pairs(
+        self,
+        query: str,
+        limit: int,
+        time_range: tuple[datetime, datetime] | None,
+        user_id: str | None,
+    ) -> list[tuple[Episode, float | None]]:
+        """Vector recall returning ``(episode, cosine_similarity)``
+        pairs, best-first. The index path pushes the ``user_id``
+        partition into RediSearch as a hybrid TAG filter; the Python
+        post-filter below stays as a defensive backstop (and does the
+        real work on the brute-force path)."""
         query_embedding = await self._embedder.embed(query)
 
-        # Over-fetch when filtering so we have enough candidates after
-        # the namespace partition is applied. The vector index lacks
-        # native ``user_id`` faceting today; this is a post-filter.
-        fetch_limit = limit * 8 if user_id is not None else limit
-
         if self._use_vector_index:
-            episodes = await self._recall_via_index(query_embedding, fetch_limit)
+            pairs = await self._recall_via_index(
+                query_embedding, limit, user_id
+            )
         else:
-            episodes = await self._recall_brute_force(query_embedding, fetch_limit)
+            # Brute-force scan lacks a native filter; over-fetch so
+            # enough candidates survive the partition post-filter.
+            fetch_limit = limit * 8 if user_id is not None else limit
+            pairs = await self._recall_brute_force(
+                query_embedding, fetch_limit
+            )
 
         # Hard namespace partition by ``user_id``.
-        episodes = [e for e in episodes if e.user_id == user_id]
+        pairs = [(e, s) for e, s in pairs if e.user_id == user_id]
         if time_range is not None:
             lo, hi = time_range
-            episodes = [e for e in episodes if lo <= e.occurred_at <= hi]
-        return episodes[:limit]
+            pairs = [
+                (e, s) for e, s in pairs if lo <= e.occurred_at <= hi
+            ]
+        return pairs[:limit]
 
     async def _recall_via_index(
-        self, query_embedding: list[float], limit: int
-    ) -> list[Episode]:
+        self,
+        query_embedding: list[float],
+        limit: int,
+        user_id: str | None,
+    ) -> list[tuple[Episode, float | None]]:
+        # Hybrid query: tenant TAG filter applied inside RediSearch so
+        # the KNN candidates all belong to this user — no more global
+        # over-fetch that starves busy tenants at scale. Note:
+        # episodes written by pre-sentinel versions carry an empty
+        # ``user_id`` tag (which RediSearch doesn't index), so legacy
+        # anonymous rows only surface via the brute-force path.
+        tag = _escape_tag(encode_user_id(user_id))
         params = [
             "FT.SEARCH",
             self._index_name,
-            f"*=>[KNN {limit} @embedding $vec AS score]",
+            f"(@user_id:{{{tag}}})=>[KNN {limit} @embedding $vec AS score]",
             "PARAMS",
             "2",
             "vec",
@@ -321,7 +390,7 @@ class RedisMemory:
             result = await self._client.execute_command(*params)
         except Exception as exc:  # noqa: BLE001
             raise MemoryStoreError(f"RediSearch KNN query failed: {exc}") from exc
-        return _decode_ft_search(result)
+        return _decode_ft_search_pairs(result)
 
     async def recall_scored(
         self,
@@ -400,7 +469,7 @@ class RedisMemory:
 
     async def _recall_brute_force(
         self, query_embedding: list[float], limit: int
-    ) -> list[Episode]:
+    ) -> list[tuple[Episode, float | None]]:
         episodes = await self._scan_all_episodes()
         scored: list[tuple[float, Episode]] = []
         for ep in episodes:
@@ -408,7 +477,7 @@ class RedisMemory:
                 continue
             scored.append((_cosine(query_embedding, ep.embedding), ep))
         scored.sort(key=lambda pair: pair[0], reverse=True)
-        return [ep for _, ep in scored[:limit]]
+        return [(ep, s) for s, ep in scored[:limit]]
 
     async def _recall_recent(
         self,
@@ -430,8 +499,10 @@ class RedisMemory:
         episodes: list[Episode] = []
         while True:
             cursor, keys = await self._client.scan(cursor=cursor, match=match)
-            for key in keys:
-                data = await self._client.hgetall(key)
+            # Pipeline the per-key HGETALLs — one round-trip per SCAN
+            # page instead of one per key. Falls back to sequential
+            # calls for clients (fakes) without pipeline support.
+            for data in await self._hgetall_many(list(keys)):
                 if not data:
                     continue
                 ep = _decode_hash(data)
@@ -440,6 +511,18 @@ class RedisMemory:
             if cursor == 0:
                 break
         return episodes
+
+    async def _hgetall_many(self, keys: list[Any]) -> list[dict[Any, Any]]:
+        if not keys:
+            return []
+        pipeline_factory = getattr(self._client, "pipeline", None)
+        if pipeline_factory is None:
+            return [await self._client.hgetall(key) for key in keys]
+        async with pipeline_factory(transaction=False) as pipe:
+            for key in keys:
+                pipe.hgetall(key)
+            results = await pipe.execute()
+        return list(results)
 
     async def recall_facts(
         self,
@@ -519,8 +602,7 @@ class RedisMemory:
             sample_facts = list(
                 await self.facts.query(user_id=user_id, limit=10)
             )
-            all_facts = await self.facts.query(user_id=user_id, limit=100_000)
-            fact_count = len(all_facts)
+            fact_count = await count_facts(self.facts, user_id=user_id)
         return MemoryProfile(
             user_id=user_id,
             episode_count=len(episodes),
@@ -537,11 +619,12 @@ class RedisMemory:
         session_id: str | None = None,
         before: datetime | None = None,
     ) -> int:
-        # Scan all episode keys, filter Python-side, DEL the matches.
-        # Faster than maintaining a secondary index for what's
-        # typically a low-frequency op.
+        # Scan all episode keys, filter Python-side, then remove the
+        # matches in ONE batched UNLINK (non-blocking delete) instead
+        # of a round-trip per key. Faster than maintaining a
+        # secondary index for what's typically a low-frequency op.
         episodes = await self._scan_all_episodes()
-        deleted = 0
+        keys: list[str] = []
         for ep in episodes:
             if ep.user_id != user_id:
                 continue
@@ -549,19 +632,13 @@ class RedisMemory:
                 continue
             if before is not None and ep.occurred_at >= before:
                 continue
-            await self._client.delete(self._key_for(ep.id))
-            deleted += 1
-        # Facts: same scan-and-delete pattern via the FactStore's
-        # internals.
+            keys.append(self._key_for(ep.id))
+        deleted = await _delete_keys(self._client, keys)
+        # Facts: delegate to the FactStore's public ``delete``.
         if session_id is None and self.facts is not None:
-            facts = await self.facts.query(user_id=user_id, limit=100_000)
-            if before is not None:
-                facts = [f for f in facts if f.recorded_at < before]
-            for f in facts:
-                if hasattr(self.facts, "_key_for"):
-                    key = self.facts._key_for(f.id)  # type: ignore[attr-defined]
-                    await self._client.delete(key)
-                    deleted += 1
+            deleted += await delete_facts(
+                self.facts, user_id=user_id, before=before
+            )
         return deleted
 
     async def export(
@@ -595,6 +672,33 @@ class RedisMemory:
 # (``from .redis import _pack_float32``) keep working.
 _pack_float32 = pack_float32
 _unpack_float32 = unpack_float32
+
+
+def _escape_tag(value: str) -> str:
+    """Escape a value for use inside a RediSearch TAG filter
+    (``@field:{value}``): every non-alphanumeric character gets a
+    backslash so ids with ``-``, ``@``, ``.`` etc. match literally."""
+    return "".join(
+        ch if (ch.isalnum() or ch == "_") else f"\\{ch}" for ch in value
+    )
+
+
+async def _delete_keys(client: Any, keys: list[str]) -> int:
+    """Remove ``keys`` in one batched call. Prefers ``UNLINK``
+    (non-blocking, reclaims memory off-thread) and falls back to
+    ``DEL`` for servers / fakes without it. Returns the number of
+    keys removed."""
+    if not keys:
+        return 0
+    unlink = getattr(client, "unlink", None)
+    if unlink is not None:
+        result = await unlink(*keys)
+    else:
+        result = await client.delete(*keys)
+    try:
+        return int(result)
+    except (TypeError, ValueError):
+        return len(keys)
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
@@ -638,7 +742,9 @@ def _decode_hash(data: dict[Any, Any]) -> Episode | None:
         embedding: list[float] | None = _unpack_float32(bytes(embedding_blob))
     else:
         embedding = None
-    user_id_raw = _decode_field(norm.get("user_id", ""))
+    # Sentinel (new rows) and legacy "" both decode to the anonymous
+    # bucket — see ``memory._user_key``.
+    user_id_val = decode_legacy_user_id(_decode_field(norm.get("user_id", "")))
     # Round-trip tool_transcript_json → list[Message]. Missing
     # field (pre-feature episodes / feature disabled) leaves
     # the Episode field at its default ``None`` which preserves
@@ -655,7 +761,7 @@ def _decode_hash(data: dict[Any, Any]) -> Episode | None:
     return Episode(
         id=eid,
         session_id=_decode_field(norm.get("session_id", "")),
-        user_id=user_id_raw or None,
+        user_id=user_id_val,
         occurred_at=occurred_at,
         input=_decode_field(norm.get("input", "")),
         output=_decode_field(norm.get("output", "")),
@@ -664,14 +770,19 @@ def _decode_hash(data: dict[Any, Any]) -> Episode | None:
     )
 
 
-def _decode_ft_search(result: Any) -> list[Episode]:
-    """Translate a ``FT.SEARCH`` reply into Episodes.
+def _decode_ft_search_pairs(
+    result: Any,
+) -> list[tuple[Episode, float | None]]:
+    """Translate a ``FT.SEARCH`` reply into ``(episode, similarity)``
+    pairs. The KNN clause returns the cosine *distance* under the
+    ``score`` alias; we convert to a similarity via ``1 - distance``
+    (``None`` when the field is missing).
 
     The reply shape is ``[total, id1, [k1, v1, k2, v2, ...], id2, [...], ...]``.
     """
     if not result or not isinstance(result, list):
         return []
-    out: list[Episode] = []
+    out: list[tuple[Episode, float | None]] = []
     # First element is the total count.
     body = result[1:]
     for i in range(0, len(body), 2):
@@ -699,18 +810,35 @@ def _decode_ft_search(result: Any) -> list[Episode]:
             occurred_at = datetime.fromtimestamp(float(occurred_raw), tz=UTC)
         except ValueError:
             occurred_at = datetime.now(UTC)
-        user_id_raw = _decode_field(decoded.get("user_id", ""))
+        user_id_val = decode_legacy_user_id(
+            _decode_field(decoded.get("user_id", ""))
+        )
+        similarity: float | None = None
+        score_raw = decoded.get("score")
+        if score_raw is not None:
+            try:
+                similarity = 1.0 - float(_decode_field(score_raw))
+            except ValueError:
+                similarity = None
         out.append(
-            Episode(
-                id=eid,
-                session_id=_decode_field(decoded.get("session_id", "")),
-                user_id=user_id_raw or None,
-                occurred_at=occurred_at,
-                input=_decode_field(decoded.get("input", "")),
-                output=_decode_field(decoded.get("output", "")),
+            (
+                Episode(
+                    id=eid,
+                    session_id=_decode_field(decoded.get("session_id", "")),
+                    user_id=user_id_val,
+                    occurred_at=occurred_at,
+                    input=_decode_field(decoded.get("input", "")),
+                    output=_decode_field(decoded.get("output", "")),
+                ),
+                similarity,
             )
         )
     return out
+
+
+def _decode_ft_search(result: Any) -> list[Episode]:
+    """Back-compat wrapper: Episodes only, scores dropped."""
+    return [ep for ep, _ in _decode_ft_search_pairs(result)]
 
 
 __all__ = [

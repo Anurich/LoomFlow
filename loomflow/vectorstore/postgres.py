@@ -24,6 +24,7 @@ are all supported.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping
 from typing import Any
 
@@ -424,22 +425,64 @@ def _xlate_node(
     return " AND ".join(parts), params
 
 
+# Metadata keys are interpolated into the SQL text (JSONB ``->>``
+# takes a literal), so they must be validated — a quote or backslash
+# in a key would be an injection vector. Conservative allow-list.
+_SAFE_KEY_RE = re.compile(r"[A-Za-z0-9_.\- ]+\Z")
+
+# SQL-side guard so casting a non-numeric metadata value to numeric
+# can't blow up the whole query: only rows whose text looks like a
+# JSON number get cast + compared; everything else simply doesn't
+# match (same semantics as the in-memory store's typed comparison).
+_NUMERIC_GUARD_SQL = r"'^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$'"
+
+
+def _safe_key(key: str) -> str:
+    if not _SAFE_KEY_RE.fullmatch(key):
+        raise FilterError(
+            f"invalid metadata key for filtering: {key!r} "
+            "(only letters, digits, '_', '.', '-' and spaces allowed)"
+        )
+    return key
+
+
+def _is_numeric_operand(value: Any) -> bool:
+    """True for int/float operands (bool excluded — it's an int
+    subclass but compares as the JSON strings 'true'/'false')."""
+    return isinstance(value, int | float) and not isinstance(value, bool)
+
+
 def _xlate_field(
     key: str, condition: Any, params: list[Any]
 ) -> tuple[str, list[Any]]:
     """Translate one field constraint to a SQL boolean expression."""
+    key = _safe_key(key)
     if isinstance(condition, Mapping) and condition and all(
         k.startswith("$") for k in condition
     ):
         sub_exprs: list[str] = []
         for op, expected in condition.items():
             if op in _SQL_BIN_OPS:
-                params.append(_pg_field_value(expected))
-                sub_exprs.append(
-                    f"(metadata->>'{key}') "
-                    f"{_SQL_BIN_OPS[op]} "
-                    f"${len(params)}"
+                params.append(
+                    expected
+                    if _is_numeric_operand(expected)
+                    else _pg_field_value(expected)
                 )
+                if _is_numeric_operand(expected):
+                    # Numeric operand → compare numerically, not as
+                    # text ("10" < "9" lexicographically!). Matches
+                    # the module docstring's promised semantics.
+                    sub_exprs.append(
+                        f"((metadata->>'{key}') ~ {_NUMERIC_GUARD_SQL} "
+                        f"AND ((metadata->>'{key}'))::numeric "
+                        f"{_SQL_BIN_OPS[op]} ${len(params)})"
+                    )
+                else:
+                    sub_exprs.append(
+                        f"(metadata->>'{key}') "
+                        f"{_SQL_BIN_OPS[op]} "
+                        f"${len(params)}"
+                    )
             elif op == "$in":
                 if not isinstance(expected, list | tuple):
                     raise FilterError("$in expects a list")
@@ -479,6 +522,13 @@ def _xlate_field(
             params,
         )
 
+    if _is_numeric_operand(condition):
+        params.append(condition)
+        return (
+            f"((metadata->>'{key}') ~ {_NUMERIC_GUARD_SQL} "
+            f"AND ((metadata->>'{key}'))::numeric = ${len(params)})",
+            params,
+        )
     params.append(_pg_field_value(condition))
     return f"(metadata->>'{key}') = ${len(params)}", params
 
