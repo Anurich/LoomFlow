@@ -70,7 +70,12 @@ from ..core.context import inherit_ambient_memory
 from ..core.types import Event
 from ..tools.registry import Tool
 from .base import AgentSession, Dependencies
-from .helpers import SubagentInvocation
+from .helpers import (
+    SubagentInvocation,
+    budget_gate,
+    consume_worker_usage,
+    usage_from_result_dict,
+)
 
 if TYPE_CHECKING:
     from ..agent.api import Agent
@@ -199,6 +204,18 @@ class Swarm:
         )
 
         while True:
+            # Budget gate — one check per handoff iteration (mirrors
+            # Blackboard's per-round gate). Pre-fix, Swarm's
+            # ``while True`` loop never consulted the budget: an
+            # exhausted budget kept spawning peers until
+            # max_handoffs.
+            blocked, gate_events = await budget_gate(deps, session)
+            for gate_event in gate_events:
+                yield gate_event
+            if blocked:
+                session.output = last_output
+                return
+
             active_agent = self._agents[active_name]
             yield Event.architecture_event(
                 session.id,
@@ -228,15 +245,17 @@ class Swarm:
             # same peer reuses the same memory partition). Lock
             # serialises concurrent calls. Otherwise fall back to a
             # per-handoff deterministic id (legacy).
-            from ..agent.worker_registry import resolve_persistent_session
+            from ..agent.worker_registry import (
+                CrossUserWorkerError,
+                acquire_worker_session,
+                resolve_persistent_session,
+            )
             sub_session_id, handle = resolve_persistent_session(
                 active_name,
                 fallback=f"{session.id}__swarm_{active_name}_{handoff_count}",
                 registry=self._worker_registry,
                 role_to_id=self._role_to_worker_id,
             )
-            if handle is not None:
-                handle.touch(user_id=deps.context.user_id)
             invocation = SubagentInvocation(
                 active_agent,
                 active_prompt,
@@ -249,9 +268,41 @@ class Swarm:
             # ``memory=`` inherits it. anyio's contextvar inheritance
             # carries it into the invocation's task-group spawn.
             with inherit_ambient_memory(deps.memory):
-                async for ev in invocation.events():
-                    yield ev
+                if handle is not None:
+                    # Cross-user check + lock + touch, held for the
+                    # peer's whole turn so concurrent invocations of
+                    # the same persistent worker serialise.
+                    try:
+                        async with acquire_worker_session(
+                            handle, deps.context.user_id
+                        ):
+                            async for ev in invocation.events():
+                                yield ev
+                    except CrossUserWorkerError as exc:
+                        session.interrupted = True
+                        session.interruption_reason = (
+                            f"swarm:{active_name}:cross_user_worker"
+                        )
+                        session.output = last_output
+                        yield Event.architecture_event(
+                            session.id,
+                            "swarm.cross_user_rejected",
+                            agent=active_name,
+                            error=str(exc),
+                        )
+                        return
+                else:
+                    async for ev in invocation.events():
+                        yield ev
             session.turns += int(invocation.result.get("turns", 0) or 0)
+            # Charge the peer's spend against the parent budget
+            # (cumulative_usage was already rolled up by
+            # ``rollup_into=session``).
+            await consume_worker_usage(
+                deps,
+                active_agent,
+                usage_from_result_dict(invocation.result),
+            )
             last_output = str(invocation.result.get("output", ""))
             interrupted = bool(invocation.result.get("interrupted", False))
             interruption_reason = invocation.result.get(

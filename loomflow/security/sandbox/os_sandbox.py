@@ -74,6 +74,23 @@ def _detect_mode() -> SandboxMode:
     return "degraded"
 
 
+def _validate_seatbelt_root(root: Path) -> None:
+    """Reject roots that can't be embedded verbatim in a Seatbelt
+    profile string literal. A ``"`` closes the ``(subpath "...")``
+    string, a backslash starts an escape, and a newline / control
+    char breaks the s-expression — any of them would let a
+    crafted root rewrite the sandbox profile itself, so we fail
+    loudly instead of interpolating."""
+    text = str(root)
+    if '"' in text or "\\" in text or any(ord(ch) < 0x20 for ch in text):
+        raise ValueError(
+            f"OSSandbox root {text!r} contains a double quote, "
+            "backslash, or control character (e.g. newline); it "
+            "cannot be safely embedded in a Seatbelt sandbox "
+            "profile. Rename the directory or choose another root."
+        )
+
+
 def _seatbelt_profile(roots: tuple[Path, ...], allow_network: bool) -> str:
     """Generate a Seatbelt (.sb) profile: deny by default, allow reads
     everywhere (so Python + stdlib import), but allow *writes* only
@@ -105,6 +122,9 @@ def _seatbelt_profile(roots: tuple[Path, ...], allow_network: bool) -> str:
     write_roots = list(roots) + [Path(tempfile.gettempdir()).resolve()]
     for r in write_roots:
         # subpath grants write to the dir and everything beneath it.
+        # The root is interpolated into a quoted profile string, so
+        # it must not contain quote / escape / control characters.
+        _validate_seatbelt_root(r)
         lines.append(f'(allow file-write* (subpath "{r}"))')
     if allow_network:
         lines.append("(allow network*)")
@@ -191,6 +211,13 @@ class OSSandbox:
         self._allow_network = allow_network
         self._timeout = timeout_seconds
         self._mode: SandboxMode = _detect_mode()
+        # Fail fast on roots that can't be embedded in a Seatbelt
+        # profile string (quote / backslash / control chars) —
+        # better a construction-time ValueError than a profile
+        # injection or an opaque sandbox-exec parse failure later.
+        if self._mode == "seatbelt":
+            for r in roots_list:
+                _validate_seatbelt_root(r)
         # Degraded fallback is composed eagerly so misconfig (e.g. a
         # non-InProcess host) fails fast at construction, same as the
         # kernel path's requirement below.

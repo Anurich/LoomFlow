@@ -56,7 +56,12 @@ from ..core.protocols import Memory
 from ..core.types import Event, Usage
 from ..tools.registry import Tool
 from .base import AgentSession, Architecture, Dependencies
-from .helpers import SubagentInvocation, add_usage
+from .helpers import (
+    SubagentInvocation,
+    add_usage,
+    consume_worker_usage,
+    usage_from_result_dict,
+)
 from .react import ReAct
 from .tool_host_wrappers import ExtendedToolHost
 
@@ -222,6 +227,7 @@ class Supervisor:
             last_outputs=last_outputs,
             worker_registry=self._worker_registry,
             role_to_worker_id=self._role_to_worker_id,
+            deps=deps,
         )
         forward_tool = _make_forward_message_tool(
             last_outputs=last_outputs,
@@ -363,6 +369,7 @@ def _make_delegate_tool(
     last_outputs: dict[str, str] | None = None,
     worker_registry: dict[str, Any] | None = None,
     role_to_worker_id: dict[str, str] | None = None,
+    deps: Dependencies | None = None,
 ) -> Tool:
     """Build a :class:`Tool` whose ``execute`` routes to the named
     worker :class:`Agent` and returns its final output.
@@ -383,7 +390,18 @@ def _make_delegate_tool(
     parent ``session.cumulative_usage`` so the parent's
     ``RunResult.cost_usd`` reflects the worker's spend — without
     this every consumer of ``Team.supervisor`` silently under-counts.
+    When ``deps`` is supplied, the worker's spend is ALSO charged
+    against the parent's budget via
+    :func:`~loomflow.architecture.helpers.consume_worker_usage`
+    (budget-only — cumulative_usage is never double-counted, and
+    workers sharing the parent's budget instance are skipped).
     """
+
+    async def _charge_parent_budget(
+        worker_agent: Agent, usage: Usage
+    ) -> None:
+        if deps is not None:
+            await consume_worker_usage(deps, worker_agent, usage)
 
     async def _delegate(worker: str, instructions: str) -> str:
         agent = workers.get(worker)
@@ -411,73 +429,83 @@ def _make_delegate_tool(
         ):
             handle = worker_registry[role_to_worker_id[worker]]
             worker_id_for_return = handle.worker_id
-            # Pin user_id on first touch + reject cross-user.
             caller_user = get_run_context().user_id
-            if (
-                handle.user_id is not None
-                and caller_user is not None
-                and handle.user_id != caller_user
-            ):
-                return (
-                    f"Error: worker {worker!r} "
-                    f"({handle.worker_id}) belongs to user_id "
-                    f"{handle.user_id!r} but the current run is "
-                    f"user_id {caller_user!r}. Cross-tenant "
-                    "delegation is rejected."
-                )
-            # Lock + touch happen INSIDE the handle so concurrent
-            # delegate-to-same-worker calls serialise.
-            async with handle.lock:
-                handle.touch(user_id=caller_user)
-                worker_session_id = handle.session_id
-                # Memory propagation: install the coordinator's
-                # memory as ambient so a worker constructed without
-                # an explicit ``memory=`` inherits it. Matches the
-                # propagation Workflow.stream does. Anyio task-group
-                # spawns inherit the contextvar, so SubagentInvocation
-                # (which fires agent.run inside a task group) also
-                # sees the ambient.
-                with inherit_ambient_memory(memory):
-                    if event_sink is None:
-                        result = await agent.run(
-                            instructions,
-                            session_id=worker_session_id,
-                            context=get_run_context(),
-                        )
-                        session.cumulative_usage = add_usage(
-                            session.cumulative_usage,
-                            Usage(
+            # Cross-user check + lock + touch live in the shared
+            # :func:`acquire_worker_session` helper (used by every
+            # architecture) — the lock is held for the whole worker
+            # run so concurrent delegate-to-same-worker calls
+            # serialise. Lazy import: module scope would pull
+            # loomflow.agent at architecture import time.
+            from ..agent.worker_registry import (
+                CrossUserWorkerError,
+                acquire_worker_session,
+            )
+            try:
+                async with acquire_worker_session(
+                    handle, caller_user
+                ):
+                    worker_session_id = handle.session_id
+                    # Memory propagation: install the coordinator's
+                    # memory as ambient so a worker constructed
+                    # without an explicit ``memory=`` inherits it.
+                    # Matches the propagation Workflow.stream does.
+                    # Anyio task-group spawns inherit the
+                    # contextvar, so SubagentInvocation (which fires
+                    # agent.run inside a task group) also sees the
+                    # ambient.
+                    with inherit_ambient_memory(memory):
+                        if event_sink is None:
+                            result = await agent.run(
+                                instructions,
+                                session_id=worker_session_id,
+                                context=get_run_context(),
+                            )
+                            worker_usage = Usage(
                                 input_tokens=result.tokens_in,
                                 cached_input_tokens=result.cached_tokens_in,
                                 cache_write_tokens=result.cache_write_tokens,
                                 output_tokens=result.tokens_out,
                                 cost_usd=result.cost_usd,
-                            ),
-                        )
-                        output = _mark_if_interrupted(
-                            result.output,
-                            interrupted=result.interrupted,
-                            reason=result.interruption_reason,
-                        )
-                    else:
-                        invocation = SubagentInvocation(
-                            agent,
-                            instructions,
-                            session_id=worker_session_id,
-                            rollup_into=session,
-                        )
-                        async with event_sink.clone() as sink:
-                            async for ev in invocation.events():
-                                await sink.send(ev)
-                        output = _mark_if_interrupted(
-                            str(invocation.result.get("output", "")),
-                            interrupted=bool(
-                                invocation.result.get("interrupted", False)
-                            ),
-                            reason=invocation.result.get(
-                                "interruption_reason"
-                            ),
-                        )
+                            )
+                            session.cumulative_usage = add_usage(
+                                session.cumulative_usage,
+                                worker_usage,
+                            )
+                            await _charge_parent_budget(
+                                agent, worker_usage
+                            )
+                            output = _mark_if_interrupted(
+                                result.output,
+                                interrupted=result.interrupted,
+                                reason=result.interruption_reason,
+                            )
+                        else:
+                            invocation = SubagentInvocation(
+                                agent,
+                                instructions,
+                                session_id=worker_session_id,
+                                rollup_into=session,
+                            )
+                            async with event_sink.clone() as sink:
+                                async for ev in invocation.events():
+                                    await sink.send(ev)
+                            await _charge_parent_budget(
+                                agent,
+                                usage_from_result_dict(
+                                    invocation.result
+                                ),
+                            )
+                            output = _mark_if_interrupted(
+                                str(invocation.result.get("output", "")),
+                                interrupted=bool(
+                                    invocation.result.get("interrupted", False)
+                                ),
+                                reason=invocation.result.get(
+                                    "interruption_reason"
+                                ),
+                            )
+            except CrossUserWorkerError as exc:
+                return f"Error: {exc}"
             if last_outputs is not None:
                 last_outputs[worker] = output
             # Prefix return with the worker_id so the model
@@ -508,17 +536,19 @@ def _make_delegate_tool(
                 )
             # Roll worker usage into the parent's session so cost
             # accounting is correct (mirrors what
-            # SubagentInvocation does in the streaming branch).
-            session.cumulative_usage = add_usage(
-                session.cumulative_usage,
-                Usage(
-                    input_tokens=result.tokens_in,
-                    cached_input_tokens=result.cached_tokens_in,
-                    cache_write_tokens=result.cache_write_tokens,
-                    output_tokens=result.tokens_out,
-                    cost_usd=result.cost_usd,
-                ),
+            # SubagentInvocation does in the streaming branch),
+            # and charge it against the parent budget.
+            worker_usage = Usage(
+                input_tokens=result.tokens_in,
+                cached_input_tokens=result.cached_tokens_in,
+                cache_write_tokens=result.cache_write_tokens,
+                output_tokens=result.tokens_out,
+                cost_usd=result.cost_usd,
             )
+            session.cumulative_usage = add_usage(
+                session.cumulative_usage, worker_usage
+            )
+            await _charge_parent_budget(agent, worker_usage)
             output = _mark_if_interrupted(
                 result.output,
                 interrupted=result.interrupted,
@@ -541,6 +571,9 @@ def _make_delegate_tool(
             async with event_sink.clone() as sink:
                 async for ev in invocation.events():
                     await sink.send(ev)
+        await _charge_parent_budget(
+            agent, usage_from_result_dict(invocation.result)
+        )
         output = _mark_if_interrupted(
             str(invocation.result.get("output", "")),
             interrupted=bool(

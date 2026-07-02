@@ -17,12 +17,12 @@ the extra round-trip for the small payloads we have.
 
 from __future__ import annotations
 
-import math
 from datetime import UTC, datetime
 from typing import Any
 
 import anyio
 
+from ..core._eviction import BoundedDict
 from ..core.errors import MemoryStoreError
 from ..core.protocols import Embedder
 from ..core.types import (
@@ -39,6 +39,7 @@ from ._embedding_util import cosine, pack_float32, unpack_float32
 from ._user_key import decode_legacy_user_id, encode_user_id
 from .embedder import HashEmbedder, warn_hash_embedder_fallback
 from .facts import count_facts, delete_facts
+from .inmemory import _DEFAULT_MAX_USERS, _DEFAULT_USER_TTL_SECONDS
 
 DEFAULT_KEY_PREFIX = "jeeves:episode:"
 DEFAULT_INDEX_NAME = "jeeves_idx"
@@ -66,8 +67,16 @@ class RedisMemory:
         self._index_name = index_name
         self._use_vector_index = use_vector_index
         self._index_ready = False
-        # Working blocks partition by user_id; key is (user_id, name).
-        self._blocks: dict[tuple[str | None, str], MemoryBlock] = {}
+        # Working blocks partition by ``user_id`` (outer key); the
+        # container is bounded (LRU + TTL) with the same defaults as
+        # :class:`InMemoryMemory` so a runaway tenant explosion can't
+        # grow the in-process dict without limit.
+        self._blocks: BoundedDict[str | None, dict[str, MemoryBlock]] = (
+            BoundedDict(
+                max_keys=_DEFAULT_MAX_USERS,
+                ttl_seconds=_DEFAULT_USER_TTL_SECONDS,
+            )
+        )
         self._lock = anyio.Lock()
         # The Agent loop's fact-recall hook. ``None`` by default —
         # construct an explicit :class:`RedisFactStore` (or pass
@@ -213,43 +222,40 @@ class RedisMemory:
         self, *, user_id: str | None = None
     ) -> list[MemoryBlock]:
         async with self._lock:
-            scoped = [
-                b for (uid, _name), b in self._blocks.items() if uid == user_id
-            ]
+            user_blocks = self._blocks.get(user_id, {})
+            scoped = list(user_blocks.values())
         return sorted(scoped, key=lambda b: b.pinned_order)
 
     async def update_block(
         self, name: str, content: str, *, user_id: str | None = None
     ) -> None:
-        key = (user_id, name)
         async with self._lock:
-            existing = self._blocks.get(key)
-            user_count = sum(
-                1 for (uid, _) in self._blocks if uid == user_id
-            )
-            self._blocks[key] = MemoryBlock(
+            user_blocks = self._blocks.setdefault(user_id, {})
+            existing = user_blocks.get(name)
+            user_blocks[name] = MemoryBlock(
                 name=name,
                 content=content,
-                pinned_order=existing.pinned_order if existing else user_count,
+                pinned_order=(
+                    existing.pinned_order
+                    if existing is not None
+                    else len(user_blocks)
+                ),
             )
 
     async def append_block(
         self, name: str, content: str, *, user_id: str | None = None
     ) -> None:
-        key = (user_id, name)
         async with self._lock:
-            existing = self._blocks.get(key)
+            user_blocks = self._blocks.setdefault(user_id, {})
+            existing = user_blocks.get(name)
             if existing is None:
-                user_count = sum(
-                    1 for (uid, _) in self._blocks if uid == user_id
-                )
-                self._blocks[key] = MemoryBlock(
+                user_blocks[name] = MemoryBlock(
                     name=name,
                     content=content,
-                    pinned_order=user_count,
+                    pinned_order=len(user_blocks),
                 )
             else:
-                self._blocks[key] = MemoryBlock(
+                user_blocks[name] = MemoryBlock(
                     name=name,
                     content=existing.content + content,
                     pinned_order=existing.pinned_order,
@@ -329,15 +335,37 @@ class RedisMemory:
         query_embedding = await self._embedder.embed(query)
 
         if self._use_vector_index:
+            # ``time_range`` is applied as a Python post-filter, so
+            # requesting exactly ``limit`` KNN hits would under-fetch
+            # whenever some of them fall outside the range.
+            fetch_limit = limit * 8 if time_range is not None else limit
             pairs = await self._recall_via_index(
-                query_embedding, limit, user_id
+                query_embedding, fetch_limit, user_id
             )
+            if user_id is None:
+                # Legacy anonymous episodes (pre-sentinel) carry an
+                # empty-string ``user_id`` TAG, which RediSearch does
+                # not index — they never match the sentinel tag
+                # filter. Union with the brute-force scan so
+                # pre-migration anonymous rows still surface.
+                seen_ids = {ep.id for ep, _ in pairs}
+                brute = await self._recall_brute_force(
+                    query_embedding, limit * 8
+                )
+                pairs = pairs + [
+                    (e, s) for e, s in brute if e.id not in seen_ids
+                ]
+                pairs.sort(
+                    key=lambda p: p[1] if p[1] is not None else -2.0,
+                    reverse=True,
+                )
         else:
             # Brute-force scan lacks a native filter; over-fetch so
-            # enough candidates survive the partition post-filter.
-            fetch_limit = limit * 8 if user_id is not None else limit
+            # enough candidates survive the partition / time-range
+            # post-filters (the partition filter applies to the
+            # anonymous bucket too, so over-fetch unconditionally).
             pairs = await self._recall_brute_force(
-                query_embedding, fetch_limit
+                query_embedding, limit * 8
             )
 
         # Hard namespace partition by ``user_id``.
@@ -360,7 +388,9 @@ class RedisMemory:
         # over-fetch that starves busy tenants at scale. Note:
         # episodes written by pre-sentinel versions carry an empty
         # ``user_id`` tag (which RediSearch doesn't index), so legacy
-        # anonymous rows only surface via the brute-force path.
+        # anonymous rows never match this tag filter — the anonymous
+        # (``user_id=None``) case in ``_recall_pairs`` unions in a
+        # brute-force scan to cover them.
         tag = _escape_tag(encode_user_id(user_id))
         params = [
             "FT.SEARCH",
@@ -415,7 +445,7 @@ class RedisMemory:
         neutral ``1.0`` scores; a no-match query falls through to
         recency with ``0.0``.
         """
-        from ._hybrid import _BM25, hybrid_rank
+        from ._hybrid import hybrid_rank_episodes
 
         await self.ensure_index()
 
@@ -432,40 +462,14 @@ class RedisMemory:
         if not candidates:
             return []
 
-        # Vector arm — cosine over candidate embeddings; drop
-        # non-positive sims so RRF doesn't promote them.
         query_embedding = await self._embedder.embed(query)
-        vector_scores: list[tuple[int, float]] = []
-        for i, ep in enumerate(candidates):
-            assert ep.embedding is not None
-            sim = cosine(query_embedding, ep.embedding)
-            if sim > 0:
-                vector_scores.append((i, sim))
-        vector_scores.sort(key=lambda x: x[1], reverse=True)
-
-        # BM25 arm — lexical ranking over the same candidate pool.
-        texts = [f"{e.input}\n{e.output}" for e in candidates]
-        bm25_ranking = _BM25(texts).rank(query)
-
-        fused = hybrid_rank(
-            bm25_ranking=bm25_ranking,
-            vector_ranking=vector_scores,
+        return hybrid_rank_episodes(
+            candidates,
+            query=query,
+            query_embedding=query_embedding,
             alpha=alpha,
+            limit=limit,
         )
-        if not fused:
-            recent = sorted(
-                candidates, key=lambda e: e.occurred_at, reverse=True
-            )[:limit]
-            return [EpisodeMatch(episode=e, score=0.0) for e in recent]
-        return [
-            EpisodeMatch(
-                episode=candidates[idx],
-                score=score,
-                bm25_score=bm25_score,
-                vector_score=vector_score,
-            )
-            for idx, score, bm25_score, vector_score in fused[:limit]
-        ]
 
     async def _recall_brute_force(
         self, query_embedding: list[float], limit: int
@@ -475,7 +479,7 @@ class RedisMemory:
         for ep in episodes:
             if ep.embedding is None:
                 continue
-            scored.append((_cosine(query_embedding, ep.embedding), ep))
+            scored.append((cosine(query_embedding, ep.embedding), ep))
         scored.sort(key=lambda pair: pair[0], reverse=True)
         return [(ep, s) for s, ep in scored[:limit]]
 
@@ -699,21 +703,6 @@ async def _delete_keys(client: Any, keys: list[str]) -> int:
         return int(result)
     except (TypeError, ValueError):
         return len(keys)
-
-
-def _cosine(a: list[float], b: list[float]) -> float:
-    if not a or not b:
-        return 0.0
-    dot = 0.0
-    na = 0.0
-    nb = 0.0
-    for x, y in zip(a, b, strict=False):
-        dot += x * y
-        na += x * x
-        nb += y * y
-    if na <= 0.0 or nb <= 0.0:
-        return 0.0
-    return dot / (math.sqrt(na) * math.sqrt(nb))
 
 
 def _decode_field(value: Any) -> str:

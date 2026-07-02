@@ -54,7 +54,13 @@ from typing import TYPE_CHECKING, Any, Literal
 from ..core.context import inherit_ambient_memory
 from ..core.types import Event, Message, Role
 from .base import AgentSession, Dependencies
-from .helpers import SubagentInvocation, consume_usage, text_only_model_call
+from .helpers import (
+    SubagentInvocation,
+    consume_usage,
+    consume_worker_usage,
+    text_only_model_call,
+    usage_from_result_dict,
+)
 
 if TYPE_CHECKING:
     from ..agent.api import Agent
@@ -135,6 +141,10 @@ class Router:
         self._routes = list(routes)
         self._routes_by_name = {r.name: r for r in routes}
         self._fallback_route = fallback_route
+        # A classification whose confidence line is MISSING counts
+        # as confidence 0.0 whenever this threshold is > 0 (falls
+        # to the fallback route / unresolved) — otherwise a
+        # confidence-less classifier output would bypass the gate.
         self._min_confidence = require_confidence_above
         self._classifier_prompt = (
             classifier_prompt or DEFAULT_CLASSIFIER_PROMPT
@@ -190,9 +200,20 @@ class Router:
         )
         await consume_usage(deps, session, usage)
 
-        parsed_route, confidence = _parse_classification(
+        parsed_route, parsed_confidence = _parse_classification(
             classification_text
         )
+        if parsed_confidence is None:
+            # The classifier omitted (or garbled) the confidence
+            # line. When a threshold is configured, treat missing as
+            # BELOW threshold (0.0) so ``require_confidence_above``
+            # keeps meaning — the pre-fix default of 1.0 let any
+            # confidence-less classification sail past the gate.
+            # Without a threshold, keep the legacy "assume sure"
+            # 1.0 (the value is only reported, never compared).
+            confidence = 0.0 if self._min_confidence > 0.0 else 1.0
+        else:
+            confidence = parsed_confidence
         yield Event.architecture_event(
             session.id,
             "router.classified",
@@ -246,19 +267,21 @@ class Router:
         #   mode the "memory" IS the parent's session_id. Re-running
         #   the same prompt on a different route still rehydrates the
         #   prior turns from the parent session — that's the feature.
+        from ..agent.worker_registry import (
+            CrossUserWorkerError,
+            acquire_worker_session,
+            resolve_persistent_session,
+        )
         if self._conversation_scope == "shared":
             specialist_session_id = session.id
             handle = None
         else:
-            from ..agent.worker_registry import resolve_persistent_session
             specialist_session_id, handle = resolve_persistent_session(
                 chosen.name,
                 fallback=f"{session.id}__route_{chosen.name}",
                 registry=self._worker_registry,
                 role_to_id=self._role_to_worker_id,
             )
-            if handle is not None:
-                handle.touch(user_id=deps.context.user_id)
         invocation = SubagentInvocation(
             chosen.agent,
             prompt,
@@ -268,10 +291,40 @@ class Router:
         # Memory propagation — specialist inherits coordinator's
         # memory backend when it has no explicit memory= of its own.
         with inherit_ambient_memory(deps.memory):
-            async for ev in invocation.events():
-                yield ev
+            if handle is not None:
+                # Cross-user check + lock + touch, held for the
+                # specialist's whole run so concurrent dispatches
+                # to the same persistent worker serialise.
+                try:
+                    async with acquire_worker_session(
+                        handle, deps.context.user_id
+                    ):
+                        async for ev in invocation.events():
+                            yield ev
+                except CrossUserWorkerError as exc:
+                    session.interrupted = True
+                    session.interruption_reason = (
+                        f"specialist:{chosen.name}:cross_user_worker"
+                    )
+                    session.output = f"Could not route: {exc}"
+                    yield Event.architecture_event(
+                        session.id,
+                        "router.cross_user_rejected",
+                        route=chosen.name,
+                        error=str(exc),
+                    )
+                    return
+            else:
+                async for ev in invocation.events():
+                    yield ev
 
         result_dict = invocation.result
+        # Charge the specialist's spend against the parent budget
+        # (cumulative_usage was already rolled up by
+        # ``rollup_into=session``).
+        await consume_worker_usage(
+            deps, chosen.agent, usage_from_result_dict(result_dict)
+        )
         session.output = str(result_dict.get("output", ""))
         session.turns += int(result_dict.get("turns", 0) or 0)
         interrupted = bool(result_dict.get("interrupted", False))
@@ -324,14 +377,16 @@ _CONFIDENCE_RE = re.compile(
 )
 
 
-def _parse_classification(text: str) -> tuple[str, float]:
+def _parse_classification(text: str) -> tuple[str, float | None]:
     """Extract ``(route_name, confidence)`` from classifier output.
 
     Looks for ``route: X`` and ``confidence: Y`` lines (case
     insensitive, ``=`` accepted as separator). If the route line is
-    missing returns ``("", 0.0)``. If confidence is missing defaults
-    to ``1.0`` (assume the model is sure if it didn't say otherwise).
-    Confidence is clamped to ``[0, 1]``.
+    missing returns ``("", 0.0)``. If confidence is missing (or
+    unparsable) returns ``None`` for it — the Router decides what a
+    missing confidence means: 0.0 (below-threshold) when
+    ``require_confidence_above`` is configured, 1.0 otherwise.
+    Present confidences are clamped to ``[0, 1]``.
     """
     route_match = _ROUTE_RE.search(text)
     confidence_match = _CONFIDENCE_RE.search(text)
@@ -341,11 +396,10 @@ def _parse_classification(text: str) -> tuple[str, float]:
 
     route = route_match.group(1).strip()
     if confidence_match is None:
-        return route, 1.0
+        return route, None
 
     try:
         confidence = float(confidence_match.group(1))
     except ValueError:
-        confidence = 1.0
-    confidence = max(0.0, min(1.0, confidence))
-    return route, confidence
+        return route, None
+    return route, max(0.0, min(1.0, confidence))

@@ -12,12 +12,12 @@ O(N) over every episode every call. Past that, switch to
 
 from __future__ import annotations
 
-import math
 from datetime import datetime
 from typing import Any
 
 import anyio
 
+from ..core._eviction import BoundedDict
 from ..core.protocols import Embedder
 from ..core.types import (
     Episode,
@@ -29,24 +29,11 @@ from ..core.types import (
     Message,
     Role,
 )
+from ._embedding_util import cosine as _cosine
 from .consolidator import Consolidator
 from .embedder import HashEmbedder
 from .facts import FactStore, InMemoryFactStore, count_facts, delete_facts
-
-
-def _cosine(a: list[float], b: list[float]) -> float:
-    if not a or not b:
-        return 0.0
-    dot = 0.0
-    na = 0.0
-    nb = 0.0
-    for x, y in zip(a, b, strict=False):
-        dot += x * y
-        na += x * x
-        nb += y * y
-    if na <= 0.0 or nb <= 0.0:
-        return 0.0
-    return dot / (math.sqrt(na) * math.sqrt(nb))
+from .inmemory import _DEFAULT_MAX_USERS, _DEFAULT_USER_TTL_SECONDS
 
 
 def _embedding_text(episode: Episode) -> str:
@@ -67,9 +54,17 @@ class VectorMemory:
     ) -> None:
         self._embedder: Embedder = embedder if embedder is not None else HashEmbedder()
         self._max_episodes = max_episodes
-        # Working blocks are partitioned by ``user_id``. Storage key
-        # is ``(user_id, name)``; ``user_id=None`` is its own bucket.
-        self._blocks: dict[tuple[str | None, str], MemoryBlock] = {}
+        # Working blocks are partitioned by ``user_id`` (outer key,
+        # so eviction drops a user's blocks together); the container
+        # is bounded (LRU + TTL) with the same defaults as
+        # :class:`InMemoryMemory` so a runaway tenant explosion can't
+        # grow the in-process dict without limit.
+        self._blocks: BoundedDict[str | None, dict[str, MemoryBlock]] = (
+            BoundedDict(
+                max_keys=_DEFAULT_MAX_USERS,
+                ttl_seconds=_DEFAULT_USER_TTL_SECONDS,
+            )
+        )
         self._episodes: dict[str, Episode] = {}
         self._consolidator = consolidator
         # Default the fact store's embedder to ours, so the same
@@ -92,7 +87,8 @@ class VectorMemory:
         return {
             "blocks": {
                 f"{uid or ''}::{name}": v.model_dump()
-                for (uid, name), v in self._blocks.items()
+                for uid, user_blocks in self._blocks.items()
+                for name, v in user_blocks.items()
             },
             "episodes": {k: v.model_dump() for k, v in self._episodes.items()},
         }
@@ -103,43 +99,40 @@ class VectorMemory:
         self, *, user_id: str | None = None
     ) -> list[MemoryBlock]:
         async with self._lock:
-            scoped = [
-                b for (uid, _name), b in self._blocks.items() if uid == user_id
-            ]
+            user_blocks = self._blocks.get(user_id, {})
+            scoped = list(user_blocks.values())
         return sorted(scoped, key=lambda b: b.pinned_order)
 
     async def update_block(
         self, name: str, content: str, *, user_id: str | None = None
     ) -> None:
-        key = (user_id, name)
         async with self._lock:
-            existing = self._blocks.get(key)
-            user_count = sum(
-                1 for (uid, _) in self._blocks if uid == user_id
-            )
-            self._blocks[key] = MemoryBlock(
+            user_blocks = self._blocks.setdefault(user_id, {})
+            existing = user_blocks.get(name)
+            user_blocks[name] = MemoryBlock(
                 name=name,
                 content=content,
-                pinned_order=existing.pinned_order if existing else user_count,
+                pinned_order=(
+                    existing.pinned_order
+                    if existing is not None
+                    else len(user_blocks)
+                ),
             )
 
     async def append_block(
         self, name: str, content: str, *, user_id: str | None = None
     ) -> None:
-        key = (user_id, name)
         async with self._lock:
-            existing = self._blocks.get(key)
+            user_blocks = self._blocks.setdefault(user_id, {})
+            existing = user_blocks.get(name)
             if existing is None:
-                user_count = sum(
-                    1 for (uid, _) in self._blocks if uid == user_id
-                )
-                self._blocks[key] = MemoryBlock(
+                user_blocks[name] = MemoryBlock(
                     name=name,
                     content=content,
-                    pinned_order=user_count,
+                    pinned_order=len(user_blocks),
                 )
             else:
-                self._blocks[key] = MemoryBlock(
+                user_blocks[name] = MemoryBlock(
                     name=name,
                     content=existing.content + content,
                     pinned_order=existing.pinned_order,
@@ -233,7 +226,7 @@ class VectorMemory:
         Empty queries fall through to recency ordering with
         neutral scores.
         """
-        from ._hybrid import _BM25, hybrid_rank
+        from ._hybrid import hybrid_rank_episodes
 
         if not query.strip():
             recent = await self._recall_recent(limit, time_range, user_id)
@@ -254,40 +247,14 @@ class VectorMemory:
         if not candidates:
             return []
 
-        # Vector arm — cosine over precomputed embeddings.
         query_embedding = await self._embedder.embed(query)
-        vector_scores: list[tuple[int, float]] = []
-        for i, ep in enumerate(candidates):
-            assert ep.embedding is not None
-            sim = _cosine(query_embedding, ep.embedding)
-            if sim > 0:  # filter out negatives so RRF doesn't promote them
-                vector_scores.append((i, sim))
-        vector_scores.sort(key=lambda x: x[1], reverse=True)
-
-        # BM25 arm — lexical ranking over the same candidate pool.
-        texts = [f"{e.input}\n{e.output}" for e in candidates]
-        bm25 = _BM25(texts)
-        bm25_ranking = bm25.rank(query)
-
-        fused = hybrid_rank(
-            bm25_ranking=bm25_ranking,
-            vector_ranking=vector_scores,
+        return hybrid_rank_episodes(
+            candidates,
+            query=query,
+            query_embedding=query_embedding,
             alpha=alpha,
+            limit=limit,
         )
-        if not fused:
-            recent = sorted(
-                candidates, key=lambda e: e.occurred_at, reverse=True
-            )[:limit]
-            return [EpisodeMatch(episode=e, score=0.0) for e in recent]
-        return [
-            EpisodeMatch(
-                episode=candidates[idx],
-                score=score,
-                bm25_score=bm25_score,
-                vector_score=vector_score,
-            )
-            for idx, score, bm25_score, vector_score in fused[:limit]
-        ]
 
     async def _recall_recent(
         self,

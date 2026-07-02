@@ -24,22 +24,17 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from ..core.ids import new_id
 from ..core.protocols import Embedder
 from ..loader.base import Chunk
 from ._bm25 import BM25Index, reciprocal_rank_fusion
 from ._filter import evaluate_filter
 from ._mmr import mmr_select
+from ._util import embed_all, resolve_ids
 from .base import SearchResult, _chunks_from_texts
 
 
-def _cosine(a: list[float], b: list[float]) -> float:
-    dot = sum(x * y for x, y in zip(a, b, strict=True))
-    na = math.sqrt(sum(x * x for x in a))
-    nb = math.sqrt(sum(y * y for y in b))
-    if na == 0 or nb == 0:
-        return 0.0
-    return dot / (na * nb)
+def _norm(vec: list[float]) -> float:
+    return math.sqrt(sum(x * x for x in vec))
 
 
 _PERSIST_VERSION = 1
@@ -59,6 +54,9 @@ class InMemoryVectorStore:
         self._ids: list[str] = []
         self._chunks: list[Chunk] = []
         self._vectors: list[list[float]] = []
+        # Norms are cached at add/load time so a query doesn't
+        # recompute every stored vector's norm on every search.
+        self._norms: list[float] = []
         self._bm25: BM25Index | None = None  # built lazily
 
     @property
@@ -117,29 +115,18 @@ class InMemoryVectorStore:
     ) -> list[str]:
         if not chunks:
             return []
-        if ids is not None and len(ids) != len(chunks):
-            raise ValueError(
-                f"ids length ({len(ids)}) must match chunks "
-                f"length ({len(chunks)})"
-            )
-        try:
-            vectors = await self._embedder.embed_batch(
-                [c.content for c in chunks]
-            )
-        except (AttributeError, NotImplementedError):
-            vectors = [
-                await self._embedder.embed(c.content) for c in chunks
-            ]
+        assigned_ids = resolve_ids(ids, len(chunks))
+        vectors = await embed_all(
+            self._embedder, [c.content for c in chunks]
+        )
 
-        assigned_ids: list[str] = []
-        for i, (chunk, vec) in enumerate(
-            zip(chunks, vectors, strict=True)
+        for cid, chunk, vec in zip(
+            assigned_ids, chunks, vectors, strict=True
         ):
-            cid = ids[i] if ids is not None else new_id("vec")
             self._ids.append(cid)
             self._chunks.append(chunk)
             self._vectors.append(vec)
-            assigned_ids.append(cid)
+            self._norms.append(_norm(vec))
 
         # Invalidate BM25 index — built lazily on next hybrid query.
         self._bm25 = None
@@ -155,6 +142,7 @@ class InMemoryVectorStore:
         self._ids = [self._ids[i] for i in keep_indices]
         self._chunks = [self._chunks[i] for i in keep_indices]
         self._vectors = [self._vectors[i] for i in keep_indices]
+        self._norms = [self._norms[i] for i in keep_indices]
         self._bm25 = None
 
     async def get_by_ids(self, ids: list[str]) -> list[Chunk]:
@@ -171,6 +159,20 @@ class InMemoryVectorStore:
     # ---------------------------------------------------------------
     # Search
     # ---------------------------------------------------------------
+
+    def _cosine_to(
+        self, query: list[float], q_norm: float, i: int
+    ) -> float:
+        """Cosine similarity between ``query`` (with precomputed norm
+        ``q_norm``) and stored vector ``i`` (norm cached at add
+        time)."""
+        denom = q_norm * self._norms[i]
+        if denom == 0:
+            return 0.0
+        dot = sum(
+            x * y for x, y in zip(query, self._vectors[i], strict=True)
+        )
+        return dot / denom
 
     async def search(
         self,
@@ -196,12 +198,14 @@ class InMemoryVectorStore:
         if not self._vectors:
             return []
 
-        # Step 1: cosine-rank everything that survives the filter.
+        # Step 1: cosine-rank everything that survives the filter
+        # (stored norms are precomputed at add/load time).
+        q_norm = _norm(vector)
         scored: list[tuple[int, float]] = []
-        for i, vec in enumerate(self._vectors):
+        for i in range(len(self._vectors)):
             if not evaluate_filter(filter, self._chunks[i].metadata):
                 continue
-            scored.append((i, _cosine(vector, vec)))
+            scored.append((i, self._cosine_to(vector, q_norm, i)))
         scored.sort(key=lambda x: x[1], reverse=True)
 
         if diversity is None or diversity <= 0:
@@ -263,13 +267,14 @@ class InMemoryVectorStore:
             self._bm25 = BM25Index()
             self._bm25.add([c.content for c in self._chunks])
 
-        # Rank by vector.
+        # Rank by vector (cached stored-vector norms).
         q_vec = await self._embedder.embed(query)
+        q_norm = _norm(q_vec)
         vector_scored: list[tuple[int, float]] = []
-        for i, vec in enumerate(self._vectors):
+        for i in range(len(self._vectors)):
             if not evaluate_filter(filter, self._chunks[i].metadata):
                 continue
-            vector_scored.append((i, _cosine(q_vec, vec)))
+            vector_scored.append((i, self._cosine_to(q_vec, q_norm, i)))
         vector_scored.sort(key=lambda x: x[1], reverse=True)
 
         # Rank by BM25 (apply the same filter).
@@ -367,4 +372,5 @@ class InMemoryVectorStore:
                 )
             )
             store._vectors.append(row["vector"])
+            store._norms.append(_norm(row["vector"]))
         return store

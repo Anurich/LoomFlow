@@ -51,6 +51,9 @@ from typing import TYPE_CHECKING
 
 import anyio
 
+from ._common import apply_relevance_boost as _apply_relevance_boost
+from ._common import cosine_similarity as _cosine
+from ._common import drain_citations as _drain_citations
 from ._common import (
     extract_lede,
     note_from_frontmatter,
@@ -60,7 +63,10 @@ from ._common import (
     slugify_title,
     summary_from_note,
 )
+from ._common import log_citation as _log_citation
+from ._common import rrf_fuse as _rrf_fuse
 from ._common import score_bm25 as _score_bm25
+from ._common import score_semantic as _score_semantic
 from .types import (
     Note,
     NoteKind,
@@ -117,35 +123,6 @@ def _write_utf8(path: Path, content: str) -> None:
 # Excluded from `_walk_note_files` so historical revisions never
 # appear in `list_notes` / `search_notes` / index renders.
 HISTORY_DIR = ".history"
-
-
-def _log_citation(slug: str) -> None:
-    """Add ``slug`` to the per-run citation set if one is active.
-
-    No-op outside a run (contextvar default is ``None``). Best-
-    effort — failures to log a citation must NEVER break a read.
-    """
-    from ..core.context import _ambient_citations_var
-    citations = _ambient_citations_var.get()
-    if citations is None:
-        return
-    try:
-        citations.add(slug)
-    except Exception:  # noqa: BLE001 — observation, not load-bearing
-        pass
-
-
-def _drain_citations() -> set[str]:
-    """Snapshot + clear the per-run citation set, returning the
-    slugs that were cited. ``Workspace.attribute_outcome`` calls
-    this once at the end of a run."""
-    from ..core.context import _ambient_citations_var
-    citations = _ambient_citations_var.get()
-    if citations is None:
-        return set()
-    snapshot = set(citations)
-    citations.clear()
-    return snapshot
 
 
 class LocalDiskWorkspace:
@@ -524,10 +501,15 @@ class LocalDiskWorkspace:
         now = datetime.now(UTC)
         updated = 0
         patched_notes: list[Note] = []
+        # Citations don't carry author identity, so notes must be
+        # found across authors. ONE walk of the notes tree builds a
+        # slug -> path map reused for every cited slug — the old
+        # per-slug ``rglob`` re-walked the whole tree N times.
+        paths_by_slug: dict[str, Path] = {}
+        for p in self._walk_note_files(user_id):
+            paths_by_slug.setdefault(p.stem, p)
         for slug in cited:
-            # Find the note across authors — citations don't carry
-            # author identity, so scan any author dir.
-            path = self._find_note_by_slug_any_author(user_id, slug)
+            path = paths_by_slug.get(slug)
             if path is None:
                 continue
             existing = await self._load_note(path)
@@ -549,17 +531,6 @@ class LocalDiskWorkspace:
         if updated:
             await self._regenerate_index(user_id, changed=patched_notes)
         return updated
-
-    def _find_note_by_slug_any_author(
-        self, user_id: str | None, slug: str
-    ) -> Path | None:
-        notes_root = self._user_root(user_id) / NOTES_DIR
-        if not notes_root.exists():
-            return None
-        for p in notes_root.rglob(f"{slug}.md"):
-            if not _is_in_meta_dir(p):
-                return p
-        return None
 
     async def prune(
         self,
@@ -915,11 +886,25 @@ class LocalDiskWorkspace:
         score against ``qvec``. Notes without a sidecar (legacy or
         embed-failure) score zero and effectively fall back to
         BM25 ranking when hybrid mode fuses the results.
+
+        ONE walk of the notes tree builds an ``(author, slug) ->
+        path`` map reused for every candidate — the old per-
+        candidate ``_find_note_path`` re-walked the author's
+        subtree N times.
         """
         import json
+        notes_root = self._user_root(user_id) / NOTES_DIR
+        path_by_key: dict[tuple[str, str], Path] = {}
+        for p in self._walk_note_files(user_id):
+            rel_parts = p.relative_to(notes_root).parts
+            if len(rel_parts) < 2:
+                continue  # not under an author dir
+            path_by_key.setdefault((rel_parts[0], p.stem), p)
         out: dict[str, float] = {}
         for note in notes:
-            path = self._find_note_path(user_id, note.author, note.slug)
+            path = path_by_key.get(
+                (_sanitise_author(note.author), note.slug)
+            )
             if path is None:
                 continue
             sidecar = path.with_suffix(".embedding.json")
@@ -1183,138 +1168,6 @@ def _is_in_meta_dir(path: Path) -> bool:
     return HISTORY_DIR in path.parts
 
 
-# ---------------------------------------------------------------------------
-# Scoring helpers — BM25-ish, semantic cosine, RRF fusion
-# ---------------------------------------------------------------------------
-
-
-def _score_semantic(
-    sem_scores: dict[str, float],
-    notes: list[Note],
-    limit: int,
-) -> list[NoteMatch]:
-    """Pure cosine ranking. Notes without embeddings score zero
-    and drop to the tail; ties broken by ``updated_at``."""
-    by_slug = {n.slug: n for n in notes}
-    ranked = sorted(
-        by_slug.values(),
-        key=lambda n: (sem_scores.get(n.slug, 0.0), n.updated_at),
-        reverse=True,
-    )
-    out: list[NoteMatch] = []
-    for note in ranked[:limit]:
-        score = sem_scores.get(note.slug, 0.0)
-        if score <= 0.0:
-            continue
-        out.append(
-            NoteMatch(
-                summary=summary_from_note(note),
-                score=score,
-                snippet=extract_lede(note.body),
-            )
-        )
-    return out
-
-
-def _rrf_fuse(
-    bm25: list[NoteMatch],
-    sem_scores: dict[str, float],
-    notes: list[Note],
-    limit: int,
-    k: int = 60,
-) -> list[NoteMatch]:
-    """Reciprocal rank fusion: combines BM25 ranking and semantic
-    ranking by summing ``1/(k + rank)`` across both. Robust to
-    score-scale differences between the two methods. ``k=60`` is
-    the canonical RRF constant from the original Cormack et al.
-    paper; any value in the 30-100 range works.
-    """
-    rank_bm = {m.summary.slug: i for i, m in enumerate(bm25)}
-    sem_ranked = sorted(
-        sem_scores.keys(),
-        key=lambda s: sem_scores[s],
-        reverse=True,
-    )
-    rank_sem = {slug: i for i, slug in enumerate(sem_ranked)}
-    fused: dict[str, float] = {}
-    for slug in set(rank_bm) | set(rank_sem):
-        score = 0.0
-        if slug in rank_bm:
-            score += 1.0 / (k + rank_bm[slug])
-        if slug in rank_sem:
-            score += 1.0 / (k + rank_sem[slug])
-        fused[slug] = score
-    by_slug = {n.slug: n for n in notes}
-    bm_by_slug = {m.summary.slug: m for m in bm25}
-    ranked_slugs = sorted(
-        fused.keys(), key=lambda s: fused[s], reverse=True
-    )
-    out: list[NoteMatch] = []
-    for slug in ranked_slugs[:limit]:
-        note = by_slug.get(slug)
-        if note is None:
-            continue
-        # Prefer the BM25 snippet when available (more informative
-        # than the lede); otherwise fall back.
-        bm_match = bm_by_slug.get(slug)
-        snippet = bm_match.snippet if bm_match else extract_lede(note.body)
-        out.append(
-            NoteMatch(
-                summary=summary_from_note(note),
-                score=fused[slug],
-                snippet=snippet,
-            )
-        )
-    return out
-
-
-def _cosine(a: list[float], b: list[float]) -> float:
-    """Cosine similarity. Returns 0 on degenerate inputs."""
-    import math
-    if not a or not b or len(a) != len(b):
-        return 0.0
-    dot = sum(x * y for x, y in zip(a, b, strict=True))
-    na = math.sqrt(sum(x * x for x in a))
-    nb = math.sqrt(sum(x * x for x in b))
-    if na == 0.0 or nb == 0.0:
-        return 0.0
-    return dot / (na * nb)
-
-
-def _apply_relevance_boost(
-    results: list[NoteMatch],
-    candidates: list[Note],
-    limit: int,
-) -> list[NoteMatch]:
-    """Multiply each result's score by a relevance boost based on
-    citation metadata, then re-sort.
-
-    Formula: ``boost = 1 + log(1 + cited_count) + 2*log(1 +
-    success_count)``. Success-citations weighted more than mere
-    citations — a note that's been validated through successful
-    runs is more trustworthy than one that's been read but never
-    associated with success. Log scaling so a runaway-popular
-    note doesn't drown out new ones with a single citation.
-    """
-    import math
-    note_by_slug = {n.slug: n for n in candidates}
-    boosted: list[NoteMatch] = []
-    for m in results:
-        n = note_by_slug.get(m.summary.slug)
-        if n is None:
-            boosted.append(m)
-            continue
-        boost = (
-            1.0
-            + math.log(1 + n.cited_count)
-            + 2.0 * math.log(1 + n.success_count)
-        )
-        boosted.append(
-            NoteMatch(
-                summary=m.summary,
-                score=m.score * boost,
-                snippet=m.snippet,
-            )
-        )
-    boosted.sort(key=lambda m: m.score, reverse=True)
-    return boosted[:limit]
+# Scoring helpers (BM25 / semantic cosine / RRF fusion / relevance
+# boost) live in ``_common`` and are shared with the in-memory
+# backend — see the aliased imports at the top of this module.

@@ -26,7 +26,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Iterable, Mapping
 from contextlib import AsyncExitStack, asynccontextmanager
-from contextvars import ContextVar
+from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -104,6 +104,34 @@ def _new_hex_id(bytes_: int = 8) -> str:
     """Generate a short hex id for spans / traces. 16-char span id,
     32-char trace id by convention (matches OTel)."""
     return uuid.uuid4().hex[: bytes_ * 2]
+
+
+# Internal seam: :class:`MultiTelemetry` mints one (trace_id,
+# span_id, parent_span_id) tuple per composed span and hands it to
+# each capture sink under this reserved attrs key. Sinks that
+# advertise ``_accepts_span_ctx = True`` pop it and (a) record the
+# shared ids instead of minting their own, (b) leave the module
+# contextvars alone — the composer manages them exactly once, so
+# two capture sinks in one MultiTelemetry can't stomp each other's
+# parent linkage. Never set this key from user code.
+_SPAN_CTX_KEY = "_loomflow_span_ctx"
+
+
+def _resolve_span_ctx(
+    attrs: dict[str, Any],
+) -> tuple[str, str, str | None, bool]:
+    """Pop the internal span-context seam from ``attrs`` (mutates)
+    and return ``(trace_id, span_id, parent_id, externally_managed)``.
+    When no seam is present the ids are minted / inherited from the
+    module contextvars, and the caller must install this span as the
+    active parent itself (``externally_managed=False``)."""
+    ctx = attrs.pop(_SPAN_CTX_KEY, None)
+    if ctx is not None:
+        trace_id, span_id, parent_id = ctx
+        return str(trace_id), str(span_id), parent_id, True
+    span_id = _new_hex_id(8)
+    trace_id = _trace_id.get() or _new_hex_id(16)
+    return trace_id, span_id, _parent_span_id.get(), False
 
 
 class NoTelemetry:
@@ -212,25 +240,32 @@ class InMemoryTelemetry:
     parallel-tool-dispatch path) inherit the correct parent.
     """
 
+    # Opt-in to MultiTelemetry's shared span-context seam.
+    _accepts_span_ctx: bool = True
+
     def __init__(self) -> None:
         self._spans: list[CapturedSpan] = []
         self._metrics: list[CapturedMetric] = []
 
     @asynccontextmanager
     async def trace(self, name: str, **attrs: Any) -> AsyncIterator[Span]:
-        clean_attrs = _clean(attrs)
-        span_id = _new_hex_id(8)
         # Inherit the active trace_id when one's already running;
-        # mint a new one when this is the root.
-        trace_id = _trace_id.get() or _new_hex_id(16)
-        parent_id = _parent_span_id.get()
+        # mint a new one when this is the root. A MultiTelemetry
+        # composer supplies the ids instead (managed=True) and
+        # owns the contextvars.
+        trace_id, span_id, parent_id, managed = _resolve_span_ctx(attrs)
+        clean_attrs = _clean(attrs)
         started_at = datetime.now(UTC)
         t0 = time.perf_counter()
 
         # Install this span as the active parent for children
-        # spawned inside the contextmanager.
-        trace_token = _trace_id.set(trace_id)
-        parent_token = _parent_span_id.set(span_id)
+        # spawned inside the contextmanager (composer does this
+        # once for all sinks when managed).
+        trace_token: Token[str | None] | None = None
+        parent_token: Token[str | None] | None = None
+        if not managed:
+            trace_token = _trace_id.set(trace_id)
+            parent_token = _parent_span_id.set(span_id)
         exc_repr: str | None = None
         try:
             yield Span(
@@ -243,8 +278,10 @@ class InMemoryTelemetry:
             exc_repr = repr(exc)
             raise
         finally:
-            _parent_span_id.reset(parent_token)
-            _trace_id.reset(trace_token)
+            if parent_token is not None:
+                _parent_span_id.reset(parent_token)
+            if trace_token is not None:
+                _trace_id.reset(trace_token)
             elapsed_ms = (time.perf_counter() - t0) * 1000.0
             self._spans.append(
                 CapturedSpan(
@@ -306,6 +343,9 @@ class ConsoleTelemetry:
     text stream are not appropriate at scale.
     """
 
+    # Opt-in to MultiTelemetry's shared span-context seam.
+    _accepts_span_ctx: bool = True
+
     def __init__(
         self,
         *,
@@ -317,23 +357,23 @@ class ConsoleTelemetry:
 
     @asynccontextmanager
     async def trace(self, name: str, **attrs: Any) -> AsyncIterator[Span]:
+        # Ids minted here, or supplied by a MultiTelemetry composer
+        # (managed=True) that also owns the parent/trace contextvars.
+        trace_id, span_id, parent_id, managed = _resolve_span_ctx(attrs)
         clean_attrs = _clean(attrs)
-        span_id = _new_hex_id(8)
-        trace_id = _trace_id.get() or _new_hex_id(16)
-        parent_id = _parent_span_id.get()
-        # Compute depth for indentation: count the chain of
-        # active parents. We approximate by counting active spans
-        # — good enough for visual hierarchy without maintaining
-        # a separate depth contextvar.
-        depth = 0
-        # Walk the contextvar lineage isn't supported by ContextVar;
+        # Walking the contextvar lineage isn't supported by ContextVar;
         # instead, store depth alongside the parent id when we set
         # the contextvar. Cheapest impl: use a separate depth var.
+        # (Console-private, so it's always managed here even when
+        # the span ids come from a composer.)
         depth = _console_depth.get() if parent_id is not None else 0
 
         t0 = time.perf_counter()
-        trace_token = _trace_id.set(trace_id)
-        parent_token = _parent_span_id.set(span_id)
+        trace_token: Token[str | None] | None = None
+        parent_token: Token[str | None] | None = None
+        if not managed:
+            trace_token = _trace_id.set(trace_id)
+            parent_token = _parent_span_id.set(span_id)
         depth_token = _console_depth.set(depth + 1)
         exc_repr: str | None = None
         try:
@@ -348,8 +388,10 @@ class ConsoleTelemetry:
             raise
         finally:
             _console_depth.reset(depth_token)
-            _parent_span_id.reset(parent_token)
-            _trace_id.reset(trace_token)
+            if parent_token is not None:
+                _parent_span_id.reset(parent_token)
+            if trace_token is not None:
+                _trace_id.reset(trace_token)
             elapsed_ms = (time.perf_counter() - t0) * 1000.0
             indent = "  " * depth
             attrs_str = (
@@ -413,11 +455,19 @@ class MultiTelemetry:
         # Watch live in stderr AND inspect afterwards
         assert any(s.name == "loom.tool" for s in in_mem.spans())
 
-    Span IDs are *generated by the first sink* and shared with the
-    others — keeps trace hierarchy consistent across captures.
-    Exceptions raised inside a sink's ``trace`` propagate after
-    every other sink has had a chance to record the cleanup
-    (``finally`` blocks fire even on exceptional exit thanks to
+    Span identity (trace_id / span_id / parent linkage) is minted
+    ONCE per composed span by MultiTelemetry itself and shared with
+    every capture-style sink (in-memory / console / file) via an
+    internal seam, and the parent-tracking contextvars are set
+    exactly once around the composed enter. Sinks left to manage
+    the shared contextvars themselves would stomp each other —
+    the second sink's ``set`` lands before the first sink's span
+    body runs, so nested spans would link to the wrong parent and
+    the sinks would disagree about the hierarchy. Sinks without
+    the seam (OTel, custom) are entered unchanged. Exceptions
+    raised inside a sink's ``trace`` propagate after every other
+    sink has had a chance to record the cleanup (``finally``
+    blocks fire even on exceptional exit thanks to
     :class:`AsyncExitStack`).
     """
 
@@ -431,20 +481,44 @@ class MultiTelemetry:
 
     @asynccontextmanager
     async def trace(self, name: str, **attrs: Any) -> AsyncIterator[Span]:
-        # Enter every sink's contextmanager. AsyncExitStack ensures
-        # they all get cleaned up even if one raises mid-enter,
-        # and exits them in reverse order at the end.
-        async with AsyncExitStack() as stack:
-            spans: list[Span] = []
-            for sink in self._sinks:
-                span = await stack.enter_async_context(
-                    sink.trace(name, **attrs)
+        # Never forward a caller-supplied value under the reserved
+        # seam key — the composed identity below is authoritative.
+        attrs.pop(_SPAN_CTX_KEY, None)
+        # Mint the composed span's identity once; every ctx-aware
+        # sink records these same ids, so all captures agree on
+        # trace_id / span_id / parent linkage.
+        span_id = _new_hex_id(8)
+        trace_id = _trace_id.get() or _new_hex_id(16)
+        parent_id = _parent_span_id.get()
+        span_ctx = (trace_id, span_id, parent_id)
+        # Set the shared contextvars exactly once for the whole
+        # composition (sinks skip their own set when handed a ctx).
+        trace_token = _trace_id.set(trace_id)
+        parent_token = _parent_span_id.set(span_id)
+        try:
+            # Enter every sink's contextmanager. AsyncExitStack
+            # ensures they all get cleaned up even if one raises
+            # mid-enter, and exits them in reverse order at the end.
+            async with AsyncExitStack() as stack:
+                for sink in self._sinks:
+                    if getattr(sink, "_accepts_span_ctx", False):
+                        cm = sink.trace(
+                            name, **{_SPAN_CTX_KEY: span_ctx}, **attrs
+                        )
+                    else:
+                        cm = sink.trace(name, **attrs)
+                    await stack.enter_async_context(cm)
+                # Yield the composed Span — the canonical identity
+                # every ctx-aware sink recorded.
+                yield Span(
+                    name=name,
+                    trace_id=trace_id,
+                    span_id=span_id,
+                    attributes=_clean(attrs),
                 )
-                spans.append(span)
-            # Yield the first sink's Span — that's the one whose
-            # trace_id / span_id we treat as canonical. Other
-            # sinks' spans are still active in the background.
-            yield spans[0]
+        finally:
+            _parent_span_id.reset(parent_token)
+            _trace_id.reset(trace_token)
 
     async def emit_metric(
         self, name: str, value: float, **attrs: Any
@@ -517,17 +591,23 @@ class FileTelemetry:
     def path(self) -> Path:
         return self._path
 
+    # Opt-in to MultiTelemetry's shared span-context seam.
+    _accepts_span_ctx: bool = True
+
     @asynccontextmanager
     async def trace(self, name: str, **attrs: Any) -> AsyncIterator[Span]:
+        # Ids minted here, or supplied by a MultiTelemetry composer
+        # (managed=True) that also owns the parent/trace contextvars.
+        trace_id, span_id, parent_id, managed = _resolve_span_ctx(attrs)
         clean_attrs = _clean(attrs)
-        span_id = _new_hex_id(8)
-        trace_id = _trace_id.get() or _new_hex_id(16)
-        parent_id = _parent_span_id.get()
         started_at = datetime.now(UTC)
         t0 = time.perf_counter()
 
-        trace_token = _trace_id.set(trace_id)
-        parent_token = _parent_span_id.set(span_id)
+        trace_token: Token[str | None] | None = None
+        parent_token: Token[str | None] | None = None
+        if not managed:
+            trace_token = _trace_id.set(trace_id)
+            parent_token = _parent_span_id.set(span_id)
         exc_repr: str | None = None
         try:
             yield Span(
@@ -540,8 +620,10 @@ class FileTelemetry:
             exc_repr = repr(exc)
             raise
         finally:
-            _parent_span_id.reset(parent_token)
-            _trace_id.reset(trace_token)
+            if parent_token is not None:
+                _parent_span_id.reset(parent_token)
+            if trace_token is not None:
+                _trace_id.reset(trace_token)
             elapsed_ms = (time.perf_counter() - t0) * 1000.0
             await self._write(
                 {

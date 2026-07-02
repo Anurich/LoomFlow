@@ -17,6 +17,7 @@ is unambiguous.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -27,6 +28,8 @@ from ..core.errors import MCPError
 from ..core.types import ToolDef, ToolEvent, ToolResult
 from .client import MCPClient
 from .spec import MCPServerSpec
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -59,6 +62,13 @@ class MCPRegistry:
                 )
         self._clients = clients
         self._tool_index: dict[str, _IndexEntry] = {}
+        # Cached per-server tool lists (raw SDK descriptors) from the
+        # last successful pull; lets ``_refresh_server`` rebuild the
+        # full index after re-listing only ONE server.
+        self._per_server_tools: dict[str, list[Any]] = {}
+        # Servers whose last ``list_tools`` pull failed — skipped from
+        # the index but retried on the next ``refresh()``.
+        self._unavailable: set[str] = set()
         self._connected = False
 
     # ---- introspection --------------------------------------------------
@@ -67,24 +77,70 @@ class MCPRegistry:
     def server_names(self) -> list[str]:
         return list(self._clients.keys())
 
+    @property
+    def unavailable(self) -> set[str]:
+        """Names of servers whose last tool pull failed.
+
+        These servers contribute no tools to the index; a subsequent
+        :meth:`refresh` (or a successful targeted re-pull) clears
+        them. Returned as a copy — mutate-proof for callers.
+        """
+        return set(self._unavailable)
+
     # ---- lifecycle ------------------------------------------------------
 
     async def connect(self) -> None:
-        """Connect every client in parallel and rebuild the index."""
+        """Connect every client in parallel and rebuild the index.
+
+        Per-client connect failures are isolated (logged, not
+        raised): the failing server surfaces in :attr:`unavailable`
+        after :meth:`refresh` because its ``list_tools`` pull re-
+        attempts the connect and fails there. One dead server must
+        not make every other server unusable.
+        """
         if self._connected:
             return
+
+        async def _connect_one(client: MCPClient) -> None:
+            try:
+                await client.connect()
+            except Exception as exc:  # noqa: BLE001 — isolate per-server failures
+                logger.warning(
+                    "MCP server %r failed to connect: %s", client.name, exc
+                )
+
         async with anyio.create_task_group() as tg:
             for client in self._clients.values():
-                tg.start_soon(client.connect)
+                tg.start_soon(_connect_one, client)
         await self.refresh()
         self._connected = True
 
     async def aclose(self) -> None:
+        """Close every client, isolating per-client failures.
+
+        Each close is wrapped so one raising client can't cancel its
+        siblings mid-teardown (which would leak portal threads /
+        subprocesses). Every client is always closed; collected
+        errors are re-raised afterwards as a single
+        :class:`ExceptionGroup`.
+        """
+        errors: list[Exception] = []
+
+        async def _close_one(client: MCPClient) -> None:
+            try:
+                await client.aclose()
+            except Exception as exc:  # noqa: BLE001 — close the rest regardless
+                errors.append(exc)
+
         async with anyio.create_task_group() as tg:
             for client in self._clients.values():
-                tg.start_soon(client.aclose)
+                tg.start_soon(_close_one, client)
         self._tool_index = {}
+        self._per_server_tools = {}
+        self._unavailable = set()
         self._connected = False
+        if errors:
+            raise ExceptionGroup("errors while closing MCP clients", errors)
 
     async def __aenter__(self) -> MCPRegistry:
         await self.connect()
@@ -96,17 +152,51 @@ class MCPRegistry:
     # ---- index management -----------------------------------------------
 
     async def refresh(self) -> None:
-        """Re-pull tool lists from every client and rebuild the index."""
+        """Re-pull tool lists from every client and rebuild the index.
+
+        Per-server failures are isolated: a server whose
+        ``list_tools`` raises is skipped (warning logged, name
+        recorded in :attr:`unavailable`) so one flaky server doesn't
+        take down every other server's tools. Failed servers get
+        retried on the next ``refresh()``.
+        """
         per_server: dict[str, list[Any]] = {}
+        failed: set[str] = set()
         async with anyio.create_task_group() as tg:
 
             async def _pull(server_name: str, client: MCPClient) -> None:
-                per_server[server_name] = await client.list_tools()
+                try:
+                    per_server[server_name] = await client.list_tools()
+                except Exception as exc:  # noqa: BLE001 — isolate flaky servers
+                    failed.add(server_name)
+                    logger.warning(
+                        "MCP server %r failed to list tools; "
+                        "skipping its tools: %s",
+                        server_name,
+                        exc,
+                    )
 
             for server_name, client in self._clients.items():
                 tg.start_soon(_pull, server_name, client)
 
+        self._per_server_tools = per_server
+        self._unavailable = failed
         self._tool_index = _build_index(per_server)
+
+    async def _refresh_server(self, server_name: str) -> None:
+        """Re-pull ONE server's tools and rebuild the index from the
+        cached per-server lists.
+
+        Used after :meth:`_reset_client` so a single reconnect
+        doesn't re-list every healthy server. Raises whatever the
+        pull raises — the caller treats the refresh as best-effort.
+        """
+        client = self._clients.get(server_name)
+        if client is None:
+            return
+        self._per_server_tools[server_name] = await client.list_tools()
+        self._unavailable.discard(server_name)
+        self._tool_index = _build_index(self._per_server_tools)
 
     # ---- ToolHost protocol ----------------------------------------------
 
@@ -164,11 +254,13 @@ class MCPRegistry:
             if not reset_ok:
                 return ToolResult.error_(call_id=call_id, message=str(first_exc))
             # The reconnected server may expose a different tool set
-            # (it might have restarted with new capabilities); refresh
-            # so the index doesn't go stale. Best-effort: a refresh
-            # failure must not mask the retry below.
+            # (it might have restarted with new capabilities); re-pull
+            # THIS server only — the healthy siblings' cached tool
+            # lists are still good, so a full refresh would be N-1
+            # wasted round-trips. Best-effort: a refresh failure must
+            # not mask the retry below.
             try:
-                await self.refresh()
+                await self._refresh_server(server_name)
             except Exception:  # noqa: BLE001 — keep the (stale) index
                 pass
             # _reset_client swaps in a fresh client; re-fetch so we

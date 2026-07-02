@@ -29,6 +29,8 @@ from collections import Counter
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
+from ._embedding_util import cosine
+
 if TYPE_CHECKING:
     from ..core.types import Episode, EpisodeMatch
 
@@ -69,17 +71,10 @@ def default_recall_scored(
 # ---------------------------------------------------------------------------
 
 
-def cosine(a: list[float], b: list[float]) -> float:
-    """Standard cosine similarity, range ``[-1, 1]``. Returns ``0.0``
-    on zero-norm inputs (which would otherwise be ``nan``)."""
-    if not a or not b or len(a) != len(b):
-        return 0.0
-    dot = sum(x * y for x, y in zip(a, b, strict=True))
-    norm_a = math.sqrt(sum(x * x for x in a))
-    norm_b = math.sqrt(sum(y * y for y in b))
-    if norm_a == 0.0 or norm_b == 0.0:
-        return 0.0
-    return dot / (norm_a * norm_b)
+# ``cosine`` is re-exported (see the import at the top of the module)
+# from ``memory._embedding_util`` — the single shared implementation
+# for all memory backends. Kept in ``__all__`` for back-compat with
+# callers that imported it from here.
 
 
 class _BM25:
@@ -214,6 +209,82 @@ def hybrid_rank(
     return out
 
 
+def hybrid_rank_episodes(
+    candidates: list[Episode],
+    *,
+    query: str,
+    query_embedding: list[float] | None,
+    alpha: float,
+    limit: int,
+    embeddings: list[list[float]] | None = None,
+) -> list[EpisodeMatch]:
+    """Shared BM25 + cosine + RRF ranking tail for the backends'
+    ``recall_scored`` implementations.
+
+    Every backend fetches its own candidate pool (already partitioned
+    by ``user_id`` and filtered by ``time_range``) and hands it here:
+
+    * ``query_embedding`` — the embedded query, or ``None`` for
+      backends without a vector arm (BM25-only ranking then).
+    * ``embeddings`` — optional parallel list of candidate vectors;
+      when ``None``, each candidate's own ``Episode.embedding`` is
+      used (candidates without one simply don't score on the vector
+      arm).
+
+    Non-positive cosine similarities are dropped so RRF doesn't
+    promote them. When the fused ranking is empty (no lexical AND no
+    vector signal), falls back to recency ordering with ``0.0``
+    scores so the caller always gets *something* useful. Component
+    scores (``bm25_score`` / ``vector_score``) ride along on each
+    :class:`EpisodeMatch`.
+    """
+    from ..core.types import EpisodeMatch
+
+    if not candidates:
+        return []
+
+    # Vector arm — cosine over candidate embeddings; drop
+    # non-positive sims so RRF doesn't promote them.
+    vector_scores: list[tuple[int, float]] = []
+    if query_embedding is not None:
+        for i, ep in enumerate(candidates):
+            emb = (
+                embeddings[i]
+                if embeddings is not None
+                else ep.embedding
+            )
+            if emb is None:
+                continue
+            sim = cosine(query_embedding, emb)
+            if sim > 0:
+                vector_scores.append((i, sim))
+        vector_scores.sort(key=lambda x: x[1], reverse=True)
+
+    # BM25 arm — lexical ranking over the same candidate pool.
+    texts = [f"{e.input}\n{e.output}" for e in candidates]
+    bm25_ranking = _BM25(texts).rank(query)
+
+    fused = hybrid_rank(
+        bm25_ranking=bm25_ranking,
+        vector_ranking=vector_scores,
+        alpha=alpha,
+    )
+    if not fused:
+        recent = sorted(
+            candidates, key=lambda e: e.occurred_at, reverse=True
+        )[:limit]
+        return [EpisodeMatch(episode=e, score=0.0) for e in recent]
+    return [
+        EpisodeMatch(
+            episode=candidates[idx],
+            score=score,
+            bm25_score=bm25_score,
+            vector_score=vector_score,
+        )
+        for idx, score, bm25_score, vector_score in fused[:limit]
+    ]
+
+
 # Kept for symmetry with the public API of vectorstore._bm25; some
 # downstream tests / extensions may want to reach into this module.
 __all__ = [
@@ -222,6 +293,7 @@ __all__ = [
     "_BM25",
     "reciprocal_rank_fusion",
     "hybrid_rank",
+    "hybrid_rank_episodes",
 ]
 
 

@@ -17,6 +17,7 @@ from typing import Any
 
 import anyio
 
+from ..core._eviction import BoundedDict
 from ..core.protocols import Embedder
 from ..core.types import (
     Episode,
@@ -28,7 +29,6 @@ from ..core.types import (
     Message,
     Role,
 )
-from ._embedding_util import cosine
 from ._user_key import (
     decode_legacy_user_id,
     encode_user_id,
@@ -36,6 +36,7 @@ from ._user_key import (
 )
 from .embedder import HashEmbedder, warn_hash_embedder_fallback
 from .facts import count_facts, delete_facts
+from .inmemory import _DEFAULT_MAX_USERS, _DEFAULT_USER_TTL_SECONDS
 
 DEFAULT_COLLECTION = "jeeves_episodes"
 
@@ -62,8 +63,16 @@ class ChromaMemory:
         self._embedder: Embedder = embedder
         self._collection_name = collection_name
         self._collection: Any | None = None
-        # Working blocks partition by ``user_id``; key is ``(user_id, name)``.
-        self._blocks: dict[tuple[str | None, str], MemoryBlock] = {}
+        # Working blocks partition by ``user_id`` (outer key); the
+        # container is bounded (LRU + TTL) with the same defaults as
+        # :class:`InMemoryMemory` so a runaway tenant explosion can't
+        # grow the in-process dict without limit.
+        self._blocks: BoundedDict[str | None, dict[str, MemoryBlock]] = (
+            BoundedDict(
+                max_keys=_DEFAULT_MAX_USERS,
+                ttl_seconds=_DEFAULT_USER_TTL_SECONDS,
+            )
+        )
         self._lock = anyio.Lock()
         # ``facts`` is the Agent loop's hook for surfacing semantic
         # claims into the model's context. Defaults to ``None`` to
@@ -149,43 +158,40 @@ class ChromaMemory:
         self, *, user_id: str | None = None
     ) -> list[MemoryBlock]:
         async with self._lock:
-            scoped = [
-                b for (uid, _name), b in self._blocks.items() if uid == user_id
-            ]
+            user_blocks = self._blocks.get(user_id, {})
+            scoped = list(user_blocks.values())
         return sorted(scoped, key=lambda b: b.pinned_order)
 
     async def update_block(
         self, name: str, content: str, *, user_id: str | None = None
     ) -> None:
-        key = (user_id, name)
         async with self._lock:
-            existing = self._blocks.get(key)
-            user_count = sum(
-                1 for (uid, _) in self._blocks if uid == user_id
-            )
-            self._blocks[key] = MemoryBlock(
+            user_blocks = self._blocks.setdefault(user_id, {})
+            existing = user_blocks.get(name)
+            user_blocks[name] = MemoryBlock(
                 name=name,
                 content=content,
-                pinned_order=existing.pinned_order if existing else user_count,
+                pinned_order=(
+                    existing.pinned_order
+                    if existing is not None
+                    else len(user_blocks)
+                ),
             )
 
     async def append_block(
         self, name: str, content: str, *, user_id: str | None = None
     ) -> None:
-        key = (user_id, name)
         async with self._lock:
-            existing = self._blocks.get(key)
+            user_blocks = self._blocks.setdefault(user_id, {})
+            existing = user_blocks.get(name)
             if existing is None:
-                user_count = sum(
-                    1 for (uid, _) in self._blocks if uid == user_id
-                )
-                self._blocks[key] = MemoryBlock(
+                user_blocks[name] = MemoryBlock(
                     name=name,
                     content=content,
-                    pinned_order=user_count,
+                    pinned_order=len(user_blocks),
                 )
             else:
-                self._blocks[key] = MemoryBlock(
+                user_blocks[name] = MemoryBlock(
                     name=name,
                     content=existing.content + content,
                     pinned_order=existing.pinned_order,
@@ -295,7 +301,7 @@ class ChromaMemory:
         ``1.0`` scores; a no-match query falls through to recency with
         ``0.0``.
         """
-        from ._hybrid import _BM25, hybrid_rank
+        from ._hybrid import hybrid_rank_episodes
 
         coll = await self._get_collection()
 
@@ -323,40 +329,14 @@ class ChromaMemory:
         if not candidates:
             return []
 
-        # Vector arm — cosine over candidate embeddings; drop
-        # non-positive sims so RRF doesn't promote them.
         query_embedding = list(await self._embedder.embed(query))
-        vector_scores: list[tuple[int, float]] = []
-        for i, ep in enumerate(candidates):
-            assert ep.embedding is not None
-            sim = cosine(query_embedding, ep.embedding)
-            if sim > 0:
-                vector_scores.append((i, sim))
-        vector_scores.sort(key=lambda x: x[1], reverse=True)
-
-        # BM25 arm — lexical ranking over the same candidate pool.
-        texts = [f"{e.input}\n{e.output}" for e in candidates]
-        bm25_ranking = _BM25(texts).rank(query)
-
-        fused = hybrid_rank(
-            bm25_ranking=bm25_ranking,
-            vector_ranking=vector_scores,
+        return hybrid_rank_episodes(
+            candidates,
+            query=query,
+            query_embedding=query_embedding,
             alpha=alpha,
+            limit=limit,
         )
-        if not fused:
-            recent = sorted(
-                candidates, key=lambda e: e.occurred_at, reverse=True
-            )[:limit]
-            return [EpisodeMatch(episode=e, score=0.0) for e in recent]
-        return [
-            EpisodeMatch(
-                episode=candidates[idx],
-                score=score,
-                bm25_score=bm25_score,
-                vector_score=vector_score,
-            )
-            for idx, score, bm25_score, vector_score in fused[:limit]
-        ]
 
     async def _recall_recent(
         self,

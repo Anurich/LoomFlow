@@ -30,11 +30,11 @@ from typing import Any
 
 import anyio
 
-from ..core.ids import new_id
 from ..core.protocols import Embedder
 from ..loader.base import Chunk
 from ._filter import COMPARISON_OPERATORS, LOGICAL_OPERATORS, FilterError
-from ._mmr import mmr_select
+from ._mmr import rerank_tail
+from ._util import embed_all, resolve_ids
 from .base import SearchResult, _chunks_from_texts
 
 # Map Mongo-style ops to SQL operators that act on the JSONB extracted
@@ -220,28 +220,13 @@ class PostgresVectorStore:
     ) -> list[str]:
         if not chunks:
             return []
-        if ids is not None and len(ids) != len(chunks):
-            raise ValueError(
-                f"ids length ({len(ids)}) must match chunks "
-                f"length ({len(chunks)})"
-            )
-        try:
-            vectors = await self._embedder.embed_batch(
-                [c.content for c in chunks]
-            )
-        except (AttributeError, NotImplementedError):
-            vectors = [
-                await self._embedder.embed(c.content) for c in chunks
-            ]
+        assigned = resolve_ids(ids, len(chunks))
+        vectors = await embed_all(
+            self._embedder, [c.content for c in chunks]
+        )
 
         if not self._initialized:
             await self.init_schema(len(vectors[0]))
-
-        assigned = (
-            list(ids)
-            if ids is not None
-            else [new_id("vec") for _ in chunks]
-        )
 
         rows = [
             (
@@ -329,12 +314,16 @@ class PostgresVectorStore:
         if filter:
             where_sql, params = _build_where_sql(filter, params)
 
+        # MMR rerank needs the raw vectors; a plain top-k search
+        # doesn't — skip fetching the (wide) embedding column then.
+        want_mmr = diversity is not None and diversity > 0
         # Wider candidate pool when MMR-reranking.
-        n_fetch = max(k * 4, 20) if diversity else k
+        n_fetch = max(k * 4, 20) if want_mmr else k
         params.append(n_fetch)
+        embedding_col = "embedding," if want_mmr else ""
 
         sql = f"""
-            SELECT id, content, metadata, embedding,
+            SELECT id, content, metadata, {embedding_col}
                    1 - (embedding <=> $1::vector) AS score
             FROM {self._table}
             {where_sql}
@@ -362,15 +351,11 @@ class PostgresVectorStore:
                     id=row["id"],
                 )
             )
-            # pgvector returns embedding as text "[1.0,2.0,...]"
-            emb = row["embedding"]
-            cand_vecs.append(_pg_to_vec(emb))
+            if want_mmr:
+                # pgvector returns embedding as text "[1.0,2.0,...]"
+                cand_vecs.append(_pg_to_vec(row["embedding"]))
 
-        if diversity is None or diversity <= 0:
-            return candidates[:k]
-
-        chosen = mmr_select(vector, cand_vecs, k, diversity=diversity)
-        return [candidates[i] for i in chosen]
+        return rerank_tail(vector, candidates, cand_vecs, k, diversity)
 
     async def count(self) -> int:
         async with self._acquire() as conn:

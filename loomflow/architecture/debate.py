@@ -195,7 +195,8 @@ class MultiAgentDebate:
         )
         round0: dict[str, str] = {}
         async for ev in self._run_round_parallel(
-            session, prompt, history=[], round_num=0, responses=round0
+            session, prompt, history=[], round_num=0, responses=round0,
+            user_id=deps.context.user_id,
         ):
             yield ev
         history.append(round0)
@@ -238,6 +239,7 @@ class MultiAgentDebate:
             async for ev in self._run_round_parallel(
                 session, prompt, history=history, round_num=r,
                 responses=round_responses,
+                user_id=deps.context.user_id,
             ):
                 yield ev
             history.append(round_responses)
@@ -279,23 +281,51 @@ class MultiAgentDebate:
             "debate.judging",
         )
         judge_prompt = self._build_judge_prompt(prompt, history)
-        from ..agent.worker_registry import resolve_persistent_session
+        from ..agent.worker_registry import (
+            CrossUserWorkerError,
+            acquire_worker_session,
+            resolve_persistent_session,
+        )
         judge_sid, judge_handle = resolve_persistent_session(
             "judge",
             fallback=f"{session.id}__judge",
             registry=self._worker_registry,
             role_to_id=self._role_to_worker_id,
         )
-        if judge_handle is not None:
-            judge_handle.touch(user_id=deps.context.user_id)
         judge_inv = SubagentInvocation(
             self._judge,
             judge_prompt,
             session_id=judge_sid,
             rollup_into=session,
         )
-        async for ev in judge_inv.events():
-            yield ev
+        if judge_handle is not None:
+            try:
+                async with acquire_worker_session(
+                    judge_handle, deps.context.user_id
+                ):
+                    async for ev in judge_inv.events():
+                        yield ev
+            except CrossUserWorkerError as exc:
+                # Cross-tenant judge can't synthesize — degrade to
+                # majority vote over the final round.
+                yield Event.architecture_event(
+                    session.id,
+                    "debate.cross_user_rejected",
+                    debater="judge",
+                    error=str(exc),
+                )
+                final = _majority_vote(history[-1])
+                session.output = final
+                yield Event.architecture_event(
+                    session.id,
+                    "debate.synthesized",
+                    method="majority_vote",
+                    final=final[:300],
+                )
+                return
+        else:
+            async for ev in judge_inv.events():
+                yield ev
         judge_result = judge_inv.result
         session.turns += int(judge_result.get("turns", 0) or 0)
 
@@ -324,6 +354,7 @@ class MultiAgentDebate:
         history: list[dict[str, str]],
         round_num: int,
         responses: dict[str, str],
+        user_id: str | None,
     ) -> AsyncIterator[Event]:
         """Run all debaters for a single round in parallel and yield
         their streaming events.
@@ -357,6 +388,7 @@ class MultiAgentDebate:
                             send.clone(),
                             self._worker_registry,
                             self._role_to_worker_id,
+                            user_id,
                         )
 
         async with anyio.create_task_group() as outer_tg:
@@ -425,6 +457,7 @@ async def _run_one_debater_streaming(
     send: MemoryObjectSendStream[Event],
     worker_registry: _DebateRegistryT | None,
     role_to_worker_id: _DebateRoleMapT | None,
+    user_id: str | None,
 ) -> None:
     """Single-debater worker for parallel dispatch: run the debater
     via :class:`SubagentInvocation`, forward its events into ``send``,
@@ -433,50 +466,59 @@ async def _run_one_debater_streaming(
     When ``worker_registry`` is non-None and the debater has a
     registered handle, use the handle's stable session_id so the
     debater carries memory across rounds AND across multiple
-    ``Agent.run()`` invocations. The per-handle lock serialises
-    concurrent debate rounds (uncommon in production but possible).
+    ``Agent.run()`` invocations. :func:`acquire_worker_session`
+    does the cross-user check + per-handle lock + touch with the
+    RUN's real ``user_id`` (pre-fix this touched with a hard-coded
+    ``None``, so the handle was never pinned and the cross-tenant
+    guard could never fire). A cross-user rejection surfaces as an
+    architecture event + an error response for this debater slot
+    instead of crashing the round.
     """
     async with send:
         # Lazy import — circular if hoisted to module scope (the
         # worker_registry module imports Agent which imports us
         # through architecture/__init__.py).
-        from ..agent.worker_registry import resolve_persistent_session
+        from ..agent.worker_registry import (
+            CrossUserWorkerError,
+            acquire_worker_session,
+            resolve_persistent_session,
+        )
         sub_session_id, handle = resolve_persistent_session(
             name,
             fallback=f"{session.id}__{name}_round_{round_num}",
             registry=worker_registry,
             role_to_id=role_to_worker_id,
         )
+        invocation = SubagentInvocation(
+            debater,
+            debater_prompt,
+            session_id=sub_session_id,
+            rollup_into=session,
+        )
         if handle is not None:
-            async with handle.lock:
-                handle.touch(user_id=None)
-                invocation = SubagentInvocation(
-                    debater,
-                    debater_prompt,
-                    session_id=sub_session_id,
-                    rollup_into=session,
+            try:
+                async with acquire_worker_session(handle, user_id):
+                    async for ev in invocation.events():
+                        await send.send(ev)
+            except CrossUserWorkerError as exc:
+                responses[name] = f"[error: {exc}]"
+                await send.send(
+                    Event.architecture_event(
+                        session.id,
+                        "debate.cross_user_rejected",
+                        round=round_num,
+                        debater=name,
+                        error=str(exc),
+                    )
                 )
-                async for ev in invocation.events():
-                    await send.send(ev)
-                responses[name] = str(
-                    invocation.result.get("output", "")
-                )
-                session.turns += int(
-                    invocation.result.get("turns", 0) or 0
-                )
+                return
         else:
-            invocation = SubagentInvocation(
-                debater,
-                debater_prompt,
-                session_id=sub_session_id,
-                rollup_into=session,
-            )
             async for ev in invocation.events():
                 await send.send(ev)
-            responses[name] = str(invocation.result.get("output", ""))
-            session.turns += int(
-                invocation.result.get("turns", 0) or 0
-            )
+        responses[name] = str(invocation.result.get("output", ""))
+        session.turns += int(
+            invocation.result.get("turns", 0) or 0
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -7,8 +7,17 @@ is configurable:
 * Pass ``path_args=("path", "destination", ...)`` to validate exactly
   those argument names.
 * Otherwise the sandbox auto-detects: any string argument whose name
-  is in :data:`DEFAULT_PATH_ARG_NAMES` *or* whose value contains a
-  path separator (``/`` or ``\\``) is treated as a path.
+  is in :data:`DEFAULT_PATH_ARG_NAMES`, or ends with a common
+  path-ish suffix (``...path`` / ``...paths`` / ``...file`` /
+  ``...dir`` etc.), *or* whose value contains a path separator
+  (``/`` or ``\\``) is treated as a path.
+
+Container arguments (lists / tuples / sets / dicts) are recursed
+into and their string leaves validated with the same rules —
+``{"paths": ["/etc/passwd"]}`` and nested dicts are checked, not
+skipped. Leaves inherit the pathiness of the nearest enclosing
+path-like name, so every string under a path-named argument is
+validated regardless of separator presence.
 
 Symlinks are resolved before the containment check so an attacker
 can't bypass the sandbox by symlinking ``/etc/passwd`` into the
@@ -40,6 +49,36 @@ DEFAULT_PATH_ARG_NAMES: frozenset[str] = frozenset(
         "target",
     }
 )
+
+# Auto-detect also treats argument / nested-key names that ARE one
+# of these, or end in one after a ``_`` / ``-`` / ``.`` separator
+# ("paths", "output_path", "src-files", ...), as path-like, so
+# their string leaves are validated even without a separator in
+# the value. Delimited matching avoids false positives like
+# ``resource`` (ends with "source" but isn't a path).
+_PATH_NAME_SUFFIXES: tuple[str, ...] = (
+    "path",
+    "paths",
+    "file",
+    "files",
+    "filename",
+    "filenames",
+    "dir",
+    "dirs",
+    "directory",
+    "directories",
+    "folder",
+    "folders",
+    "source",
+    "destination",
+    "target",
+    "targets",
+)
+
+# Containers nest at most this deep before the scan gives up —
+# tool args come from JSON and never legitimately nest this far;
+# the bound just guards against pathological recursion.
+_MAX_ARG_DEPTH = 16
 
 
 class FilesystemSandbox:
@@ -107,21 +146,69 @@ class FilesystemSandbox:
         self, args: Mapping[str, Any]
     ) -> tuple[str, str] | None:
         for name, value in args.items():
-            if not self._looks_like_path(name, value):
-                continue
-            if not isinstance(value, str):
-                continue
-            if not self._is_inside_any_root(value):
-                return name, value
+            leaf = self._scan_value(name, value, 0)
+            if leaf is not None:
+                return name, leaf
         return None
 
-    def _looks_like_path(self, name: str, value: Any) -> bool:
+    def _scan_value(self, name: str, value: Any, depth: int) -> str | None:
+        """Recursively scan ``value`` (str leaves, lists / tuples /
+        sets / dicts) for the first path outside the roots. ``name``
+        is the nearest enclosing argument / dict-key name; container
+        items inherit it, so ``{"paths": ["/etc/passwd"]}`` is
+        checked with the pathiness of ``paths``. Returns the
+        offending leaf value, or ``None``."""
+        if depth > _MAX_ARG_DEPTH:
+            return None
+        if isinstance(value, str):
+            if self._looks_like_path(name, value) and not (
+                self._is_inside_any_root(value)
+            ):
+                return value
+            return None
+        if isinstance(value, Mapping):
+            pathy = self._name_is_path_like(name)
+            for key, item in value.items():
+                # Nested keys re-key the pathiness check — unless
+                # the enclosing name was already path-like, which
+                # stays sticky so `{"paths": {"a": ...}}` keeps
+                # validating every leaf beneath it.
+                child = (
+                    name if pathy or not isinstance(key, str) else key
+                )
+                leaf = self._scan_value(child, item, depth + 1)
+                if leaf is not None:
+                    return leaf
+            return None
+        if isinstance(value, (list, tuple, set, frozenset)):
+            for item in value:
+                leaf = self._scan_value(name, item, depth + 1)
+                if leaf is not None:
+                    return leaf
+        return None
+
+    def _name_is_path_like(self, name: str) -> bool:
+        """Whether ``name`` alone marks its values as paths (the
+        explicit allowlist, or — in auto-detect — the known set plus
+        common path-ish suffixes)."""
         if self._explicit_path_args is not None:
             return name in self._explicit_path_args
         if not self._auto_detect:
             return False
-        if name.lower() in DEFAULT_PATH_ARG_NAMES:
+        lowered = name.lower()
+        if lowered in DEFAULT_PATH_ARG_NAMES:
             return True
+        return any(
+            lowered == suffix
+            or lowered.endswith((f"_{suffix}", f"-{suffix}", f".{suffix}"))
+            for suffix in _PATH_NAME_SUFFIXES
+        )
+
+    def _looks_like_path(self, name: str, value: Any) -> bool:
+        if self._name_is_path_like(name):
+            return True
+        if self._explicit_path_args is not None or not self._auto_detect:
+            return False
         if isinstance(value, str) and ("/" in value or "\\" in value):
             return True
         return False

@@ -18,7 +18,6 @@ Schema:
 from __future__ import annotations
 
 import json
-import math
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -30,6 +29,7 @@ import anyio
 
 from ..core.protocols import Embedder
 from ..core.types import Fact, _normalize_predicate
+from ._embedding_util import cosine as _cosine
 from ._embedding_util import pack_float32, unpack_float32
 
 _FACTS_DDL = """
@@ -447,21 +447,6 @@ def _tokenize(text: str) -> set[str]:
         if len(token) >= 2 and token not in _STOP_WORDS:
             out.add(token)
     return out
-
-
-def _cosine(a: list[float], b: list[float]) -> float:
-    if not a or not b:
-        return 0.0
-    dot = 0.0
-    na = 0.0
-    nb = 0.0
-    for x, y in zip(a, b, strict=False):
-        dot += x * y
-        na += x * x
-        nb += y * y
-    if na <= 0.0 or nb <= 0.0:
-        return 0.0
-    return dot / (math.sqrt(na) * math.sqrt(nb))
 
 
 _STOP_WORDS: frozenset[str] = frozenset(

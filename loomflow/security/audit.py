@@ -22,7 +22,8 @@ without a real secret.
 
 The log is conceptually monotonic: ``seq`` is per-log and never
 re-used. :class:`FileAuditLog` recovers the highest seq from the file
-on startup so multiple processes can append in turn.
+lazily on its first append (keeping the constructor cheap and the
+event loop unblocked) so multiple processes can append in turn.
 """
 
 from __future__ import annotations
@@ -237,9 +238,12 @@ class InMemoryAuditLog:
 class FileAuditLog:
     """JSONL append-only audit log with HMAC signatures.
 
-    On construction we read any pre-existing entries to recover the
-    highest seq, so a process restart picks up where the last one left
-    off.
+    Pre-existing entries are scanned on the FIRST ``append`` (in a
+    worker thread, off the event loop) to recover the highest seq,
+    so a process restart picks up where the last one left off. The
+    scan is deferred out of ``__init__`` because logs are routinely
+    constructed inside async code — a big existing file would
+    otherwise block the event loop before the first await.
     """
 
     def __init__(self, path: str | Path, *, secret: str = "") -> None:
@@ -247,16 +251,19 @@ class FileAuditLog:
         self._path = Path(path)
         self._secret = secret
         self._seq = 0
+        # Deferred seq recovery — see class docstring. Guarded by
+        # ``self._lock`` in ``append``.
+        self._seq_recovered = False
         self._lock = anyio.Lock()
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        if self._path.exists():
-            self._seq = self._scan_max_seq()
 
     @property
     def path(self) -> Path:
         return self._path
 
     def _scan_max_seq(self) -> int:
+        if not self._path.exists():
+            return 0
         max_seq = 0
         with self._path.open("r", encoding="utf-8") as fh:
             for line in fh:
@@ -281,6 +288,13 @@ class FileAuditLog:
         user_id: str | None = None,
     ) -> AuditEntry:
         async with self._lock:
+            if not self._seq_recovered:
+                # Deferred from __init__: recover the highest seq
+                # from any pre-existing file, off the event loop.
+                self._seq = await anyio.to_thread.run_sync(
+                    self._scan_max_seq
+                )
+                self._seq_recovered = True
             self._seq += 1
             timestamp = datetime.now(UTC)
             body = _canonical_payload(

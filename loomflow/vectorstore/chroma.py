@@ -17,16 +17,17 @@ direct).
 from __future__ import annotations
 
 import json
+import warnings
 from collections.abc import Mapping
 from typing import Any
 
 import anyio
 
-from ..core.ids import new_id
 from ..core.protocols import Embedder
 from ..loader.base import Chunk
 from ._filter import COMPARISON_OPERATORS, LOGICAL_OPERATORS, FilterError
-from ._mmr import mmr_select
+from ._mmr import rerank_tail
+from ._util import embed_all, resolve_ids
 from .base import SearchResult, _chunks_from_texts
 
 
@@ -109,7 +110,18 @@ def _flatten_metadata(meta: Mapping[str, Any]) -> dict[str, Any]:
 
 
 class ChromaVectorStore:
-    """Vector store backed by ``chromadb``."""
+    """Vector store backed by ``chromadb``.
+
+    Collections are created with ``{"hnsw:space": "cosine"}`` so
+    Chroma's reported distance is cosine distance and search scores
+    honour the cross-store cosine contract (``score = 1 - distance``
+    in ``[-1, 1]``). LIMITATION: ``get_or_create_collection`` cannot
+    change the space of a PRE-EXISTING collection — a collection
+    created by an older version of this class kept Chroma's default
+    ``l2`` space, and its scores are NOT cosine. We emit a
+    ``UserWarning`` when that's cheaply detectable from the
+    collection's metadata; re-index into a fresh collection to fix.
+    """
 
     name = "chroma"
 
@@ -143,9 +155,28 @@ class ChromaVectorStore:
         else:
             self._client = chromadb.Client()
 
+        # ``hnsw:space: cosine`` makes Chroma's distance a true cosine
+        # distance so ``1 - distance`` is the contract's cosine score.
+        # (Chroma defaults to L2 when the space is unspecified.)
         self._collection = self._client.get_or_create_collection(
-            name=collection_name
+            name=collection_name,
+            metadata={"hnsw:space": "cosine"},
         )
+        # ``get_or_create`` can't change the space of a pre-existing
+        # collection; warn when we can see it isn't cosine. Missing
+        # metadata means the collection pre-dates this setting and
+        # runs on Chroma's L2 default.
+        coll_meta = getattr(self._collection, "metadata", None) or {}
+        space = coll_meta.get("hnsw:space", "l2")
+        if space != "cosine":
+            warnings.warn(
+                f"Chroma collection {collection_name!r} already exists "
+                f"with hnsw:space={space!r} (not 'cosine'); search "
+                "scores from this store will not follow the cosine "
+                "score contract. Re-index into a new collection to fix.",
+                UserWarning,
+                stacklevel=2,
+            )
 
     # ---------------------------------------------------------------
     # Factory classmethods — explicit kwargs so IDEs autocomplete
@@ -220,24 +251,9 @@ class ChromaVectorStore:
     ) -> list[str]:
         if not chunks:
             return []
-        if ids is not None and len(ids) != len(chunks):
-            raise ValueError(
-                f"ids length ({len(ids)}) must match chunks "
-                f"length ({len(chunks)})"
-            )
-        try:
-            vectors = await self._embedder.embed_batch(
-                [c.content for c in chunks]
-            )
-        except (AttributeError, NotImplementedError):
-            vectors = [
-                await self._embedder.embed(c.content) for c in chunks
-            ]
-
-        assigned = (
-            list(ids)
-            if ids is not None
-            else [new_id("vec") for _ in chunks]
+        assigned = resolve_ids(ids, len(chunks))
+        vectors = await embed_all(
+            self._embedder, [c.content for c in chunks]
         )
         contents = [c.content for c in chunks]
         # Chroma rejects empty-dict metadatas AND non-scalar values;
@@ -339,7 +355,10 @@ class ChromaVectorStore:
             (embs_batch[0] if embs_batch else [None] * len(ids_batch[0])),
             strict=False,
         ):
-            score = max(0.0, 1.0 - float(dist))
+            # The collection's space is cosine (see __init__), so
+            # Chroma's distance is ``1 - cos`` in [0, 2] and this is
+            # a true cosine similarity in [-1, 1] — no clamp.
+            score = 1.0 - float(dist)
             chunk_meta = dict(meta or {})
             chunk_meta.pop("_empty", None)
             candidates.append(
@@ -354,13 +373,7 @@ class ChromaVectorStore:
             )
             cand_vecs.append(list(emb) if emb is not None else [])
 
-        if diversity is None or diversity <= 0:
-            return candidates[:k]
-
-        chosen = mmr_select(
-            vector, cand_vecs, k, diversity=diversity
-        )
-        return [candidates[i] for i in chosen]
+        return rerank_tail(vector, candidates, cand_vecs, k, diversity)
 
     async def count(self) -> int:
         n = await anyio.to_thread.run_sync(self._collection.count)

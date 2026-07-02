@@ -19,15 +19,11 @@ in whichever native way they prefer, then call this to rerank.
 from __future__ import annotations
 
 import math
+from typing import TypeVar
 
+from ._util import cosine as _cosine
 
-def _cosine(a: list[float], b: list[float]) -> float:
-    dot = sum(x * y for x, y in zip(a, b, strict=True))
-    na = math.sqrt(sum(x * x for x in a))
-    nb = math.sqrt(sum(y * y for y in b))
-    if na == 0 or nb == 0:
-        return 0.0
-    return dot / (na * nb)
+_T = TypeVar("_T")
 
 
 def mmr_select(
@@ -85,3 +81,22 @@ def mmr_select(
         remaining.remove(best_idx)
 
     return selected
+
+
+def rerank_tail(
+    query_vec: list[float],
+    candidates: list[_T],
+    candidate_vecs: list[list[float]],
+    k: int,
+    diversity: float | None,
+) -> list[_T]:
+    """Shared per-backend search tail: plain top-``k`` when
+    ``diversity`` is off (``None`` / ``<= 0``), MMR rerank otherwise.
+
+    ``candidates`` and ``candidate_vecs`` are parallel lists already
+    sorted best-first by the backend's native similarity ranking.
+    """
+    if diversity is None or diversity <= 0:
+        return candidates[:k]
+    chosen = mmr_select(query_vec, candidate_vecs, k, diversity=diversity)
+    return [candidates[i] for i in chosen]

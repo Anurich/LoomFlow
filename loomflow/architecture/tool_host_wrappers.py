@@ -61,8 +61,18 @@ class ExtendedToolHost:
     async def list_tools(
         self, *, query: str | None = None
     ) -> list[ToolDef]:
-        defs = list(await self._base.list_tools(query=query))
-        for t in self._extras:
+        # Extras win on name conflict (matching ``call`` dispatch):
+        # a base def shadowed by a same-named extra is dropped, so
+        # the model never sees duplicate ToolDefs — providers reject
+        # tool lists with duplicate names (API 400).
+        defs = [
+            d
+            for d in await self._base.list_tools(query=query)
+            if d.name not in self._extras_by_name
+        ]
+        # Iterate the name-keyed view (not ``self._extras``) so a
+        # re-registered extra also can't produce duplicates.
+        for t in self._extras_by_name.values():
             d = t.to_def()
             if query is None or (
                 query.lower() in d.name.lower()
@@ -86,6 +96,16 @@ class ExtendedToolHost:
                 return ToolResult.error_(
                     call_id=call_id, message=str(exc)
                 )
+            if isinstance(output, ToolResult):
+                # The extra's fn already built a ToolResult — pass
+                # it through instead of double-nesting it inside
+                # ``ToolResult.success(output=...)``. Re-stamp the
+                # call_id so tool-result pairing stays correct.
+                if call_id and output.call_id != call_id:
+                    return output.model_copy(
+                        update={"call_id": call_id}
+                    )
+                return output
             return ToolResult.success(call_id=call_id, output=output)
         return await self._base.call(tool, args, call_id=call_id)
 

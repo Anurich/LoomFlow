@@ -521,7 +521,7 @@ class SqliteMemory:
                 vec = unpack_float32(bytes(blob))
             except (TypeError, ValueError):
                 continue
-            scored.append((_cosine(query_vector, vec), row))
+            scored.append((cosine(query_vector, vec), row))
         scored.sort(key=lambda pair: pair[0], reverse=True)
         return [(_row_to_episode(r), s) for s, r in scored[:limit]]
 
@@ -546,7 +546,7 @@ class SqliteMemory:
         with neutral ``1.0`` scores; a query that matches nothing falls
         through to recency with ``0.0``.
         """
-        from ._hybrid import _BM25, hybrid_rank
+        from ._hybrid import hybrid_rank_episodes
 
         # Footgun protection — mirror ``recall``.
         if user_id is None:
@@ -574,39 +574,15 @@ class SqliteMemory:
         if not candidates:
             return []
 
-        # Vector arm — cosine over candidate embeddings; drop
-        # non-positive sims so RRF doesn't promote them.
         query_vector = await self._embedder.embed(query)
-        vector_scores: list[tuple[int, float]] = []
-        for i, vec in enumerate(embeddings):
-            sim = cosine(query_vector, vec)
-            if sim > 0:
-                vector_scores.append((i, sim))
-        vector_scores.sort(key=lambda x: x[1], reverse=True)
-
-        # BM25 arm — lexical ranking over the same candidate pool.
-        texts = [f"{e.input}\n{e.output}" for e in candidates]
-        bm25_ranking = _BM25(texts).rank(query)
-
-        fused = hybrid_rank(
-            bm25_ranking=bm25_ranking,
-            vector_ranking=vector_scores,
+        return hybrid_rank_episodes(
+            candidates,
+            query=query,
+            query_embedding=query_vector,
             alpha=alpha,
+            limit=limit,
+            embeddings=embeddings,
         )
-        if not fused:
-            recent = sorted(
-                candidates, key=lambda e: e.occurred_at, reverse=True
-            )[:limit]
-            return [EpisodeMatch(episode=e, score=0.0) for e in recent]
-        return [
-            EpisodeMatch(
-                episode=candidates[idx],
-                score=score,
-                bm25_score=bm25_score,
-                vector_score=vector_score,
-            )
-            for idx, score, bm25_score, vector_score in fused[:limit]
-        ]
 
     async def _recall_recent(
         self,
@@ -928,14 +904,3 @@ def _row_to_episode(row: tuple[Any, ...]) -> Episode:
         output=output,
         embedding=embedding_list,
     )
-
-
-def _cosine(a: list[float], b: list[float]) -> float:
-    if not a or not b or len(a) != len(b):
-        return 0.0
-    dot = sum(x * y for x, y in zip(a, b, strict=False))
-    norm_a = sum(x * x for x in a) ** 0.5
-    norm_b = sum(y * y for y in b) ** 0.5
-    if norm_a == 0 or norm_b == 0:
-        return 0.0
-    return float(dot / (norm_a * norm_b))

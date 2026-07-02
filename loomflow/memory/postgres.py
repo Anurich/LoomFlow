@@ -33,7 +33,6 @@ from ..core.types import (
     Message,
     Role,
 )
-from ._embedding_util import cosine
 from ._user_key import ANON_USER_ID, decode_user_id, encode_user_id
 from .embedder import HashEmbedder, warn_hash_embedder_fallback
 from .facts import count_facts, delete_facts
@@ -326,11 +325,22 @@ class PostgresMemory:
             episode = episode.model_copy(update={"embedding": embedding})
 
         async with self._pool.acquire() as conn:
+            # ``DO UPDATE`` (not ``DO NOTHING``) so re-``remember()``
+            # with the same id refreshes the row — matching SQLite's
+            # ``INSERT OR REPLACE`` semantics and staying consistent
+            # with the transcript sidecar below, which already
+            # replaces (DELETE + INSERT) on re-remember.
             insert_episode = (
                 "INSERT INTO episodes(id, namespace, session_id, user_id, "
                 "                     occurred_at, input, output, embedding) "
                 "VALUES ($1, $2, $3, $4, $5, $6, $7, $8) "
-                "ON CONFLICT (id) DO NOTHING;"
+                "ON CONFLICT (id) DO UPDATE SET "
+                "  session_id = EXCLUDED.session_id, "
+                "  user_id = EXCLUDED.user_id, "
+                "  occurred_at = EXCLUDED.occurred_at, "
+                "  input = EXCLUDED.input, "
+                "  output = EXCLUDED.output, "
+                "  embedding = EXCLUDED.embedding;"
             )
             episode_args = (
                 episode.id,
@@ -441,7 +451,7 @@ class PostgresMemory:
         scores; a no-match query falls through to recency with
         ``0.0``.
         """
-        from ._hybrid import _BM25, hybrid_rank
+        from ._hybrid import hybrid_rank_episodes
 
         if not query.strip():
             recent = await self._recall_recent(limit, time_range, user_id)
@@ -474,39 +484,13 @@ class PostgresMemory:
         if not candidates:
             return []
 
-        # Vector arm — cosine over candidate embeddings; drop
-        # non-positive sims so RRF doesn't promote them.
-        vector_scores: list[tuple[int, float]] = []
-        for i, ep in enumerate(candidates):
-            assert ep.embedding is not None
-            sim = cosine(query_embedding, ep.embedding)
-            if sim > 0:
-                vector_scores.append((i, sim))
-        vector_scores.sort(key=lambda x: x[1], reverse=True)
-
-        # BM25 arm — lexical ranking over the same candidate pool.
-        texts = [f"{e.input}\n{e.output}" for e in candidates]
-        bm25_ranking = _BM25(texts).rank(query)
-
-        fused = hybrid_rank(
-            bm25_ranking=bm25_ranking,
-            vector_ranking=vector_scores,
+        return hybrid_rank_episodes(
+            candidates,
+            query=query,
+            query_embedding=query_embedding,
             alpha=alpha,
+            limit=limit,
         )
-        if not fused:
-            recent = sorted(
-                candidates, key=lambda e: e.occurred_at, reverse=True
-            )[:limit]
-            return [EpisodeMatch(episode=e, score=0.0) for e in recent]
-        return [
-            EpisodeMatch(
-                episode=candidates[idx],
-                score=score,
-                bm25_score=bm25_score,
-                vector_score=vector_score,
-            )
-            for idx, score, bm25_score, vector_score in fused[:limit]
-        ]
 
     async def _recall_recent(
         self,

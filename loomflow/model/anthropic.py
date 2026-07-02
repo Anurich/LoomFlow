@@ -155,9 +155,16 @@ DEFAULT_MAX_TOKENS = 4096
 _THINKING_MAX_TOKENS_HEADROOM = 4096
 
 # How many responses' worth of thinking blocks the adapter remembers
-# for replay (keyed by tool_use id). Multi-turn tool loops only need
-# the most recent turns; the cap keeps long sessions bounded.
-_THINKING_CACHE_MAX = 256
+# for replay (keyed by tool_use id). Eviction is LRU: every replay
+# hit in ``_to_anthropic_messages`` moves the entry to the end, so
+# blocks still referenced by a live conversation's history stay
+# resident while dead conversations' entries age out first. The cap
+# only bites once more than this many *live* replayed turns exist
+# across every conversation sharing this model instance — a
+# residual limitation, since the adapter has no conversation
+# identity to scope the cache by (entries are keyed only by
+# tool_use id).
+_THINKING_CACHE_MAX = 4096
 
 
 def _reconcile_thinking_kwargs(kwargs: dict[str, Any]) -> None:
@@ -235,7 +242,9 @@ class AnthropicModel:
         # to lead the assistant turn when thinking is enabled and the
         # turn contains tool_use; ``Message`` doesn't carry them, so
         # the adapter remembers them here and ``_to_anthropic_messages``
-        # replays them. Bounded FIFO (see _THINKING_CACHE_MAX).
+        # replays them. Bounded LRU (see _THINKING_CACHE_MAX):
+        # replay hits refresh an entry, so entries still referenced
+        # by a live conversation's history survive eviction.
         self._thinking: dict[str, list[dict[str, Any]]] = {}
         if client is not None:
             self._client = client
@@ -262,6 +271,8 @@ class AnthropicModel:
         messages: list[Message],
         *,
         tools: list[ToolDef] | None = None,
+        effort: str | None = None,
+        strict_effort: bool = False,
     ) -> int:
         """Native token count via Anthropic's
         ``messages.count_tokens`` beta endpoint — exact, no
@@ -269,13 +280,18 @@ class AnthropicModel:
 
         Mirrors the same ``messages`` / ``tools`` shaping the
         ``complete`` and ``stream`` paths use, so the count is
-        what the actual completion would be billed for.
-        :func:`loomflow.model.count_tokens.count_tokens` discovers
-        this method via ``hasattr`` and prefers it over the
-        tiktoken / char-based fallbacks.
+        what the actual completion would be billed for. Pass the
+        same ``effort`` the real call will use: thinking blocks
+        are replayed into the request only when thinking is
+        enabled for that request (they're stripped when it's
+        off), so the count matches the real construction either
+        way. :func:`loomflow.model.count_tokens.count_tokens`
+        discovers this method via ``hasattr`` and prefers it over
+        the tiktoken / char-based fallbacks.
         """
         system_parts, anth_messages = _to_anthropic_messages(
-            messages, thinking_map=self._thinking
+            messages,
+            thinking_map=self._thinking_map_for(effort, strict_effort),
         )
         anth_tools = [_to_anthropic_tool(t) for t in (tools or [])]
         kwargs: dict[str, Any] = {
@@ -297,6 +313,26 @@ class AnthropicModel:
                 **kwargs
             )
         return int(getattr(resp, "input_tokens", 0))
+
+    def _effort_kwargs(
+        self, effort: str | None, strict_effort: bool
+    ) -> dict[str, Any]:
+        """Translate ``effort`` into Anthropic request kwargs (the
+        ``thinking`` / ``output_config`` shape for this model)."""
+        from ._effort import anthropic_kwargs
+
+        return anthropic_kwargs(effort, self.name, strict=strict_effort)
+
+    def _thinking_map_for(
+        self, effort: str | None, strict_effort: bool
+    ) -> dict[str, list[dict[str, Any]]] | None:
+        """The thinking replay cache — but only when ``effort``
+        enables thinking for this request. The API requires signed
+        thinking blocks to lead tool_use assistant turns when
+        thinking is ON and rejects them when thinking is OFF, so
+        replay must be gated on the actual request configuration."""
+        effort_kwargs = self._effort_kwargs(effort, strict_effort)
+        return self._thinking if effort_kwargs.get("thinking") else None
 
     async def complete(
         self,
@@ -334,8 +370,17 @@ class AnthropicModel:
         limits, auth, 4xx/5xx — propagate so :class:`RetryingModel`
         can classify them.
         """
+        # Reasoning-effort translation, resolved FIRST because it
+        # decides whether thinking is on for this request — which
+        # gates thinking-block replay in the message conversion
+        # below (the API rejects thinking blocks when thinking is
+        # off, and requires them leading tool_use turns when on).
+        effort_kwargs = self._effort_kwargs(effort, strict_effort)
         system_parts, anth_messages = _to_anthropic_messages(
-            messages, thinking_map=self._thinking
+            messages,
+            thinking_map=(
+                self._thinking if effort_kwargs.get("thinking") else None
+            ),
         )
         anth_tools = [_to_anthropic_tool(t) for t in (tools or [])]
 
@@ -368,15 +413,11 @@ class AnthropicModel:
                 "type": "tool",
                 "name": synthetic_tool_name,
             }
-        # Reasoning-effort translation. Adapter picks the right
-        # regime (Opus 4.7 adaptive-only / 4.6 adaptive+effort /
+        # Reasoning-effort kwargs (resolved above). Adapter picks the
+        # right regime (Opus 4.7 adaptive-only / 4.6 adaptive+effort /
         # legacy budget_tokens) based on the model name; drops the
         # kwarg with a warning on models that don't support it.
-        from ._effort import anthropic_kwargs
-
-        kwargs.update(
-            anthropic_kwargs(effort, self.name, strict=strict_effort)
-        )
+        kwargs.update(effort_kwargs)
         # Thinking constraints: budget_tokens < max_tokens, and
         # temperature must stay at the API default.
         _reconcile_thinking_kwargs(kwargs)
@@ -517,13 +558,19 @@ class AnthropicModel:
         tool_use id so ``_to_anthropic_messages`` can replay them on
         the next request. No-op when the response had no thinking or
         no tool calls (turns without tool_use never need replay).
-        Bounded FIFO eviction keeps long sessions from growing the
-        cache without limit."""
+        Bounded LRU eviction (replay hits refresh entries — see
+        ``_to_anthropic_messages``) keeps long sessions from growing
+        the cache without evicting blocks a live conversation still
+        replays on every request."""
         if not thinking_blocks or not tool_calls:
             return
         key = tool_calls[0].id
         if not key:
             return
+        # Insert at the end (dicts preserve insertion order) so the
+        # while-loop below always evicts the least-recently-used
+        # entry first.
+        self._thinking.pop(key, None)
         self._thinking[key] = thinking_blocks
         while len(self._thinking) > _THINKING_CACHE_MAX:
             self._thinking.pop(next(iter(self._thinking)))
@@ -540,8 +587,15 @@ class AnthropicModel:
         strict_effort: bool = False,
         prompt_caching: Any = None,
     ) -> AsyncIterator[ModelChunk]:
+        # Effort resolved FIRST: thinking-block replay below is
+        # gated on whether thinking is enabled for THIS request
+        # (see the matching comment in ``complete``).
+        effort_kwargs = self._effort_kwargs(effort, strict_effort)
         system_parts, anth_messages = _to_anthropic_messages(
-            messages, thinking_map=self._thinking
+            messages,
+            thinking_map=(
+                self._thinking if effort_kwargs.get("thinking") else None
+            ),
         )
         anth_tools = [_to_anthropic_tool(t) for t in (tools or [])]
         synthetic_tool_name = ""
@@ -569,11 +623,7 @@ class AnthropicModel:
             }
         if anth_tools:
             kwargs["tools"] = anth_tools
-        from ._effort import anthropic_kwargs
-
-        kwargs.update(
-            anthropic_kwargs(effort, self.name, strict=strict_effort)
-        )
+        kwargs.update(effort_kwargs)
         # Thinking constraints: budget_tokens < max_tokens, and
         # temperature must stay at the API default.
         _reconcile_thinking_kwargs(kwargs)
@@ -825,8 +875,15 @@ def _to_anthropic_messages(
             # Replay signed thinking blocks FIRST — required position
             # when thinking is enabled and the turn has tool_use.
             if thinking_map and m.tool_calls:
-                replay = thinking_map.get(m.tool_calls[0].id)
+                key = m.tool_calls[0].id
+                replay = thinking_map.get(key)
                 if replay:
+                    # LRU touch: an entry replayed on this request is
+                    # hot (it recurs on EVERY request while its
+                    # conversation lives) — move it to the end so
+                    # eviction in ``_remember_thinking`` drops cold
+                    # entries from finished conversations first.
+                    thinking_map[key] = thinking_map.pop(key)
                     blocks.extend(replay)
             if m.content:
                 blocks.append({"type": "text", "text": m.content})

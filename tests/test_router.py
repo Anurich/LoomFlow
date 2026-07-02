@@ -6,8 +6,9 @@ Covers:
 * Constructor validation: empty routes, duplicate names, invalid
   fallback, confidence range.
 * :func:`_parse_classification` regex behaviour: route + confidence,
-  missing confidence (defaults to 1.0), missing route (returns
-  empty + 0.0), confidence clamping.
+  missing confidence (returns ``None``; Router maps it to 1.0 with
+  no threshold, 0.0 when ``require_confidence_above`` is set),
+  missing route (returns empty + 0.0), confidence clamping.
 * Successful classification + dispatch (specialist's output becomes
   Router's output).
 * Confidence below threshold + fallback → fallback specialist runs.
@@ -137,14 +138,15 @@ def test_parse_classification_handles_equals_separator() -> None:
     assert conf == 0.7
 
 
-def test_parse_classification_missing_confidence_defaults_to_one() -> None:
-    """If the model doesn't emit confidence, treat it as fully
-    confident (the safer default — otherwise we'd reject everything
-    when ``require_confidence_above > 0``)."""
+def test_parse_classification_missing_confidence_returns_none() -> None:
+    """If the model doesn't emit confidence, the parser reports
+    ``None`` and the Router decides: 1.0 when no threshold is
+    configured (legacy), 0.0 when ``require_confidence_above > 0``
+    (so a confidence-less classification can't defeat the gate)."""
     text = "route: sales"
     route, conf = _parse_classification(text)
     assert route == "sales"
-    assert conf == 1.0
+    assert conf is None
 
 
 def test_parse_classification_missing_route_returns_empty() -> None:

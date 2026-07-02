@@ -75,7 +75,12 @@ from typing import TYPE_CHECKING
 from ..core.types import Event, Message, Role
 from ..loader.base import Chunk
 from .base import AgentSession, Architecture, Dependencies
-from .helpers import consume_usage, parse_score, text_only_model_call
+from .helpers import (
+    budget_gate,
+    consume_usage,
+    parse_score,
+    text_only_model_call,
+)
 from .react import ReAct
 
 if TYPE_CHECKING:
@@ -195,6 +200,20 @@ class Reflexion:
                 if attempt > 1:
                     prior_turns += session.turns
                 session.turns = 0
+                # Budget gate — one check per attempt, covering the
+                # base run AND the evaluator / reflector helper
+                # calls that follow. Mirrors SelfRefine (per round)
+                # and Plan-and-Execute (per step); pre-fix, an
+                # exhausted budget only stopped the base loop while
+                # Reflexion kept burning evaluator + reflector
+                # calls.
+                blocked, gate_events = await budget_gate(
+                    deps, session
+                )
+                for gate_event in gate_events:
+                    yield gate_event
+                if blocked:
+                    return
                 yield Event.architecture_event(
                     session.id,
                     "reflexion.attempt_started",
@@ -225,10 +244,18 @@ class Reflexion:
                             n_recalled=len(hits),
                         )
 
-                # Each attempt is a fresh seed: clear messages so the
-                # base re-runs seed_context, which will pick up lessons
-                # from memory.working() automatically.
-                session.messages = []
+                # Attempt 2+ is a fresh seed: clear messages so the
+                # base re-runs seed_context, which will pick up
+                # lessons from memory.working() automatically.
+                # Attempt 1 does NOT clear — on a brand-new session
+                # the list is empty anyway, and on a stop-hook
+                # re-invocation (Ralph loop) or a follow-up run on
+                # the same session, wiping here would destroy the
+                # conversation the re-entry depends on (the prior
+                # turns aren't persisted to memory yet, so the
+                # base's re-seed could not rebuild them).
+                if attempt > 1:
+                    session.messages = []
 
                 async for event in self._base.run(session, deps, prompt):
                     yield event

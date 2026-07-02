@@ -23,7 +23,6 @@ HNSW + numeric/tag indexes is a follow-up.
 from __future__ import annotations
 
 import json
-import math
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any
@@ -32,6 +31,7 @@ import anyio
 
 from ..core.protocols import Embedder
 from ..core.types import Fact, _normalize_predicate
+from ._embedding_util import cosine as _cosine
 from ._embedding_util import pack_float32, unpack_float32
 from ._user_key import decode_legacy_user_id, encode_user_id
 from .embedder import HashEmbedder
@@ -279,12 +279,33 @@ class RedisFactStore:
             cursor, keys = await self._client.scan(
                 cursor=cursor, match=match
             )
-            for key in keys:
-                data = await self._client.hgetall(key)
+            # Pipeline the per-key HGETALLs — one round-trip per SCAN
+            # page instead of one per key (mirrors
+            # ``RedisMemory._scan_all_episodes``). Falls back to
+            # sequential calls for clients (fakes) without pipeline
+            # support.
+            key_list = list(keys)
+            for key, data in zip(
+                key_list,
+                await self._hgetall_many(key_list),
+                strict=True,
+            ):
                 if data:
                     yield key, _normalize_keys(data)
             if cursor == 0:
                 break
+
+    async def _hgetall_many(self, keys: list[Any]) -> list[dict[Any, Any]]:
+        if not keys:
+            return []
+        pipeline_factory = getattr(self._client, "pipeline", None)
+        if pipeline_factory is None:
+            return [await self._client.hgetall(key) for key in keys]
+        async with pipeline_factory(transaction=False) as pipe:
+            for key in keys:
+                pipe.hgetall(key)
+            results = await pipe.execute()
+        return list(results)
 
 
 # ---------------------------------------------------------------------------
@@ -364,18 +385,3 @@ def _is_valid_at(fact: Fact, when_ts: float) -> bool:
     if fact.valid_until is None:
         return True
     return when_ts < fact.valid_until.timestamp()
-
-
-def _cosine(a: list[float], b: list[float]) -> float:
-    if not a or not b:
-        return 0.0
-    dot = 0.0
-    na = 0.0
-    nb = 0.0
-    for x, y in zip(a, b, strict=False):
-        dot += x * y
-        na += x * x
-        nb += y * y
-    if na <= 0.0 or nb <= 0.0:
-        return 0.0
-    return dot / (math.sqrt(na) * math.sqrt(nb))

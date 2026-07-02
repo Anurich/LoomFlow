@@ -16,6 +16,17 @@ internally over-fetch so enough candidates survive the filter.
 We also keep a parallel in-process vector list to support MMR
 diversity reranking (some FAISS index types can't reconstruct
 vectors from the index, so we cache them ourselves).
+
+Vectors are L2-normalised before indexing for BOTH metrics, so the
+cross-store cosine score contract holds: with ``"ip"`` the inner
+product of unit vectors IS cosine; with ``"l2"`` the squared L2
+distance ``d`` between unit vectors satisfies ``d = 2(1 - cos)``,
+so ``1 - d/2`` recovers cosine.
+
+Deletes are deferred: HNSW (the default index) can't remove rows,
+so deleted rows are masked out of search results and the index is
+compacted (rebuilt from the cached vectors, no re-embedding) only
+once deleted rows reach half the indexed total.
 """
 
 from __future__ import annotations
@@ -25,11 +36,11 @@ from typing import Any
 
 import anyio
 
-from ..core.ids import new_id
 from ..core.protocols import Embedder
 from ..loader.base import Chunk
 from ._filter import evaluate_filter
-from ._mmr import mmr_select
+from ._mmr import rerank_tail
+from ._util import embed_all, resolve_ids
 from .base import SearchResult, _chunks_from_texts
 
 
@@ -67,6 +78,10 @@ class FAISSVectorStore:
         self._chunks: list[Chunk] = []
         self._vectors: list[list[float]] = []  # parallel cache for MMR
         self._row_for_id: dict[str, int] = {}
+        # Deferred deletes: HNSW can't remove rows in place, so
+        # deleted row indices are masked at query time and the index
+        # is compacted lazily (see ``delete`` / ``_compact``).
+        self._deleted_rows: set[int] = set()
 
     @property
     def embedder(self) -> Embedder:
@@ -153,35 +168,22 @@ class FAISSVectorStore:
     ) -> list[str]:
         if not chunks:
             return []
-        if ids is not None and len(ids) != len(chunks):
-            raise ValueError(
-                f"ids length ({len(ids)}) must match chunks "
-                f"length ({len(chunks)})"
-            )
-        try:
-            vectors = await self._embedder.embed_batch(
-                [c.content for c in chunks]
-            )
-        except (AttributeError, NotImplementedError):
-            vectors = [
-                await self._embedder.embed(c.content) for c in chunks
-            ]
-
-        assigned = (
-            list(ids)
-            if ids is not None
-            else [new_id("vec") for _ in chunks]
+        assigned = resolve_ids(ids, len(chunks))
+        vectors = await embed_all(
+            self._embedder, [c.content for c in chunks]
         )
 
         import numpy as np  # type: ignore[import-not-found, import-untyped]
 
         arr = np.asarray(vectors, dtype="float32")
-        if self._metric == "ip":
-            self._faiss.normalize_L2(arr)
+        # Normalise for BOTH metrics — unit vectors are what makes
+        # the score formulas cosine (ip: dot == cos; l2 on unit
+        # vectors: d == 2(1 - cos)). See the module docstring.
+        self._faiss.normalize_L2(arr)
         self._ensure_index(arr.shape[1])
         await anyio.to_thread.run_sync(self._index.add, arr)
 
-        # Cache the (already-normalized for IP) vectors for MMR.
+        # Cache the (already-normalized) vectors for MMR + rebuilds.
         cached_vectors = arr.tolist()
         for i, (cid, chunk) in enumerate(
             zip(assigned, chunks, strict=True)
@@ -193,46 +195,60 @@ class FAISSVectorStore:
         return assigned
 
     async def delete(self, ids: list[str]) -> None:
+        """Deferred delete: mark rows dead (masked from every search /
+        ``get_by_ids`` / ``count`` immediately) and compact the index
+        only when dead rows reach half the indexed total.
+
+        Rationale: the default HNSW index can't remove vectors in
+        place (``remove_ids`` is unsupported for it, with or without
+        an ``IndexIDMap2`` wrapper), and the previous implementation
+        rebuilt the whole index on EVERY delete. Compaction rebuilds
+        from the cached vectors — no re-embedding.
+        """
         if not ids or self._index is None:
             return
-        kill = set(ids)
-        keep = [
-            (cid, chunk, vec)
-            for cid, chunk, vec in zip(
-                self._ids, self._chunks, self._vectors, strict=True
-            )
-            if cid not in kill
-        ]
+        for cid in ids:
+            row = self._row_for_id.pop(cid, None)
+            if row is not None:
+                self._deleted_rows.add(row)
 
-        if not keep:
+        if not self._row_for_id:
+            # Everything is gone — cheap full reset.
             self._ids = []
             self._chunks = []
             self._vectors = []
-            self._row_for_id = {}
+            self._deleted_rows = set()
             self._index.reset()
             return
 
-        # Reset and rebuild from the cached vectors (no re-embedding —
-        # important when the embedder is paid-API-backed).
-        self._index.reset()
-        self._ids = []
-        self._chunks = []
-        self._vectors = []
-        self._row_for_id = {}
+        if len(self._deleted_rows) * 2 >= len(self._ids):
+            await self._compact()
 
-        # Re-add via the FAISS index without going through the
-        # embedder (we already have vectors).
+    async def _compact(self) -> None:
+        """Rebuild the FAISS index from the cached (already
+        normalised) survivor vectors — no re-embedding, important
+        when the embedder is paid-API-backed."""
+        keep_rows = [
+            i
+            for i in range(len(self._ids))
+            if i not in self._deleted_rows
+        ]
+        ids = [self._ids[i] for i in keep_rows]
+        chunks = [self._chunks[i] for i in keep_rows]
+        vectors = [self._vectors[i] for i in keep_rows]
+
         import numpy as np
 
-        survivor_vecs = [vec for _, _, vec in keep]
-        arr = np.asarray(survivor_vecs, dtype="float32")
+        self._index.reset()
+        self._ids = ids
+        self._chunks = chunks
+        self._vectors = vectors
+        self._row_for_id = {cid: i for i, cid in enumerate(ids)}
+        self._deleted_rows = set()
+
+        arr = np.asarray(vectors, dtype="float32")
         self._ensure_index(arr.shape[1])
         await anyio.to_thread.run_sync(self._index.add, arr)
-        for cid, chunk, vec in keep:
-            self._row_for_id[cid] = len(self._ids)
-            self._ids.append(cid)
-            self._chunks.append(chunk)
-            self._vectors.append(vec)
 
     async def get_by_ids(self, ids: list[str]) -> list[Chunk]:
         if not ids:
@@ -264,19 +280,23 @@ class FAISSVectorStore:
         filter: Mapping[str, Any] | None = None,
         diversity: float | None = None,
     ) -> list[SearchResult]:
-        if self._index is None or not self._ids:
+        if self._index is None or not self._row_for_id:
             return []
 
         import numpy as np
 
-        # Over-fetch so post-filter + MMR have headroom.
+        # Over-fetch so post-filter + MMR have headroom; also fetch
+        # past any deferred-deleted rows still in the index.
         multiplier = 8 if filter else (4 if diversity else 1)
         n_fetch = max(k * multiplier, 20 if (filter or diversity) else k)
-        n_fetch = min(n_fetch, len(self._ids))
+        n_fetch = min(
+            n_fetch + len(self._deleted_rows), len(self._ids)
+        )
 
         q = np.asarray([vector], dtype="float32")
-        if self._metric == "ip":
-            self._faiss.normalize_L2(q)
+        # Queries are normalised for both metrics, matching the
+        # stored vectors (see ``add``) so scores are true cosine.
+        self._faiss.normalize_L2(q)
 
         distances, indices = await anyio.to_thread.run_sync(
             self._index.search, q, n_fetch
@@ -288,18 +308,18 @@ class FAISSVectorStore:
         for dist, idx in zip(distances[0], indices[0], strict=True):
             if idx < 0 or idx >= len(self._ids):
                 continue
+            if idx in self._deleted_rows:
+                continue
             chunk = self._chunks[idx]
             if not evaluate_filter(filter, chunk.metadata):
                 continue
-            # Normalise to the cross-store SCORE CONTRACT: cosine
-            # similarity, higher-is-better. Vectors are L2-normalised
-            # for the ``ip`` metric (see _embed_and_store / search_by_
-            # vector), so inner product IS cosine in [-1, 1] — return
-            # it directly. For ``l2`` on unit vectors, the squared L2
-            # distance d relates to cosine c by d = 2(1 - c), so
-            # c = 1 - d/2 recovers the same [-1, 1] cosine score
-            # instead of the old, differently-scaled ``1 - d``. Either
-            # metric now yields scores directly comparable with
+            # Cross-store SCORE CONTRACT: cosine similarity,
+            # higher-is-better, in [-1, 1]. Stored + query vectors
+            # are L2-normalised for BOTH metrics (see ``add``), so
+            # with ``ip`` the inner product IS cosine, and with
+            # ``l2`` the squared distance d between unit vectors
+            # satisfies d = 2(1 - c), i.e. c = 1 - d/2. Either
+            # metric yields scores directly comparable with
             # Chroma / Postgres / InMemory.
             score = (
                 float(dist)
@@ -315,13 +335,9 @@ class FAISSVectorStore:
             )
             cand_vecs.append(self._vectors[idx])
 
-        if diversity is None or diversity <= 0:
-            return candidates[:k]
-
-        chosen = mmr_select(
-            list(q[0]), cand_vecs, k, diversity=diversity
+        return rerank_tail(
+            list(q[0]), candidates, cand_vecs, k, diversity
         )
-        return [candidates[i] for i in chosen]
 
     async def count(self) -> int:
-        return len(self._ids)
+        return len(self._row_for_id)

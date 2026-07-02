@@ -195,6 +195,50 @@ class ActorCritic:
     def declared_workers(self) -> dict[str, Agent]:
         return {"actor": self._actor, "critic": self._critic}
 
+    async def _stream_guarded(
+        self,
+        session: AgentSession,
+        deps: Dependencies,
+        invocation: SubagentInvocation,
+        handle: Any,
+        role: str,
+        round_num: int,
+        rejection: list[str],
+    ) -> AsyncIterator[Event]:
+        """Stream ``invocation`` under the persistent-worker session
+        guard (cross-user check + lock + touch via the shared
+        :func:`acquire_worker_session`). On cross-user rejection the
+        error is appended to ``rejection``, the session is marked
+        interrupted, and the rejection event is emitted — callers
+        check ``rejection`` and stop."""
+        if handle is None:
+            async for ev in invocation.events():
+                yield ev
+            return
+        from ..agent.worker_registry import (
+            CrossUserWorkerError,
+            acquire_worker_session,
+        )
+        try:
+            async with acquire_worker_session(
+                handle, deps.context.user_id
+            ):
+                async for ev in invocation.events():
+                    yield ev
+        except CrossUserWorkerError as exc:
+            rejection.append(str(exc))
+            session.interrupted = True
+            session.interruption_reason = (
+                f"{role}:round_{round_num}:cross_user_worker"
+            )
+            yield Event.architecture_event(
+                session.id,
+                "actor_critic.cross_user_rejected",
+                round=round_num,
+                agent=role,
+                error=str(exc),
+            )
+
     async def run(
         self,
         session: AgentSession,
@@ -227,16 +271,20 @@ class ActorCritic:
             registry=self._worker_registry,
             role_to_id=self._role_to_worker_id,
         )
-        if actor_handle_0 is not None:
-            actor_handle_0.touch(user_id=deps.context.user_id)
         actor_inv = SubagentInvocation(
             self._actor,
             prompt,
             session_id=actor_sid_0,
             rollup_into=session,
         )
-        async for ev in actor_inv.events():
+        rejection: list[str] = []
+        async for ev in self._stream_guarded(
+            session, deps, actor_inv, actor_handle_0,
+            "actor", 0, rejection,
+        ):
             yield ev
+        if rejection:
+            return
         actor_result = actor_inv.result
         current_output = str(actor_result.get("output", ""))
         session.output = current_output
@@ -281,16 +329,20 @@ class ActorCritic:
                 registry=self._worker_registry,
                 role_to_id=self._role_to_worker_id,
             )
-            if critic_handle is not None:
-                critic_handle.touch(user_id=deps.context.user_id)
             critic_inv = SubagentInvocation(
                 self._critic,
                 critique_prompt,
                 session_id=critic_sid,
                 rollup_into=session,
             )
-            async for ev in critic_inv.events():
+            rejection = []
+            async for ev in self._stream_guarded(
+                session, deps, critic_inv, critic_handle,
+                "critic", round_num, rejection,
+            ):
                 yield ev
+            if rejection:
+                return
             critic_result = critic_inv.result
             session.turns += int(critic_result.get("turns", 0) or 0)
 
@@ -356,16 +408,20 @@ class ActorCritic:
                 registry=self._worker_registry,
                 role_to_id=self._role_to_worker_id,
             )
-            if refine_handle is not None:
-                refine_handle.touch(user_id=deps.context.user_id)
             refine_inv = SubagentInvocation(
                 self._actor,
                 refine_prompt,
                 session_id=refine_sid,
                 rollup_into=session,
             )
-            async for ev in refine_inv.events():
+            rejection = []
+            async for ev in self._stream_guarded(
+                session, deps, refine_inv, refine_handle,
+                "actor", round_num, rejection,
+            ):
                 yield ev
+            if rejection:
+                return
             refine_result = refine_inv.result
             session.turns += int(refine_result.get("turns", 0) or 0)
 

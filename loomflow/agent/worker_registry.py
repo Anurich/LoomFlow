@@ -43,6 +43,8 @@ stale state).
 from __future__ import annotations
 
 import re
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -53,6 +55,20 @@ from ..core.ids import new_id
 
 if TYPE_CHECKING:
     from .api import Agent
+
+
+class CrossUserWorkerError(RuntimeError):
+    """A persistent worker pinned to one ``user_id`` was invoked by
+    a run belonging to a different ``user_id``.
+
+    Raised by :func:`acquire_worker_session` BEFORE the worker's
+    lock is taken or its session touched — cross-tenant reuse of a
+    worker's stable session (and therefore its memory partition)
+    must never happen. Callers surface the message to the model /
+    caller instead of crashing the run (Supervisor returns it as a
+    tool-result error string; other architectures emit an
+    architecture event and degrade per call site).
+    """
 
 
 # Mirror :func:`Supervisor.add_worker` identifier-safety check at
@@ -128,6 +144,46 @@ class _WorkerHandle:
         if self.user_id is None:
             self.user_id = user_id
         self.last_used_at = datetime.now(UTC)
+
+
+@asynccontextmanager
+async def acquire_worker_session(
+    handle: _WorkerHandle, caller_user: str | None
+) -> AsyncIterator[_WorkerHandle]:
+    """Cross-user check → lock → touch, in ONE place.
+
+    Every architecture that invokes a persistent worker MUST enter
+    the worker's session through this helper (Supervisor previously
+    inlined this dance; Swarm / Router / Blackboard / Debate touched
+    with no check and no lock — the cross-tenant reuse bug).
+
+    Semantics:
+
+    * **Mismatch check** — when the handle is already pinned to a
+      user and the current run belongs to a DIFFERENT user, raise
+      :class:`CrossUserWorkerError` before taking the lock. A
+      ``None`` on either side is not a mismatch (anonymous runs and
+      first-touch pinning keep working).
+    * **Lock** — held for the duration of the ``async with`` body so
+      concurrent invocations of the same worker serialise instead of
+      interleaving writes into the worker's session.
+    * **Touch** — pins ``user_id`` on first touch and ticks
+      ``last_used_at``, under the lock.
+    """
+    if (
+        handle.user_id is not None
+        and caller_user is not None
+        and handle.user_id != caller_user
+    ):
+        raise CrossUserWorkerError(
+            f"worker {handle.role!r} ({handle.worker_id}) belongs "
+            f"to user_id {handle.user_id!r} but the current run is "
+            f"user_id {caller_user!r}. Cross-tenant delegation is "
+            "rejected."
+        )
+    async with handle.lock:
+        handle.touch(user_id=caller_user)
+        yield handle
 
 
 def resolve_persistent_session(

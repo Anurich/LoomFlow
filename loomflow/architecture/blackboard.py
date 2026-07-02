@@ -64,7 +64,13 @@ from typing import TYPE_CHECKING, Any
 from ..core.context import inherit_ambient_memory
 from ..core.types import Event
 from .base import AgentSession, Dependencies
-from .helpers import SubagentInvocation, budget_gate, parse_fenced_json
+from .helpers import (
+    SubagentInvocation,
+    budget_gate,
+    consume_worker_usage,
+    parse_fenced_json,
+    usage_from_result_dict,
+)
 
 if TYPE_CHECKING:
     from ..agent.api import Agent
@@ -327,7 +333,11 @@ class BlackboardArchitecture:
                 round=round_num,
                 agent=decision.next_agent,
             )
-            from ..agent.worker_registry import resolve_persistent_session
+            from ..agent.worker_registry import (
+                CrossUserWorkerError,
+                acquire_worker_session,
+                resolve_persistent_session,
+            )
             sub_session_id, handle = resolve_persistent_session(
                 decision.next_agent,
                 fallback=(
@@ -337,18 +347,48 @@ class BlackboardArchitecture:
                 registry=self._worker_registry,
                 role_to_id=self._role_to_worker_id,
             )
-            if handle is not None:
-                handle.touch(user_id=deps.context.user_id)
             invocation = SubagentInvocation(
                 picked,
                 agent_prompt,
                 session_id=sub_session_id,
                 rollup_into=session,
             )
-            async for ev in invocation.events():
-                yield ev
+            if handle is not None:
+                # Cross-user check + lock + touch, held for the
+                # contribution so concurrent invocations of the
+                # same persistent worker serialise.
+                try:
+                    async with acquire_worker_session(
+                        handle, deps.context.user_id
+                    ):
+                        async for ev in invocation.events():
+                            yield ev
+                except CrossUserWorkerError as exc:
+                    bb.post(
+                        "system",
+                        f"Contributor {decision.next_agent!r} "
+                        f"rejected: {exc}",
+                        kind="error",
+                    )
+                    yield Event.architecture_event(
+                        session.id,
+                        "blackboard.cross_user_rejected",
+                        round=round_num,
+                        agent=decision.next_agent,
+                        error=str(exc),
+                    )
+                    continue
+            else:
+                async for ev in invocation.events():
+                    yield ev
             picked_result = invocation.result
             session.turns += int(picked_result.get("turns", 0) or 0)
+            # Charge the contributor's spend against the parent
+            # budget (cumulative_usage was already rolled up by
+            # ``rollup_into=session``).
+            await consume_worker_usage(
+                deps, picked, usage_from_result_dict(picked_result)
+            )
             output = str(picked_result.get("output", ""))
             bb.post(
                 decision.next_agent,
@@ -413,25 +453,61 @@ class BlackboardArchitecture:
         ) + (
             f"\n\nBlackboard state:\n{bb.render_for('__coordinator')}"
         )
-        from ..agent.worker_registry import resolve_persistent_session
+        from ..agent.worker_registry import (
+            CrossUserWorkerError,
+            acquire_worker_session,
+            resolve_persistent_session,
+        )
         sub_session_id, coord_handle = resolve_persistent_session(
             "__coordinator",
             fallback=f"{session.id}__bb_coord_round_{round_num}",
             registry=self._worker_registry,
             role_to_id=self._role_to_worker_id,
         )
-        if coord_handle is not None:
-            coord_handle.touch(user_id=deps.context.user_id)
         invocation = SubagentInvocation(
             self._coordinator,
             coord_prompt,
             session_id=sub_session_id,
             rollup_into=session,
         )
-        async for ev in invocation.events():
-            yield ev
+        if coord_handle is not None:
+            try:
+                async with acquire_worker_session(
+                    coord_handle, deps.context.user_id
+                ):
+                    async for ev in invocation.events():
+                        yield ev
+            except CrossUserWorkerError as exc:
+                # A cross-tenant coordinator can't be consulted —
+                # terminate the round loop gracefully; the decider
+                # (or fallback selection) still synthesizes from
+                # whatever is on the board.
+                yield Event.architecture_event(
+                    session.id,
+                    "blackboard.cross_user_rejected",
+                    round=round_num,
+                    agent="__coordinator",
+                    error=str(exc),
+                )
+                decision_holder.append(
+                    _CoordinatorDecision(
+                        terminate=True,
+                        next_agent=None,
+                        instruction=None,
+                        raw=f"(cross-user rejected: {exc})",
+                    )
+                )
+                return
+        else:
+            async for ev in invocation.events():
+                yield ev
         coord_result = invocation.result
         session.turns += int(coord_result.get("turns", 0) or 0)
+        await consume_worker_usage(
+            deps,
+            self._coordinator,
+            usage_from_result_dict(coord_result),
+        )
         decision_holder.append(
             _parse_coordinator_decision(
                 str(coord_result.get("output", ""))
@@ -448,42 +524,72 @@ class BlackboardArchitecture:
         """Run the decider (LLM Agent or fallback) and stream its
         events; write the final answer into ``final_holder[0]``."""
         if self._decider is None:
-            # Last "answer"-kind entry wins; fall through to last
-            # public entry; finally the empty string.
-            for entry in reversed(bb.public):
-                if entry.kind == "answer":
-                    final_holder.append(entry.content)
-                    return
-            for entry in reversed(bb.public):
-                if entry.kind == "contribution":
-                    final_holder.append(entry.content)
-                    return
-            final_holder.append("")
+            final_holder.append(_fallback_final(bb))
             return
 
         decide_prompt = self._decider_instructions + (
             f"\n\nFull blackboard state:\n{bb.render_for('__decider')}"
         )
-        from ..agent.worker_registry import resolve_persistent_session
+        from ..agent.worker_registry import (
+            CrossUserWorkerError,
+            acquire_worker_session,
+            resolve_persistent_session,
+        )
         sub_session_id, dec_handle = resolve_persistent_session(
             "__decider",
             fallback=f"{session.id}__bb_decider",
             registry=self._worker_registry,
             role_to_id=self._role_to_worker_id,
         )
-        if dec_handle is not None:
-            dec_handle.touch(user_id=deps.context.user_id)
         invocation = SubagentInvocation(
             self._decider,
             decide_prompt,
             session_id=sub_session_id,
             rollup_into=session,
         )
-        async for ev in invocation.events():
-            yield ev
+        if dec_handle is not None:
+            try:
+                async with acquire_worker_session(
+                    dec_handle, deps.context.user_id
+                ):
+                    async for ev in invocation.events():
+                        yield ev
+            except CrossUserWorkerError as exc:
+                # Cross-tenant decider can't synthesize — degrade
+                # to the no-decider fallback selection.
+                yield Event.architecture_event(
+                    session.id,
+                    "blackboard.cross_user_rejected",
+                    agent="__decider",
+                    error=str(exc),
+                )
+                final_holder.append(_fallback_final(bb))
+                return
+        else:
+            async for ev in invocation.events():
+                yield ev
         decider_result = invocation.result
         session.turns += int(decider_result.get("turns", 0) or 0)
+        await consume_worker_usage(
+            deps,
+            self._decider,
+            usage_from_result_dict(decider_result),
+        )
         final_holder.append(str(decider_result.get("output", "")))
+
+
+def _fallback_final(bb: Blackboard) -> str:
+    """No-decider final answer: last ``answer``-kind entry wins;
+    fall through to the last ``contribution``; finally the empty
+    string. Also used when the configured decider is unavailable
+    (cross-user rejection)."""
+    for entry in reversed(bb.public):
+        if entry.kind == "answer":
+            return entry.content
+    for entry in reversed(bb.public):
+        if entry.kind == "contribution":
+            return entry.content
+    return ""
 
 
 def _parse_coordinator_decision(text: str) -> _CoordinatorDecision:

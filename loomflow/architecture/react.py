@@ -419,9 +419,13 @@ class ReAct:
                     # strong-mode verification. Skip plan_write
                     # itself — letting the model verify a step by
                     # the same plan call that marked it done
-                    # defeats the whole point. ``record_tool_call``
-                    # is a no-op when living_plan isn't enabled.
-                    if c.tool != "plan_write":
+                    # defeats the whole point. Only SUCCESSFUL
+                    # calls count: a denied or errored tool call
+                    # is not evidence that work happened, so it
+                    # must not be usable as ``verified_by`` for a
+                    # DONE transition. ``record_tool_call`` is a
+                    # no-op when living_plan isn't enabled.
+                    if c.tool != "plan_write" and final.ok:
                         from ..tools.plan import record_tool_call
                         record_tool_call(str(final.call_id))
 

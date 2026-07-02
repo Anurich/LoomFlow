@@ -26,7 +26,7 @@ from ..core.types import (
     Message,
     Role,
 )
-from ._hybrid import _BM25, hybrid_rank
+from ._hybrid import hybrid_rank_episodes
 from .consolidator import Consolidator
 from .facts import FactStore, InMemoryFactStore, count_facts, delete_facts
 
@@ -191,38 +191,20 @@ class InMemoryMemory:
                 EpisodeMatch(episode=e, score=1.0) for e in sorted_recent
             ]
 
-        # Build a BM25 index over the candidate pool only — no
-        # cross-user contamination because filtering already
-        # happened in ``_candidate_episodes``.
-        texts = [f"{e.input}\n{e.output}" for e in candidates]
-        bm25 = _BM25(texts)
-        bm25_ranking = bm25.rank(query)
-
-        # No vector arm in this backend; pass an empty ranking and
-        # rely on hybrid_rank to fall through to BM25-only.
-        fused = hybrid_rank(
-            bm25_ranking=bm25_ranking,
-            vector_ranking=[],
+        # No vector arm in this backend (no embedder) —
+        # ``query_embedding=None`` makes the shared helper rank by
+        # BM25 only, over the candidate pool only (no cross-user
+        # contamination: filtering already happened in
+        # ``_candidate_episodes``). A zero-hit query falls back to
+        # recency inside the helper so the caller always gets
+        # *something* useful.
+        return hybrid_rank_episodes(
+            candidates,
+            query=query,
+            query_embedding=None,
             alpha=alpha,
+            limit=limit,
         )
-        if not fused:
-            # No BM25 hits either — fall back to recency so the
-            # caller always gets *something* useful.
-            sorted_recent = sorted(
-                candidates, key=lambda e: e.occurred_at, reverse=True
-            )[:limit]
-            return [
-                EpisodeMatch(episode=e, score=0.0) for e in sorted_recent
-            ]
-        return [
-            EpisodeMatch(
-                episode=candidates[idx],
-                score=score,
-                bm25_score=bm25_score,
-                vector_score=vector_score,
-            )
-            for idx, score, bm25_score, vector_score in fused[:limit]
-        ]
 
     async def _candidate_episodes(
         self,

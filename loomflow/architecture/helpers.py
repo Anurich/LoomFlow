@@ -245,6 +245,77 @@ async def consume_usage(
         session.turns += 1
 
 
+def usage_from_result_dict(result: Mapping[str, Any]) -> Usage:
+    """Convert a ``RunResult``-shaped dict (``SubagentInvocation
+    .result``) into a :class:`Usage`.
+
+    Mind the field-name swap: RunResult dicts use ``tokens_in`` /
+    ``tokens_out`` / ``cached_tokens_in`` while ``Usage`` uses
+    ``input_tokens`` / ``output_tokens`` / ``cached_input_tokens``
+    — the rest line up.
+    """
+    return Usage(
+        input_tokens=int(result.get("tokens_in", 0) or 0),
+        cached_input_tokens=int(
+            result.get("cached_tokens_in", 0) or 0
+        ),
+        cache_write_tokens=int(
+            result.get("cache_write_tokens", 0) or 0
+        ),
+        output_tokens=int(result.get("tokens_out", 0) or 0),
+        cost_usd=float(result.get("cost_usd", 0) or 0),
+    )
+
+
+async def consume_worker_usage(
+    deps: Dependencies,
+    worker: Any,
+    usage: Usage,
+) -> None:
+    """Charge a completed sub-agent's spend against the PARENT budget.
+
+    Budget-only counterpart of :func:`consume_usage`. Multi-agent
+    architectures roll a worker's usage into
+    ``session.cumulative_usage`` via ``SubagentInvocation(
+    rollup_into=session)`` (or an inline ``add_usage``), so calling
+    :func:`consume_usage` here would double-count the session
+    totals — this helper touches ONLY ``deps.budget``.
+
+    Skipped when:
+
+    * ``deps.fast_budget`` — parent budget is ``NoBudget``.
+    * the worker :class:`Agent` shares the parent's budget INSTANCE
+      — the worker's own run already consumed against it, and
+      charging again here would double-bill.
+    * the usage is all-zero (nothing to charge).
+    """
+    if deps.fast_budget:
+        return
+    if getattr(worker, "budget", None) is deps.budget:
+        return
+    if not (
+        usage.input_tokens
+        or usage.cached_input_tokens
+        or usage.output_tokens
+        or usage.cost_usd
+    ):
+        return
+    try:
+        await deps.budget.consume(
+            tokens_in=usage.input_tokens,
+            tokens_out=usage.output_tokens,
+            cost_usd=usage.cost_usd,
+            user_id=deps.context.user_id,
+        )
+    except TypeError:
+        # Legacy budget impls without the user_id kwarg.
+        await deps.budget.consume(
+            tokens_in=usage.input_tokens,
+            tokens_out=usage.output_tokens,
+            cost_usd=usage.cost_usd,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Fenced-JSON parsing — shared by every architecture that asks the
 # model for structured JSON and needs to tolerate markdown fences.
@@ -448,8 +519,28 @@ async def run_single_tool(
                                 update={"destructive": True}
                             )
                             break
-                except Exception:  # noqa: BLE001 — best-effort; don't crash on host issues
-                    pass
+                except Exception as exc:  # noqa: BLE001 — host may be flaky; never crash here
+                    # FAIL CLOSED. If we can't fetch the tool defs we
+                    # don't know whether this tool is destructive —
+                    # letting the call proceed as destructive=False
+                    # would silently skip the ask/approval gate for a
+                    # possibly-destructive tool. Stamping True routes
+                    # it through the approval handler; the worst case
+                    # of the wrong polarity is an unnecessary
+                    # approval prompt, not an ungated destructive
+                    # call.
+                    logging.getLogger(
+                        "loomflow.architecture.helpers"
+                    ).warning(
+                        "list_tools() failed while stamping the "
+                        "destructive flag for tool=%s; failing "
+                        "closed (treating call as destructive): %s",
+                        call.tool,
+                        exc,
+                    )
+                    call = call.model_copy(
+                        update={"destructive": True}
+                    )
         if deps.fast_hooks:
             hook_decision: PermissionDecision = PermissionDecision.allow_()
         else:
@@ -646,7 +737,13 @@ def add_usage(a: Usage, b: Usage) -> Usage:
 _SCORE_LINE_RE = re.compile(
     r"score\s*[:=]\s*([0-9]*\.?[0-9]+)", re.IGNORECASE
 )
-_FALLBACK_NUMBER_RE = re.compile(r"\b(0\.\d+|1\.0+|0|1)\b")
+# Prose fallback: DECIMAL forms only (``0.85``, ``1.0``). Bare
+# integers are deliberately excluded — "0 errors found" or "1 issue
+# remains" must not parse as a score of 0.0 / 1.0.
+_FALLBACK_DECIMAL_RE = re.compile(r"\b(0?\.\d+|1\.0+)\b")
+# Whole-line fallback: a line that is NOTHING but a plausible 0-1
+# number ("0", "1", "0.7") is unambiguous even for bare integers.
+_WHOLE_LINE_NUMBER_RE = re.compile(r"[01](?:\.\d+)?")
 
 
 class SubagentInvocation:
@@ -769,23 +866,10 @@ class SubagentInvocation:
                 self.result.update(result)
                 # Roll worker usage into the parent session so the
                 # parent's RunResult.cost_usd / tokens reflect work
-                # the sub-agent did. Mind the field-name swap:
-                # RunResult dict uses ``tokens_in`` / ``tokens_out``
-                # / ``cached_tokens_in`` while ``Usage`` uses
-                # ``input_tokens`` / ``output_tokens`` /
-                # ``cached_input_tokens`` — the rest line up.
+                # the sub-agent did (field-name swap handled by
+                # ``usage_from_result_dict``).
                 if self._rollup_into is not None:
-                    sub_usage = Usage(
-                        input_tokens=int(result.get("tokens_in", 0) or 0),
-                        cached_input_tokens=int(
-                            result.get("cached_tokens_in", 0) or 0
-                        ),
-                        cache_write_tokens=int(
-                            result.get("cache_write_tokens", 0) or 0
-                        ),
-                        output_tokens=int(result.get("tokens_out", 0) or 0),
-                        cost_usd=float(result.get("cost_usd", 0) or 0),
-                    )
+                    sub_usage = usage_from_result_dict(result)
                     self._rollup_into.cumulative_usage = add_usage(
                         self._rollup_into.cumulative_usage, sub_usage
                     )
@@ -817,22 +901,39 @@ class SubagentInvocation:
 def parse_score(text: str) -> float:
     """Extract a 0-1 score from free-form evaluator output.
 
-    Prefers the ``score: X`` (or ``score=X``) pattern; falls back to
-    any plausible number in the text. Clamps to ``[0.0, 1.0]``.
-    Returns 0.0 on parse failure (treated as a failed evaluation —
-    let the caller decide what that means).
+    Parsing order:
+
+    1. The ``score: X`` (or ``score=X``) pattern anywhere in the
+       text — the documented evaluator format.
+    2. A line that consists of NOTHING but a 0-1 number (``"0.7"``,
+       ``"1"``) — unambiguous even for bare integers.
+    3. A decimal-form number in prose (``"scored 0.6 overall"``).
+       Bare integers in prose are deliberately NOT matched — a
+       critique like ``"0 errors found"`` or ``"1 issue remains"``
+       is not a score and previously parsed as 0.0 / 1.0.
+
+    Clamps to ``[0.0, 1.0]``. Returns 0.0 on parse failure (treated
+    as a failed evaluation — let the caller decide what that means).
 
     Used by :class:`~loomflow.architecture.Reflexion` (attempt
     score) and :class:`~loomflow.architecture.TreeOfThoughts`
     (per-thought evaluation).
     """
     match = _SCORE_LINE_RE.search(text)
-    if match is None:
-        match = _FALLBACK_NUMBER_RE.search(text)
-    if match is None:
+    if match is not None:
+        try:
+            value = float(match.group(1))
+        except ValueError:
+            return 0.0
+        return max(0.0, min(1.0, value))
+    for line in text.strip().splitlines():
+        if _WHOLE_LINE_NUMBER_RE.fullmatch(line.strip()):
+            return max(0.0, min(1.0, float(line.strip())))
+    fallback = _FALLBACK_DECIMAL_RE.search(text)
+    if fallback is None:
         return 0.0
     try:
-        value = float(match.group(1))
+        value = float(fallback.group(1))
     except ValueError:
         return 0.0
     return max(0.0, min(1.0, value))

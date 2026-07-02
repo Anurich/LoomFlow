@@ -14,19 +14,24 @@ cross-author ``mark_answered`` carve-out.
 
 from __future__ import annotations
 
-import math
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import anyio
 
+from ._common import apply_relevance_boost as _apply_relevance_boost
+from ._common import cosine_similarity as _cosine
+from ._common import drain_citations as _drain_citations
 from ._common import (
     extract_lede,
     render_workspace_index,
     slugify_title,
     summary_from_note,
 )
+from ._common import log_citation as _log_citation
+from ._common import rrf_fuse as _rrf_fuse
 from ._common import score_bm25 as _score_bm25
+from ._common import score_semantic as _score_semantic
 from .disk import _should_prune
 from .types import (
     Note,
@@ -40,29 +45,6 @@ from .types import (
 
 if TYPE_CHECKING:
     from ..core.protocols import Embedder
-
-
-def _log_citation(slug: str) -> None:
-    """Add ``slug`` to the per-run citation set if one is active."""
-    from ..core.context import _ambient_citations_var
-    citations = _ambient_citations_var.get()
-    if citations is None:
-        return
-    try:
-        citations.add(slug)
-    except Exception:  # noqa: BLE001
-        pass
-
-
-def _drain_citations() -> set[str]:
-    """Snapshot + clear the per-run citation set."""
-    from ..core.context import _ambient_citations_var
-    citations = _ambient_citations_var.get()
-    if citations is None:
-        return set()
-    snapshot = set(citations)
-    citations.clear()
-    return snapshot
 
 
 class InMemoryWorkspace:
@@ -490,118 +472,7 @@ class InMemoryWorkspace:
             pass
 
 
-# ---------------------------------------------------------------------------
-# Scoring helpers. BM25 scoring is shared with the disk backend via
-# ``_common.score_bm25`` so the two backends can't drift — tests in
-# tests/test_workspace.py exercise both through the same harness.
-# The semantic + RRF helpers stay local (they operate on this
-# backend's in-memory embedding cache).
-# ---------------------------------------------------------------------------
-
-
-def _score_semantic(
-    sem_scores: dict[str, float],
-    notes: list[Note],
-    limit: int,
-) -> list[NoteMatch]:
-    by_slug = {n.slug: n for n in notes}
-    ranked = sorted(
-        by_slug.values(),
-        key=lambda n: (sem_scores.get(n.slug, 0.0), n.updated_at),
-        reverse=True,
-    )
-    out: list[NoteMatch] = []
-    for note in ranked[:limit]:
-        score = sem_scores.get(note.slug, 0.0)
-        if score <= 0.0:
-            continue
-        out.append(
-            NoteMatch(
-                summary=summary_from_note(note),
-                score=score,
-                snippet=extract_lede(note.body),
-            )
-        )
-    return out
-
-
-def _rrf_fuse(
-    bm25: list[NoteMatch],
-    sem_scores: dict[str, float],
-    notes: list[Note],
-    limit: int,
-    k: int = 60,
-) -> list[NoteMatch]:
-    rank_bm = {m.summary.slug: i for i, m in enumerate(bm25)}
-    sem_ranked = sorted(
-        sem_scores.keys(), key=lambda s: sem_scores[s], reverse=True
-    )
-    rank_sem = {slug: i for i, slug in enumerate(sem_ranked)}
-    fused: dict[str, float] = {}
-    for slug in set(rank_bm) | set(rank_sem):
-        score = 0.0
-        if slug in rank_bm:
-            score += 1.0 / (k + rank_bm[slug])
-        if slug in rank_sem:
-            score += 1.0 / (k + rank_sem[slug])
-        fused[slug] = score
-    by_slug = {n.slug: n for n in notes}
-    bm_by_slug = {m.summary.slug: m for m in bm25}
-    ranked_slugs = sorted(
-        fused.keys(), key=lambda s: fused[s], reverse=True
-    )
-    out: list[NoteMatch] = []
-    for slug in ranked_slugs[:limit]:
-        note = by_slug.get(slug)
-        if note is None:
-            continue
-        bm_match = bm_by_slug.get(slug)
-        snippet = bm_match.snippet if bm_match else extract_lede(note.body)
-        out.append(
-            NoteMatch(
-                summary=summary_from_note(note),
-                score=fused[slug],
-                snippet=snippet,
-            )
-        )
-    return out
-
-
-def _cosine(a: list[float], b: list[float]) -> float:
-    if not a or not b or len(a) != len(b):
-        return 0.0
-    dot = sum(x * y for x, y in zip(a, b, strict=True))
-    na = math.sqrt(sum(x * x for x in a))
-    nb = math.sqrt(sum(x * x for x in b))
-    if na == 0.0 or nb == 0.0:
-        return 0.0
-    return dot / (na * nb)
-
-
-def _apply_relevance_boost(
-    results: list[NoteMatch],
-    candidates: list[Note],
-    limit: int,
-) -> list[NoteMatch]:
-    """See ``loomflow.workspace.disk._apply_relevance_boost``."""
-    note_by_slug = {n.slug: n for n in candidates}
-    boosted: list[NoteMatch] = []
-    for m in results:
-        n = note_by_slug.get(m.summary.slug)
-        if n is None:
-            boosted.append(m)
-            continue
-        boost = (
-            1.0
-            + math.log(1 + n.cited_count)
-            + 2.0 * math.log(1 + n.success_count)
-        )
-        boosted.append(
-            NoteMatch(
-                summary=m.summary,
-                score=m.score * boost,
-                snippet=m.snippet,
-            )
-        )
-    boosted.sort(key=lambda m: m.score, reverse=True)
-    return boosted[:limit]
+# Scoring helpers (BM25 / semantic cosine / RRF fusion / relevance
+# boost) and the citation-logging helpers live in ``_common`` and are
+# shared with the disk backend so the two can't drift — see the
+# aliased imports at the top of this module.

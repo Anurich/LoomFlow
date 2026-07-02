@@ -1788,10 +1788,8 @@ class Agent:
                 Event.architecture_event(
                     session.id,
                     "auto_compact.failed",
-                    payload={
-                        "stage": "count_tokens",
-                        "error": f"{type(exc).__name__}: {exc}",
-                    },
+                    stage="count_tokens",
+                    error=f"{type(exc).__name__}: {exc}",
                 )
             )
             return
@@ -1813,13 +1811,11 @@ class Agent:
             Event.architecture_event(
                 session.id,
                 "auto_compacted",
-                payload={
-                    "tokens_before": current,
-                    "messages_before": messages_before,
-                    "messages_after": len(session.messages),
-                    "messages_dropped": dropped,
-                    "summary_chars": len(summary),
-                },
+                tokens_before=current,
+                messages_before=messages_before,
+                messages_after=len(session.messages),
+                messages_dropped=dropped,
+                summary_chars=len(summary),
             )
         )
 
@@ -2262,11 +2258,9 @@ class Agent:
                         Event.architecture_event(
                             session_id,
                             "stop_hook.fired",
-                            payload={
-                                "hook": fired_hook_name,
-                                "iteration": iter_count,
-                                "reason": hook_result.reason,
-                            },
+                            hook=fired_hook_name,
+                            iteration=iter_count,
+                            reason=hook_result.reason,
                         )
                     )
 
@@ -2291,10 +2285,8 @@ class Agent:
                         Event.architecture_event(
                             session_id,
                             "stop_hook.exhausted",
-                            payload={
-                                "iterations": iter_count,
-                                "limit": self._max_stop_hook_iterations,
-                            },
+                            iterations=iter_count,
+                            limit=self._max_stop_hook_iterations,
                         )
                     )
 

@@ -1,10 +1,12 @@
 """Helpers shared between :class:`LocalDiskWorkspace` and
 :class:`InMemoryWorkspace`: slugification, frontmatter parsing /
-rendering, and the canonical index renderer.
+rendering, search scoring (BM25 / semantic / RRF / relevance
+boost), citation logging, and the canonical index renderer.
 """
 
 from __future__ import annotations
 
+import math
 import re
 from datetime import datetime
 from typing import Any
@@ -136,6 +138,170 @@ def score_bm25(q: str, notes: list[Note], limit: int) -> list[NoteMatch]:
             )
         )
     return out
+
+
+def score_semantic(
+    sem_scores: dict[str, float],
+    notes: list[Note],
+    limit: int,
+) -> list[NoteMatch]:
+    """Pure cosine ranking. Notes without embeddings score zero
+    and drop to the tail; ties broken by ``updated_at``."""
+    by_slug = {n.slug: n for n in notes}
+    ranked = sorted(
+        by_slug.values(),
+        key=lambda n: (sem_scores.get(n.slug, 0.0), n.updated_at),
+        reverse=True,
+    )
+    out: list[NoteMatch] = []
+    for note in ranked[:limit]:
+        score = sem_scores.get(note.slug, 0.0)
+        if score <= 0.0:
+            continue
+        out.append(
+            NoteMatch(
+                summary=summary_from_note(note),
+                score=score,
+                snippet=extract_lede(note.body),
+            )
+        )
+    return out
+
+
+def rrf_fuse(
+    bm25: list[NoteMatch],
+    sem_scores: dict[str, float],
+    notes: list[Note],
+    limit: int,
+    k: int = 60,
+) -> list[NoteMatch]:
+    """Reciprocal rank fusion: combines BM25 ranking and semantic
+    ranking by summing ``1/(k + rank)`` across both. Robust to
+    score-scale differences between the two methods. ``k=60`` is
+    the canonical RRF constant from the original Cormack et al.
+    paper; any value in the 30-100 range works.
+    """
+    rank_bm = {m.summary.slug: i for i, m in enumerate(bm25)}
+    sem_ranked = sorted(
+        sem_scores.keys(),
+        key=lambda s: sem_scores[s],
+        reverse=True,
+    )
+    rank_sem = {slug: i for i, slug in enumerate(sem_ranked)}
+    fused: dict[str, float] = {}
+    for slug in set(rank_bm) | set(rank_sem):
+        score = 0.0
+        if slug in rank_bm:
+            score += 1.0 / (k + rank_bm[slug])
+        if slug in rank_sem:
+            score += 1.0 / (k + rank_sem[slug])
+        fused[slug] = score
+    by_slug = {n.slug: n for n in notes}
+    bm_by_slug = {m.summary.slug: m for m in bm25}
+    ranked_slugs = sorted(
+        fused.keys(), key=lambda s: fused[s], reverse=True
+    )
+    out: list[NoteMatch] = []
+    for slug in ranked_slugs[:limit]:
+        note = by_slug.get(slug)
+        if note is None:
+            continue
+        # Prefer the BM25 snippet when available (more informative
+        # than the lede); otherwise fall back.
+        bm_match = bm_by_slug.get(slug)
+        snippet = bm_match.snippet if bm_match else extract_lede(note.body)
+        out.append(
+            NoteMatch(
+                summary=summary_from_note(note),
+                score=fused[slug],
+                snippet=snippet,
+            )
+        )
+    return out
+
+
+def cosine_similarity(a: list[float], b: list[float]) -> float:
+    """Cosine similarity. Returns 0 on degenerate inputs."""
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b, strict=True))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(x * x for x in b))
+    if na == 0.0 or nb == 0.0:
+        return 0.0
+    return dot / (na * nb)
+
+
+def apply_relevance_boost(
+    results: list[NoteMatch],
+    candidates: list[Note],
+    limit: int,
+) -> list[NoteMatch]:
+    """Multiply each result's score by a relevance boost based on
+    citation metadata, then re-sort.
+
+    Formula: ``boost = 1 + log(1 + cited_count) + 2*log(1 +
+    success_count)``. Success-citations weighted more than mere
+    citations — a note that's been validated through successful
+    runs is more trustworthy than one that's been read but never
+    associated with success. Log scaling so a runaway-popular
+    note doesn't drown out new ones with a single citation.
+    """
+    note_by_slug = {n.slug: n for n in candidates}
+    boosted: list[NoteMatch] = []
+    for m in results:
+        n = note_by_slug.get(m.summary.slug)
+        if n is None:
+            boosted.append(m)
+            continue
+        boost = (
+            1.0
+            + math.log(1 + n.cited_count)
+            + 2.0 * math.log(1 + n.success_count)
+        )
+        boosted.append(
+            NoteMatch(
+                summary=m.summary,
+                score=m.score * boost,
+                snippet=m.snippet,
+            )
+        )
+    boosted.sort(key=lambda m: m.score, reverse=True)
+    return boosted[:limit]
+
+
+# ---------------------------------------------------------------------------
+# Per-run citation logging (contextvar-backed, best-effort)
+# ---------------------------------------------------------------------------
+
+
+def log_citation(slug: str) -> None:
+    """Add ``slug`` to the per-run citation set if one is active.
+
+    No-op outside a run (contextvar default is ``None``). Best-
+    effort — failures to log a citation must NEVER break a read.
+    """
+    from ..core.context import _ambient_citations_var
+    citations = _ambient_citations_var.get()
+    if citations is None:
+        return
+    try:
+        citations.add(slug)
+    except Exception:  # noqa: BLE001 — observation, not load-bearing
+        pass
+
+
+def drain_citations() -> set[str]:
+    """Snapshot + clear the per-run citation set, returning the
+    slugs that were cited. ``Workspace.attribute_outcome`` calls
+    this once at the end of a run."""
+    from ..core.context import _ambient_citations_var
+    citations = _ambient_citations_var.get()
+    if citations is None:
+        return set()
+    snapshot = set(citations)
+    citations.clear()
+    return snapshot
 
 
 def summary_from_note(note: Note) -> NoteSummary:
