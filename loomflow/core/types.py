@@ -257,7 +257,7 @@ class ModelChunk(BaseModel):
     depending on the kind.
     """
 
-    kind: Literal["text", "tool_call", "finish"]
+    kind: Literal["text", "thinking", "tool_call", "finish"]
     text: str | None = None
     tool_call: ToolCall | None = None
     finish_reason: str | None = None

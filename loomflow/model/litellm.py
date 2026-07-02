@@ -80,6 +80,14 @@ class LiteLLMModel(OpenAIModel):
     produces OpenAI-shaped outputs.
     """
 
+    # Unlike real OpenAI endpoints, many LiteLLM-routed providers
+    # (Ollama, older Mistral/Cohere deployments, some Bedrock
+    # models, ...) reject ``response_format=json_schema`` with a
+    # hard error rather than ignoring it. Keep the agent loop's
+    # prompt-augmentation + validate-with-retry fallback instead —
+    # slower but works everywhere LiteLLM routes.
+    supports_native_structured_output: bool = False
+
     def __init__(
         self,
         model: str,
@@ -87,6 +95,7 @@ class LiteLLMModel(OpenAIModel):
         api_key: str | None = None,
         client: Any | None = None,
         secrets: Any | None = None,
+        cost_per_mtoken: tuple[float, float] | None = None,
         **litellm_kwargs: Any,
     ) -> None:
         if client is None:
@@ -119,7 +128,20 @@ class LiteLLMModel(OpenAIModel):
         # purely to satisfy OpenAIModel's signature; LiteLLM itself
         # picks up provider-specific keys from environment variables
         # or the ``api_key=`` we shoved into the defaults above.
-        super().__init__(model, client=client, api_key=api_key)
+        super().__init__(
+            model,
+            client=client,
+            api_key=api_key,
+            cost_per_mtoken=cost_per_mtoken,
+        )
+
+    def _response_format(self, output_schema: Any | None) -> dict[str, Any] | None:
+        """Never emit ``response_format=json_schema`` through LiteLLM
+        — many routed providers reject it with a hard error. The
+        agent loop's prompt-augmentation + validate-with-retry path
+        (see ``supports_native_structured_output = False`` above)
+        handles structured output safely instead."""
+        return None
 
     def _effort_kwargs(
         self, effort: str | None, strict_effort: bool

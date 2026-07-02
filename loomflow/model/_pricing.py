@@ -10,9 +10,12 @@ Snapshots, not facts. Provider pricing changes; the table below
 captures rates as of **May 2026** for the models loomflow's adapters
 target by default. Two ways to keep up:
 
-* Override at the call site — adapters accept a ``cost_per_mtoken``
-  override kwarg (not implemented yet — opens room for users with
-  negotiated rates / enterprise discounts).
+* Override at the call site — adapters accept a ``cost_per_mtoken=``
+  constructor kwarg (an ``(input_rate, output_rate)`` tuple in USD
+  per million tokens) which flows through :func:`estimate_cost`'s
+  ``override=`` parameter and takes precedence over the table. For
+  users with negotiated rates / enterprise discounts, or models the
+  table doesn't know.
 * Update :data:`PRICING_PER_MTOKEN` and ship a patch release.
 
 Models the table doesn't recognise fall through to a longest-prefix
@@ -173,6 +176,7 @@ def estimate_cost(
     cached_input_tokens: int = 0,
     cache_write_tokens: int = 0,
     cache_ttl: str = "5m",
+    override: tuple[float, float] | None = None,
 ) -> float:
     """Return the USD cost of a model call given its token buckets.
 
@@ -187,26 +191,36 @@ def estimate_cost(
     * ``output_tokens`` — completion at the model's output rate.
     * ``cache_ttl`` — ``"5m"`` (default) or ``"1h"``. Affects only
       the cache-write rate.
+    * ``override`` — optional ``(input_rate, output_rate)`` in USD
+      per million tokens. Wired from the adapters'
+      ``cost_per_mtoken=`` constructor kwarg; skips the table lookup
+      (and the unknown-model warning) entirely.
 
     Lookup order:
 
-    1. Exact match against :data:`PRICING_PER_MTOKEN`.
-    2. **Longest-prefix** match (``gpt-4.1-mini-2026-05-13`` →
+    1. The ``override`` tuple, when supplied.
+    2. Exact match against :data:`PRICING_PER_MTOKEN`.
+    3. **Longest-prefix** match (``gpt-4.1-mini-2026-05-13`` →
        ``gpt-4.1-mini``).
-    3. Miss → return ``0.0`` and warn once per unknown model.
+    4. Miss → return ``0.0`` and warn once per unknown model.
     """
     if not model:
         return 0.0
-    pricing = PRICING_PER_MTOKEN.get(model)
+    pricing = override
+    if pricing is None:
+        pricing = PRICING_PER_MTOKEN.get(model)
     if pricing is None:
         pricing = _longest_prefix_match(model)
     if pricing is None:
         if model not in _WARNED_UNKNOWN:
             _WARNED_UNKNOWN.add(model)
             warnings.warn(
-                f"cost estimation: unknown model {model!r}. Add it to "
-                "loomflow.model._pricing.PRICING_PER_MTOKEN to track "
-                "spend; the call will be reported as $0.00 in usage.",
+                f"cost estimation: unknown model {model!r}. Every call "
+                "will be reported as $0.00 in usage, so budget caps "
+                "like StandardBudget(max_cost_usd=...) are NOT "
+                "enforced for this model. Pass cost_per_mtoken=(in, "
+                "out) to the model adapter, or add the model to "
+                "loomflow.model._pricing.PRICING_PER_MTOKEN.",
                 stacklevel=3,
             )
         return 0.0

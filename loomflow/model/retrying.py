@@ -128,6 +128,7 @@ class RetryingModel:
         ``stream`` raises mid-stream the error propagates unchanged.
         """
         attempt = 1
+        yielded_any = False
         while True:
             try:
                 iterator = self._inner.stream(
@@ -146,12 +147,19 @@ class RetryingModel:
                     first_chunk = await iterator.__anext__()
                 except StopAsyncIteration:
                     return
-                # Past the gate; from here on errors propagate.
+                # Past the gate; from here on errors propagate — a
+                # retry would replay chunks the consumer already saw.
+                yielded_any = True
                 yield first_chunk
                 async for chunk in iterator:
                     yield chunk
                 return
             except Exception as exc:  # noqa: BLE001
+                if yielded_any:
+                    # Mid-stream failure: chunks are already out the
+                    # door and cannot be rewound. Never retry here
+                    # (the docstring contract) — surface the error.
+                    raise
                 classified = classify_model_error(exc)
                 if not isinstance(classified, TransientModelError):
                     if classified is not None:

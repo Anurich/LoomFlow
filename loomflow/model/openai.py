@@ -33,6 +33,23 @@ class _OAIPartial:
     args_json: str = ""
 
 
+# Reasoning-model families reject the legacy ``max_tokens`` parameter
+# in favour of ``max_completion_tokens``. Prefix-matched (like the
+# reasoning-effort table in ``_effort.py``) so dated snapshots match.
+# Older chat models — and OpenAI-compatible third-party servers
+# reached via ``base_url`` — still accept ``max_tokens``, so we keep
+# it for everything else rather than switching unconditionally.
+_MAX_COMPLETION_TOKENS_PREFIXES = ("o1", "o3", "o4", "gpt-5")
+
+
+def _max_tokens_param(model_name: str) -> str:
+    """Pick the output-cap parameter name for a model."""
+    name = model_name.lower()
+    if any(name.startswith(p) for p in _MAX_COMPLETION_TOKENS_PREFIXES):
+        return "max_completion_tokens"
+    return "max_tokens"
+
+
 class OpenAIModel:
     """Talks to OpenAI via :class:`openai.AsyncOpenAI`."""
 
@@ -55,8 +72,13 @@ class OpenAIModel:
         api_key: str | None = None,
         base_url: str | None = None,
         secrets: Any | None = None,
+        cost_per_mtoken: tuple[float, float] | None = None,
     ) -> None:
         self.name = model
+        # Optional ``(input_rate, output_rate)`` USD-per-million-token
+        # override — takes precedence over the built-in pricing table
+        # (negotiated rates, or models the table doesn't know).
+        self._cost_per_mtoken = cost_per_mtoken
         if client is not None:
             self._client = client
         else:
@@ -98,6 +120,16 @@ class OpenAIModel:
         from ._effort import openai_kwargs
         return openai_kwargs(effort, self.name, strict=strict_effort)
 
+    def _response_format(self, output_schema: Any | None) -> dict[str, Any] | None:
+        """Build the ``response_format`` payload for an output schema.
+
+        Hook for subclasses: :class:`LiteLLMModel` returns ``None``
+        because many routed providers hard-reject
+        ``response_format=json_schema`` (the agent loop's prompt-
+        augmentation fallback handles structured output there).
+        """
+        return _build_response_format(output_schema)
+
     async def complete(
         self,
         messages: list[Message],
@@ -138,10 +170,10 @@ class OpenAIModel:
         if temperature != 1.0:
             kwargs["temperature"] = temperature
         if max_tokens is not None:
-            kwargs["max_tokens"] = max_tokens
+            kwargs[_max_tokens_param(self.name)] = max_tokens
         if oai_tools:
             kwargs["tools"] = oai_tools
-        rf = _build_response_format(output_schema)
+        rf = self._response_format(output_schema)
         if rf is not None:
             kwargs["response_format"] = rf
         # Reasoning-effort translation. Adapter knows which OpenAI
@@ -162,7 +194,12 @@ class OpenAIModel:
 
         try:
             response = await self._client.chat.completions.create(**kwargs)
-        except Exception:  # noqa: BLE001 — surface the fallback transparently
+        except (AttributeError, TypeError):
+            # Duck-typing fallback ONLY: fake / non-conforming
+            # clients that don't accept the non-streaming call shape.
+            # Real SDK errors (rate limit, auth, 4xx/5xx) propagate
+            # to the retry layer instead of being swallowed and
+            # re-issued as a second API call.
             return await _consume_stream(
                 self.stream(
                     messages,
@@ -190,6 +227,10 @@ class OpenAIModel:
                         tools=tools,
                         temperature=temperature,
                         max_tokens=max_tokens,
+                        output_schema=output_schema,
+                        effort=effort,
+                        strict_effort=strict_effort,
+                        prompt_caching=prompt_caching,
                     )
                 )
             return ("", [], Usage(), "stop")
@@ -240,6 +281,7 @@ class OpenAIModel:
                 in_tok,
                 out_tok,
                 cached_input_tokens=cache_read,
+                override=self._cost_per_mtoken,
             ),
         )
         finish_reason = getattr(choice, "finish_reason", None) or "stop"
@@ -269,10 +311,10 @@ class OpenAIModel:
         if temperature != 1.0:
             kwargs["temperature"] = temperature
         if max_tokens is not None:
-            kwargs["max_tokens"] = max_tokens
+            kwargs[_max_tokens_param(self.name)] = max_tokens
         if oai_tools:
             kwargs["tools"] = oai_tools
-        rf = _build_response_format(output_schema)
+        rf = self._response_format(output_schema)
         if rf is not None:
             kwargs["response_format"] = rf
         kwargs.update(self._effort_kwargs(effort, strict_effort))
@@ -309,6 +351,7 @@ class OpenAIModel:
                         in_tok,
                         out_tok,
                         cached_input_tokens=cache_read,
+                        override=self._cost_per_mtoken,
                     ),
                 )
 
