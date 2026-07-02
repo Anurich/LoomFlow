@@ -703,11 +703,15 @@ class _CountingEmbedder(HashEmbedder):
 
     async def embed(self, text: str) -> list[float]:
         self.embed_calls += 1
-        return await super().embed(text)
+        return await HashEmbedder.embed(self, text)
 
     async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        # Zero-arg ``super()`` inside a comprehension resolves its
+        # implicit ``__class__`` cell inconsistently across CPython
+        # versions (fails on 3.11's genexpr scope). Call the base
+        # method explicitly so the fake is interpreter-independent.
         self.embed_batch_calls += 1
-        return [await super().embed(t) for t in texts]
+        return [await HashEmbedder.embed(self, t) for t in texts]
 
 
 def test_postgres_schema_includes_session_index() -> None:
