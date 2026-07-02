@@ -10,20 +10,20 @@ last N turn groups verbatim.
 Where it fires
 --------------
 
-Inside :meth:`Agent._loop`'s Ralph loop, between iterations. The first
-architecture pass runs untouched (zero overhead on short single-turn
-runs). Before each subsequent stop-hook-triggered iteration, we count
-tokens in ``session.messages`` via the 0.10.17 token-counting helper.
-If the count exceeds ``auto_compact_at_tokens``, we compact in place:
-the older messages are replaced with a single summary system message,
-the most recent N user-anchored turn groups stay verbatim.
+Inside :meth:`Agent._loop`, after every ``architecture.run()`` pass —
+the first pass of a default (no-stop-hook) agent included, so opting
+into ``auto_compact_at_tokens=`` works without also registering stop
+hooks. After each pass we count tokens in ``session.messages`` via
+the 0.10.17 token-counting helper. If the count exceeds
+``auto_compact_at_tokens``, we compact in place: the older messages
+are replaced with a single summary system message, the most recent N
+user-anchored turn groups stay verbatim.
 
-Why not also fire before the first architecture pass? Because the
-first pass operates on a fresh ``session.messages`` (or one
-rehydrated from memory — but at that point snip + memory's own
-limits are the right defence). Auto-compact's job is "we've been
-running for a while, the conversation grew, prune it before the
-next model call." That moment is between Ralph-loop iterations.
+Why not fire BEFORE the first architecture pass? Because at that
+point ``session.messages`` is fresh (or rehydrated from memory — and
+there snip + memory's own limits are the right defence). Auto-
+compact's job is "the conversation grew while running, prune it
+before the next model call" — that moment is after a pass finishes.
 
 What survives the compact
 -------------------------
@@ -284,7 +284,18 @@ async def maybe_auto_compact(
             text = getattr(chunk, "text", None)
             if text:
                 parts.append(text)
-    except Exception:  # noqa: BLE001 — never kill a turn
+    except Exception as exc:  # noqa: BLE001 — never kill a turn
+        # Graceful no-op, but NOT silent: a summariser that fails on
+        # every iteration effectively disables compaction, and the
+        # conversation will keep growing until it blows the context
+        # window. Warn so the squeeze is observable.
+        warnings.warn(
+            f"auto-compact summariser "
+            f"{getattr(summariser, 'name', type(summariser).__name__)!r} "
+            f"failed ({type(exc).__name__}: {exc}); continuing with the "
+            f"conversation uncompacted.",
+            stacklevel=2,
+        )
         return None, ""
 
     summary = "".join(parts).strip()

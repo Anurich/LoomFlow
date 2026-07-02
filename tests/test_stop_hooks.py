@@ -192,8 +192,10 @@ async def test_stop_hook_first_wins_skips_remaining() -> None:
 
 async def test_stop_hook_disabled_via_zero_cap() -> None:
     """max_stop_hook_iterations=0 + a hook that wants to continue
-    → architecture runs once, hook is checked but cap is 0 so the
-    re-invocation never fires. Useful for "I want to register a
+    → architecture runs once and the Ralph loop is disabled
+    entirely (documented semantics of 0). The run is a normal,
+    non-interrupted completion — a loop the user explicitly turned
+    off was never "exhausted". Useful for "I want to register a
     hook but globally disable continuation."""
 
     class _WouldContinue:
@@ -211,10 +213,9 @@ async def test_stop_hook_disabled_via_zero_cap() -> None:
     r = await a.run("once")
     # initial pass only; loop never runs because cap is 0
     assert r.turns == 1
-    # Cap-of-0 still counts as "exhausted" the moment we'd want to
-    # continue — surface it
-    assert r.interrupted is True
-    assert r.interruption_reason == "stop_hook_iterations_exhausted"
+    # 0 genuinely disables — no interruption stamp.
+    assert r.interrupted is False
+    assert r.interruption_reason is None
 
 
 async def test_negative_cap_rejected_at_construction() -> None:

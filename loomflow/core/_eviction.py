@@ -15,9 +15,12 @@ Two complementary policies, both off by default:
   spill-to-disk should use a backend that persists (SqliteMemory,
   PostgresMemory) instead of relying on the in-process bound.
 * ``ttl_seconds`` — drop a bucket when its last touch is older
-  than this. Eviction runs lazily on touch (cheap; we already have
-  the lock). Callers reading periodically can call
-  :meth:`evict_expired` to force a sweep.
+  than this. Eviction runs lazily: per-key operations check the
+  touched key's expiry inline, and a full O(n) sweep runs (a)
+  once every :data:`_SWEEP_EVERY` per-key operations and (b) on
+  every O(n) view operation (``len`` / ``iter`` / ``items`` /
+  ...). Callers reading rarely can call :meth:`evict_expired` to
+  force a sweep.
 
 Both knobs are tuneable per-construction. The default for both is
 ``None`` (unbounded, today's behaviour) — opt in via the primitive's
@@ -30,7 +33,7 @@ from collections import OrderedDict
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Generic, TypeVar, overload
+from typing import Generic, TypeVar, cast, overload
 
 __all__ = ["BoundedDict"]
 
@@ -38,6 +41,13 @@ __all__ = ["BoundedDict"]
 _K = TypeVar("_K")
 _V = TypeVar("_V")
 _D = TypeVar("_D")
+
+# Per-key operations between amortised full TTL sweeps. Sweeping is
+# O(n); doing it on every access made each hot-path ``get``/``set``
+# O(n) too. 128 keeps the amortised cost at O(n/128) per op while an
+# inline single-key expiry check preserves read correctness in
+# between. See ``BoundedDict._maybe_sweep``.
+_SWEEP_EVERY = 128
 
 
 @dataclass(slots=True)
@@ -64,7 +74,7 @@ class BoundedDict(Generic[_K, _V]):
     isn't paying the eviction cost.
     """
 
-    __slots__ = ("_data", "_max_keys", "_ttl_seconds")
+    __slots__ = ("_data", "_max_keys", "_ops_since_sweep", "_ttl_seconds")
 
     def __init__(
         self,
@@ -79,6 +89,9 @@ class BoundedDict(Generic[_K, _V]):
         self._data: OrderedDict[_K, _Slot[_V]] = OrderedDict()
         self._max_keys = max_keys
         self._ttl_seconds = ttl_seconds
+        # Per-key operations since the last full TTL sweep — see
+        # ``_maybe_sweep``.
+        self._ops_since_sweep = 0
 
     @property
     def max_keys(self) -> int | None:
@@ -91,15 +104,18 @@ class BoundedDict(Generic[_K, _V]):
     # ---- core mapping operations ----------------------------------------
 
     def __contains__(self, key: object) -> bool:
-        self._evict_expired_locked()
-        return key in self._data
+        self._maybe_sweep()
+        return self._live_slot(cast("_K", key)) is not None
 
     def __len__(self) -> int:
-        self._evict_expired_locked()
+        # Full sweep — ``len`` must not count expired entries, and a
+        # correct answer requires visiting every slot anyway.
+        self._sweep_expired()
         return len(self._data)
 
     def __iter__(self) -> Iterator[_K]:
-        self._evict_expired_locked()
+        # Full sweep — iteration is O(n) regardless.
+        self._sweep_expired()
         return iter(list(self._data.keys()))
 
     @overload
@@ -109,8 +125,8 @@ class BoundedDict(Generic[_K, _V]):
     @overload
     def get(self, key: _K, default: _D) -> _V | _D: ...
     def get(self, key: _K, default: _D | None = None) -> _V | _D | None:
-        self._evict_expired_locked()
-        slot = self._data.get(key)
+        self._maybe_sweep()
+        slot = self._live_slot(key)
         if slot is None:
             return default
         # Touch refreshes LRU + timestamp.
@@ -119,34 +135,38 @@ class BoundedDict(Generic[_K, _V]):
         return slot.value
 
     def __getitem__(self, key: _K) -> _V:
-        self._evict_expired_locked()
-        slot = self._data[key]
+        self._maybe_sweep()
+        slot = self._live_slot(key)
+        if slot is None:
+            raise KeyError(key)
         slot.last_touched = _now()
         self._data.move_to_end(key)
         return slot.value
 
     def __setitem__(self, key: _K, value: _V) -> None:
-        self._evict_expired_locked()
+        self._maybe_sweep()
         existing = self._data.get(key)
         if existing is not None:
+            # An expired slot is simply overwritten — value and
+            # timestamp both refresh, same outcome as evict + insert.
             existing.value = value
             existing.last_touched = _now()
             self._data.move_to_end(key)
             return
         self._data[key] = _Slot(value=value, last_touched=_now())
-        self._enforce_max_keys_locked()
+        self._enforce_max_keys()
 
     def setdefault(self, key: _K, default_factory: _V) -> _V:
         """Return the existing value or insert ``default_factory`` and
         return it. Like ``dict.setdefault`` but the default is the
         already-constructed value (callers with expensive default
         construction can pre-check ``key in self`` instead)."""
-        self._evict_expired_locked()
-        slot = self._data.get(key)
+        self._maybe_sweep()
+        slot = self._live_slot(key)
         if slot is None:
             slot = _Slot(value=default_factory, last_touched=_now())
             self._data[key] = slot
-            self._enforce_max_keys_locked()
+            self._enforce_max_keys()
             return slot.value
         slot.last_touched = _now()
         self._data.move_to_end(key)
@@ -166,15 +186,15 @@ class BoundedDict(Generic[_K, _V]):
         """Snapshot of (key, value) pairs after eviction. Returns a
         list (not a view) so callers can iterate without worrying
         about mutation under their feet."""
-        self._evict_expired_locked()
+        self._sweep_expired()
         return [(k, slot.value) for k, slot in self._data.items()]
 
     def keys(self) -> list[_K]:
-        self._evict_expired_locked()
+        self._sweep_expired()
         return list(self._data.keys())
 
     def values(self) -> list[_V]:
-        self._evict_expired_locked()
+        self._sweep_expired()
         return [slot.value for slot in self._data.values()]
 
     # ---- explicit eviction ---------------------------------------------
@@ -182,17 +202,59 @@ class BoundedDict(Generic[_K, _V]):
     def evict_expired(self) -> int:
         """Force a TTL sweep. Returns the number of keys evicted.
 
-        Most callers don't need this — every read/write triggers a
-        lazy sweep already. Use this from a periodic background
-        task if your primitive sees long quiet periods (no
+        Most callers don't need this — per-key reads/writes check the
+        touched key's expiry inline and a full sweep runs every
+        :data:`_SWEEP_EVERY` operations. Use this from a periodic
+        background task if your primitive sees long quiet periods (no
         accesses) and you'd rather have the dict shrink predictably
         than wait for the next user request to drive eviction.
         """
-        return self._evict_expired_locked()
+        return self._sweep_expired()
 
     # ---- internals -----------------------------------------------------
+    #
+    # NOTE: BoundedDict itself holds no lock — it is synchronous,
+    # in-process state. Callers that share an instance across tasks
+    # (e.g. StandardBudget) wrap accesses in their own ``anyio.Lock``.
 
-    def _evict_expired_locked(self) -> int:
+    def _live_slot(self, key: _K) -> _Slot[_V] | None:
+        """Return the slot for ``key`` if present AND not expired.
+
+        An expired slot is dropped eagerly. This single-key inline
+        check is what keeps ``get`` / ``__getitem__`` /
+        ``__contains__`` / ``setdefault`` correct between the
+        amortised full sweeps (see ``_maybe_sweep``)."""
+        slot = self._data.get(key)
+        if slot is None:
+            return None
+        ttl = self._ttl_seconds
+        if (
+            ttl is not None
+            and (_now() - slot.last_touched).total_seconds() >= ttl
+        ):
+            self._data.pop(key, None)
+            return None
+        return slot
+
+    def _maybe_sweep(self) -> None:
+        """Amortised TTL sweep for the hot per-key operations.
+
+        A full sweep is O(n); running one on EVERY ``get`` / ``set``
+        made each access O(n) under multi-tenant load. Instead we
+        sweep once per :data:`_SWEEP_EVERY` per-key operations —
+        expired-but-unswept keys can't be observed in the meantime
+        because every per-key read goes through ``_live_slot``'s
+        inline expiry check, and the O(n) view operations
+        (``__len__`` / ``__iter__`` / ``items`` / ...) always sweep.
+        """
+        if self._ttl_seconds is None:
+            return
+        self._ops_since_sweep += 1
+        if self._ops_since_sweep >= _SWEEP_EVERY:
+            self._sweep_expired()
+
+    def _sweep_expired(self) -> int:
+        self._ops_since_sweep = 0
         if self._ttl_seconds is None or not self._data:
             return 0
         cutoff = _now()
@@ -208,7 +270,7 @@ class BoundedDict(Generic[_K, _V]):
                 evicted += 1
         return evicted
 
-    def _enforce_max_keys_locked(self) -> None:
+    def _enforce_max_keys(self) -> None:
         if self._max_keys is None:
             return
         while len(self._data) > self._max_keys:

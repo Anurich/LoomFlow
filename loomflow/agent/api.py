@@ -158,9 +158,10 @@ def _absorb_legacy_tuning(
     base = tuning if tuning is not None else Tuning()
     # Explicit ``tuning=`` wins: only fill fields the caller left at default
     # AND supplied via a legacy kwarg.
+    defaults = Tuning()
     overrides = {
         k: v for k, v in moved.items()
-        if getattr(base, k) == getattr(Tuning(), k)
+        if getattr(base, k) == getattr(defaults, k)
     }
     from dataclasses import replace
     return replace(base, **overrides)
@@ -1717,13 +1718,27 @@ class Agent:
             effort if effort is not None else self._default_effort
         )
 
+        # Resolve the session id HERE (same precedence as ``_loop``:
+        # explicit kwarg > context.session_id > fresh id) so a setup
+        # failure inside ``_produce`` can emit an ERROR event that is
+        # attributable to this run instead of carrying an empty
+        # session_id. ``_loop`` reuses the id we pass, so events from
+        # the happy path and the error path agree.
+        resolved_session_id = (
+            session_id
+            if session_id is not None
+            else (context.session_id if context is not None else None)
+        )
+        if resolved_session_id is None:
+            resolved_session_id = new_id("sess")
+
         async def _produce() -> None:
             try:
                 await self._loop_guarded(
                     prompt,
                     emit=send.send,
                     user_id=user_id,
-                    session_id=session_id,
+                    session_id=resolved_session_id,
                     metadata=metadata,
                     context=context,
                     extra_tools=extra_tools,
@@ -1734,7 +1749,7 @@ class Agent:
                 )
             except Exception as exc:  # noqa: BLE001 — surface as ERROR + re-raise
                 with anyio.CancelScope(shield=True):
-                    await send.send(Event.error("", exc))
+                    await send.send(Event.error(resolved_session_id, exc))
                 raise
             finally:
                 send.close()
@@ -1747,6 +1762,66 @@ class Agent:
                         yield event
             finally:
                 tg.cancel_scope.cancel()
+
+    async def _maybe_compact(self, session: AgentSession, emit: Emit) -> None:
+        """Auto-compact ``session.messages`` when past the token threshold.
+
+        Runs after every architecture pass (including the only pass of
+        a default no-stop-hook agent), so long conversations shrink
+        regardless of whether the Ralph loop is active. Pure no-op
+        when not opted in (``auto_compact_at_tokens=None``). Failures
+        are graceful — the compactor NEVER kills a turn — but they are
+        surfaced as an ``auto_compact.failed`` architecture event so
+        a silently-disabled compaction is observable.
+        """
+        if (
+            self._auto_compact_at_tokens is None
+            or self._auto_compact_summariser is None
+        ):
+            return
+        from ..model.count_tokens import count_tokens
+        from .auto_compact import maybe_auto_compact
+        try:
+            current = await count_tokens(self._model, session.messages)
+        except Exception as exc:  # noqa: BLE001 — never kill a turn
+            await emit(
+                Event.architecture_event(
+                    session.id,
+                    "auto_compact.failed",
+                    payload={
+                        "stage": "count_tokens",
+                        "error": f"{type(exc).__name__}: {exc}",
+                    },
+                )
+            )
+            return
+        if current <= self._auto_compact_at_tokens:
+            return
+        new_msgs, summary = await maybe_auto_compact(
+            session.messages,
+            summariser=self._auto_compact_summariser,
+            at_tokens=self._auto_compact_at_tokens,
+            current_token_count=current,
+            keep_recent_turns=self._auto_compact_keep_recent_turns,
+        )
+        if new_msgs is None:
+            return
+        dropped = len(session.messages) - len(new_msgs)
+        messages_before = len(session.messages)
+        session.messages = new_msgs
+        await emit(
+            Event.architecture_event(
+                session.id,
+                "auto_compacted",
+                payload={
+                    "tokens_before": current,
+                    "messages_before": messages_before,
+                    "messages_after": len(session.messages),
+                    "messages_dropped": dropped,
+                    "summary_chars": len(summary),
+                },
+            )
+        )
 
     # ---- the loop --------------------------------------------------------
 
@@ -1926,7 +2001,29 @@ class Agent:
             )
             plan_token = _ambient_living_plan_var.set(plan_state)
 
+        # Reset the ambient contextvars set above on EVERY exit path —
+        # success, exception (OutputValidationError, BudgetExceeded,
+        # ...), or cancellation (RunTimeout via ``fail_after``). A
+        # success-path-only reset would leak this agent's workspace /
+        # citation / plan state into the caller's task whenever the
+        # run fails. Entered FIRST in the ``async with`` tuple below
+        # so its teardown runs even when a later context manager
+        # fails to enter.
+        @contextlib.asynccontextmanager
+        async def _ambient_reset_guard() -> AsyncIterator[None]:
+            try:
+                yield
+            finally:
+                # Reverse of the set order above.
+                if plan_token is not None:
+                    _ambient_living_plan_var.reset(plan_token)
+                if citation_token is not None:
+                    _ambient_citations_var.reset(citation_token)
+                if ws_token is not None:
+                    _ambient_workspace_var.reset(ws_token)
+
         async with (
+            _ambient_reset_guard(),
             self._runtime.session(session_id),
             run_trace,
             set_run_context(run_ctx),
@@ -2118,13 +2215,24 @@ class Agent:
             async for event in self._architecture.run(session, deps, prompt):
                 await emit(event)
 
+            # Auto-compact after every architecture pass — including
+            # the only pass of a default (no-stop-hook) agent, so
+            # opting into ``auto_compact_at_tokens=`` works without
+            # also registering stop hooks. See :meth:`_maybe_compact`
+            # (no-op unless opted in; failures never kill the turn).
+            await self._maybe_compact(session, emit)
+
             # Framework Ralph loop — when stop hooks are registered,
             # run them after the architecture exits. Any hook
             # returning a StopHookResult triggers a re-invocation
             # of architecture.run() with the inject_message as a
             # fresh user prompt. Bounded by
             # ``self._max_stop_hook_iterations`` so a flaky hook
-            # can't burn budget unbounded.
+            # can't burn budget unbounded. A cap of 0 disables the
+            # loop entirely (documented behaviour) — the run is NOT
+            # marked interrupted in that case; the guard below keeps
+            # the ``while ... else`` exhaustion stamp from firing on
+            # a loop that was never meant to run.
             #
             # First-non-None wins per iteration; remaining hooks
             # for that iteration are skipped. Re-uses the same
@@ -2132,7 +2240,7 @@ class Agent:
             # history) and the same deps (already includes
             # ``context``, ``fast_*`` flags, the wrapped model +
             # memory).
-            if not fast_stop_hooks:
+            if not fast_stop_hooks and self._max_stop_hook_iterations > 0:
                 iter_count = 0
                 while iter_count < self._max_stop_hook_iterations:
                     hook_result: StopHookResult | None = None
@@ -2162,67 +2270,15 @@ class Agent:
                         )
                     )
 
-                    # Auto-compact between Ralph iterations.
-                    # Counts tokens in session.messages; if past
-                    # threshold, summarises older turns into a
-                    # single system message + keeps the last N
-                    # turn groups verbatim. Pure no-op when not
-                    # opted in (``auto_compact_at_tokens=None``).
-                    # Failures are graceful — the compactor
-                    # NEVER kills a turn.
-                    if (
-                        self._auto_compact_at_tokens is not None
-                        and self._auto_compact_summariser is not None
-                    ):
-                        from ..model.count_tokens import count_tokens
-                        from .auto_compact import maybe_auto_compact
-                        try:
-                            current = await count_tokens(
-                                self._model, session.messages
-                            )
-                        except Exception:  # noqa: BLE001
-                            current = 0
-                        if current > self._auto_compact_at_tokens:
-                            new_msgs, summary = await maybe_auto_compact(
-                                session.messages,
-                                summariser=self._auto_compact_summariser,
-                                at_tokens=self._auto_compact_at_tokens,
-                                current_token_count=current,
-                                keep_recent_turns=(
-                                    self._auto_compact_keep_recent_turns
-                                ),
-                            )
-                            if new_msgs is not None:
-                                dropped = (
-                                    len(session.messages)
-                                    - len(new_msgs)
-                                )
-                                session.messages = new_msgs
-                                await emit(
-                                    Event.architecture_event(
-                                        session_id,
-                                        "auto_compacted",
-                                        payload={
-                                            "tokens_before": current,
-                                            "messages_before": (
-                                                len(session.messages)
-                                                + dropped
-                                            ),
-                                            "messages_after": (
-                                                len(session.messages)
-                                            ),
-                                            "messages_dropped": dropped,
-                                            "summary_chars": (
-                                                len(summary)
-                                            ),
-                                        },
-                                    )
-                                )
-
                     async for event in self._architecture.run(
                         session, deps, hook_result.inject_message
                     ):
                         await emit(event)
+
+                    # Auto-compact between Ralph iterations (and
+                    # after the final one) — same call as after the
+                    # first pass above.
+                    await self._maybe_compact(session, emit)
                 else:
                     # Loop exhausted via the cap — record the
                     # interruption on the session so RunResult
@@ -2368,17 +2424,6 @@ class Agent:
                     payload=completion_payload,
                 )
             await emit(Event.completed(session_id, result.model_dump(mode="json")))
-            # Reset the workspace contextvar set above so the
-            # ambient doesn't leak past this run. We do it inside
-            # the ``async with`` so it fires before the run-context
-            # teardown — keeps the cleanup order symmetric with the
-            # set-up order above.
-            if ws_token is not None:
-                _ambient_workspace_var.reset(ws_token)
-            if plan_token is not None:
-                _ambient_living_plan_var.reset(plan_token)
-            if citation_token is not None:
-                _ambient_citations_var.reset(citation_token)
             return result
 
 
@@ -2789,7 +2834,8 @@ def _resolve_model(
     Strings dispatch by prefix:
 
     * ``claude-*`` -> :class:`AnthropicModel` (direct, no LiteLLM hop)
-    * ``gpt-*`` / ``o1-*`` / ``o3-*`` -> :class:`OpenAIModel` (direct)
+    * ``gpt-*`` / ``o1-*`` / ``o3-*`` / ``o4-*`` -> :class:`OpenAIModel`
+      (direct)
     * ``echo`` -> :class:`EchoModel` (zero-key dev / tests)
     * ``mistral-``, ``command-``, ``bedrock/``, ``vertex_ai/``,
       ``together_ai/``, ``ollama/``, ``gemini/``, ``groq/``,
@@ -2825,7 +2871,7 @@ def _resolve_model(
     if spec.startswith("claude-"):
         from ..model.anthropic import AnthropicModel
         return AnthropicModel(spec, secrets=secrets)
-    if spec.startswith(("gpt-", "o1-", "o3-")):
+    if spec.startswith(("gpt-", "o1-", "o3-", "o4-")):
         from ..model.openai import OpenAIModel
         return OpenAIModel(spec, secrets=secrets)
     if spec == "echo":
@@ -2838,7 +2884,7 @@ def _resolve_model(
         return LiteLLMModel(inner, secrets=secrets)
     raise ConfigError(
         f"unknown model spec: {spec!r}. Recognised prefixes:\n"
-        "  claude-*, gpt-*, o1-*, o3-* (direct adapters)\n"
+        "  claude-*, gpt-*, o1-*, o3-*, o4-* (direct adapters)\n"
         "  mistral-, command-, bedrock/, vertex_ai/, ollama/, "
         "gemini/, groq/, together_ai/, replicate/, azure/ "
         "(via LiteLLM)\n"

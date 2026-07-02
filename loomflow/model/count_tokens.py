@@ -45,6 +45,8 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
+import anyio.to_thread
+
 from ..core.types import Message
 
 if TYPE_CHECKING:
@@ -105,8 +107,15 @@ async def count_tokens(
     # Tier 2: tiktoken (cl100k_base — GPT-4 / Claude-3+ family).
     # Apply the ``max(1, ...)`` floor so callers can use the
     # returned count in budget percentage math without div-zero.
+    # Encoding is CPU-bound and O(conversation length) — for 100k+
+    # token conversations it takes long enough to stall every other
+    # run sharing the event loop, so it's offloaded to a worker
+    # thread. The cheap char-based tier below stays inline.
     try:
-        return max(1, _tiktoken_estimate(messages, tools))
+        estimate = await anyio.to_thread.run_sync(
+            _tiktoken_estimate, messages, tools
+        )
+        return max(1, estimate)
     except Exception:  # noqa: BLE001 — tiktoken absent or borked
         pass
 
