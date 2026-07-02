@@ -54,7 +54,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from ..core.context import inherit_ambient_memory
 from ..core.types import Event, Message, Role
 from .base import AgentSession, Dependencies
-from .helpers import SubagentInvocation, add_usage, text_only_model_call
+from .helpers import SubagentInvocation, consume_usage, text_only_model_call
 
 if TYPE_CHECKING:
     from ..agent.api import Agent
@@ -188,15 +188,7 @@ class Router:
         classification_text, usage = await text_only_model_call(
             deps, "router_classify", msgs
         )
-        await deps.budget.consume(
-            tokens_in=usage.input_tokens,
-            tokens_out=usage.output_tokens,
-            cost_usd=usage.cost_usd,
-        )
-        session.cumulative_usage = add_usage(
-            session.cumulative_usage, usage
-        )
-        session.turns += 1
+        await consume_usage(deps, session, usage)
 
         parsed_route, confidence = _parse_classification(
             classification_text

@@ -18,56 +18,27 @@ Behaviour is identical; the refactor only changes the shape.
 from __future__ import annotations
 
 import contextlib
-import logging
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any
 
 import anyio
 
-from ..core._deprecation import warn_legacy_protocol
 from ..core.types import (
     Event,
     Image,
     Message,
-    PermissionDecision,
     Role,
     ToolCall,
     ToolResult,
     Usage,
 )
-from ..security.audit import AuditLog, wants_full_transcripts
 from .base import AgentSession, Dependencies
-from .helpers import add_usage
-
-
-def _tool_result_payload(
-    *,
-    call: ToolCall,
-    result: ToolResult,
-    turn: int,
-    audit_log: AuditLog | None,
-) -> dict[str, Any]:
-    """Build the ``tool_result`` audit payload, adding the result
-    body when a :class:`FullTranscriptAuditLog` is wired."""
-    payload: dict[str, Any] = {
-        "tool": call.tool,
-        "call_id": result.call_id,
-        "ok": result.ok,
-        "denied": result.denied,
-        "error": result.error,
-        "reason": result.reason,
-        "turn": turn,
-    }
-    if wants_full_transcripts(audit_log):
-        payload["output"] = result.output
-        payload["duration_ms"] = result.duration_ms
-    return payload
-
-# Module-level singleton no-op async context manager. ``contextlib.nullcontext``
-# implements both the sync and async protocols (since Python 3.10), so we can
-# reuse a single instance everywhere a hot path wants to *maybe* enter a
-# telemetry span via ``async with (NULL_CTX if fast else tel.trace(...)):``.
-_NULL_CTX: contextlib.AbstractAsyncContextManager[None] = contextlib.nullcontext()
+from .helpers import (
+    _NULL_CTX,
+    budget_gate,
+    consume_usage,
+    run_gated_tool,
+)
 
 if TYPE_CHECKING:
     from ..agent.api import Agent
@@ -100,10 +71,22 @@ class ReAct:
         deps: Dependencies,
         prompt: str,
     ) -> AsyncIterator[Event]:
-        # 1. Seed context (system prompt + memory recall + user prompt).
-        session.messages.extend(
-            await _build_seed_messages(deps, session.instructions, prompt)
-        )
+        # 1. Seed context (system prompt + memory recall + user prompt)
+        # — but ONLY on first entry. On re-invocation (the stop-hook
+        # Ralph loop calls ``run()`` again on the same session) the
+        # seed context is already in ``session.messages``; re-seeding
+        # would duplicate the system prompt + memory recall +
+        # rehydrated history on every iteration. Per the
+        # re-invocation contract (base.py), the new ``prompt`` is
+        # appended as a fresh USER turn instead.
+        if not session.messages:
+            session.messages.extend(
+                await _build_seed_messages(deps, session.instructions, prompt)
+            )
+        else:
+            session.messages.append(
+                Message(role=Role.USER, content=prompt)
+            )
 
         # 1a. Snip — bounded-window trim of the rehydrated message
         # list before the first model call. Pure list slicing; no
@@ -140,33 +123,13 @@ class ReAct:
                 session.interruption_reason = "max_turns_exceeded"
                 break
 
-            # Budget gate. ``NoBudget.allows_step()`` returns OK every
-            # time — when ``fast_budget`` is True we skip the call
-            # entirely.
-            if not deps.fast_budget:
-                # Pass user_id so per-user budget caps fire
-                # correctly. Older budget impls without the kwarg
-                # fall back via the ``except TypeError``.
-                try:
-                    status = await deps.budget.allows_step(
-                        user_id=deps.context.user_id
-                    )
-                except TypeError:
-                    status = await deps.budget.allows_step()
-                if status.blocked:
-                    session.interrupted = True
-                    session.interruption_reason = f"budget:{status.reason}"
-                    if not deps.fast_telemetry:
-                        await deps.telemetry.emit_metric(
-                            "loom.budget.exceeded",
-                            1,
-                            session_id=session.id,
-                            reason=status.reason,
-                        )
-                    yield Event.budget_exceeded(session.id, status)
-                    break
-                if status.warn:
-                    yield Event.budget_warning(session.id, status)
+            # Budget gate — shared helper (user_id forwarding +
+            # legacy fallback + fast_budget skip live in ONE place).
+            blocked, gate_events = await budget_gate(deps, session)
+            for gate_event in gate_events:
+                yield gate_event
+            if blocked:
+                break
 
             session.turns += 1
 
@@ -195,6 +158,14 @@ class ReAct:
                 # ``model_chunk`` Event so a ``stream()`` consumer
                 # sees tokens as they arrive.
                 tool_defs = await deps.tools.list_tools()
+                # One ``{name: destructive}`` map per turn, built
+                # from the defs we just fetched — passed down into
+                # the tool dispatch so the destructive-flag backstop
+                # never needs a second ``list_tools()`` round-trip
+                # per call.
+                destructive_map = {
+                    d.name: d.destructive for d in tool_defs
+                }
                 tool_calls: list[ToolCall] = []
                 usage = Usage()
 
@@ -287,22 +258,11 @@ class ReAct:
                     text = "".join(text_parts)
 
                 # 2b. Update budget + telemetry + cumulative usage.
-                if not deps.fast_budget:
-                    try:
-                        await deps.budget.consume(
-                            tokens_in=usage.input_tokens,
-                            tokens_out=usage.output_tokens,
-                            cost_usd=usage.cost_usd,
-                            user_id=deps.context.user_id,
-                        )
-                    except TypeError:
-                        # Legacy budget impls without the user_id
-                        # kwarg — keep working.
-                        await deps.budget.consume(
-                            tokens_in=usage.input_tokens,
-                            tokens_out=usage.output_tokens,
-                            cost_usd=usage.cost_usd,
-                        )
+                # ``count_turn=False`` — ReAct already incremented
+                # its turn counter at the top of the loop.
+                await consume_usage(
+                    deps, session, usage, count_turn=False
+                )
                 if not deps.fast_telemetry:
                     await deps.telemetry.emit_metric(
                         "loom.tokens.input",
@@ -323,9 +283,6 @@ class ReAct:
                             session_id=session.id,
                             model=deps.model.name,
                         )
-                session.cumulative_usage = add_usage(
-                    session.cumulative_usage, usage
-                )
                 session.output = text
 
                 session.messages.append(
@@ -361,7 +318,8 @@ class ReAct:
 
                 if deps.streaming:
                     async for ev in _dispatch_streaming(
-                        deps, session, tool_calls, results
+                        deps, session, tool_calls, results,
+                        destructive_map,
                     ):
                         yield ev
                 else:
@@ -378,6 +336,7 @@ class ReAct:
                                 i,
                                 results,
                                 events_per_call[i],
+                                destructive_map,
                             )
                     for event_list in events_per_call:
                         for ev in event_list:
@@ -430,6 +389,25 @@ class ReAct:
                                 original_chars=original_len,
                                 summary_chars=len(msg_content),
                             )
+                    # Unconditional hard cap — the floor beneath the
+                    # optional summariser above. A pathological
+                    # multi-megabyte tool output must never blow up
+                    # the next model call's input tokens.
+                    max_chars = deps.tool_result_max_chars
+                    if len(msg_content) > max_chars:
+                        dropped_chars = len(msg_content) - max_chars
+                        msg_content = (
+                            msg_content[:max_chars]
+                            + f"\n…[truncated {dropped_chars} chars]"
+                        )
+                        yield Event.architecture_event(
+                            session.id,
+                            "tool_result_truncated",
+                            tool=c.tool,
+                            call_id=final.call_id,
+                            kept_chars=max_chars,
+                            truncated_chars=dropped_chars,
+                        )
                     session.messages.append(
                         Message(
                             role=Role.TOOL,
@@ -583,6 +561,7 @@ async def _dispatch_streaming(
     session: AgentSession,
     tool_calls: list[ToolCall],
     results: list[ToolResult | None],
+    destructive_map: dict[str, bool] | None = None,
 ) -> AsyncIterator[Event]:
     """Streaming path for tool dispatch — events flow as they happen.
 
@@ -604,39 +583,14 @@ async def _dispatch_streaming(
     ) -> None:
         async with sender:
             await sender.send(Event.tool_call(session.id, call))
-            if not deps.fast_audit:
-                await _audit(
-                    deps.audit_log,
-                    session.id,
-                    "model",
-                    "tool_call",
-                    {
-                        "tool": call.tool,
-                        "call_id": call.id,
-                        "args": dict(call.args),
-                        "destructive": call.destructive,
-                        "turn": session.turns,
-                    },
-                    user_id=deps.context.user_id,
-                )
-            result = await _run_single_tool(
-                deps, call, turn=session.turns, slot=slot
+            result = await run_gated_tool(
+                deps,
+                session,
+                call,
+                slot=slot,
+                destructive_map=destructive_map,
             )
             results[slot] = result
-            if not deps.fast_audit:
-                await _audit(
-                    deps.audit_log,
-                    session.id,
-                    "system",
-                    "tool_result",
-                    _tool_result_payload(
-                        call=call,
-                        result=result,
-                        turn=session.turns,
-                        audit_log=deps.audit_log,
-                    ),
-                    user_id=deps.context.user_id,
-                )
             await sender.send(Event.tool_result(session.id, result))
 
     async with anyio.create_task_group() as tg:
@@ -655,267 +609,24 @@ async def _run_one_tool(
     slot: int,
     results: list[ToolResult | None],
     event_buffer: list[Event],
+    destructive_map: dict[str, bool] | None = None,
 ) -> None:
     """Per-call worker: append tool_call event, run the tool through
-    hooks + permissions + runtime.step, write result into
+    the shared gated executor (audit → hooks → permissions →
+    approval → timeout-bounded host call → audit), write result into
     ``results[slot]``, append tool_result event. Buffered into
     ``event_buffer`` so the caller can yield events in deterministic
     call order after the parallel dispatch completes."""
     event_buffer.append(Event.tool_call(session.id, call))
-    if not deps.fast_audit:
-        await _audit(
-            deps.audit_log,
-            session.id,
-            "model",
-            "tool_call",
-            {
-                "tool": call.tool,
-                "call_id": call.id,
-                "args": dict(call.args),
-                "destructive": call.destructive,
-                "turn": session.turns,
-            },
-            user_id=deps.context.user_id,
-        )
-    result = await _run_single_tool(deps, call, turn=session.turns, slot=slot)
-    results[slot] = result
-    if not deps.fast_audit:
-        await _audit(
-            deps.audit_log,
-            session.id,
-            "system",
-            "tool_result",
-            _tool_result_payload(
-                call=call,
-                result=result,
-                turn=session.turns,
-                audit_log=deps.audit_log,
-            ),
-            user_id=deps.context.user_id,
-        )
-    event_buffer.append(Event.tool_result(session.id, result))
-
-
-async def _run_single_tool(
-    deps: Dependencies, call: ToolCall, *, turn: int, slot: int
-) -> ToolResult:
-    """Hooks → permission → journaled tool host call → post-hook.
-
-    Layers (hooks / permissions / runtime / telemetry) are skipped
-    when their corresponding ``fast_*`` flag on ``deps`` is set —
-    e.g. ``AllowAll`` permissions short-circuit the ``check`` call,
-    an empty ``HookRegistry`` short-circuits ``pre_tool`` /
-    ``post_tool`` dispatch, and ``InProcRuntime`` lets us inline
-    the tool host call (skipping idempotency-key derivation).
-    """
-    started = anyio.current_time()
-    result: ToolResult
-
-    tool_trace: contextlib.AbstractAsyncContextManager[Any] = (
-        _NULL_CTX
-        if deps.fast_telemetry
-        else deps.telemetry.trace(
-            "loom.tool",
-            tool=call.tool,
-            call_id=call.id,
-            turn=turn,
-        )
+    result = await run_gated_tool(
+        deps,
+        session,
+        call,
+        slot=slot,
+        destructive_map=destructive_map,
     )
-
-    async with tool_trace:
-        run_user_id = deps.context.user_id
-        # Stamp ``call.destructive`` from the tool host BEFORE any
-        # permission check. Background: ``ToolCall.destructive``
-        # defaults to False, and model adapters (openai, anthropic)
-        # construct ToolCall from the model's tool_use response
-        # without consulting the original Tool's ``destructive``
-        # flag — so a call to a ``destructive=True`` tool would
-        # arrive at permissions.check with ``destructive=False`` and
-        # auto-approve, bypassing the approval handler entirely.
-        # Tool.to_def() now propagates the flag (registry.py), so
-        # any well-behaved adapter could stamp it themselves; this
-        # block is the defensive backstop that fixes the bug for
-        # adapters (current OpenAI/Anthropic ones included) that
-        # don't. Look up authoritatively from the tool host — the
-        # Tool object's destructive flag is the source of truth.
-        if not call.destructive:
-            try:
-                defs = await deps.tools.list_tools()
-                for d in defs:
-                    if d.name == call.tool and d.destructive:
-                        call = call.model_copy(
-                            update={"destructive": True}
-                        )
-                        break
-            except Exception:  # noqa: BLE001 — best-effort; don't crash on host issues
-                pass
-        if deps.fast_hooks:
-            hook_decision: PermissionDecision = PermissionDecision.allow_()
-        else:
-            try:
-                hook_decision = await deps.hooks.pre_tool(
-                    call, user_id=run_user_id
-                )
-            except TypeError:
-                # Legacy HookHost without the kwarg. Warn once
-                # per-process so callers know to add it.
-                warn_legacy_protocol("HookHost", "pre_tool")
-                hook_decision = await deps.hooks.pre_tool(call)
-
-        if hook_decision.deny:
-            result = ToolResult.denied_(
-                call.id, hook_decision.reason or "denied by hook"
-            )
-        else:
-            if deps.fast_permissions:
-                # AllowAll always allows — skip the dataclass round-trip.
-                perm: PermissionDecision = PermissionDecision.allow_()
-            else:
-                try:
-                    perm = await deps.permissions.check(
-                        call, context={}, user_id=run_user_id
-                    )
-                except TypeError:
-                    # Legacy Permissions without the kwarg. Warn
-                    # once per-process so callers know to add it.
-                    warn_legacy_protocol("Permissions", "check")
-                    perm = await deps.permissions.check(call, context={})
-            # Decide whether to execute, then either set a deny
-            # result here or fall into the execute-and-post-hook
-            # block below. ``execute_call`` stays True only when
-            # every gate (deny / ask) approved.
-            execute_call = True
-            # When ``deps.fast_hooks`` is True we never actually
-            # ran a hook — the ``allow_()`` we pre-set above is a
-            # default, not an explicit approval. Distinguish so an
-            # ``ask`` from permissions doesn't get silently bypassed
-            # by the absence of a hook layer.
-            hook_explicitly_allowed = (
-                (not deps.fast_hooks) and hook_decision.allow
-            )
-            if perm.deny:
-                result = ToolResult.denied_(
-                    call.id, perm.reason or "denied by policy"
-                )
-                execute_call = False
-            elif perm.ask and not hook_explicitly_allowed:
-                # Permissions returned ``ask`` — route the decision
-                # through the configured approval handler. When no
-                # handler is wired, fall back to a deny so the agent
-                # never silently bypasses the approval gate.
-                approved = await _resolve_ask_decision(
-                    call,
-                    deps.approval_handler,
-                    run_user_id,
-                )
-                if not approved:
-                    result = ToolResult.denied_(
-                        call.id,
-                        perm.reason or (
-                            "approval required; no approver"
-                            if deps.approval_handler is None
-                            else "approval declined"
-                        ),
-                    )
-                    execute_call = False
-            if execute_call:
-                try:
-                    if deps.fast_runtime:
-                        result = await deps.tools.call(
-                            call.tool,
-                            call.args,
-                            call_id=call.id,
-                        )
-                    else:
-                        result = await deps.runtime.step(
-                            f"tool_call_{turn}_{slot}",
-                            deps.tools.call,
-                            call.tool,
-                            call.args,
-                            call_id=call.id,
-                            idempotency_key=call.idempotency_key(),
-                        )
-                except Exception as exc:  # noqa: BLE001
-                    result = ToolResult.error_(call.id, str(exc))
-
-                if not deps.fast_hooks:
-                    try:
-                        await deps.hooks.post_tool(
-                            call, result, user_id=run_user_id
-                        )
-                    except TypeError:
-                        warn_legacy_protocol("HookHost", "post_tool")
-                        await deps.hooks.post_tool(call, result)
-
-    if not deps.fast_telemetry:
-        elapsed_ms = (anyio.current_time() - started) * 1000
-        await deps.telemetry.emit_metric(
-            "loom.tool.duration_ms",
-            elapsed_ms,
-            tool=call.tool,
-            ok=result.ok,
-            denied=result.denied,
-        )
-    return result
-
-
-async def _resolve_ask_decision(
-    call: ToolCall,
-    handler: Any,  # ApprovalHandler | None — Any keeps the import flat
-    user_id: str | None,
-) -> bool:
-    """Translate a ``Decision.ask_`` permissions outcome into an
-    allow/deny by invoking the registered approval handler.
-
-    Returns ``True`` when the handler approves the call, ``False``
-    when it declines, when no handler is wired, or when the handler
-    raises. A raising handler is treated as a deny (and logged) so
-    a buggy approval flow never silently green-lights a tool the
-    policy explicitly wanted gated.
-    """
-    if handler is None:
-        return False
-    try:
-        return bool(await handler(call, user_id))
-    except Exception as exc:  # noqa: BLE001 — defensive: handlers
-        # may raise from UI plumbing / network failures. We must
-        # not turn a buggy approval flow into a permissive one.
-        logging.getLogger("loomflow.architecture.react").warning(
-            "approval_handler raised for tool=%s; treating as deny: %s",
-            call.tool,
-            exc,
-        )
-        return False
-
-
-async def _audit(
-    audit_log: AuditLog | None,
-    session_id: str,
-    actor: str,
-    action: str,
-    payload: dict[str, Any],
-    *,
-    user_id: str | None = None,
-) -> None:
-    if audit_log is None:
-        return
-    try:
-        await audit_log.append(
-            session_id=session_id,
-            actor=actor,
-            action=action,
-            payload=payload,
-            user_id=user_id,
-        )
-    except TypeError:
-        # Legacy AuditLog impls without the user_id kwarg.
-        warn_legacy_protocol("AuditLog", "append")
-        await audit_log.append(
-            session_id=session_id,
-            actor=actor,
-            action=action,
-            payload=payload,
-        )
+    results[slot] = result
+    event_buffer.append(Event.tool_result(session.id, result))
 
 
 def _format_tool_message(result: ToolResult) -> str:

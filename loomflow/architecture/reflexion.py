@@ -42,7 +42,14 @@ For each attempt up to ``max_attempts``:
    (selective-recall) — keyed by the failing prompt so future
    recall can find it.
 8. **Reset.** Clear ``session.messages`` so the base re-seeds its
-   context. Cumulative usage and turn count carry across attempts.
+   context. Cumulative usage carries across attempts. The TURN
+   COUNTER does not: each attempt gets a fresh per-attempt turn
+   budget (``session.turns`` is reset to 0 before the base runs),
+   because the base architecture terminates at ``max_turns`` —
+   carrying the count across attempts would starve attempt 2+ down
+   to a couple of turns. The cumulative total across all attempts
+   is restored onto ``session.turns`` when the run finishes, so
+   ``RunResult.turns`` still reports the true overall count.
 
 Strengths
 ---------
@@ -68,7 +75,7 @@ from typing import TYPE_CHECKING
 from ..core.types import Event, Message, Role
 from ..loader.base import Chunk
 from .base import AgentSession, Architecture, Dependencies
-from .helpers import add_usage, parse_score, text_only_model_call
+from .helpers import consume_usage, parse_score, text_only_model_call
 from .react import ReAct
 
 if TYPE_CHECKING:
@@ -172,121 +179,144 @@ class Reflexion:
         deps: Dependencies,
         prompt: str,
     ) -> AsyncIterator[Event]:
-        for attempt in range(1, self._max_attempts + 1):
-            yield Event.architecture_event(
-                session.id,
-                "reflexion.attempt_started",
-                attempt=attempt,
-                max_attempts=self._max_attempts,
-            )
-
-            # Selective recall: when a lesson_store is configured,
-            # query for lessons relevant to THIS prompt and write
-            # them to the working memory block. The block is
-            # rewritten (not appended) so the agent only sees the
-            # top-k relevant lessons, not the full lesson history.
-            if self._lesson_store is not None:
-                hits = await self._lesson_store.search(
-                    prompt, k=self._top_k
-                )
-                if hits:
-                    bullets = "\n".join(
-                        f"- {r.chunk.content}" for r in hits
-                    )
-                    await deps.memory.update_block(
-                        self._lessons_block, bullets
-                    )
-                    yield Event.architecture_event(
-                        session.id,
-                        "reflexion.lessons_recalled",
-                        attempt=attempt,
-                        n_recalled=len(hits),
-                    )
-
-            # Each attempt is a fresh seed: clear messages so the
-            # base re-runs seed_context, which will pick up lessons
-            # from memory.working() automatically.
-            session.messages = []
-
-            async for event in self._base.run(session, deps, prompt):
-                yield event
-
-            if session.interrupted:
-                # Base architecture interrupted itself (max_turns,
-                # budget). Don't reflect on a partial output.
-                return
-
-            # --- Evaluate ---
-            score = await self._evaluate(deps, session, prompt, attempt)
-            yield Event.architecture_event(
-                session.id,
-                "reflexion.evaluated",
-                attempt=attempt,
-                score=score,
-            )
-
-            if score >= self._threshold:
+        # Per-attempt turn budget. The base architecture terminates
+        # at ``max_turns``; if the counter carried across attempts
+        # (the pre-fix behaviour), attempt 2+ would inherit attempt
+        # 1's near-exhausted count and get starved down to a turn or
+        # two. Each attempt starts from 0; ``prior_turns`` tracks
+        # what completed attempts consumed, and the ``finally`` block
+        # restores the true cumulative total (baseline from any
+        # stop-hook re-invocation + completed attempts + the current
+        # attempt) onto ``session.turns`` for RunResult reporting.
+        turns_baseline = session.turns
+        prior_turns = 0
+        try:
+            for attempt in range(1, self._max_attempts + 1):
+                if attempt > 1:
+                    prior_turns += session.turns
+                session.turns = 0
                 yield Event.architecture_event(
                     session.id,
-                    "reflexion.threshold_met",
+                    "reflexion.attempt_started",
+                    attempt=attempt,
+                    max_attempts=self._max_attempts,
+                )
+
+                # Selective recall: when a lesson_store is configured,
+                # query for lessons relevant to THIS prompt and write
+                # them to the working memory block. The block is
+                # rewritten (not appended) so the agent only sees the
+                # top-k relevant lessons, not the full lesson history.
+                if self._lesson_store is not None:
+                    hits = await self._lesson_store.search(
+                        prompt, k=self._top_k
+                    )
+                    if hits:
+                        bullets = "\n".join(
+                            f"- {r.chunk.content}" for r in hits
+                        )
+                        await deps.memory.update_block(
+                            self._lessons_block, bullets
+                        )
+                        yield Event.architecture_event(
+                            session.id,
+                            "reflexion.lessons_recalled",
+                            attempt=attempt,
+                            n_recalled=len(hits),
+                        )
+
+                # Each attempt is a fresh seed: clear messages so the
+                # base re-runs seed_context, which will pick up lessons
+                # from memory.working() automatically.
+                session.messages = []
+
+                async for event in self._base.run(session, deps, prompt):
+                    yield event
+
+                if session.interrupted:
+                    # Base architecture interrupted itself (max_turns,
+                    # budget). Don't reflect on a partial output.
+                    return
+
+                # --- Evaluate ---
+                score = await self._evaluate(
+                    deps, session, prompt, attempt
+                )
+                yield Event.architecture_event(
+                    session.id,
+                    "reflexion.evaluated",
                     attempt=attempt,
                     score=score,
                 )
-                return
 
-            if attempt >= self._max_attempts:
+                if score >= self._threshold:
+                    yield Event.architecture_event(
+                        session.id,
+                        "reflexion.threshold_met",
+                        attempt=attempt,
+                        score=score,
+                    )
+                    return
+
+                if attempt >= self._max_attempts:
+                    yield Event.architecture_event(
+                        session.id,
+                        "reflexion.max_attempts_reached",
+                        final_score=score,
+                        attempts=attempt,
+                    )
+                    return
+
+                # --- Reflect → produce a lesson ---
+                lesson = await self._reflect(
+                    deps, session, prompt, attempt, score
+                )
                 yield Event.architecture_event(
                     session.id,
-                    "reflexion.max_attempts_reached",
-                    final_score=score,
-                    attempts=attempt,
+                    "reflexion.lesson_produced",
+                    attempt=attempt,
+                    lesson=lesson,
                 )
-                return
 
-            # --- Reflect → produce a lesson ---
-            lesson = await self._reflect(
-                deps, session, prompt, attempt, score
-            )
-            yield Event.architecture_event(
-                session.id,
-                "reflexion.lesson_produced",
-                attempt=attempt,
-                lesson=lesson,
-            )
-
-            # --- Persist the lesson.
-            #
-            # Selective-recall mode: write to the vector store with
-            # the failing prompt as metadata so future recalls of
-            # similar prompts surface this lesson. The store handles
-            # the embedding internally.
-            #
-            # Legacy mode: append to the memory working block.
-            if self._lesson_store is not None:
-                await self._lesson_store.add(
-                    [
-                        Chunk(
-                            content=lesson,
-                            metadata={
-                                "attempt": attempt,
-                                "score": score,
-                                "prompt_excerpt": prompt[:200],
-                            },
-                        )
-                    ]
+                # --- Persist the lesson.
+                #
+                # Selective-recall mode: write to the vector store with
+                # the failing prompt as metadata so future recalls of
+                # similar prompts surface this lesson. The store handles
+                # the embedding internally.
+                #
+                # Legacy mode: append to the memory working block.
+                if self._lesson_store is not None:
+                    await self._lesson_store.add(
+                        [
+                            Chunk(
+                                content=lesson,
+                                metadata={
+                                    "attempt": attempt,
+                                    "score": score,
+                                    "prompt_excerpt": prompt[:200],
+                                },
+                            )
+                        ]
+                    )
+                    persist_target = "lesson_store"
+                else:
+                    await deps.memory.append_block(
+                        self._lessons_block, f"- {lesson}"
+                    )
+                    persist_target = self._lessons_block
+                yield Event.architecture_event(
+                    session.id,
+                    "reflexion.lesson_persisted",
+                    attempt=attempt,
+                    block=persist_target,
                 )
-                persist_target = "lesson_store"
-            else:
-                await deps.memory.append_block(
-                    self._lessons_block, f"- {lesson}"
-                )
-                persist_target = self._lessons_block
-            yield Event.architecture_event(
-                session.id,
-                "reflexion.lesson_persisted",
-                attempt=attempt,
-                block=persist_target,
-            )
+        finally:
+            # Restore the true cumulative turn count for reporting:
+            # whatever the session started with (stop-hook
+            # re-invocation baseline) + completed attempts + the
+            # attempt in flight when we exited.
+            session.turns += turns_baseline + prior_turns
 
     # ---- helpers ---------------------------------------------------------
 
@@ -310,15 +340,7 @@ class Reflexion:
         text, usage = await text_only_model_call(
             deps, f"reflexion_eval_{attempt}", msgs
         )
-        await deps.budget.consume(
-            tokens_in=usage.input_tokens,
-            tokens_out=usage.output_tokens,
-            cost_usd=usage.cost_usd,
-        )
-        session.cumulative_usage = add_usage(
-            session.cumulative_usage, usage
-        )
-        session.turns += 1
+        await consume_usage(deps, session, usage)
         return parse_score(text)
 
     async def _reflect(
@@ -343,15 +365,7 @@ class Reflexion:
         text, usage = await text_only_model_call(
             deps, f"reflexion_reflect_{attempt}", msgs
         )
-        await deps.budget.consume(
-            tokens_in=usage.input_tokens,
-            tokens_out=usage.output_tokens,
-            cost_usd=usage.cost_usd,
-        )
-        session.cumulative_usage = add_usage(
-            session.cumulative_usage, usage
-        )
-        session.turns += 1
+        await consume_usage(deps, session, usage)
         return text.strip()
 
 

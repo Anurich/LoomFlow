@@ -22,8 +22,12 @@ Pattern (BFS beam search)
    d. **Early exit:** if any candidate scores ``>= solved_threshold``,
       we stop early and use that branch.
 
-3. **Best leaf wins.** The highest-scoring leaf across the whole
-   tree is the final answer (its content goes to ``session.output``).
+3. **Best leaf wins, then synthesis.** The highest-scoring leaf
+   across the whole tree selects the winning root→leaf reasoning
+   chain; a closing model call (``synthesize_final=True``, the
+   default) turns that chain into the actual final answer written
+   to ``session.output``. With ``synthesize_final=False`` the raw
+   winning thought is the output (legacy behaviour).
 
 This is the "BFS-with-beam" variant — DFS with backtracking is a
 follow-up. For a structured combinatorial task, BFS-beam covers most
@@ -31,11 +35,13 @@ of what users need.
 
 Cost
 ----
-``branch_factor × beam_width × max_depth × 2`` model calls (one
-proposer + one evaluator per candidate). With defaults
-``(3, 2, 3)`` that's 36 calls. Reserve ToT for problems where the
-search structure earns the cost — math/planning tasks where ReAct
-visibly meanders.
+Per level: ONE batched proposer call per frontier node (asking for
+``branch_factor`` numbered thoughts at once) + one evaluator call
+per candidate — ``beam_width × (1 + branch_factor) × max_depth``
+model calls, plus one closing synthesis call (``synthesize_final``,
+on by default). With defaults ``(3, 2, 3)`` that's ~25 calls.
+Reserve ToT for problems where the search structure earns the cost
+— math/planning tasks where ReAct visibly meanders.
 
 Strengths
 ---------
@@ -58,6 +64,7 @@ Weaknesses
 
 from __future__ import annotations
 
+import re
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
@@ -67,7 +74,12 @@ from pydantic import BaseModel
 from ..core.ids import new_id
 from ..core.types import Event, Message, Role, Usage
 from .base import AgentSession, Dependencies
-from .helpers import add_usage, parse_score, text_only_model_call
+from .helpers import (
+    budget_gate,
+    consume_usage,
+    parse_score,
+    text_only_model_call,
+)
 
 if TYPE_CHECKING:
     from ..agent.api import Agent
@@ -76,12 +88,26 @@ if TYPE_CHECKING:
 DEFAULT_PROPOSER_PROMPT = """\
 You are exploring possible reasoning paths to solve a problem.
 
-Given the problem and any prior steps, propose ONE next step (a
-"thought") toward a solution. A thought can be a sub-step,
-intermediate calculation, sub-decision, or partial answer.
+Given the problem and any prior steps, propose {n} DISTINCT candidate
+next steps ("thoughts") toward a solution. A thought can be a
+sub-step, intermediate calculation, sub-decision, or partial answer.
+Each thought should explore a genuinely different direction — do not
+propose near-duplicates.
 
-Output only the thought itself — concise, one paragraph at most.
-Do not number it; do not preface with "Thought:".
+Output ONLY a numbered list, one thought per line:
+1. <first thought>
+2. <second thought>
+...
+
+No preamble, no commentary, no prefixes like "Thought:".
+"""
+
+
+DEFAULT_SYNTHESIZER_PROMPT = """\
+You are given a problem and the chain of reasoning steps that a
+tree search selected as the most promising path. Produce the FINAL
+ANSWER to the problem, using the reasoning chain. Do not describe
+the steps — deliver the completed solution the user asked for.
 """
 
 
@@ -135,6 +161,8 @@ class TreeOfThoughts:
         parallel: bool = True,
         proposer_prompt: str | None = None,
         evaluator_prompt: str | None = None,
+        synthesize_final: bool = True,
+        synthesizer_prompt: str | None = None,
     ) -> None:
         if branch_factor < 1:
             raise ValueError("branch_factor must be >= 1")
@@ -169,6 +197,16 @@ class TreeOfThoughts:
         self._evaluator_prompt = (
             evaluator_prompt or DEFAULT_EVALUATOR_PROMPT
         )
+        # When True (default), a closing model call synthesizes a
+        # real final answer from the root→best-leaf reasoning chain.
+        # Without it, ``session.output`` would be the winning leaf's
+        # content — a single incremental *thought*, not a solution.
+        # Set False to get the raw best-thought behaviour (useful
+        # when the caller does its own synthesis).
+        self._synthesize_final = synthesize_final
+        self._synthesizer_prompt = (
+            synthesizer_prompt or DEFAULT_SYNTHESIZER_PROMPT
+        )
 
     def declared_workers(self) -> dict[str, Agent]:
         return {}
@@ -199,16 +237,11 @@ class TreeOfThoughts:
         )
 
         for depth in range(1, self._max_depth + 1):
-            status = await deps.budget.allows_step()
-            if status.blocked:
-                session.interrupted = True
-                session.interruption_reason = (
-                    f"budget:{status.reason}"
-                )
-                yield Event.budget_exceeded(session.id, status)
+            blocked, gate_events = await budget_gate(deps, session)
+            for gate_event in gate_events:
+                yield gate_event
+            if blocked:
                 break
-            if status.warn:
-                yield Event.budget_warning(session.id, status)
 
             yield Event.architecture_event(
                 session.id,
@@ -217,78 +250,80 @@ class TreeOfThoughts:
                 frontier_size=len(frontier),
             )
 
-            # === Expand: generate branch_factor candidates per node ===
+            # === Expand: ONE proposer call per frontier node asks
+            # for ``branch_factor`` numbered thoughts at once. ===
             #
-            # Parallel mode runs every (parent × k) proposer call
-            # concurrently — independent calls, big wall-clock win
-            # at moderate fan-out. Sequential mode preserves
-            # deterministic ordering for tests / strict rate limits.
+            # Pre-fix, this issued branch_factor byte-identical calls
+            # per parent (same messages, k only distinguished the
+            # runtime step name) — N-1 of the N calls bought nothing
+            # but provider-sampling luck at full price. One batched
+            # call is branch_factor× cheaper on input tokens and
+            # explicitly asks for DISTINCT candidates.
+            #
+            # Parallel mode runs the per-parent calls concurrently;
+            # sequential mode preserves deterministic ordering for
+            # tests / strict rate limits.
             candidates: list[ThoughtNode] = []
-            propose_jobs = [
-                (parent, k)
-                for parent in frontier
-                for k in range(self._branch_factor)
-            ]
+            parents = list(frontier)
             propose_results: list[tuple[str, Usage] | None] = [
                 None
-            ] * len(propose_jobs)
+            ] * len(parents)
 
             # B023 false positive: the task_group below joins on
             # all spawned tasks before the for-loop advances, so the
             # captured ``depth`` / ``propose_results`` are stable
             # for the closure's entire lifetime.
-            async def _propose_one(  # noqa: B023
-                idx: int, parent: ThoughtNode, k: int
+            async def _propose_for_parent(  # noqa: B023
+                idx: int, parent: ThoughtNode
             ) -> None:
                 chain = _chain_to_root(all_nodes, parent)
                 msgs = _proposer_messages(
-                    self._proposer_prompt, prompt, chain
+                    self._proposer_prompt,
+                    prompt,
+                    chain,
+                    self._branch_factor,
                 )
                 text, usage = await text_only_model_call(
                     deps,
-                    f"tot_propose_d{depth}_p{parent.id}_k{k}",  # noqa: B023
+                    f"tot_propose_d{depth}_p{parent.id}",  # noqa: B023
                     msgs,
                 )
                 propose_results[idx] = (text, usage)  # noqa: B023
 
             if self._parallel:
                 async with anyio.create_task_group() as tg:
-                    for idx, (parent, k) in enumerate(propose_jobs):
-                        tg.start_soon(_propose_one, idx, parent, k)
+                    for idx, parent in enumerate(parents):
+                        tg.start_soon(_propose_for_parent, idx, parent)
             else:
-                for idx, (parent, k) in enumerate(propose_jobs):
-                    await _propose_one(idx, parent, k)
+                for idx, parent in enumerate(parents):
+                    await _propose_for_parent(idx, parent)
 
-            for (parent, _k), pr in zip(
-                propose_jobs, propose_results, strict=True
+            for parent, pr in zip(
+                parents, propose_results, strict=True
             ):
                 assert pr is not None
                 text, usage = pr
-                await deps.budget.consume(
-                    tokens_in=usage.input_tokens,
-                    tokens_out=usage.output_tokens,
-                    cost_usd=usage.cost_usd,
+                await consume_usage(deps, session, usage)
+                thoughts = _parse_numbered_thoughts(
+                    text, self._branch_factor
                 )
-                session.cumulative_usage = add_usage(
-                    session.cumulative_usage, usage
-                )
-                session.turns += 1
-                candidate = ThoughtNode(
-                    id=new_id("thot"),
-                    parent_id=parent.id,
-                    content=text.strip(),
-                    depth=depth,
-                )
-                candidates.append(candidate)
-                all_nodes.append(candidate)
-                yield Event.architecture_event(
-                    session.id,
-                    "tot.proposed",
-                    depth=depth,
-                    node_id=candidate.id,
-                    parent_id=parent.id,
-                    content=candidate.content[:200],
-                )
+                for thought in thoughts:
+                    candidate = ThoughtNode(
+                        id=new_id("thot"),
+                        parent_id=parent.id,
+                        content=thought,
+                        depth=depth,
+                    )
+                    candidates.append(candidate)
+                    all_nodes.append(candidate)
+                    yield Event.architecture_event(
+                        session.id,
+                        "tot.proposed",
+                        depth=depth,
+                        node_id=candidate.id,
+                        parent_id=parent.id,
+                        content=candidate.content[:200],
+                    )
 
             # === Evaluate every candidate (parallel where possible) ===
             eval_results: list[tuple[float, Usage] | None] = [
@@ -319,15 +354,7 @@ class TreeOfThoughts:
             ):
                 assert er is not None
                 score, usage = er
-                await deps.budget.consume(
-                    tokens_in=usage.input_tokens,
-                    tokens_out=usage.output_tokens,
-                    cost_usd=usage.cost_usd,
-                )
-                session.cumulative_usage = add_usage(
-                    session.cumulative_usage, usage
-                )
-                session.turns += 1
+                await consume_usage(deps, session, usage)
                 cand.score = score
                 yield Event.architecture_event(
                     session.id,
@@ -389,6 +416,51 @@ class TreeOfThoughts:
             return
         best = max(non_root, key=lambda n: n.score)
         session.output = best.content
+
+        # === Final synthesis over the winning root→leaf chain ===
+        #
+        # ``best.content`` is a single incremental *thought*, not a
+        # solution — without this closing call the architecture never
+        # actually answers the problem. One text-only model call
+        # turns the selected reasoning chain into the final answer.
+        if self._synthesize_final:
+            chain = _chain_to_root(all_nodes, best)
+            steps = [n for n in chain if n.parent_id is not None]
+            steps_text = "\n".join(
+                f"Step {i + 1}: {n.content}"
+                for i, n in enumerate(steps)
+            )
+            synth_msgs = [
+                Message(
+                    role=Role.SYSTEM,
+                    content=self._synthesizer_prompt,
+                ),
+                Message(
+                    role=Role.USER,
+                    content=(
+                        f"Problem:\n{prompt}\n\n"
+                        f"Selected reasoning chain:\n{steps_text}\n\n"
+                        f"Produce the final answer."
+                    ),
+                ),
+            ]
+            synth_text, synth_usage = await text_only_model_call(
+                deps,
+                "tot_synthesize",
+                synth_msgs,
+                output_schema=deps.output_schema,
+            )
+            await consume_usage(deps, session, synth_usage)
+            if synth_text.strip():
+                session.output = synth_text.strip()
+            yield Event.architecture_event(
+                session.id,
+                "tot.synthesized",
+                winner_id=best.id,
+                chain_length=len(steps),
+                final=session.output[:300],
+            )
+
         # Stash the full tree on session.metadata so consumers can
         # render the search tree post-hoc.
         session.metadata["tot_nodes"] = [
@@ -428,33 +500,77 @@ def _chain_to_root(
     return list(reversed(chain))
 
 
+_NUMBERED_LINE_RE = re.compile(r"^\s*(?:\d+[\.\)]|[-*•])\s+(.*\S)\s*$")
+
+
+def _parse_numbered_thoughts(text: str, expected: int) -> list[str]:
+    """Parse a numbered / bulleted list of thoughts from one
+    batched proposer response.
+
+    Continuation lines (non-empty, not starting a new item) are
+    folded into the current thought so multi-line thoughts survive.
+    When no list markers are found at all, the whole response is
+    treated as a single thought (graceful degradation for models
+    that ignore the format). At most ``expected`` thoughts are
+    returned — extras beyond ``branch_factor`` are dropped.
+    """
+    thoughts: list[str] = []
+    current: list[str] = []
+    for line in text.split("\n"):
+        match = _NUMBERED_LINE_RE.match(line)
+        if match is not None:
+            if current:
+                thoughts.append(" ".join(current).strip())
+            current = [match.group(1).strip()]
+        elif line.strip() and current:
+            current.append(line.strip())
+    if current:
+        thoughts.append(" ".join(current).strip())
+    if not thoughts:
+        stripped = text.strip()
+        return [stripped] if stripped else []
+    return [t for t in thoughts if t][:expected]
+
+
 def _proposer_messages(
-    system_prompt: str, problem: str, chain: list[ThoughtNode]
+    system_prompt: str,
+    problem: str,
+    chain: list[ThoughtNode],
+    n: int,
 ) -> list[Message]:
-    """Build messages for a proposer call.
+    """Build messages for a batched proposer call.
 
     The chain from root to current frontier node provides the
-    "prior steps so far"; the proposer extends with one new thought.
+    "prior steps so far"; the proposer extends with ``n`` distinct
+    candidate next thoughts in one response.
     """
+    # Custom prompts may not carry the ``{n}`` placeholder (or may
+    # contain literal braces) — fall back to the raw prompt rather
+    # than crashing on .format().
+    try:
+        system = system_prompt.format(n=n)
+    except (KeyError, IndexError, ValueError):
+        system = system_prompt
     # Drop the root (which holds the original prompt) since we send
     # the prompt explicitly.
-    prior_steps = [n for n in chain if n.parent_id is not None]
+    prior_steps = [n_ for n_ in chain if n_.parent_id is not None]
     prior_text = (
         "\n".join(
-            f"Step {i + 1}: {n.content}"
-            for i, n in enumerate(prior_steps)
+            f"Step {i + 1}: {node.content}"
+            for i, node in enumerate(prior_steps)
         )
         if prior_steps
-        else "(no prior steps yet — propose the first one)"
+        else "(no prior steps yet — propose the first ones)"
     )
     return [
-        Message(role=Role.SYSTEM, content=system_prompt),
+        Message(role=Role.SYSTEM, content=system),
         Message(
             role=Role.USER,
             content=(
                 f"Problem:\n{problem}\n\n"
                 f"Prior steps:\n{prior_text}\n\n"
-                f"Propose ONE next step."
+                f"Propose {n} distinct candidate next steps as a "
+                f"numbered list."
             ),
         ),
     ]

@@ -57,7 +57,6 @@ Weaknesses
 
 from __future__ import annotations
 
-import json
 import re
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any
@@ -65,9 +64,15 @@ from typing import TYPE_CHECKING, Any
 import anyio
 from pydantic import BaseModel, Field
 
-from ..core.types import Event, Message, Role, ToolResult
+from ..core.types import Event, Message, Role, ToolCall, ToolResult
 from .base import AgentSession, Dependencies
-from .helpers import add_usage, text_only_model_call
+from .helpers import (
+    budget_gate,
+    consume_usage,
+    parse_fenced_json,
+    run_gated_tool,
+    text_only_model_call,
+)
 
 if TYPE_CHECKING:
     from ..agent.api import Agent
@@ -169,7 +174,12 @@ class ReWOO:
         yield Event.architecture_event(
             session.id, "rewoo.planner_started"
         )
-        plan = await self._make_plan(deps, session, prompt)
+        # Fetch tool defs ONCE — used for both the planner's tool
+        # descriptions and the per-step destructive-flag stamping
+        # (no extra list_tools round-trip per executed step).
+        tool_defs = await deps.tools.list_tools()
+        destructive_map = {d.name: d.destructive for d in tool_defs}
+        plan = await self._make_plan(deps, session, prompt, tool_defs)
         if len(plan.steps) > self._max_steps:
             plan = ReWOOPlan(steps=plan.steps[: self._max_steps])
         yield Event.architecture_event(
@@ -206,16 +216,11 @@ class ReWOO:
 
         results: dict[str, ReWOOStepResult] = {}
         for level_index, level in enumerate(levels):
-            status = await deps.budget.allows_step()
-            if status.blocked:
-                session.interrupted = True
-                session.interruption_reason = (
-                    f"budget:{status.reason}"
-                )
-                yield Event.budget_exceeded(session.id, status)
+            blocked, gate_events = await budget_gate(deps, session)
+            for gate_event in gate_events:
+                yield gate_event
+            if blocked:
                 return
-            if status.warn:
-                yield Event.budget_warning(session.id, status)
 
             yield Event.architecture_event(
                 session.id,
@@ -225,7 +230,12 @@ class ReWOO:
             )
 
             level_results = await _execute_level(
-                deps, session, level, results, self._parallel_levels
+                deps,
+                session,
+                level,
+                results,
+                self._parallel_levels,
+                destructive_map,
             )
             results.update(level_results)
             for step_id, sr in level_results.items():
@@ -264,8 +274,8 @@ class ReWOO:
         deps: Dependencies,
         session: AgentSession,
         prompt: str,
+        tool_defs: list[Any],
     ) -> ReWOOPlan:
-        tool_defs = await deps.tools.list_tools()
         tool_descriptions = (
             "\n".join(
                 f"  - {t.name}: {t.description}" for t in tool_defs
@@ -282,15 +292,7 @@ class ReWOO:
         text, usage = await text_only_model_call(
             deps, "rewoo_planner", msgs
         )
-        await deps.budget.consume(
-            tokens_in=usage.input_tokens,
-            tokens_out=usage.output_tokens,
-            cost_usd=usage.cost_usd,
-        )
-        session.cumulative_usage = add_usage(
-            session.cumulative_usage, usage
-        )
-        session.turns += 1
+        await consume_usage(deps, session, usage)
         return _parse_rewoo_plan(text)
 
     async def _solve(
@@ -320,18 +322,16 @@ class ReWOO:
             Message(role=Role.SYSTEM, content=self._solver_prompt),
             Message(role=Role.USER, content=user_content),
         ]
+        # The solver produces the run's final answer — forward the
+        # caller's output_schema so native structured-output
+        # adapters can constrain it.
         text, usage = await text_only_model_call(
-            deps, "rewoo_solver", msgs
+            deps,
+            "rewoo_solver",
+            msgs,
+            output_schema=deps.output_schema,
         )
-        await deps.budget.consume(
-            tokens_in=usage.input_tokens,
-            tokens_out=usage.output_tokens,
-            cost_usd=usage.cost_usd,
-        )
-        session.cumulative_usage = add_usage(
-            session.cumulative_usage, usage
-        )
-        session.turns += 1
+        await consume_usage(deps, session, usage)
         return text.strip()
 
 
@@ -437,6 +437,7 @@ async def _execute_level(
     level: list[ReWOOStep],
     prior_results: dict[str, ReWOOStepResult],
     parallel: bool,
+    destructive_map: dict[str, bool] | None = None,
 ) -> dict[str, ReWOOStepResult]:
     """Run every step in ``level`` (parallel or sequential) and
     return the new step results keyed by step id."""
@@ -444,7 +445,7 @@ async def _execute_level(
 
     if parallel and len(level) > 1:
         async with anyio.create_task_group() as tg:
-            for step in level:
+            for slot, step in enumerate(level):
                 tg.start_soon(
                     _run_one_step,
                     deps,
@@ -452,11 +453,19 @@ async def _execute_level(
                     step,
                     prior_results,
                     new_results,
+                    slot,
+                    destructive_map,
                 )
     else:
-        for step in level:
+        for slot, step in enumerate(level):
             await _run_one_step(
-                deps, session, step, prior_results, new_results
+                deps,
+                session,
+                step,
+                prior_results,
+                new_results,
+                slot,
+                destructive_map,
             )
     return new_results
 
@@ -467,28 +476,37 @@ async def _run_one_step(
     step: ReWOOStep,
     prior_results: dict[str, ReWOOStepResult],
     out_results: dict[str, ReWOOStepResult],
+    slot: int = 0,
+    destructive_map: dict[str, bool] | None = None,
 ) -> None:
-    """Resolve placeholders, dispatch the tool call, capture output
-    or error into ``out_results[step.id]``."""
+    """Resolve placeholders, dispatch the tool call through the
+    SHARED gated executor (hooks → permissions → approval handler →
+    audit log → timeout-bounded, journaled tool host call — the
+    exact same path ReAct uses), capture output or error into
+    ``out_results[step.id]``.
+
+    Routing through :func:`run_gated_tool` is load-bearing: a
+    destructive tool in a ReWOO plan must hit the same permission /
+    approval gates and leave the same audit trail as it would in a
+    ReAct turn. Pre-fix, ReWOO called ``deps.tools.call`` directly
+    and bypassed all of it.
+    """
     resolved_args = _substitute_placeholders(
         step.args, prior_results
     )
-    try:
-        tool_result: ToolResult = await deps.runtime.step(
-            f"rewoo_step_{step.id}",
-            deps.tools.call,
-            step.tool,
-            resolved_args,
-            call_id=f"rewoo_{step.id}",
-        )
-    except Exception as exc:  # noqa: BLE001 — surface as step error
-        out_results[step.id] = ReWOOStepResult(
-            step_id=step.id,
-            tool=step.tool,
-            output="",
-            error=str(exc),
-        )
-        return
+    call = ToolCall(
+        id=f"rewoo_{step.id}",
+        tool=step.tool,
+        args=resolved_args if isinstance(resolved_args, dict) else {},
+    )
+    tool_result: ToolResult = await run_gated_tool(
+        deps,
+        session,
+        call,
+        slot=slot,
+        step_name=f"rewoo_step_{step.id}",
+        destructive_map=destructive_map,
+    )
 
     # Record this tool call for plan_write's strong-mode
     # verification (no-op when living_plan isn't enabled).
@@ -526,20 +544,7 @@ def _parse_rewoo_plan(text: str) -> ReWOOPlan:
     """Parse a ReWOO plan from JSON. Tolerant of markdown code
     fences. Returns an empty plan on parse failure (caller's
     ``empty_plan`` branch handles termination)."""
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        lines = cleaned.split("\n")
-        if lines[0].startswith("```"):
-            lines = lines[1:]
-        while lines and lines[-1].strip().startswith("```"):
-            lines = lines[:-1]
-        cleaned = "\n".join(lines).strip()
-
-    try:
-        parsed = json.loads(cleaned)
-    except (json.JSONDecodeError, ValueError):
-        return ReWOOPlan(steps=[])
-
+    parsed = parse_fenced_json(text)
     if not isinstance(parsed, list):
         return ReWOOPlan(steps=[])
 

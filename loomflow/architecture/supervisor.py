@@ -336,6 +336,23 @@ class Supervisor:
 # ---------------------------------------------------------------------------
 
 
+def _mark_if_interrupted(
+    output: str, *, interrupted: bool, reason: str | None
+) -> str:
+    """Prefix a worker's output with an interruption marker.
+
+    When a delegated worker's run was cut short (budget exhausted,
+    ``max_turns`` hit, ...), its partial output would otherwise be
+    indistinguishable from a completed answer — the coordinator
+    model would happily synthesize on top of truncated work. The
+    marker makes the truncation explicit so the model can retry,
+    re-delegate, or caveat its answer.
+    """
+    if not interrupted:
+        return output
+    return f"[interrupted: {reason or 'unknown'}]\n{output}"
+
+
 def _make_delegate_tool(
     workers: dict[str, Agent],
     session: AgentSession,
@@ -437,7 +454,11 @@ def _make_delegate_tool(
                                 cost_usd=result.cost_usd,
                             ),
                         )
-                        output = result.output
+                        output = _mark_if_interrupted(
+                            result.output,
+                            interrupted=result.interrupted,
+                            reason=result.interruption_reason,
+                        )
                     else:
                         invocation = SubagentInvocation(
                             agent,
@@ -448,7 +469,15 @@ def _make_delegate_tool(
                         async with event_sink.clone() as sink:
                             async for ev in invocation.events():
                                 await sink.send(ev)
-                        output = str(invocation.result.get("output", ""))
+                        output = _mark_if_interrupted(
+                            str(invocation.result.get("output", "")),
+                            interrupted=bool(
+                                invocation.result.get("interrupted", False)
+                            ),
+                            reason=invocation.result.get(
+                                "interruption_reason"
+                            ),
+                        )
             if last_outputs is not None:
                 last_outputs[worker] = output
             # Prefix return with the worker_id so the model
@@ -490,7 +519,11 @@ def _make_delegate_tool(
                     cost_usd=result.cost_usd,
                 ),
             )
-            output = result.output
+            output = _mark_if_interrupted(
+                result.output,
+                interrupted=result.interrupted,
+                reason=result.interruption_reason,
+            )
             if last_outputs is not None:
                 last_outputs[worker] = output
             return output
@@ -508,7 +541,13 @@ def _make_delegate_tool(
             async with event_sink.clone() as sink:
                 async for ev in invocation.events():
                     await sink.send(ev)
-        output = str(invocation.result.get("output", ""))
+        output = _mark_if_interrupted(
+            str(invocation.result.get("output", "")),
+            interrupted=bool(
+                invocation.result.get("interrupted", False)
+            ),
+            reason=invocation.result.get("interruption_reason"),
+        )
         if last_outputs is not None:
             last_outputs[worker] = output
         return output

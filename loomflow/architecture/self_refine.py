@@ -45,7 +45,7 @@ from typing import TYPE_CHECKING
 
 from ..core.types import Event, Message, Role
 from .base import AgentSession, Architecture, Dependencies
-from .helpers import add_usage, text_only_model_call
+from .helpers import budget_gate, consume_usage, text_only_model_call
 from .react import ReAct
 
 if TYPE_CHECKING:
@@ -129,14 +129,11 @@ class SelfRefine:
 
         # === Refinement rounds ===
         for round_num in range(1, self._max_rounds + 1):
-            status = await deps.budget.allows_step()
-            if status.blocked:
-                session.interrupted = True
-                session.interruption_reason = f"budget:{status.reason}"
-                yield Event.budget_exceeded(session.id, status)
+            blocked, gate_events = await budget_gate(deps, session)
+            for gate_event in gate_events:
+                yield gate_event
+            if blocked:
                 return
-            if status.warn:
-                yield Event.budget_warning(session.id, status)
 
             # --- Critic ---
             yield Event.architecture_event(
@@ -158,15 +155,7 @@ class SelfRefine:
             critique, critic_usage = await text_only_model_call(
                 deps, f"self_refine_critic_{round_num}", critic_messages
             )
-            await deps.budget.consume(
-                tokens_in=critic_usage.input_tokens,
-                tokens_out=critic_usage.output_tokens,
-                cost_usd=critic_usage.cost_usd,
-            )
-            session.cumulative_usage = add_usage(
-                session.cumulative_usage, critic_usage
-            )
-            session.turns += 1
+            await consume_usage(deps, session, critic_usage)
 
             yield Event.architecture_event(
                 session.id,
@@ -202,18 +191,16 @@ class SelfRefine:
                     ),
                 ),
             ]
+            # The refiner's output replaces session.output — forward
+            # the caller's output_schema so native structured-output
+            # adapters can constrain the final answer.
             refined, refiner_usage = await text_only_model_call(
-                deps, f"self_refine_refiner_{round_num}", refiner_messages
+                deps,
+                f"self_refine_refiner_{round_num}",
+                refiner_messages,
+                output_schema=deps.output_schema,
             )
-            await deps.budget.consume(
-                tokens_in=refiner_usage.input_tokens,
-                tokens_out=refiner_usage.output_tokens,
-                cost_usd=refiner_usage.cost_usd,
-            )
-            session.cumulative_usage = add_usage(
-                session.cumulative_usage, refiner_usage
-            )
-            session.turns += 1
+            await consume_usage(deps, session, refiner_usage)
 
             session.output = refined
             yield Event.architecture_event(

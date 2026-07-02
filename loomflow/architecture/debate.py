@@ -66,7 +66,7 @@ from anyio.streams.memory import MemoryObjectSendStream
 from ..core.context import inherit_ambient_memory
 from ..core.types import Event
 from .base import AgentSession, Dependencies
-from .helpers import SubagentInvocation
+from .helpers import SubagentInvocation, budget_gate
 
 if TYPE_CHECKING:
     from ..agent.api import Agent
@@ -222,16 +222,11 @@ class MultiAgentDebate:
 
         # === Debate rounds ===
         for r in range(1, self._rounds + 1):
-            status = await deps.budget.allows_step()
-            if status.blocked:
-                session.interrupted = True
-                session.interruption_reason = (
-                    f"budget:{status.reason}"
-                )
-                yield Event.budget_exceeded(session.id, status)
+            blocked, gate_events = await budget_gate(deps, session)
+            for gate_event in gate_events:
+                yield gate_event
+            if blocked:
                 return
-            if status.warn:
-                yield Event.budget_warning(session.id, status)
 
             yield Event.architecture_event(
                 session.id,

@@ -212,6 +212,23 @@ class Dependencies:
     enable; see :mod:`loomflow.tools.result_summarizer` for the
     summariser prompt and fall-back semantics."""
 
+    tool_timeout_s: float | None = 120.0
+    """Hard wall-clock cap on a single tool invocation, enforced with
+    ``anyio.fail_after`` in the shared tool-execution helper
+    (:func:`loomflow.architecture.helpers.run_single_tool`). On
+    timeout the tool returns ``ToolResult.error_(call_id, "tool
+    timed out after Ns")`` so the model can observe the failure and
+    react, instead of the whole run hanging on one stuck tool.
+    ``None`` disables the backstop."""
+
+    tool_result_max_chars: int = 50_000
+    """Unconditional ceiling on the formatted tool-result text that
+    enters conversation history. Applied AFTER the optional LLM
+    summariser (``tool_result_summarizer``) — this is the hard floor
+    beneath it, so a pathological multi-megabyte tool output can
+    never blow up the next model call's input tokens. Truncated
+    results carry a ``…[truncated N chars]`` marker."""
+
     goal_checker: Model | None = None
     """Small fast model the :class:`~loomflow.GoalStopHook`
     (``Agent(run_until=...)``) uses to judge whether the run's stop

@@ -61,7 +61,6 @@ Composition
 
 from __future__ import annotations
 
-import json
 import re
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any
@@ -71,7 +70,7 @@ from pydantic import BaseModel, Field
 from ..core.context import inherit_ambient_memory
 from ..core.types import Event
 from .base import AgentSession, Dependencies
-from .helpers import SubagentInvocation
+from .helpers import SubagentInvocation, budget_gate, parse_fenced_json
 
 if TYPE_CHECKING:
     from ..agent.api import Agent
@@ -260,16 +259,11 @@ class ActorCritic:
 
         # === Critique → refine loop ===
         for round_num in range(1, self._max_rounds + 1):
-            status = await deps.budget.allows_step()
-            if status.blocked:
-                session.interrupted = True
-                session.interruption_reason = (
-                    f"budget:{status.reason}"
-                )
-                yield Event.budget_exceeded(session.id, status)
+            blocked, gate_events = await budget_gate(deps, session)
+            for gate_event in gate_events:
+                yield gate_event
+            if blocked:
                 return
-            if status.warn:
-                yield Event.budget_warning(session.id, status)
 
             # --- Critic ---
             yield Event.architecture_event(
@@ -415,24 +409,8 @@ def _parse_critique(text: str) -> CriticOutput:
     raw text) when parsing fails entirely so the loop keeps making
     progress on the next refine pass instead of crashing.
     """
-    cleaned = text.strip()
-
-    # (2) Strip markdown code fences if present.
-    if cleaned.startswith("```"):
-        lines = cleaned.split("\n")
-        if lines[0].startswith("```"):
-            lines = lines[1:]
-        # Trailing fence on its own line.
-        while lines and lines[-1].strip().startswith("```"):
-            lines = lines[:-1]
-        cleaned = "\n".join(lines).strip()
-
-    # (1) Try direct JSON parse.
-    parsed: object
-    try:
-        parsed = json.loads(cleaned)
-    except (json.JSONDecodeError, ValueError):
-        parsed = None
+    # (1)+(2) Fence-tolerant JSON parse via the shared helper.
+    parsed: object = parse_fenced_json(text)
 
     if isinstance(parsed, dict):
         try:

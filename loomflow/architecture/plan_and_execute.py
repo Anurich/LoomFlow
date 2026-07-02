@@ -46,7 +46,6 @@ Weaknesses
 
 from __future__ import annotations
 
-import json
 import re
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
@@ -55,7 +54,13 @@ from pydantic import BaseModel, Field
 
 from ..core.types import Event, Message, Role
 from .base import AgentSession, Dependencies
-from .helpers import add_usage, text_only_model_call
+from .helpers import (
+    budget_gate,
+    consume_usage,
+    parse_fenced_json,
+    strip_markdown_fences,
+    text_only_model_call,
+)
 
 if TYPE_CHECKING:
     from ..agent.api import Agent
@@ -170,16 +175,11 @@ class PlanAndExecute:
         # === 2. Execute each step sequentially ===
         results: list[StepResult] = []
         for i, step in enumerate(plan.steps):
-            status = await deps.budget.allows_step()
-            if status.blocked:
-                session.interrupted = True
-                session.interruption_reason = (
-                    f"budget:{status.reason}"
-                )
-                yield Event.budget_exceeded(session.id, status)
+            blocked, gate_events = await budget_gate(deps, session)
+            for gate_event in gate_events:
+                yield gate_event
+            if blocked:
                 return
-            if status.warn:
-                yield Event.budget_warning(session.id, status)
 
             yield Event.architecture_event(
                 session.id,
@@ -239,15 +239,7 @@ class PlanAndExecute:
         text, usage = await text_only_model_call(
             deps, "plan_planner", msgs
         )
-        await deps.budget.consume(
-            tokens_in=usage.input_tokens,
-            tokens_out=usage.output_tokens,
-            cost_usd=usage.cost_usd,
-        )
-        session.cumulative_usage = add_usage(
-            session.cumulative_usage, usage
-        )
-        session.turns += 1
+        await consume_usage(deps, session, usage)
         return _parse_plan(text)
 
     async def _execute_step(
@@ -289,15 +281,7 @@ class PlanAndExecute:
         text, usage = await text_only_model_call(
             deps, f"plan_step_{step.id}", msgs
         )
-        await deps.budget.consume(
-            tokens_in=usage.input_tokens,
-            tokens_out=usage.output_tokens,
-            cost_usd=usage.cost_usd,
-        )
-        session.cumulative_usage = add_usage(
-            session.cumulative_usage, usage
-        )
-        session.turns += 1
+        await consume_usage(deps, session, usage)
         return text.strip()
 
     async def _synthesize(
@@ -325,18 +309,16 @@ class PlanAndExecute:
             ),
             Message(role=Role.USER, content=user_content),
         ]
+        # The synthesizer produces the run's final answer — forward
+        # the caller's output_schema so native structured-output
+        # adapters can constrain it.
         text, usage = await text_only_model_call(
-            deps, "plan_synthesizer", msgs
+            deps,
+            "plan_synthesizer",
+            msgs,
+            output_schema=deps.output_schema,
         )
-        await deps.budget.consume(
-            tokens_in=usage.input_tokens,
-            tokens_out=usage.output_tokens,
-            cost_usd=usage.cost_usd,
-        )
-        session.cumulative_usage = add_usage(
-            session.cumulative_usage, usage
-        )
-        session.turns += 1
+        await consume_usage(deps, session, usage)
         return text.strip()
 
 
@@ -353,23 +335,12 @@ def _parse_plan(text: str) -> Plan:
     to splitting on newlines if no JSON found. Step ids are
     auto-assigned (``step_1``, ``step_2``, ...).
     """
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        lines = cleaned.split("\n")
-        if lines[0].startswith("```"):
-            lines = lines[1:]
-        while lines and lines[-1].strip().startswith("```"):
-            lines = lines[:-1]
-        cleaned = "\n".join(lines).strip()
+    cleaned = strip_markdown_fences(text)
 
     descriptions: list[str] = []
 
     # Try a strict JSON parse first.
-    parsed: object
-    try:
-        parsed = json.loads(cleaned)
-    except (json.JSONDecodeError, ValueError):
-        parsed = None
+    parsed: object = parse_fenced_json(cleaned)
 
     if isinstance(parsed, list):
         for item in parsed:

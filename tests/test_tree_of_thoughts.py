@@ -114,19 +114,19 @@ def test_chain_to_root_handles_root_alone() -> None:
 
 
 async def test_tot_single_level_picks_highest_scored_leaf() -> None:
-    """Root → 2 candidates → 2 evaluator calls → top 1 survives.
-    Final session.output is the higher-scoring candidate's content.
+    """Root → ONE batched proposer call yields 2 candidates → 2
+    evaluator calls → top 1 survives. Final session.output is the
+    higher-scoring candidate's content (synthesis disabled to test
+    the raw search behaviour).
 
     Model script (in order):
-      1. propose candidate 1 ("guess A")
-      2. propose candidate 2 ("guess B")
-      3. evaluate candidate 1 ("score: 0.4")
-      4. evaluate candidate 2 ("score: 0.8")
+      1. propose both candidates ("1. guess A\\n2. guess B")
+      2. evaluate candidate 1 ("score: 0.4")
+      3. evaluate candidate 2 ("score: 0.8")
     """
     model = ScriptedModel(
         [
-            ScriptedTurn(text="guess A"),
-            ScriptedTurn(text="guess B"),
+            ScriptedTurn(text="1. guess A\n2. guess B"),
             ScriptedTurn(text="score: 0.4"),
             ScriptedTurn(text="score: 0.8"),
         ]
@@ -136,14 +136,15 @@ async def test_tot_single_level_picks_highest_scored_leaf() -> None:
         model=model,
         architecture=TreeOfThoughts(
             branch_factor=2, max_depth=1, beam_width=1,
+            synthesize_final=False,
             # default solved_threshold=1.0; scripted scores all < 1.0
             # so early termination never fires.
         ),
     )
     result = await agent.run("solve this")
     assert result.output == "guess B"
-    # 2 propose + 2 eval = 4 turns
-    assert result.turns == 4
+    # 1 batched propose + 2 eval = 3 turns
+    assert result.turns == 3
 
 
 # ---------------------------------------------------------------------------
@@ -157,25 +158,21 @@ async def test_tot_multi_level_expands_from_pruned_frontier() -> None:
 
     Model script:
       Level 1:
-        1. propose "L1a"
-        2. propose "L1b"
-        3. eval L1a → 0.5
-        4. eval L1b → 0.7  ← survives
+        1. propose "1. L1a\\n2. L1b" (one batched call)
+        2. eval L1a → 0.5
+        3. eval L1b → 0.7  ← survives
       Level 2 (from L1b):
-        5. propose "L2a"
-        6. propose "L2b"
-        7. eval L2a → 0.95  ← would solve, but solved_threshold=2.0 prevents
-        8. eval L2b → 0.6
+        4. propose "1. L2a\\n2. L2b" (one batched call)
+        5. eval L2a → 0.95
+        6. eval L2b → 0.6
     Final: L2a (highest non-root score).
     """
     model = ScriptedModel(
         [
-            ScriptedTurn(text="L1a"),
-            ScriptedTurn(text="L1b"),
+            ScriptedTurn(text="1. L1a\n2. L1b"),
             ScriptedTurn(text="score: 0.5"),
             ScriptedTurn(text="score: 0.7"),
-            ScriptedTurn(text="L2a"),
-            ScriptedTurn(text="L2b"),
+            ScriptedTurn(text="1. L2a\n2. L2b"),
             ScriptedTurn(text="score: 0.95"),
             ScriptedTurn(text="score: 0.6"),
         ]
@@ -185,6 +182,7 @@ async def test_tot_multi_level_expands_from_pruned_frontier() -> None:
         model=model,
         architecture=TreeOfThoughts(
             branch_factor=2, max_depth=2, beam_width=1,
+            synthesize_final=False,
             # default solved_threshold=1.0; scripted scores < 1.0.
         ),
     )
@@ -203,8 +201,7 @@ async def test_tot_early_terminates_on_solved_threshold() -> None:
     solution; level 2 / 3 never run."""
     model = ScriptedModel(
         [
-            ScriptedTurn(text="A"),
-            ScriptedTurn(text="B"),
+            ScriptedTurn(text="1. A\n2. B"),
             ScriptedTurn(text="score: 0.3"),
             ScriptedTurn(text="score: 0.99"),  # solved
         ]
@@ -215,12 +212,13 @@ async def test_tot_early_terminates_on_solved_threshold() -> None:
         architecture=TreeOfThoughts(
             branch_factor=2, max_depth=3, beam_width=1,
             solved_threshold=0.95,
+            synthesize_final=False,
         ),
     )
     result = await agent.run("task")
     assert result.output == "B"
-    # 2 propose + 2 eval = 4. No level 2 turns.
-    assert result.turns == 4
+    # 1 batched propose + 2 eval = 3. No level 2 turns.
+    assert result.turns == 3
 
 
 # ---------------------------------------------------------------------------
@@ -242,8 +240,7 @@ async def test_tot_exposes_tree_via_session_metadata() -> None:
 
     model = ScriptedModel(
         [
-            ScriptedTurn(text="A"),
-            ScriptedTurn(text="B"),
+            ScriptedTurn(text="1. A\n2. B"),
             ScriptedTurn(text="score: 0.5"),
             ScriptedTurn(text="score: 0.95"),
         ]
@@ -253,6 +250,7 @@ async def test_tot_exposes_tree_via_session_metadata() -> None:
         model=model,
         architecture=TreeOfThoughts(
             branch_factor=2, max_depth=1, beam_width=1,
+            synthesize_final=False,
         ),
     )
     # We need to inspect session.metadata, which RunResult doesn't
@@ -289,6 +287,7 @@ async def test_tot_emits_full_event_sequence() -> None:
         [
             ScriptedTurn(text="cand"),
             ScriptedTurn(text="score: 0.5"),
+            ScriptedTurn(text="the final answer"),  # synthesis
         ]
     )
     agent = Agent(
@@ -309,6 +308,7 @@ async def test_tot_emits_full_event_sequence() -> None:
     assert "tot.proposed" in arch_names
     assert "tot.evaluated" in arch_names
     assert "tot.pruned" in arch_names
+    assert "tot.synthesized" in arch_names
     assert "tot.completed" in arch_names
 
 
@@ -322,9 +322,7 @@ async def test_tot_beam_keeps_top_n_per_level() -> None:
     (the lowest-scored one is pruned)."""
     model = ScriptedModel(
         [
-            ScriptedTurn(text="A"),
-            ScriptedTurn(text="B"),
-            ScriptedTurn(text="C"),
+            ScriptedTurn(text="1. A\n2. B\n3. C"),
             ScriptedTurn(text="score: 0.9"),
             ScriptedTurn(text="score: 0.2"),
             ScriptedTurn(text="score: 0.5"),
@@ -335,6 +333,7 @@ async def test_tot_beam_keeps_top_n_per_level() -> None:
         model=model,
         architecture=TreeOfThoughts(
             branch_factor=3, max_depth=1, beam_width=2,
+            synthesize_final=False,
         ),
     )
     events = [e async for e in agent.stream("task")]
@@ -357,9 +356,7 @@ async def test_tot_min_score_floor_drops_weak_branches() -> None:
     of beam capacity. Saves the next level's compute."""
     model = ScriptedModel(
         [
-            ScriptedTurn(text="thought a"),
-            ScriptedTurn(text="thought b"),
-            ScriptedTurn(text="thought c"),
+            ScriptedTurn(text="1. thought a\n2. thought b\n3. thought c"),
             ScriptedTurn(text="score: 0.9"),
             ScriptedTurn(text="score: 0.2"),
             ScriptedTurn(text="score: 0.4"),
@@ -373,6 +370,7 @@ async def test_tot_min_score_floor_drops_weak_branches() -> None:
             max_depth=1,
             beam_width=3,  # beam has room for all 3
             min_score=0.5,  # ...but floor drops 0.2 and 0.4
+            synthesize_final=False,
         ),
     )
     events = [e async for e in agent.stream("task")]
@@ -393,26 +391,27 @@ def test_tot_rejects_invalid_min_score() -> None:
 async def test_tot_parallel_and_sequential_agree() -> None:
     """Parallel and sequential modes must produce the same result
     given identical scripted scores."""
-    proposer_replies = ["thought a", "thought b"]
-    eval_replies = ["score: 0.9", "score: 0.3"]
-    seq_model = ScriptedModel(
-        [ScriptedTurn(text=t) for t in proposer_replies + eval_replies]
-    )
-    par_model = ScriptedModel(
-        [ScriptedTurn(text=t) for t in proposer_replies + eval_replies]
-    )
+    replies = [
+        "1. thought a\n2. thought b",
+        "score: 0.9",
+        "score: 0.3",
+    ]
+    seq_model = ScriptedModel([ScriptedTurn(text=t) for t in replies])
+    par_model = ScriptedModel([ScriptedTurn(text=t) for t in replies])
     seq_agent = Agent(
         "solver",
         model=seq_model,
         architecture=TreeOfThoughts(
-            branch_factor=2, max_depth=1, beam_width=1, parallel=False
+            branch_factor=2, max_depth=1, beam_width=1, parallel=False,
+            synthesize_final=False,
         ),
     )
     par_agent = Agent(
         "solver",
         model=par_model,
         architecture=TreeOfThoughts(
-            branch_factor=2, max_depth=1, beam_width=1, parallel=True
+            branch_factor=2, max_depth=1, beam_width=1, parallel=True,
+            synthesize_final=False,
         ),
     )
     seq = await seq_agent.run("task")
