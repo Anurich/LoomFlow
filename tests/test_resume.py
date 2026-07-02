@@ -79,10 +79,16 @@ async def test_resume_replays_model_call_from_journal() -> None:
     assert r1.output == "The answer is 42."
     assert model.remaining == 0  # script consumed
 
-    # Replay against the same session_id: model.stream is journaled,
-    # so we get the cached chunks back without consuming any more
-    # ScriptedTurns.
-    r2 = await agent.resume("fixed", "what is the answer")
+    # Simulate a process restart: fresh Agent (fresh default memory)
+    # sharing the same journaled runtime. Journal keys now fingerprint
+    # the model call's inputs, so replay requires the seed messages to
+    # match the recorded run — which they do across a restart, but NOT
+    # when the first run's completed episode is still live in the same
+    # agent's memory (rehydration would prepend the prior turn, making
+    # the model input genuinely different — a conversation
+    # continuation, not a crash-resume).
+    agent_b = Agent("hi", model=model, runtime=runtime)
+    r2 = await agent_b.resume("fixed", "what is the answer")
     assert r2.output == "The answer is 42."
     assert model.remaining == 0  # still consumed; nothing new asked
 
@@ -118,7 +124,12 @@ async def test_resume_replays_tool_call_from_journal() -> None:
     # The model script is exhausted; without replay, the second run
     # would emit nothing useful. With replay, the journaled model
     # chunks AND the journaled tool result both come from cache.
-    r2 = await agent.resume("fixed-tool", "do the thing")
+    # Fresh Agent = process-restart simulation: journal keys carry an
+    # input fingerprint, so replay needs identical seed messages —
+    # true after a restart, but not with the same live agent whose
+    # memory now rehydrates the completed first turn into the prompt.
+    agent_b = Agent("hi", model=model, tools=[expensive], runtime=runtime)
+    r2 = await agent_b.resume("fixed-tool", "do the thing")
     assert r2.output == r1.output
     # Tool function NEVER ran a second time.
     assert call_log == ["x"]

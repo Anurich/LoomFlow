@@ -74,21 +74,30 @@ async def test_different_sessions_are_isolated() -> None:
     assert b == 2  # different session ⇒ executed again
 
 
-async def test_step_with_arguments_caches_per_step_name() -> None:
-    """Cached value depends on step_name, not the args. Same name + same
-    session ⇒ second call returns the first call's result regardless of
-    what args you pass."""
+async def test_step_replays_same_inputs_and_reexecutes_changed_inputs() -> None:
+    """The journal key folds in a fingerprint of the step's inputs.
+    Same name + same args ⇒ cache hit (crash-resume replay). Same name
+    + DIFFERENT args ⇒ input changed → cache invalidated → fresh run.
+    Previously the key was the bare step name, so re-running a session
+    with new inputs replayed the old result verbatim."""
+
+    calls = {"count": 0}
 
     async def add(a: int, b: int) -> int:
+        calls["count"] += 1
         return a + b
 
     runtime = JournaledRuntime(InMemoryJournalStore())
     async with runtime.session("s1"):
         first = await runtime.step("add", add, 2, 3)
-        # Different args, same step_name: replay returns cached.
+        # Same args, same step_name: replay returns cached.
+        replayed = await runtime.step("add", add, 2, 3)
+        # Different args, same step_name: executes fresh.
         second = await runtime.step("add", add, 100, 200)
     assert first == 5
-    assert second == 5
+    assert replayed == 5
+    assert second == 300
+    assert calls["count"] == 2
 
 
 # ---------------------------------------------------------------------------
@@ -156,15 +165,17 @@ async def test_contextvar_propagates_into_spawned_tasks() -> None:
             tg.start_soon(_spawn, 0, "a")
             tg.start_soon(_spawn, 1, "b")
 
-        # Replay: same session, same step names ⇒ cached.
+        # Replay: same session, same step names, same inputs ⇒ cached.
+        # (The journal key includes an input fingerprint, so the labels
+        # must match the recorded call for a cache hit.)
         again: list[Any] = [None, None]
 
         async def _spawn_again(i: int, label: str) -> None:
             again[i] = await runtime.step(f"step_{i}", increment, label)
 
         async with anyio.create_task_group() as tg:
-            tg.start_soon(_spawn_again, 0, "X")
-            tg.start_soon(_spawn_again, 1, "Y")
+            tg.start_soon(_spawn_again, 0, "a")
+            tg.start_soon(_spawn_again, 1, "b")
 
     assert results == again  # parallel + replay produced identical values
     assert counter["calls"] == 2  # never executed again on replay
@@ -223,8 +234,11 @@ async def test_agent_run_journals_each_tool_call() -> None:
 
 
 async def test_replay_a_full_run_against_same_session_id() -> None:
-    """Same session_id forces the journaled replay path. Tool functions
-    are wrapped to assert they're never re-executed in replay."""
+    """Same session_id + same inputs forces the journaled replay path.
+    Tool functions are wrapped to assert they're never re-executed in
+    replay. Changed inputs invalidate the cache and re-execute — the
+    journal key carries an input fingerprint precisely so a stale
+    session can't replay an answer for inputs it never saw."""
 
     actual_calls = {"count": 0}
 
@@ -258,16 +272,28 @@ async def test_replay_a_full_run_against_same_session_id() -> None:
         assert result == "echoed:hi"
         assert actual_calls["count"] == 1
 
-    # Second run with same session+step name replays the cache.
+    # Second run (crash-resume) with same session + step name + inputs
+    # replays the cache.
     async with runtime.session("fixed"):
         replay_result = await runtime.step(
             "tool_call_1_0",
             _call_tool_directly,
             echo,
-            {"msg": "different"},  # ignored on replay
+            {"msg": "hi"},
         )
         assert replay_result == "echoed:hi"
         assert actual_calls["count"] == 1  # echo NOT called again
+
+        # Different inputs under the same step name: cache invalidated,
+        # tool executes fresh (no stale replay of "echoed:hi").
+        fresh_result = await runtime.step(
+            "tool_call_1_0",
+            _call_tool_directly,
+            echo,
+            {"msg": "different"},
+        )
+        assert fresh_result == "echoed:different"
+        assert actual_calls["count"] == 2
 
     _ = model  # silence unused-import warning when Agent isn't invoked
 
@@ -341,6 +367,10 @@ async def test_idempotency_key_is_namespaced_under_idem_prefix() -> None:
 
 
 async def test_no_idempotency_key_falls_back_to_positional_name() -> None:
+    """Without an idempotency key the journal key is the positional
+    name plus an input fingerprint (``<name>@<hash>``) — never the
+    ``idem:`` namespace."""
+
     async def run() -> str:
         return "ok"
 
@@ -350,7 +380,10 @@ async def test_no_idempotency_key_falls_back_to_positional_name() -> None:
         await runtime.step("tool_call_1_0", run)
 
     names = {n for s, n in store.step_keys() if s == "s1"}
-    assert names == {"tool_call_1_0"}
+    assert len(names) == 1
+    (key,) = names
+    assert key.startswith("tool_call_1_0@")
+    assert not key.startswith("idem:")
 
 
 async def test_idem_namespace_separates_from_positional_loop_names() -> None:
@@ -358,8 +391,8 @@ async def test_idem_namespace_separates_from_positional_loop_names() -> None:
     can never alias a positional loop name like
     ``tool_call_<turn>_<slot>``. A positional step and an
     idempotency-keyed step sharing the *same raw string* land on
-    different journal keys (``tool_call_1_0`` vs ``idem:tool_call_1_0``)
-    and both execute independently."""
+    different journal keys (``tool_call_1_0@<fingerprint>`` vs
+    ``idem:tool_call_1_0``) and both execute independently."""
     counter = {"calls": 0}
 
     async def run() -> int:
@@ -378,4 +411,7 @@ async def test_idem_namespace_separates_from_positional_loop_names() -> None:
     assert b == 2  # distinct journal keys => both executed
     assert counter["calls"] == 2
     names = {n for s, n in store.step_keys() if s == "s1"}
-    assert names == {"tool_call_1_0", "idem:tool_call_1_0"}
+    assert "idem:tool_call_1_0" in names
+    positional = names - {"idem:tool_call_1_0"}
+    assert len(positional) == 1
+    assert positional.pop().startswith("tool_call_1_0@")

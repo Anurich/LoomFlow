@@ -1,7 +1,9 @@
 """Journal stores for the durable runtime.
 
 A journal records the result of every side-effecting step in a run,
-keyed by ``(session_id, step_name)``. On replay, the runtime returns
+keyed by ``(session_id, step_name)`` — where ``step_name`` as written
+by :class:`~loomflow.runtime.journaled.JournaledRuntime` already folds
+in a fingerprint of the step's inputs. On replay, the runtime returns
 the cached result instead of re-executing the step. This is the
 mechanism that makes long-running agents resumable across crashes.
 
@@ -12,24 +14,40 @@ Today's stores:
   semantics but don't need durability across restarts.
 * :class:`SqliteJournalStore` — sqlite3 file with two tables; survives
   process restarts. Sync sqlite3 calls dispatched through
-  :func:`anyio.to_thread.run_sync`.
+  :func:`anyio.to_thread.run_sync` against one long-lived connection
+  (WAL mode, ``busy_timeout=5000``) serialised by a thread lock.
+* :class:`PostgresJournalStore` — asyncpg-pool-backed; multi-host.
 
-Both stores use :mod:`pickle` for value serialization. That's safe in
-this context because journals only ever hold values returned by *your
-own* trusted code (tools, models, memory backends) — the same code
-path that ran them in the first place. Switching to JSON would force
-every stored value to be JSON-serialisable, which precludes Pydantic
-models and arbitrary tool return values.
+All stores expose :meth:`~JournalStore.prune` so operators can purge
+completed sessions (by ``session_id``) or old entries (by ``before``
+timestamp) — nothing prunes automatically.
+
+.. warning:: **Pickle wire format.**
+
+    All stores serialise journal values with :mod:`pickle`.
+    ``pickle.loads`` executes arbitrary code embedded in the payload:
+    anyone who can WRITE to the journal store (the sqlite file, the
+    Postgres tables) can achieve code execution in every process that
+    replays from it. Treat the journal store with the same trust level
+    as your codebase — never point a runtime at a journal writable by
+    untrusted parties. Pickled payloads are also fragile across
+    library/Python upgrades: a value pickled under one version of a
+    class may fail to unpickle after an upgrade, in which case the
+    affected sessions must be pruned rather than resumed.
+
+    TODO: switch the default wire format to JSON via Pydantic
+    ``model_dump`` (with a registry/fallback for non-Pydantic values)
+    and keep pickle as an opt-in for arbitrary objects.
 """
 
 from __future__ import annotations
 
 import pickle
 import sqlite3
+import threading
 import time
-from collections.abc import Iterator
-from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
@@ -64,6 +82,20 @@ class JournalStore(Protocol):
         self, session_id: str, step_name: str, chunks: list[Any]
     ) -> None: ...
 
+    async def prune(
+        self,
+        before: datetime | None = None,
+        session_id: str | None = None,
+    ) -> None:
+        """Delete journal entries matching ALL provided filters.
+
+        ``before`` drops entries created before that instant (naive
+        datetimes are interpreted in local time, matching
+        ``datetime.timestamp()``); ``session_id`` restricts the purge
+        to one session. With no filters, the whole journal is purged.
+        """
+        ...
+
     async def aclose(self) -> None: ...
 
 
@@ -78,6 +110,7 @@ class InMemoryJournalStore:
     def __init__(self) -> None:
         self._steps: dict[tuple[str, str], JournalEntry] = {}
         self._streams: dict[tuple[str, str], list[Any]] = {}
+        self._stream_times: dict[tuple[str, str], float] = {}
         self._lock = anyio.Lock()
 
     async def get_step(
@@ -106,6 +139,37 @@ class InMemoryJournalStore:
     ) -> None:
         async with self._lock:
             self._streams[(session_id, step_name)] = list(chunks)
+            self._stream_times[(session_id, step_name)] = time.time()
+
+    async def prune(
+        self,
+        before: datetime | None = None,
+        session_id: str | None = None,
+    ) -> None:
+        cutoff = before.timestamp() if before is not None else None
+
+        def _matches(key: tuple[str, str], created_at: float) -> bool:
+            if session_id is not None and key[0] != session_id:
+                return False
+            return not (cutoff is not None and created_at >= cutoff)
+
+        async with self._lock:
+            self._steps = {
+                k: v
+                for k, v in self._steps.items()
+                if not _matches(k, v.created_at)
+            }
+            kept_streams = {
+                k: v
+                for k, v in self._streams.items()
+                if not _matches(k, self._stream_times.get(k, 0.0))
+            }
+            self._streams = kept_streams
+            self._stream_times = {
+                k: t
+                for k, t in self._stream_times.items()
+                if k in kept_streams
+            }
 
     async def aclose(self) -> None:
         return None
@@ -168,33 +232,35 @@ CREATE TABLE IF NOT EXISTS journal_streams (
 
 
 class SqliteJournalStore:
-    """SQLite-backed journal. Durable across process restarts."""
+    """SQLite-backed journal. Durable across process restarts.
+
+    Holds one long-lived connection opened with
+    ``check_same_thread=False`` and configured with ``journal_mode=WAL``,
+    ``synchronous=NORMAL`` and ``busy_timeout=5000`` so concurrent runs
+    (and concurrent processes) sharing the file coordinate instead of
+    failing fast with ``database is locked``. Async entry points hop to
+    a worker thread via :func:`anyio.to_thread.run_sync`; a
+    :class:`threading.Lock` serialises all use of the shared connection
+    because those hops may land on different worker threads.
+    """
 
     def __init__(self, path: str | Path) -> None:
         self._path = Path(path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._init_schema()
+        self._lock = threading.Lock()
+        self._closed = False
+        self._conn = sqlite3.connect(self._path, check_same_thread=False)
+        with self._lock:
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA synchronous=NORMAL")
+            self._conn.execute("PRAGMA busy_timeout=5000")
+            self._conn.execute(_STEP_DDL)
+            self._conn.execute(_STREAM_DDL)
+            self._conn.commit()
 
     @property
     def path(self) -> Path:
         return self._path
-
-    @contextmanager
-    def _connect(self) -> Iterator[sqlite3.Connection]:
-        # Each call creates and closes its own connection. SQLite
-        # connections are not safe to share across threads by default,
-        # and we hop threads for every async call.
-        conn = sqlite3.connect(self._path)
-        try:
-            yield conn
-        finally:
-            conn.close()
-
-    def _init_schema(self) -> None:
-        with self._connect() as conn:
-            conn.execute(_STEP_DDL)
-            conn.execute(_STREAM_DDL)
-            conn.commit()
 
     # ---- step ops --------------------------------------------------------
 
@@ -208,8 +274,8 @@ class SqliteJournalStore:
     def _get_step_sync(
         self, session_id: str, step_name: str
     ) -> JournalEntry | None:
-        with self._connect() as conn:
-            row = conn.execute(
+        with self._lock:
+            row = self._conn.execute(
                 "SELECT value, created_at FROM journal_steps "
                 "WHERE session_id = ? AND step_name = ?",
                 (session_id, step_name),
@@ -228,14 +294,14 @@ class SqliteJournalStore:
     def _put_step_sync(
         self, session_id: str, step_name: str, value: Any
     ) -> None:
-        with self._connect() as conn:
-            conn.execute(
+        with self._lock:
+            self._conn.execute(
                 "INSERT OR REPLACE INTO journal_steps "
                 "(session_id, step_name, value, created_at) "
                 "VALUES (?, ?, ?, ?)",
                 (session_id, step_name, pickle.dumps(value), time.time()),
             )
-            conn.commit()
+            self._conn.commit()
 
     # ---- stream ops ------------------------------------------------------
 
@@ -249,8 +315,8 @@ class SqliteJournalStore:
     def _get_stream_sync(
         self, session_id: str, step_name: str
     ) -> list[Any] | None:
-        with self._connect() as conn:
-            row = conn.execute(
+        with self._lock:
+            row = self._conn.execute(
                 "SELECT chunks FROM journal_streams "
                 "WHERE session_id = ? AND step_name = ?",
                 (session_id, step_name),
@@ -270,19 +336,52 @@ class SqliteJournalStore:
     def _put_stream_sync(
         self, session_id: str, step_name: str, chunks: list[Any]
     ) -> None:
-        with self._connect() as conn:
-            conn.execute(
+        with self._lock:
+            self._conn.execute(
                 "INSERT OR REPLACE INTO journal_streams "
                 "(session_id, step_name, chunks, created_at) "
                 "VALUES (?, ?, ?, ?)",
                 (session_id, step_name, pickle.dumps(chunks), time.time()),
             )
-            conn.commit()
+            self._conn.commit()
+
+    # ---- gc ---------------------------------------------------------------
+
+    async def prune(
+        self,
+        before: datetime | None = None,
+        session_id: str | None = None,
+    ) -> None:
+        """Delete entries matching all given filters (see protocol)."""
+        await anyio.to_thread.run_sync(self._prune_sync, before, session_id)
+
+    def _prune_sync(
+        self, before: datetime | None, session_id: str | None
+    ) -> None:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if before is not None:
+            clauses.append("created_at < ?")
+            params.append(before.timestamp())
+        if session_id is not None:
+            clauses.append("session_id = ?")
+            params.append(session_id)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._lock:
+            self._conn.execute(f"DELETE FROM journal_steps{where}", params)
+            self._conn.execute(f"DELETE FROM journal_streams{where}", params)
+            self._conn.commit()
 
     # ---- lifecycle -------------------------------------------------------
 
     async def aclose(self) -> None:
-        return None
+        await anyio.to_thread.run_sync(self._close_sync)
+
+    def _close_sync(self) -> None:
+        with self._lock:
+            if not self._closed:
+                self._conn.close()
+                self._closed = True
 
 
 # ---------------------------------------------------------------------------
@@ -423,4 +522,27 @@ class PostgresJournalStore:
                 step_name,
                 pickle.dumps(list(chunks)),
                 time.time(),
+            )
+
+    # ---- gc ---------------------------------------------------------------
+
+    async def prune(
+        self,
+        before: datetime | None = None,
+        session_id: str | None = None,
+    ) -> None:
+        """Delete entries matching all given filters (see protocol)."""
+        clauses: list[str] = []
+        params: list[Any] = []
+        if before is not None:
+            params.append(before.timestamp())
+            clauses.append(f"created_at < ${len(params)}")
+        if session_id is not None:
+            params.append(session_id)
+            clauses.append(f"session_id = ${len(params)}")
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        async with self._pool.acquire() as conn:
+            await conn.execute(f"DELETE FROM journal_steps{where}", *params)
+            await conn.execute(
+                f"DELETE FROM journal_streams{where}", *params
             )

@@ -147,18 +147,30 @@ async def test_runtime_path_property(tmp_path: Path) -> None:
 async def test_agent_run_with_sqlite_runtime_writes_journal(
     tmp_path: Path,
 ) -> None:
+    import pickle
+    import sqlite3
+
     db = tmp_path / "j.db"
     rt = SqliteRuntime(db)
     agent = Agent("hi", model="echo", runtime=rt)
 
     result = await agent.run("hello")
 
-    # The journal should now have entries for this session.
-    entry = await rt.store.get_step(
-        result.session_id, "persist_episode_1"
-    )
+    # The journal should now have entries for this session. Journal
+    # keys are "<step_name>@<input fingerprint>", so scan by prefix
+    # rather than exact key.
+    conn = sqlite3.connect(db)
+    try:
+        rows = conn.execute(
+            "SELECT step_name, value FROM journal_steps "
+            "WHERE session_id = ? AND step_name LIKE 'persist_episode_%'",
+            (result.session_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    assert rows, "expected a journaled persist_episode step"
     # The persisted value is the episode id (a string from
     # InMemoryMemory.remember).
-    assert entry is not None
-    assert isinstance(entry.value, str)
-    assert entry.value.startswith("ep_")
+    value = pickle.loads(rows[0][1])
+    assert isinstance(value, str)
+    assert value.startswith("ep_")
