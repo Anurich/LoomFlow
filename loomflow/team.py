@@ -112,6 +112,133 @@ def _attach_workspace_to_workers(
         worker._workspace_teammates = names  # noqa: SLF001 — intentional
 
 
+# ---------------------------------------------------------------------------
+# Shared coordinator assembly
+#
+# Every Team builder forwards the same ~45 Agent kwargs, folds the
+# same rarely-touched knobs into one Tuning, builds the same
+# persistent-subagent worker registry, and stamps it onto the
+# returned Agent. That logic lives ONCE here; each public builder is
+# a thin wrapper that keeps its exact (IDE-friendly) signature and
+# adds only its architecture-specific wiring.
+# ---------------------------------------------------------------------------
+
+
+# Kwargs forwarded verbatim to the ``Agent`` constructor. ``workspace``
+# is deliberately excluded: supervisor / swarm / blackboard re-wrap it
+# with a member identity first, so each builder passes it explicitly.
+_AGENT_PARAMS: tuple[str, ...] = (
+    "instructions",
+    "model",
+    "memory",
+    "runtime",
+    "budget",
+    "permissions",
+    "hooks",
+    "tools",
+    "telemetry",
+    "audit_log",
+    "max_turns",
+    "skills",
+    "living_plan",
+    "run_until",
+    "prompt_caching",
+    "tool_result_summarizer",
+    "persist_tool_transcripts",
+    "snip_window",
+    "auto_compact_at_tokens",
+    "auto_extract",
+    "approval_handler",
+    "effort",
+    "strict_effort",
+)
+
+# Rarely-touched knobs forwarded as one :class:`Tuning` (was 10 flat
+# kwargs; see ``loomflow.Tuning``). ``auto_consolidate`` rides along.
+_TUNING_PARAMS: tuple[str, ...] = (
+    "stop_hooks",
+    "max_stop_hook_iterations",
+    "tool_result_summary_threshold",
+    "tool_transcript_max_bytes",
+    "auto_compact_summariser",
+    "auto_compact_keep_recent_turns",
+    "retry_policy",
+    "secrets",
+    "response_tone",
+    "auto_consolidate",
+)
+
+
+def _common_kwargs(ns: Mapping[str, Any]) -> dict[str, Any]:
+    """Collect the shared Agent + Tuning kwargs out of a builder's
+    ``locals()``. Every name in ``_AGENT_PARAMS`` / ``_TUNING_PARAMS``
+    is a parameter of every public ``Team`` builder, so the lookup
+    never misses. Call this FIRST in each builder, before any local
+    variables shadow parameter names."""
+    return {k: ns[k] for k in _AGENT_PARAMS + _TUNING_PARAMS}
+
+
+def _build_registry(
+    agents: Mapping[str, Agent], persistent: bool
+) -> tuple[dict[str, Any] | None, dict[str, str] | None]:
+    """Build the persistent-subagent worker registry for ``agents``
+    (role → Agent), or ``(None, None)`` when
+    ``persistent_subagents=False`` — architectures fall back to the
+    legacy stateless-per-call behaviour on ``None``."""
+    if not persistent:
+        return None, None
+    from .agent.worker_registry import build_worker_registry
+
+    return build_worker_registry(dict(agents))
+
+
+def _member_workspace(
+    workspace: Any, member: str, workers: dict[str, Agent]
+) -> Any:
+    """Wire a shared team notebook: stamp each worker with its
+    team-role author identity, then re-wrap the resolved workspace
+    with ``member``'s identity for the coordinator / entry agent.
+    Returns the (possibly re-wrapped) workspace spec; passes
+    ``None`` / unresolvable specs through unchanged."""
+    if workspace is None:
+        return None
+    _attach_workspace_to_workers(workers)
+    from .workspace.resolver import resolve_workspace
+
+    resolved = resolve_workspace(workspace)
+    if resolved is not None and hasattr(resolved, "member"):
+        return resolved.member(member, teammates=list(workers.keys()))
+    return workspace
+
+
+def _build_coordinator(
+    *,
+    architecture: Architecture,
+    workspace: Any,
+    worker_registry: dict[str, Any] | None,
+    common: Mapping[str, Any],
+) -> Agent:
+    """Assemble the coordinator :class:`Agent` every Team builder
+    returns. ``common`` is the dict from :func:`_common_kwargs`.
+
+    When a ``worker_registry`` was built, it is stamped onto the
+    coordinator Agent so the ``send_message`` tool's closure (built
+    inside the architecture's run) and external introspection
+    (tests, observability) point at the SAME dict the architecture
+    holds."""
+    kwargs = dict(common)
+    tuning = Tuning(**{k: kwargs.pop(k) for k in _TUNING_PARAMS})
+    coordinator = Agent(
+        workspace=workspace,
+        tuning=tuning,
+        architecture=architecture,
+        **kwargs,
+    )
+    if worker_registry is not None:
+        coordinator._worker_registry = worker_registry
+    return coordinator
+
+
 class Team:
     """Namespace for multi-agent team builders.
 
@@ -120,6 +247,19 @@ class Team:
     returned Agent has the standard ``run`` / ``stream`` / etc.
     interface — call sites don't change between single-agent and
     team agents.
+
+    Which primitive when:
+
+    * **LLM-driven routing to one specialist** → :meth:`router`.
+    * **LLM-driven delegation + synthesis across workers** →
+      :meth:`supervisor` (or :meth:`swarm` / :meth:`debate` /
+      :meth:`actor_critic` / :meth:`blackboard`).
+    * **Deterministic, developer-controlled routing or fixed
+      steps** → :class:`loomflow.Workflow`
+      (``Workflow.route`` for classify-then-dispatch with your own
+      classifier function; no LLM in the control flow).
+    * **Drawing the team's structure** → ``loomflow.graph``
+      (visualization only — it never executes anything).
     """
 
     # -----------------------------------------------------------------
@@ -196,95 +336,32 @@ class Team:
         coordinator. Workers cache independently — set
         ``prompt_caching=`` on each worker Agent at construction.
         """
-        coord_ws: Any = workspace
-        if workspace is not None:
-            _attach_workspace_to_workers(workers)
-            # Resolve the spec, then re-wrap with the coordinator's
-            # identity. ``ws.member(...)`` collapses the three old
-            # kwargs into one.
-            from .workspace.resolver import resolve_workspace
-            resolved = resolve_workspace(workspace)
-            if resolved is not None and hasattr(resolved, "member"):
-                coord_ws = resolved.member(
-                    "coordinator", teammates=list(workers.keys())
-                )
+        common = _common_kwargs(locals())
+        # Resolve the spec, then re-wrap with the coordinator's
+        # identity (``ws.member(...)``); workers get their dict key
+        # as author identity.
+        coord_ws = _member_workspace(workspace, "coordinator", workers)
         # Build the registry FIRST so the Supervisor architecture
         # can take a ref. When ``persistent_subagents=False``, both
-        # dicts stay empty and Supervisor falls back to legacy
+        # are ``None`` and Supervisor falls back to legacy
         # stateless-per-delegate behavior (no send_message tool,
         # no per-handle locks, fresh ULID session_id per delegate).
-        worker_registry: dict[str, Any] = {}
-        role_to_worker_id: dict[str, str] = {}
-        if persistent_subagents:
-            from .agent.worker_registry import build_worker_registry
-            worker_registry, role_to_worker_id = build_worker_registry(
-                workers
-            )
-
-        coordinator = Agent(
-            instructions=instructions,
-            model=model,
-            memory=memory,
-            runtime=runtime,
-            budget=budget,
-            permissions=permissions,
-            hooks=hooks,
-            tools=tools,
-            telemetry=telemetry,
-            audit_log=audit_log,
-            max_turns=max_turns,
-            skills=skills,
-            workspace=coord_ws,
-            living_plan=living_plan,
-            run_until=run_until,
-            prompt_caching=prompt_caching,
-            tool_result_summarizer=tool_result_summarizer,
-            persist_tool_transcripts=persist_tool_transcripts,
-            snip_window=snip_window,
-            auto_compact_at_tokens=auto_compact_at_tokens,
-            auto_extract=auto_extract,
-            approval_handler=approval_handler,
-            # Rarely-touched knobs forwarded as one Tuning (was 10 flat
-            # kwargs; see loomflow.Tuning). ``auto_consolidate`` joins it
-            # just below at the original call site.
-            tuning=Tuning(
-                stop_hooks=stop_hooks,
-                max_stop_hook_iterations=max_stop_hook_iterations,
-                tool_result_summary_threshold=(
-                    tool_result_summary_threshold
-                ),
-                tool_transcript_max_bytes=tool_transcript_max_bytes,
-                auto_compact_summariser=auto_compact_summariser,
-                auto_compact_keep_recent_turns=(
-                    auto_compact_keep_recent_turns
-                ),
-                retry_policy=retry_policy,
-                secrets=secrets,
-                response_tone=response_tone,
-                auto_consolidate=auto_consolidate,
-            ),
-            effort=effort,
-            strict_effort=strict_effort,
+        worker_registry, role_to_worker_id = _build_registry(
+            workers, persistent_subagents
+        )
+        return _build_coordinator(
             architecture=Supervisor(
                 workers=workers,
                 instructions_template=instructions_template,
                 delegate_tool_name=delegate_tool_name,
                 forward_tool_name=forward_tool_name,
-                worker_registry=(
-                    worker_registry if persistent_subagents else None
-                ),
-                role_to_worker_id=(
-                    role_to_worker_id if persistent_subagents else None
-                ),
+                worker_registry=worker_registry,
+                role_to_worker_id=role_to_worker_id,
             ),
+            workspace=coord_ws,
+            worker_registry=worker_registry,
+            common=common,
         )
-        # Stamp the registry onto the coordinator Agent so the
-        # send_message tool's closure (built inside Supervisor.run)
-        # and external introspection (tests, observability) point
-        # at the SAME dict.
-        if persistent_subagents:
-            coordinator._worker_registry.update(worker_registry)
-        return coordinator
 
     # -----------------------------------------------------------------
     # Swarm
@@ -364,74 +441,18 @@ class Team:
         coordinator (see :meth:`Team.supervisor` for accepted shapes).
         Peers cache independently via their own ``Agent`` ctor.
         """
-        entry_ws: Any = workspace
+        common = _common_kwargs(locals())
         # Unwrap Handoff configs to plain Agent map up front — needed
         # for both workspace wiring and the worker registry.
         raw_agents: dict[str, Agent] = {
             k: (v.agent if isinstance(v, Handoff) else v)
             for k, v in agents.items()
         }
-        if workspace is not None:
-            # Unwrap Handoff configs so we can mutate the underlying
-            # Agent's workspace identity.
-            _attach_workspace_to_workers(raw_agents)
-            from .workspace.resolver import resolve_workspace
-            resolved = resolve_workspace(workspace)
-            if resolved is not None and hasattr(resolved, "member"):
-                entry_ws = resolved.member(
-                    entry_agent, teammates=list(agents.keys())
-                )
-        worker_registry = None
-        role_to_worker_id = None
-        if persistent_subagents:
-            from .agent.worker_registry import build_worker_registry
-            worker_registry, role_to_worker_id = build_worker_registry(
-                raw_agents
-            )
-        coordinator = Agent(
-            instructions=instructions,
-            model=model,
-            memory=memory,
-            runtime=runtime,
-            budget=budget,
-            permissions=permissions,
-            hooks=hooks,
-            tools=tools,
-            telemetry=telemetry,
-            audit_log=audit_log,
-            max_turns=max_turns,
-            skills=skills,
-            workspace=entry_ws,
-            living_plan=living_plan,
-            run_until=run_until,
-            prompt_caching=prompt_caching,
-            tool_result_summarizer=tool_result_summarizer,
-            persist_tool_transcripts=persist_tool_transcripts,
-            snip_window=snip_window,
-            auto_compact_at_tokens=auto_compact_at_tokens,
-            auto_extract=auto_extract,
-            approval_handler=approval_handler,
-            # Rarely-touched knobs forwarded as one Tuning (was 10 flat
-            # kwargs; see loomflow.Tuning). ``auto_consolidate`` joins it
-            # just below at the original call site.
-            tuning=Tuning(
-                stop_hooks=stop_hooks,
-                max_stop_hook_iterations=max_stop_hook_iterations,
-                tool_result_summary_threshold=(
-                    tool_result_summary_threshold
-                ),
-                tool_transcript_max_bytes=tool_transcript_max_bytes,
-                auto_compact_summariser=auto_compact_summariser,
-                auto_compact_keep_recent_turns=(
-                    auto_compact_keep_recent_turns
-                ),
-                retry_policy=retry_policy,
-                secrets=secrets,
-                response_tone=response_tone,
-                auto_consolidate=auto_consolidate,
-            ),
-            effort=effort,
-            strict_effort=strict_effort,
+        entry_ws = _member_workspace(workspace, entry_agent, raw_agents)
+        worker_registry, role_to_worker_id = _build_registry(
+            raw_agents, persistent_subagents
+        )
+        return _build_coordinator(
             architecture=Swarm(
                 agents=agents,
                 entry_agent=entry_agent,
@@ -442,10 +463,10 @@ class Team:
                 worker_registry=worker_registry,
                 role_to_worker_id=role_to_worker_id,
             ),
+            workspace=entry_ws,
+            worker_registry=worker_registry,
+            common=common,
         )
-        if persistent_subagents and worker_registry is not None:
-            coordinator._worker_registry = worker_registry
-        return coordinator
 
     # -----------------------------------------------------------------
     # Router
@@ -535,58 +556,11 @@ class Team:
         classifier-coordinator (see :meth:`Team.supervisor` for
         accepted shapes). Specialists cache via their own ``Agent``.
         """
-        worker_registry = None
-        role_to_worker_id = None
-        if persistent_subagents:
-            from .agent.worker_registry import build_worker_registry
-            route_agents = {r.name: r.agent for r in routes}
-            worker_registry, role_to_worker_id = build_worker_registry(
-                route_agents
-            )
-        coordinator = Agent(
-            instructions=instructions,
-            model=model,
-            memory=memory,
-            runtime=runtime,
-            budget=budget,
-            permissions=permissions,
-            hooks=hooks,
-            tools=tools,
-            telemetry=telemetry,
-            audit_log=audit_log,
-            max_turns=max_turns,
-            skills=skills,
-            workspace=workspace,
-            living_plan=living_plan,
-            run_until=run_until,
-            prompt_caching=prompt_caching,
-            tool_result_summarizer=tool_result_summarizer,
-            persist_tool_transcripts=persist_tool_transcripts,
-            snip_window=snip_window,
-            auto_compact_at_tokens=auto_compact_at_tokens,
-            auto_extract=auto_extract,
-            approval_handler=approval_handler,
-            # Rarely-touched knobs forwarded as one Tuning (was 10 flat
-            # kwargs; see loomflow.Tuning). ``auto_consolidate`` joins it
-            # just below at the original call site.
-            tuning=Tuning(
-                stop_hooks=stop_hooks,
-                max_stop_hook_iterations=max_stop_hook_iterations,
-                tool_result_summary_threshold=(
-                    tool_result_summary_threshold
-                ),
-                tool_transcript_max_bytes=tool_transcript_max_bytes,
-                auto_compact_summariser=auto_compact_summariser,
-                auto_compact_keep_recent_turns=(
-                    auto_compact_keep_recent_turns
-                ),
-                retry_policy=retry_policy,
-                secrets=secrets,
-                response_tone=response_tone,
-                auto_consolidate=auto_consolidate,
-            ),
-            effort=effort,
-            strict_effort=strict_effort,
+        common = _common_kwargs(locals())
+        worker_registry, role_to_worker_id = _build_registry(
+            {r.name: r.agent for r in routes}, persistent_subagents
+        )
+        return _build_coordinator(
             architecture=Router(
                 routes=routes,
                 fallback_route=fallback_route,
@@ -596,10 +570,10 @@ class Team:
                 role_to_worker_id=role_to_worker_id,
                 conversation_scope=conversation_scope,  # type: ignore[arg-type]
             ),
+            workspace=workspace,
+            worker_registry=worker_registry,
+            common=common,
         )
-        if persistent_subagents and worker_registry is not None:
-            coordinator._worker_registry = worker_registry
-        return coordinator
 
     # -----------------------------------------------------------------
     # Debate
@@ -673,62 +647,16 @@ class Team:
         coordinator (see :meth:`Team.supervisor` for accepted shapes).
         Debaters cache via their own ``Agent`` ctor.
         """
-        worker_registry = None
-        role_to_worker_id = None
-        if persistent_subagents:
-            from .agent.worker_registry import build_worker_registry
-            debate_agents: dict[str, Agent] = {
-                f"debater_{i}": d for i, d in enumerate(debaters)
-            }
-            if judge is not None:
-                debate_agents["judge"] = judge
-            worker_registry, role_to_worker_id = build_worker_registry(
-                debate_agents
-            )
-        coordinator = Agent(
-            instructions=instructions,
-            model=model,
-            memory=memory,
-            runtime=runtime,
-            budget=budget,
-            permissions=permissions,
-            hooks=hooks,
-            tools=tools,
-            telemetry=telemetry,
-            audit_log=audit_log,
-            max_turns=max_turns,
-            skills=skills,
-            workspace=workspace,
-            living_plan=living_plan,
-            run_until=run_until,
-            prompt_caching=prompt_caching,
-            tool_result_summarizer=tool_result_summarizer,
-            persist_tool_transcripts=persist_tool_transcripts,
-            snip_window=snip_window,
-            auto_compact_at_tokens=auto_compact_at_tokens,
-            auto_extract=auto_extract,
-            approval_handler=approval_handler,
-            # Rarely-touched knobs forwarded as one Tuning (was 10 flat
-            # kwargs; see loomflow.Tuning). ``auto_consolidate`` joins it
-            # just below at the original call site.
-            tuning=Tuning(
-                stop_hooks=stop_hooks,
-                max_stop_hook_iterations=max_stop_hook_iterations,
-                tool_result_summary_threshold=(
-                    tool_result_summary_threshold
-                ),
-                tool_transcript_max_bytes=tool_transcript_max_bytes,
-                auto_compact_summariser=auto_compact_summariser,
-                auto_compact_keep_recent_turns=(
-                    auto_compact_keep_recent_turns
-                ),
-                retry_policy=retry_policy,
-                secrets=secrets,
-                response_tone=response_tone,
-                auto_consolidate=auto_consolidate,
-            ),
-            effort=effort,
-            strict_effort=strict_effort,
+        common = _common_kwargs(locals())
+        debate_agents: dict[str, Agent] = {
+            f"debater_{i}": d for i, d in enumerate(debaters)
+        }
+        if judge is not None:
+            debate_agents["judge"] = judge
+        worker_registry, role_to_worker_id = _build_registry(
+            debate_agents, persistent_subagents
+        )
+        return _build_coordinator(
             architecture=MultiAgentDebate(
                 debaters=debaters,
                 judge=judge,
@@ -740,10 +668,10 @@ class Team:
                 worker_registry=worker_registry,
                 role_to_worker_id=role_to_worker_id,
             ),
+            workspace=workspace,
+            worker_registry=worker_registry,
+            common=common,
         )
-        if persistent_subagents and worker_registry is not None:
-            coordinator._worker_registry = worker_registry
-        return coordinator
 
     # -----------------------------------------------------------------
     # Actor-Critic
@@ -815,57 +743,11 @@ class Team:
         coordinator (see :meth:`Team.supervisor` for accepted shapes).
         Actor/critic cache via their own ``Agent`` ctor.
         """
-        worker_registry = None
-        role_to_worker_id = None
-        if persistent_subagents:
-            from .agent.worker_registry import build_worker_registry
-            worker_registry, role_to_worker_id = build_worker_registry(
-                {"actor": actor, "critic": critic}
-            )
-        coordinator = Agent(
-            instructions=instructions,
-            model=model,
-            memory=memory,
-            runtime=runtime,
-            budget=budget,
-            permissions=permissions,
-            hooks=hooks,
-            tools=tools,
-            telemetry=telemetry,
-            audit_log=audit_log,
-            max_turns=max_turns,
-            skills=skills,
-            workspace=workspace,
-            living_plan=living_plan,
-            run_until=run_until,
-            prompt_caching=prompt_caching,
-            tool_result_summarizer=tool_result_summarizer,
-            persist_tool_transcripts=persist_tool_transcripts,
-            snip_window=snip_window,
-            auto_compact_at_tokens=auto_compact_at_tokens,
-            auto_extract=auto_extract,
-            approval_handler=approval_handler,
-            # Rarely-touched knobs forwarded as one Tuning (was 10 flat
-            # kwargs; see loomflow.Tuning). ``auto_consolidate`` joins it
-            # just below at the original call site.
-            tuning=Tuning(
-                stop_hooks=stop_hooks,
-                max_stop_hook_iterations=max_stop_hook_iterations,
-                tool_result_summary_threshold=(
-                    tool_result_summary_threshold
-                ),
-                tool_transcript_max_bytes=tool_transcript_max_bytes,
-                auto_compact_summariser=auto_compact_summariser,
-                auto_compact_keep_recent_turns=(
-                    auto_compact_keep_recent_turns
-                ),
-                retry_policy=retry_policy,
-                secrets=secrets,
-                response_tone=response_tone,
-                auto_consolidate=auto_consolidate,
-            ),
-            effort=effort,
-            strict_effort=strict_effort,
+        common = _common_kwargs(locals())
+        worker_registry, role_to_worker_id = _build_registry(
+            {"actor": actor, "critic": critic}, persistent_subagents
+        )
+        return _build_coordinator(
             architecture=ActorCritic(
                 actor=actor,
                 critic=critic,
@@ -876,10 +758,10 @@ class Team:
                 worker_registry=worker_registry,
                 role_to_worker_id=role_to_worker_id,
             ),
+            workspace=workspace,
+            worker_registry=worker_registry,
+            common=common,
         )
-        if persistent_subagents and worker_registry is not None:
-            coordinator._worker_registry = worker_registry
-        return coordinator
 
     # -----------------------------------------------------------------
     # Blackboard
@@ -959,71 +841,17 @@ class Team:
         :meth:`Team.supervisor` for accepted shapes). Contributing
         agents cache via their own ``Agent`` ctor.
         """
-        coord_ws: Any = workspace
-        if workspace is not None:
-            _attach_workspace_to_workers(agents)
-            from .workspace.resolver import resolve_workspace
-            resolved = resolve_workspace(workspace)
-            if resolved is not None and hasattr(resolved, "member"):
-                coord_ws = resolved.member(
-                    "coordinator", teammates=list(agents.keys())
-                )
-        worker_registry = None
-        role_to_worker_id = None
-        if persistent_subagents:
-            from .agent.worker_registry import build_worker_registry
-            bb_workers: dict[str, Agent] = dict(agents)
-            if coordinator is not None:
-                bb_workers["__coordinator"] = coordinator
-            if decider is not None:
-                bb_workers["__decider"] = decider
-            worker_registry, role_to_worker_id = build_worker_registry(
-                bb_workers
-            )
-        coord_agent = Agent(
-            instructions=instructions,
-            model=model,
-            memory=memory,
-            runtime=runtime,
-            budget=budget,
-            permissions=permissions,
-            hooks=hooks,
-            tools=tools,
-            telemetry=telemetry,
-            audit_log=audit_log,
-            max_turns=max_turns,
-            skills=skills,
-            workspace=coord_ws,
-            living_plan=living_plan,
-            run_until=run_until,
-            prompt_caching=prompt_caching,
-            tool_result_summarizer=tool_result_summarizer,
-            persist_tool_transcripts=persist_tool_transcripts,
-            snip_window=snip_window,
-            auto_compact_at_tokens=auto_compact_at_tokens,
-            auto_extract=auto_extract,
-            approval_handler=approval_handler,
-            # Rarely-touched knobs forwarded as one Tuning (was 10 flat
-            # kwargs; see loomflow.Tuning). ``auto_consolidate`` joins it
-            # just below at the original call site.
-            tuning=Tuning(
-                stop_hooks=stop_hooks,
-                max_stop_hook_iterations=max_stop_hook_iterations,
-                tool_result_summary_threshold=(
-                    tool_result_summary_threshold
-                ),
-                tool_transcript_max_bytes=tool_transcript_max_bytes,
-                auto_compact_summariser=auto_compact_summariser,
-                auto_compact_keep_recent_turns=(
-                    auto_compact_keep_recent_turns
-                ),
-                retry_policy=retry_policy,
-                secrets=secrets,
-                response_tone=response_tone,
-                auto_consolidate=auto_consolidate,
-            ),
-            effort=effort,
-            strict_effort=strict_effort,
+        common = _common_kwargs(locals())
+        coord_ws = _member_workspace(workspace, "coordinator", agents)
+        bb_workers: dict[str, Agent] = dict(agents)
+        if coordinator is not None:
+            bb_workers["__coordinator"] = coordinator
+        if decider is not None:
+            bb_workers["__decider"] = decider
+        worker_registry, role_to_worker_id = _build_registry(
+            bb_workers, persistent_subagents
+        )
+        return _build_coordinator(
             architecture=BlackboardArchitecture(
                 agents=agents,
                 coordinator=coordinator,
@@ -1034,10 +862,10 @@ class Team:
                 worker_registry=worker_registry,
                 role_to_worker_id=role_to_worker_id,
             ),
+            workspace=coord_ws,
+            worker_registry=worker_registry,
+            common=common,
         )
-        if persistent_subagents and worker_registry is not None:
-            coord_agent._worker_registry = worker_registry
-        return coord_agent
 
 
 # ---------------------------------------------------------------------------

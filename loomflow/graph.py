@@ -1,5 +1,15 @@
 """Agent structure visualization — Mermaid graph generator.
 
+.. important::
+
+   **This module is visualization-only. Nothing in here executes.**
+   :func:`build_graph` / :func:`write_graph` walk an existing
+   :class:`Agent` tree and render a *picture* of it. If you came
+   from LangGraph looking for an **executable** graph runtime
+   (nodes + edges + routers that actually run), that primitive is
+   :class:`loomflow.Workflow`; LLM-driven multi-agent execution is
+   :class:`loomflow.Team` / ``Agent(architecture=...)``.
+
 LangGraph established the de facto pattern: emit a Mermaid text
 diagram describing the agent's structure, optionally render it to
 PNG via ``mermaid.ink``. We follow the same shape, extended to
@@ -108,7 +118,12 @@ class _Subgraph:
 
 @dataclass
 class AgentGraph:
-    """Renderable graph of an agent's structure."""
+    """Renderable graph of an agent's structure.
+
+    **Visualization-only** — this is a drawing IR (nodes + edges +
+    subgraphs) rendered to Mermaid text; it is never executed. For
+    an executable graph, see :class:`loomflow.Workflow`.
+    """
 
     nodes: list[_Node] = field(default_factory=list)
     edges: list[_Edge] = field(default_factory=list)

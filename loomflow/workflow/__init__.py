@@ -1,4 +1,5 @@
-"""Workflow — developer-controlled DAGs.
+"""Workflow — developer-controlled step graphs (directed, cycles
+allowed with visit caps).
 
 Loom ships **two peer primitives** for building LLM systems:
 
@@ -410,7 +411,26 @@ def _resolve_audit_log(spec: Any) -> AuditLog | None:
 
 
 class Workflow:
-    """Developer-controlled DAG. Peer of :class:`~loomflow.Agent`.
+    """Developer-controlled directed graph. Peer of
+    :class:`~loomflow.Agent`.
+
+    Not strictly a DAG — cycles are first-class (feedback /
+    refinement loops), bounded by the ``max_steps`` and
+    ``max_visits_per_node`` safety caps.
+
+    Which primitive when:
+
+    * **Deterministic routing / fixed steps** (the developer
+      decides the control flow) → this class. ``Workflow.route``
+      covers classify-then-dispatch with *your* classifier
+      function.
+    * **LLM-driven routing to one specialist** →
+      :meth:`loomflow.Team.router` (Router architecture).
+    * **LLM-driven delegation across many agents** →
+      :meth:`loomflow.Team.supervisor` and friends, or
+      ``Agent(architecture=...)``.
+    * **Drawing a picture of an agent tree** → ``loomflow.graph``
+      (visualization only — it never executes anything).
 
     Construct with the explicit graph builder (``add_node`` /
     ``add_edge`` / ``set_start``) for full control, or use one of
@@ -1184,11 +1204,21 @@ class Workflow:
 
         # The classifier produces a routing key; the router picks
         # the matching node, but each handler needs the ORIGINAL
-        # input. We capture it in the route shim below.
-        original_input: dict[str, Any] = {}
+        # input. Carry it through PER-RUN state — ``stream()``
+        # installs a fresh ``RunContext`` (with a fresh ``metadata``
+        # dict) for every run, so concurrent ``run()`` calls on this
+        # one Workflow instance each see their own captured input.
+        # (A construction-time closure dict here would be shared
+        # across runs: request B's classifier could overwrite the
+        # captured value before request A's handler reads it — a
+        # cross-request data leak under the normal build-once,
+        # run-per-request server pattern.)
+        input_key = "_route_original_input"
 
         async def _capture_classifier(value: Any) -> Any:
-            original_input["v"] = value
+            md = get_run_context().metadata
+            if isinstance(md, dict):
+                md[input_key] = value
             # Run the user's classifier with the original input.
             return await _coerce_step(classifier)(value)
 
@@ -1208,25 +1238,21 @@ class Workflow:
         )
 
         # Each handler needs the original input, not the classifier
-        # output. Wrap the registered handlers to substitute it in.
+        # output. Wrap the registered handlers to substitute in the
+        # per-run captured value from RunContext.metadata.
+        def _make_shim(_inner: _StepFn) -> _StepFn:
+            async def _shim(_value: Any) -> Any:
+                md = get_run_context().metadata
+                return await _inner(md.get(input_key))
+            return _shim
+
         for k in keys:
             handler_name = f"route_{k}"
-            inner = wf._nodes[handler_name]
-
-            def _make_shim(_inner: _StepFn) -> _StepFn:
-                async def _shim(_value: Any) -> Any:
-                    return await _inner(original_input.get("v"))
-                return _shim
-
-            wf._nodes[handler_name] = _make_shim(inner)
+            wf._nodes[handler_name] = _make_shim(wf._nodes[handler_name])
         if default is not None:
-            inner_d = wf._nodes["route_default"]
-
-            def _make_shim_default(_inner: _StepFn) -> _StepFn:
-                async def _shim(_value: Any) -> Any:
-                    return await _inner(original_input.get("v"))
-                return _shim
-            wf._nodes["route_default"] = _make_shim_default(inner_d)
+            wf._nodes["route_default"] = _make_shim(
+                wf._nodes["route_default"]
+            )
 
         return wf
 
@@ -1236,6 +1262,7 @@ class Workflow:
         steps: list[StepLike],
         *,
         merge: Callable[[list[Any]], Any] | None = None,
+        return_exceptions: bool = False,
         name: str = "parallel",
         telemetry: Telemetry | None = None,
         audit_log: AuditLog | str | Path | dict[str, Any] | None = None,
@@ -1251,6 +1278,21 @@ class Workflow:
         defaults to returning the list of results unchanged. Steps
         run concurrently via :mod:`anyio` task groups.
 
+        ``return_exceptions=True`` gives gather-style error
+        handling: a failing branch no longer cancels its siblings —
+        the raised exception *object* is placed at that branch's
+        index in the results list handed to ``merge``, and the
+        workflow completes normally with the partial results. With
+        the default ``False``, the first branch exception cancels
+        the remaining branches and propagates (grouped by the anyio
+        task group).
+
+        Each branch runs under its own ``loom.workflow.step``
+        telemetry span (``step="fan_out.<branch>"``, named after the
+        step function) nested inside the ``fan_out`` node's span, so
+        per-branch latency and failures show up in traces even
+        though the event stream reports the fan-out as one node.
+
         ``workspace`` flows through to every nested Agent step via
         the same ambient-contextvar mechanism as the regular
         :class:`Workflow` constructor — one notebook shared across
@@ -1260,12 +1302,43 @@ class Workflow:
             raise ValueError("parallel requires at least one step")
         coerced = [_coerce_step(s) for s in steps]
         merge_fn = merge if merge is not None else (lambda xs: xs)
+        # Stable, disambiguated branch names for per-branch spans.
+        branch_names: list[str] = []
+        for i, s in enumerate(steps):
+            n = _step_name(s, f"branch_{i}")
+            base, j = n, 1
+            while n in branch_names:
+                n = f"{base}_{j}"
+                j += 1
+            branch_names.append(n)
 
         async def _fan_out(value: Any) -> Any:
             results: list[Any] = [None] * len(coerced)
+            # Per-branch telemetry — same ambient hookup as @step:
+            # ``stream()`` stashes the workflow's telemetry in the
+            # per-run RunContext metadata.
+            ctx = get_run_context()
+            tel: Telemetry = (
+                ctx.metadata.get("_workflow_telemetry") or NoTelemetry()
+            )
 
             async def _one(i: int, fn: _StepFn) -> None:
-                results[i] = await fn(value)
+                try:
+                    async with tel.trace(
+                        "loom.workflow.step",
+                        step=f"fan_out.{branch_names[i]}",
+                        user_id=ctx.user_id,
+                        session_id=ctx.session_id,
+                        pattern="workflow",
+                    ):
+                        results[i] = await fn(value)
+                except Exception as exc:  # noqa: BLE001
+                    if not return_exceptions:
+                        raise
+                    # Gather-style: record the failure at this
+                    # branch's slot; siblings keep running. (The
+                    # span above already recorded the exception.)
+                    results[i] = exc
 
             async with anyio.create_task_group() as tg:
                 for i, fn in enumerate(coerced):
