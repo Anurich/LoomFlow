@@ -21,10 +21,13 @@ Write atomicity:
 * ``WORKSPACE.md`` is regenerated after every write using the same
   temp-file + replace pattern.
 
-An ``anyio.Lock`` serialises index regeneration so concurrent
-writers don't tear it. Note bodies have no shared write target
-(each author has their own subdir + unique slug) so they don't
-need the lock.
+An ``anyio.Lock`` serialises index regeneration AND the
+slug-counter-computation + file-creation step of ``write_note`` —
+without the latter, two concurrent writes by the same author could
+pick the same counter and silently clobber each other. Per-author
+counters and parsed notes are cached in memory (keyed by
+``(mtime_ns, size)``) so repeated reads / writes don't re-walk and
+re-parse the whole tree.
 
 Text encoding is FORCED to UTF-8 on every read and write. The
 ``Path.read_text`` / ``write_text`` defaults pick up the system
@@ -174,6 +177,24 @@ class LocalDiskWorkspace:
         # name as the canonical write lock. Concurrent updates of
         # the same slug now correctly serialise behind this.
         self._index_lock = anyio.Lock()
+        # Parsed-note cache keyed by path → ((mtime_ns, size), Note).
+        # read_note / list_notes / search_notes / index regeneration
+        # all funnel through ``_load_note``; without this every call
+        # re-read and re-parsed the entire tree. Entries self-
+        # invalidate when the file's (mtime_ns, size) key changes.
+        self._note_cache: dict[Path, tuple[tuple[int, int], Note]] = {}
+        # Per-author next-slug counter cache (author root → highest
+        # counter handed out). First write per author scans the disk
+        # once; subsequent writes increment in memory. Counters are
+        # monotonic, so the cache never needs invalidating on
+        # deletes — a too-high counter is always safe.
+        self._counter_cache: dict[Path, int] = {}
+        # Per-partition index entries (user root → (author, slug) →
+        # NoteSummary) so ``_regenerate_index`` patches one entry
+        # per write instead of re-reading every note.
+        self._index_cache: dict[
+            Path, dict[tuple[str, str], NoteSummary]
+        ] = {}
         # Optional embedder for semantic search. When set, every
         # write_note also computes + persists an embedding sidecar;
         # search_notes uses cosine similarity (or hybrid RRF) when
@@ -303,27 +324,43 @@ class LocalDiskWorkspace:
         ns_dir = self._notes_dir(user_id, author, namespace=namespace)
         ns_dir.mkdir(parents=True, exist_ok=True)
         slug_frag = slugify_title(title)
-        counter = self._next_counter_across_namespaces(author_root)
-        slug = f"{counter:03d}-{slug_frag}"
-        now = datetime.now(UTC)
-        note = Note(
-            slug=slug,
-            author=author,
-            title=title,
-            body=body,
-            kind=kind,
-            tags=list(tags or []),
-            created_at=now,
-            updated_at=now,
-            user_id=user_id,
-            run_id=run_id,
-            namespace=namespace,
-            answered=answered,
-            parent_slug=parent_slug,
-        )
-        await self._write_note_atomic(ns_dir / f"{slug}.md", note)
-        await self._maybe_write_embedding(ns_dir / f"{slug}.md", note)
-        await self._regenerate_index(user_id)
+        # Counter computation + file creation happen under the write
+        # lock: without it, two concurrent writers could compute the
+        # same counter and the second ``os.replace`` would silently
+        # clobber the first note.
+        async with self._index_lock:
+            counter = self._next_counter_across_namespaces(author_root)
+            slug = f"{counter:03d}-{slug_frag}"
+            dest = ns_dir / f"{slug}.md"
+            # Belt-and-braces against on-disk collisions from
+            # OUTSIDE this process (another workspace instance /
+            # process writing the same author): bump the counter
+            # until the path is free. In-process races are already
+            # excluded by the lock.
+            while await anyio.to_thread.run_sync(dest.exists):
+                counter += 1
+                self._counter_cache[author_root] = counter
+                slug = f"{counter:03d}-{slug_frag}"
+                dest = ns_dir / f"{slug}.md"
+            now = datetime.now(UTC)
+            note = Note(
+                slug=slug,
+                author=author,
+                title=title,
+                body=body,
+                kind=kind,
+                tags=list(tags or []),
+                created_at=now,
+                updated_at=now,
+                user_id=user_id,
+                run_id=run_id,
+                namespace=namespace,
+                answered=answered,
+                parent_slug=parent_slug,
+            )
+            await self._write_note_atomic(dest, note)
+            await self._maybe_write_embedding(dest, note)
+        await self._regenerate_index(user_id, changed=[note])
         return note
 
     async def update_note(
@@ -364,7 +401,7 @@ class LocalDiskWorkspace:
                 )
                 await self._write_note_atomic(note_path, updated)
                 await self._maybe_write_embedding(note_path, updated)
-            await self._regenerate_index(user_id)
+            await self._regenerate_index(user_id, changed=[updated])
             return updated
         if existing.author != author:
             raise PermissionError(
@@ -388,7 +425,7 @@ class LocalDiskWorkspace:
             updated = existing.model_copy(update=update_dict)
             await self._write_note_atomic(note_path, updated)
             await self._maybe_write_embedding(note_path, updated)
-        await self._regenerate_index(user_id)
+        await self._regenerate_index(user_id, changed=[updated])
         return updated
 
     async def archive_note(
@@ -418,7 +455,7 @@ class LocalDiskWorkspace:
         # No history snapshot for archive — archiving is metadata-
         # only, the body doesn't change.
         await self._write_note_atomic(note_path, archived)
-        await self._regenerate_index(user_id)
+        await self._regenerate_index(user_id, changed=[archived])
         return archived
 
     async def list_versions(
@@ -486,6 +523,7 @@ class LocalDiskWorkspace:
             return 0
         now = datetime.now(UTC)
         updated = 0
+        patched_notes: list[Note] = []
         for slug in cited:
             # Find the note across authors — citations don't carry
             # author identity, so scan any author dir.
@@ -506,9 +544,10 @@ class LocalDiskWorkspace:
             # Write in-place — citation update is not a "user edit"
             # so we don't snapshot history.
             await self._write_note_atomic(path, patched)
+            patched_notes.append(patched)
             updated += 1
         if updated:
-            await self._regenerate_index(user_id)
+            await self._regenerate_index(user_id, changed=patched_notes)
         return updated
 
     def _find_note_by_slug_any_author(
@@ -549,6 +588,7 @@ class LocalDiskWorkspace:
                     # Hard-delete the note file + its embedding
                     # sidecar + its entire history dir.
                     await anyio.to_thread.run_sync(path.unlink, True)
+                    self._note_cache.pop(path, None)
                     sidecar = path.with_suffix(".embedding.json")
                     await anyio.to_thread.run_sync(sidecar.unlink, True)
                     hist = self._history_dir(
@@ -569,6 +609,8 @@ class LocalDiskWorkspace:
                             keep_last_versions,
                         )
         if notes_deleted:
+            # Full rebuild (changed=None) — deletes are cheaper to
+            # re-scan than to patch entry-by-entry.
             await self._regenerate_index(user_id)
         return PruneResult(
             notes_deleted=notes_deleted,
@@ -666,23 +708,41 @@ class LocalDiskWorkspace:
 
     def _next_counter_across_namespaces(self, author_root: Path) -> int:
         """Highest ``NNN-`` prefix seen anywhere under the author
-        root, across every namespace. +1. Excludes history dirs."""
+        root, across every namespace. +1. Excludes history dirs.
+
+        The disk scan runs ONCE per author per workspace instance;
+        after that the counter lives in ``_counter_cache`` and each
+        call is a dict increment. Counters are monotonic, so the
+        cache never goes stale on deletes (a skipped number is
+        fine, a reused one is not). Caller must hold the write lock
+        so two concurrent writers can't hand out the same value.
+        """
+        cached = self._counter_cache.get(author_root)
+        if cached is not None:
+            nxt = cached + 1
+            self._counter_cache[author_root] = nxt
+            return nxt
         counter = 0
-        if not author_root.exists():
-            return 1
-        for p in author_root.rglob("*.md"):
-            if not p.is_file() or _is_in_meta_dir(p):
-                continue
-            m = re.match(r"^(\d{3,})-", p.stem)
-            if m:
-                counter = max(counter, int(m.group(1)))
-        return counter + 1
+        if author_root.exists():
+            for p in author_root.rglob("*.md"):
+                if not p.is_file() or _is_in_meta_dir(p):
+                    continue
+                m = re.match(r"^(\d{3,})-", p.stem)
+                if m:
+                    counter = max(counter, int(m.group(1)))
+        nxt = counter + 1
+        self._counter_cache[author_root] = nxt
+        return nxt
 
     async def _write_note_atomic(self, dest: Path, note: Note) -> None:
         body = render_note_file(note)
         tmp = dest.with_suffix(dest.suffix + ".tmp")
         await anyio.to_thread.run_sync(_write_utf8, tmp, body)
         await anyio.to_thread.run_sync(os.replace, str(tmp), str(dest))
+        # Drop any cached parse of the old contents; the next read
+        # re-parses (the (mtime_ns, size) key would usually catch
+        # this anyway — popping makes it unconditional).
+        self._note_cache.pop(dest, None)
 
     async def _maybe_write_embedding(
         self, note_path: Path, note: Note
@@ -897,18 +957,73 @@ class LocalDiskWorkspace:
         ]
 
     async def _load_note(self, path: Path) -> Note:
-        text = await anyio.to_thread.run_sync(_read_utf8, path)
-        fm, body = parse_note_file(text)
-        return note_from_frontmatter(fm, body)
+        """Load one note, going through the (mtime_ns, size) parse
+        cache. Unchanged files cost a single ``stat`` instead of a
+        read + frontmatter parse — list_notes / search_notes /
+        read_note no longer re-parse the whole tree per call.
+        """
+        def _load() -> Note:
+            # stat BEFORE read: if a writer swaps the file between
+            # the two calls we cache the NEW content under the OLD
+            # key, and the next stat sees a fresh key and re-reads
+            # — self-healing rather than persistently stale.
+            st = path.stat()
+            key = (st.st_mtime_ns, st.st_size)
+            cached = self._note_cache.get(path)
+            if cached is not None and cached[0] == key:
+                return cached[1]
+            text = path.read_text(encoding="utf-8")
+            fm, body = parse_note_file(text)
+            note = note_from_frontmatter(fm, body)
+            self._note_cache[path] = (key, note)
+            return note
+
+        return await anyio.to_thread.run_sync(_load)
 
     # ---- index regeneration ---------------------------------------------
 
-    async def _regenerate_index(self, user_id: str | None) -> None:
-        """Atomically rewrite ``WORKSPACE.md`` for one partition."""
+    async def _regenerate_index(
+        self,
+        user_id: str | None,
+        *,
+        changed: list[Note] | None = None,
+    ) -> None:
+        """Atomically rewrite ``WORKSPACE.md`` for one partition.
+
+        Incremental: the partition's index entries are kept in
+        ``_index_cache`` after the first full build, and a write
+        passes the note(s) it touched via ``changed`` so only those
+        entries are patched — the old implementation re-read and
+        re-parsed EVERY note on EVERY write. ``changed=None``
+        forces a full rebuild (used by prune, and on the first
+        write per partition per instance).
+
+        Callers must NOT hold ``_index_lock`` — it's taken here.
+        """
         async with self._index_lock:
-            summaries = await self.list_notes(user_id=user_id, limit=10_000)
-            rendered = render_workspace_index(summaries)
             user_root = self._user_root(user_id)
+            entries = self._index_cache.get(user_root)
+            if entries is None or changed is None:
+                summaries = await self.list_notes(
+                    user_id=user_id, limit=10_000
+                )
+                entries = {(s.author, s.slug): s for s in summaries}
+                self._index_cache[user_root] = entries
+            else:
+                for note in changed:
+                    note_key = (note.author, note.slug)
+                    if note.archived_at is not None:
+                        # Archived notes drop out of the index,
+                        # matching list_notes' default filter.
+                        entries.pop(note_key, None)
+                    else:
+                        entries[note_key] = summary_from_note(note)
+            ordered = sorted(
+                entries.values(),
+                key=lambda s: s.updated_at,
+                reverse=True,
+            )
+            rendered = render_workspace_index(ordered)
             user_root.mkdir(parents=True, exist_ok=True)
             dest = user_root / INDEX_FILENAME
             tmp = dest.with_suffix(dest.suffix + ".tmp")

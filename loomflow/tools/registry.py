@@ -46,8 +46,17 @@ def _coerce_to_json_type(value: Any, json_type: str) -> Any:
         return value
     try:
         if json_type == "integer":
-            # ``"8"`` and ``"8.0"`` both → 8; reject true floats.
-            return int(value) if value.strip().lstrip("-").isdigit() else int(float(value))
+            # ``"8"`` and ``"8.0"`` both → 8. Non-integral floats
+            # (``"8.5"``) are NOT silently truncated — the original
+            # string passes through so validation / the function's
+            # own error surfaces instead of a wrong answer.
+            stripped = value.strip()
+            if stripped.lstrip("+-").isdigit():
+                return int(stripped)
+            as_float = float(stripped)
+            if as_float.is_integer():
+                return int(as_float)
+            return value
         if json_type == "number":
             return float(value)
         if json_type == "boolean":

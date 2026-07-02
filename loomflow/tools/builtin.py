@@ -49,10 +49,17 @@ Safety
   with the workdir as ``cwd``.
 * **Timeout on bash.** Default 30 seconds; override via the
   ``timeout`` kwarg. Commands that exceed the timeout are killed.
-* **Destructive-command denylist.** ``bash_tool`` rejects a small
-  set of obviously-dangerous patterns (``rm -rf /``, ``sudo``,
-  ``mkfs``, etc.) by default. Override via the ``allow_pattern``
-  callable for advanced use.
+* **Minimal environment on bash.** Subprocesses see only a small
+  allowlist of environment variables (PATH, HOME, LANG, ...) by
+  default — host secrets (API keys, tokens) are NOT handed to
+  model-authored commands. Opt in via ``env_allowlist`` /
+  ``inherit_env`` / ``extra_env``.
+* **Destructive-command denylist (advisory only).** ``bash_tool``
+  rejects a small set of obviously-dangerous patterns
+  (``rm -rf /``, ``sudo``, ``mkfs``, etc.) by default. This is
+  defense-in-depth against accidents, NOT a security boundary —
+  see the note on ``_DEFAULT_DENY_PATTERNS``. Use
+  :class:`~loomflow.security.sandbox.OSSandbox` for real isolation.
 * **Edit requires unique match.** ``edit_tool``'s ``old_string``
   must appear EXACTLY once in the file (unless ``replace_all=True``
   is passed in the call) — forces the model to provide enough
@@ -65,10 +72,12 @@ These will be the foundation of the upcoming Deep Agent architecture
 
 from __future__ import annotations
 
+import fnmatch
+import os
 import re
 import shutil
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import anyio
@@ -454,13 +463,22 @@ def edit_tool(
 # bash_tool
 # ---------------------------------------------------------------------------
 
-# Patterns that indicate a clearly-dangerous shell command. The
-# default deny list is conservative — users can override entirely
-# via ``allow_pattern``.
-# Patterns that indicate a clearly-dangerous shell command. The
-# ``rm -rf /`` pattern matches only when the trailing slash is
-# directly followed by whitespace or end-of-line — so
-# ``rm -rf /tmp/foo`` (a perfectly normal cleanup) is NOT flagged.
+# Patterns that indicate a clearly-dangerous shell command.
+#
+# ADVISORY ONLY — these are defense-in-depth against *accidents*,
+# not a security boundary. They are trivially bypassable by any
+# adversarial (or merely creative) model: ``rm -rf /*`` doesn't
+# match the ``rm -rf /`` pattern, ``python -c 'import shutil; ...'``
+# matches nothing at all, and string-building (``r=rm; $r -rf /``)
+# defeats any regex. If you need commands actually contained, run
+# the agent under :class:`~loomflow.security.sandbox.OSSandbox`
+# (or an equivalent OS-level jail); do not rely on this list.
+#
+# The default deny list is conservative — users can override
+# entirely via ``allow_pattern``. The ``rm -rf /`` pattern matches
+# only when the trailing slash is directly followed by whitespace
+# or end-of-line — so ``rm -rf /tmp/foo`` (a perfectly normal
+# cleanup) is NOT flagged.
 _DEFAULT_DENY_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\brm\s+-r[fr]*\s+/(?:\s|$)"),  # rm -rf / (root only)
     re.compile(r"\bsudo\b"),
@@ -472,6 +490,25 @@ _DEFAULT_DENY_PATTERNS: tuple[re.Pattern[str], ...] = (
 )
 
 
+# Environment variables forwarded to bash_tool subprocesses by
+# default. Deliberately minimal: enough for command lookup, temp
+# files, and locale-correct output — but NOT the parent process's
+# API keys / tokens / cloud credentials, which model-authored
+# commands must not see (``env``, ``printenv``, ``python -c
+# 'import os; ...'`` would exfiltrate them trivially). The
+# Windows names are included unconditionally; missing vars are
+# simply skipped on POSIX (and vice versa).
+_DEFAULT_ENV_ALLOWLIST: tuple[str, ...] = (
+    # POSIX basics
+    "PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TERM",
+    "TMPDIR", "USER", "LOGNAME", "SHELL", "TZ",
+    # Windows equivalents (cmd.exe misbehaves without SystemRoot /
+    # ComSpec; TEMP / TMP are the tempdir there)
+    "SYSTEMROOT", "SYSTEMDRIVE", "COMSPEC", "PATHEXT", "WINDIR",
+    "TEMP", "TMP", "USERPROFILE", "USERNAME",
+)
+
+
 def bash_tool(
     workdir: Path | str | None = None,
     *,
@@ -479,6 +516,8 @@ def bash_tool(
     timeout: float = 30.0,
     allow_pattern: Callable[[str], bool] | None = None,
     extra_env: dict[str, str] | None = None,
+    env_allowlist: Sequence[str] | None = None,
+    inherit_env: bool = False,
 ) -> Tool:
     """Build a :class:`Tool` that runs a shell command with the
     workdir as the current working directory.
@@ -487,7 +526,16 @@ def bash_tool(
 
     * Commands matching the built-in destructive patterns
       (``rm -rf /``, ``sudo``, ``mkfs``, fork bombs, ...) are
-      rejected before being executed.
+      rejected before being executed. This denylist is ADVISORY —
+      trivially bypassable (``rm -rf /*``, ``python -c ...``); it
+      guards against accidents, not adversaries. Real isolation
+      requires an OS-level sandbox
+      (:class:`~loomflow.security.sandbox.OSSandbox`).
+    * The subprocess environment is a minimal allowlist (PATH,
+      HOME, LANG, TERM, TMPDIR, ...) — NOT the full parent
+      environment, so host secrets (API keys, tokens) are not
+      handed to model-authored commands. See ``env_allowlist`` /
+      ``inherit_env`` below to opt in to more.
     * Commands run with a default ``timeout`` of 30 seconds; the
       subprocess is killed on timeout.
     * The shell is invoked via ``/bin/sh -c <command>`` on POSIX
@@ -503,14 +551,26 @@ def bash_tool(
     * ``allow_pattern`` — a callable that takes the command string
       and returns True if the command should run. When provided, it
       OVERRIDES the default deny list — you take full responsibility.
+    * ``env_allowlist`` — replace the default allowlist with your
+      own set of parent-env variable names to forward (e.g.
+      ``[*_DEFAULT_ENV_ALLOWLIST, "VIRTUAL_ENV", "CARGO_HOME"]``).
+    * ``inherit_env`` — ``True`` forwards the ENTIRE parent
+      environment (pre-fix behaviour). Opt-in only: this hands
+      every host secret to the commands the model writes.
     * ``extra_env`` — extra environment variables merged into the
-      subprocess env.
+      subprocess env (applied last, on top of whichever base the
+      two knobs above produced).
     * ``timeout`` — seconds before the command is killed.
 
     ``workdir`` is optional; ``None`` uses the framework's default
     tempdir (shared with the other built-in tools).
     """
     workdir_path = _resolve_workdir(workdir)
+    allowed_env_names: tuple[str, ...] = (
+        _DEFAULT_ENV_ALLOWLIST
+        if env_allowlist is None
+        else tuple(env_allowlist)
+    )
 
     def _is_allowed(command: str) -> tuple[bool, str | None]:
         if allow_pattern is not None:
@@ -534,10 +594,18 @@ def bash_tool(
             float(timeout_sec) if timeout_sec is not None else timeout
         )
 
-        # Build env: parent env + any extras the user passed in.
-        import os as _os
-
-        env = dict(_os.environ)
+        # Build env. Default: the minimal allowlist (or the caller's
+        # replacement) — never the full parent environment unless
+        # ``inherit_env=True`` was passed explicitly. ``extra_env``
+        # is merged last in every mode.
+        if inherit_env:
+            env = dict(os.environ)
+        else:
+            env = {
+                key: val
+                for key in allowed_env_names
+                if (val := os.environ.get(key)) is not None
+            }
         if extra_env:
             env.update(extra_env)
 
@@ -656,6 +724,22 @@ _NOISE_DIRS = frozenset({
 })
 
 
+def _matches_glob(rel_posix: str, name: str, glob: str) -> bool:
+    """Match one file against the tool's name-glob.
+
+    Plain filename globs (``*.py``) match the basename at any
+    depth — same semantics ``rglob`` gave the old implementation.
+    Globs containing ``/`` match against the path relative to the
+    search root; a leading ``**/`` also matches entries at the
+    root itself (mirroring ``rglob``'s zero-directory ``**``).
+    """
+    if "/" not in glob:
+        return fnmatch.fnmatch(name, glob)
+    if fnmatch.fnmatch(rel_posix, glob):
+        return True
+    return glob.startswith("**/") and fnmatch.fnmatch(rel_posix, glob[3:])
+
+
 def grep_tool(
     workdir: Path | str | None = None,
     *,
@@ -698,26 +782,46 @@ def grep_tool(
         except re.error as exc:
             return f"ERROR: invalid regex {pattern!r}: {exc}"
 
+        def _grep_file(fp: Path, hits: list[str]) -> bool:
+            """Append matches from one file; True when capped."""
+            try:
+                text = fp.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError):
+                return False  # binary / unreadable — skip
+            rel = fp.relative_to(workdir_path)
+            for i, line in enumerate(text.splitlines(), 1):
+                if rx.search(line):
+                    hits.append(f"{rel}:{i}: {line.rstrip()}")
+                    if len(hits) >= max_results:
+                        return True
+            return False
+
         def _search() -> list[str]:
+            # os.walk with in-place pruning: noise dirs (.git /
+            # node_modules / .venv / ...) are never descended into,
+            # and the walk stops as soon as max_results matches
+            # exist — the old ``sorted(root.rglob(glob))``
+            # materialised the whole tree up front, defeating both.
+            # dirnames / filenames are sorted so traversal (and
+            # therefore output) stays deterministic.
             hits: list[str] = []
-            candidates = (
-                [root] if root.is_file() else sorted(root.rglob(glob))
-            )
-            for fp in candidates:
-                if not fp.is_file():
-                    continue
-                if any(part in _NOISE_DIRS for part in fp.parts):
-                    continue
-                try:
-                    text = fp.read_text(encoding="utf-8")
-                except (UnicodeDecodeError, OSError):
-                    continue  # binary / unreadable — skip
-                rel = fp.relative_to(workdir_path)
-                for i, line in enumerate(text.splitlines(), 1):
-                    if rx.search(line):
-                        hits.append(f"{rel}:{i}: {line.rstrip()}")
-                        if len(hits) >= max_results:
-                            return hits
+            if root.is_file():
+                _grep_file(root, hits)
+                return hits
+            for dirpath, dirnames, filenames in os.walk(root):
+                dirnames[:] = sorted(
+                    d for d in dirnames if d not in _NOISE_DIRS
+                )
+                base = Path(dirpath)
+                for fname in sorted(filenames):
+                    fp = base / fname
+                    rel_root = fp.relative_to(root).as_posix()
+                    if not _matches_glob(rel_root, fname, glob):
+                        continue
+                    if not fp.is_file():
+                        continue
+                    if _grep_file(fp, hits):
+                        return hits
             return hits
 
         hits = await anyio.to_thread.run_sync(_search)
@@ -805,16 +909,37 @@ def find_tool(
             return f"ERROR: path not found: {path}"
 
         def _walk() -> list[str]:
+            # os.walk with in-place noise-dir pruning + early exit
+            # once max_results paths matched (the old
+            # ``sorted(root.rglob(glob))`` walked the entire tree
+            # — node_modules and all — before the cap applied).
+            # Sorted dirnames / filenames keep traversal
+            # deterministic; the collected slice is sorted again
+            # before returning for stable output.
             out: list[str] = []
-            for fp in sorted(root.rglob(glob)):
-                if any(part in _NOISE_DIRS for part in fp.parts):
-                    continue
-                out.append(str(fp.relative_to(workdir_path)))
-                if len(out) >= max_results:
-                    break
+            if root.is_file():
+                rel_root = root.name
+                if _matches_glob(rel_root, root.name, glob):
+                    out.append(str(root.relative_to(workdir_path)))
+                return out
+            for dirpath, dirnames, filenames in os.walk(root):
+                dirnames[:] = sorted(
+                    d for d in dirnames if d not in _NOISE_DIRS
+                )
+                base = Path(dirpath)
+                # rglob matched directories too — keep that.
+                for entry in sorted(dirnames + filenames):
+                    fp = base / entry
+                    rel_root = fp.relative_to(root).as_posix()
+                    if not _matches_glob(rel_root, entry, glob):
+                        continue
+                    out.append(str(fp.relative_to(workdir_path)))
+                    if len(out) >= max_results:
+                        return out
             return out
 
         matches = await anyio.to_thread.run_sync(_walk)
+        matches.sort()
         if not matches:
             return f"No files matching {glob!r} under {path}"
         result = "\n".join(matches)

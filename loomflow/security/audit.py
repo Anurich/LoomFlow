@@ -13,6 +13,13 @@ representation of the entry's content fields, keyed by a per-log
 ``secret``. The signature lets compliance tooling detect tampering;
 :func:`verify_signature` recomputes it and compares.
 
+The tamper-evidence is only as strong as the key: with the default
+``secret=""`` the HMAC is computed over a well-known (empty) key,
+so anyone who can edit the log can also recompute a valid
+signature — :func:`verify_signature` then proves nothing. Both
+backends emit a one-shot :class:`UserWarning` when constructed
+without a real secret.
+
 The log is conceptually monotonic: ``seq`` is per-log and never
 re-used. :class:`FileAuditLog` recovers the highest seq from the file
 on startup so multiple processes can append in turn.
@@ -23,6 +30,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import warnings
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -103,8 +111,39 @@ def _sign(secret: str, body: bytes) -> str:
     ).hexdigest()
 
 
+# One-shot flag: warn about empty signing secrets at most once per
+# process, not once per log construction (tests and dev tooling
+# build many unsigned logs deliberately).
+_EMPTY_SECRET_WARNED = False
+
+
+def _warn_if_empty_secret(secret: str, cls_name: str) -> None:
+    """Emit a one-shot warning when a log is built without a real
+    signing key — its HMACs are then forgeable by anyone who can
+    write the log, so the advertised tamper-evidence is void."""
+    global _EMPTY_SECRET_WARNED
+    if secret or _EMPTY_SECRET_WARNED:
+        return
+    _EMPTY_SECRET_WARNED = True
+    warnings.warn(
+        f"{cls_name} constructed with an empty signing secret: entry "
+        "signatures are HMACs over a well-known key, so anyone who can "
+        "edit the log can recompute them and verify_signature() "
+        "provides NO tamper-evidence. Pass secret=<random key> (e.g. "
+        "secrets.token_hex(32)) for real integrity guarantees.",
+        UserWarning,
+        stacklevel=3,
+    )
+
+
 def verify_signature(entry: AuditEntry, secret: str) -> bool:
-    """Recompute the HMAC and compare against the stored signature."""
+    """Recompute the HMAC and compare against the stored signature.
+
+    Only meaningful when the log was built with a real (non-empty,
+    unguessable) ``secret``: with the default ``secret=""`` the
+    HMAC key is public knowledge and a forger can produce entries
+    that verify, so a ``True`` return proves nothing.
+    """
     expected = _sign(
         secret,
         _canonical_payload(
@@ -129,6 +168,7 @@ class InMemoryAuditLog:
     """List-backed signed audit log."""
 
     def __init__(self, *, secret: str = "") -> None:
+        _warn_if_empty_secret(secret, "InMemoryAuditLog")
         self._secret = secret
         self._entries: list[AuditEntry] = []
         self._seq = 0
@@ -203,6 +243,7 @@ class FileAuditLog:
     """
 
     def __init__(self, path: str | Path, *, secret: str = "") -> None:
+        _warn_if_empty_secret(secret, "FileAuditLog")
         self._path = Path(path)
         self._secret = secret
         self._seq = 0

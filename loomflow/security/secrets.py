@@ -36,22 +36,46 @@ __all__ = [
 ]
 
 
-# Patterns we redact by default. Conservative — false-positives
-# (real prose containing the keyword) are preferable to leaking a
-# real key into an audit log. Production users override this in
-# subclasses.
-_REDACTION_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
-    re.compile(r"sk-[A-Za-z0-9_-]{16,}"),       # OpenAI-style
-    re.compile(r"sk-ant-[A-Za-z0-9_-]{16,}"),   # Anthropic-style
-    re.compile(r"AKIA[0-9A-Z]{16}"),            # AWS access key id
-    re.compile(r"ghp_[A-Za-z0-9]{36}"),         # GitHub PAT
+# Patterns we redact by default, as (pattern, replacement) pairs.
+# Conservative — anchored to well-known key prefixes / shapes so
+# ordinary prose doesn't match, but false-positives are preferable
+# to leaking a real key into an audit log. Production users
+# override this in subclasses.
+_REDACTION_PATTERNS: Final[tuple[tuple[re.Pattern[str], str], ...]] = (
+    (re.compile(r"sk-[A-Za-z0-9_-]{16,}"), "[REDACTED]"),  # OpenAI-style
+    (re.compile(r"sk-ant-[A-Za-z0-9_-]{16,}"), "[REDACTED]"),  # Anthropic-style
+    # AWS access key ids — long-lived (AKIA) and session / temporary
+    # (ASIA) credentials share the 16-char uppercase suffix shape.
+    (re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"), "[REDACTED]"),
+    (re.compile(r"\bghp_[A-Za-z0-9]{36}\b"), "[REDACTED]"),  # GitHub PAT
+    # Slack tokens: xoxb- (bot), xoxa-, xoxp- (user), xoxr-, xoxs-.
+    (re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}"), "[REDACTED]"),
+    # Google API keys — fixed "AIza" prefix + 35 more chars.
+    (re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"), "[REDACTED]"),
+    # Authorization headers: "Bearer <token>". Keeps the scheme so
+    # the redacted log still shows WHAT was sent, not the credential.
+    (
+        re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]{16,}"),
+        "Bearer [REDACTED]",
+    ),
+    # Generic env-style assignments: FOO_API_KEY=..., BAR_TOKEN=....
+    # Anchored on the =-assignment shape + a minimum value length so
+    # prose ("the token is short-lived") never matches; the variable
+    # NAME is kept so logs stay debuggable.
+    (
+        re.compile(
+            r"\b([A-Za-z][A-Za-z0-9_]*(?:_API_KEY|_TOKEN))"
+            r"(\s*=\s*)(['\"]?)[^\s'\"]{8,}\3"
+        ),
+        r"\1\2[REDACTED]",
+    ),
 )
 
 
 def _apply_redaction(text: str) -> str:
     out = text
-    for pat in _REDACTION_PATTERNS:
-        out = pat.sub("[REDACTED]", out)
+    for pat, replacement in _REDACTION_PATTERNS:
+        out = pat.sub(replacement, out)
     return out
 
 
