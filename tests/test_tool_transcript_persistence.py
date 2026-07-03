@@ -95,6 +95,54 @@ def test_build_transcript_no_tool_calls_returns_empty() -> None:
     assert agent._build_tool_transcript(messages) == []
 
 
+def test_build_transcript_rehydrated_session_no_prose_leak() -> None:
+    """Regression: on a RESUMED session the message log begins with
+    rehydrated prior turns, so "the first USER message" is a prior
+    turn's prompt — not this run's input. The old blocklist
+    implementation kept everything except {system, first USER, last
+    ASSISTANT-text}, which leaked the prior turn's answer AND this
+    run's own input into the transcript. session_messages() then
+    spliced that prose between input/output and consumers saw
+    misaligned turns. The allowlist keeps ONLY tool work — a no-tool
+    resumed turn must produce an empty transcript."""
+    agent = _agent(persist_tool_transcripts=True)
+    messages = [
+        Message(role=Role.SYSTEM, content="instructions"),
+        # rehydrated prior turn (from memory)
+        Message(role=Role.USER, content="how are you ?"),
+        Message(role=Role.ASSISTANT, content="I'm functioning well!"),
+        # this run's actual input + output
+        Message(role=Role.USER, content="what are you doing today"),
+        Message(role=Role.ASSISTANT, content="Ready to assist."),
+    ]
+    assert agent._build_tool_transcript(messages) == []
+
+
+def test_build_transcript_rehydrated_session_keeps_tool_work() -> None:
+    """Same rehydrated shape, but the current turn DID run a tool —
+    only that tool work survives, none of the rehydrated prose."""
+    agent = _agent(persist_tool_transcripts=True)
+    messages = [
+        Message(role=Role.USER, content="prior prompt"),
+        Message(role=Role.ASSISTANT, content="prior answer"),
+        Message(role=Role.USER, content="current prompt"),
+        Message(
+            role=Role.ASSISTANT,
+            content="",
+            tool_calls=[
+                ToolCall(id="t1", tool="grep", args={"pattern": "x"})
+            ],
+        ),
+        Message(role=Role.TOOL, content="match: x.py:3", tool_call_id="t1"),
+        Message(role=Role.ASSISTANT, content="current answer"),
+    ]
+    transcript = agent._build_tool_transcript(messages)
+    assert len(transcript) == 2
+    assert transcript[0].role is Role.ASSISTANT
+    assert transcript[0].tool_calls[0].tool == "grep"
+    assert transcript[1].role is Role.TOOL
+
+
 def test_cap_truncates_oversize_with_marker() -> None:
     agent = _agent(persist_tool_transcripts=True, tool_transcript_max_bytes=20)
     huge = "x" * 100

@@ -1048,33 +1048,24 @@ class Agent:
         no-tool conversation); the caller stores ``None`` instead
         in that case so the sidecar write is skipped.
         """
-        # Skip the first USER (= input) and the final ASSISTANT
-        # text-only message (= output) — they're already on the
-        # Episode. Everything else between is the transcript.
+        # ALLOWLIST, not blocklist: keep exactly what the docstring
+        # promises — tool results + tool-call requests. The previous
+        # implementation excluded {system, first USER, last ASSISTANT
+        # text} and kept the REST, which corrupted episodes on resumed
+        # sessions: with rehydrated history in the log, the "first
+        # USER" is a PRIOR turn's prompt (not this run's input), so a
+        # prior assistant answer + this run's own input leaked into
+        # the transcript. session_messages() then spliced that prose
+        # between input/output and every downstream consumer saw
+        # misaligned turns.
         if not messages:
             return []
         kept: list[Message] = []
-        # Find indices of the first USER and the last ASSISTANT
-        # text-only message so we can exclude exactly those.
-        first_user_idx: int | None = None
-        last_assistant_text_idx: int | None = None
-        for i, msg in enumerate(messages):
-            if first_user_idx is None and msg.role is Role.USER:
-                first_user_idx = i
-            if (
-                msg.role is Role.ASSISTANT
-                and not msg.tool_calls
-            ):
-                last_assistant_text_idx = i
-
-        for i, msg in enumerate(messages):
-            if msg.role is Role.SYSTEM:
-                continue
-            if i == first_user_idx:
-                continue
-            if i == last_assistant_text_idx:
-                continue
-            kept.append(self._cap_message(msg))
+        for msg in messages:
+            if msg.role is Role.TOOL:
+                kept.append(self._cap_message(msg))
+            elif msg.role is Role.ASSISTANT and msg.tool_calls:
+                kept.append(self._cap_message(msg))
         return kept
 
     def _cap_message(self, msg: Message) -> Message:
