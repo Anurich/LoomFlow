@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "loomflow"
-version = "0.10.29"
+version = "0.10.30"
 description = "Production workflow + agent framework. Multi-tenant, MCP-native, model-agnostic."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -209,7 +209,7 @@ markers = [
 # release BUMP=patch|minor|major`` is the explicit "this is a release"
 # flag — see the Makefile for usage.
 [tool.bumpversion]
-current_version = "0.10.29"
+current_version = "0.10.30"
 parse = """(?x)
     (?P<major>0|[1-9]\\d*)\\.(?P<minor>0|[1-9]\\d*)\\.(?P<patch>0|[1-9]\\d*)
     (?:\\.(?P<dev_label>dev)(?P<dev_n>\\d+))?
