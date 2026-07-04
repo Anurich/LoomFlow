@@ -26,6 +26,15 @@ Streaming retries are deliberately limited: once the first chunk
 has been yielded to the consumer we cannot rewind, so retries only
 fire while waiting for that first chunk. Errors mid-stream
 propagate.
+
+Composes with :class:`~loomflow.model.fallback.FallbackModel` —
+put RetryingModel INSIDE the chain::
+
+    FallbackModel([RetryingModel(a, policy), RetryingModel(b, policy)])
+
+so retries exhaust on ``a`` (this wrapper raises the final
+``TransientModelError`` only once the policy is spent) before the
+chain falls over to ``b``, which then gets its own retry budget.
 """
 
 from __future__ import annotations

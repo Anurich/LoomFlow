@@ -29,12 +29,13 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import warnings
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, fields
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import anyio
 from pydantic import BaseModel, ValidationError
@@ -66,13 +67,17 @@ from ..core.types import (
     PromptCacheConfig,
     Role,
     RunResult,
+    ToolDef,
     Usage,
 )
 from ..governance.budget import NoBudget
+from ..governance.rate_limit import RateLimiter
 from ..governance.retry import RetryPolicy
+from ..guardrails.base import Guardrail, apply_guardrails
 from ..model.echo import EchoModel
 from ..observability.tracing import NoTelemetry
 from ..runtime.inproc import InProcRuntime
+from ..runtime.journal import Checkpoint, CheckpointMeta
 from ..security.audit import AuditLog
 from ..security.hooks import HookRegistry, PostToolHook, PreToolHook
 from ..security.permissions import AllowAll
@@ -81,6 +86,13 @@ from .stop_hooks import GoalStopHook, StopHook, StopHookResult
 
 DEFAULT_MAX_TURNS = 50
 DEFAULT_STREAM_BUFFER = 128
+
+_LOG = logging.getLogger("loomflow.agent")
+
+# Injected user prompt when ``Agent.resume`` is called without one —
+# the restored transcript IS the task context; this nudge just tells
+# the model to pick up where the checkpoint left off.
+_RESUME_CONTINUATION_PROMPT = "Continue the interrupted task."
 
 Emit = Callable[[Event], Awaitable[None]]
 
@@ -117,6 +129,44 @@ class Tuning:
     secrets: Any | None = None
     auto_consolidate: bool = False
     response_tone: str | None = None
+    tool_search: bool = False
+    """G1 — Tool Search / deferred tool loading. When True and the
+    estimated tool-def token weight exceeds
+    ``tool_search_threshold_tokens``, the agent ships stubbed tool
+    defs (name + one-liner + permissive schema) plus a local
+    ``search_tools`` catalogue tool; full schemas hydrate per tool
+    after first use. Default False — no behaviour change. See
+    :mod:`loomflow.tools.search`."""
+    tool_search_threshold_tokens: int = 10_000
+    """Tool-def token estimate (chars/4) above which stubbing kicks
+    in. Small tool sets stay full even with ``tool_search=True``."""
+    keep_tools: Sequence[str] = ()
+    """Tool names that ALWAYS ship full definitions under tool
+    search — the agent's always-on core set (read / search / etc.)."""
+    memory_token_budget: int | None = None
+    """G7 — token budget (chars/4) for the seed-time memory block.
+    ``None`` (default) keeps the historical item-count behaviour.
+    When set, working blocks are pinned (counted, never dropped) and
+    facts + episodes are ranked relevance x recency-decay and
+    greedily packed into the remainder. See
+    :mod:`loomflow.memory._injection`."""
+    memory_decay_half_life_days: float | None = None
+    """Half-life in days for the recency decay under
+    ``memory_token_budget``. ``None`` (default) disables decay."""
+    checkpoint: bool = False
+    """G4 — durable checkpoint/resume. When True AND the configured
+    runtime supports checkpoints (``put_checkpoint`` — implemented by
+    ``InProcRuntime`` and ``JournaledRuntime`` + its Sqlite/Postgres
+    subclasses), the agent loop persists a transcript snapshot
+    (messages + turns + cumulative usage) after every architecture
+    pass — the first pass and each stop-hook (Ralph) iteration.
+    ``Agent.resume(session_id=...)`` restores the latest (or a chosen)
+    checkpoint and continues without re-billing prior turns. Default
+    False — zero behaviour change. Note: ``InProcRuntime`` checkpoints
+    are process-local (in-memory) — they enable resume within the
+    process but are lost on exit; use ``SqliteRuntime`` /
+    ``PostgresRuntime`` for crash durability. Checkpoint-write
+    failures are logged as warnings and never kill the run."""
 
 
 # The fields that moved from flat ``Agent(...)`` kwargs into ``Tuning``.
@@ -178,6 +228,8 @@ class Agent:
         memory: Memory | str | Mapping[str, Any] | None = None,
         runtime: Runtime | str | Mapping[str, Any] | None = None,
         budget: Budget | None = None,
+        rate_limiter: RateLimiter | None = None,
+        guardrails: Sequence[Guardrail] | None = None,
         permissions: Permissions | None = None,
         hooks: HookRegistry | None = None,
         tools: list[Tool | Callable[..., object]]
@@ -202,7 +254,7 @@ class Agent:
         run_until: str | Mapping[str, Any] | None = None,
         tool_result_summarizer: Model | str | None = None,
         snip_window: int = 0,
-        auto_compact_at_tokens: int | None = None,
+        auto_compact_at_tokens: int | Literal["auto"] | None = None,
         persist_tool_transcripts: bool = False,
         tuning: Tuning | None = None,
         **_legacy: Any,
@@ -223,6 +275,19 @@ class Agent:
         secrets = tuning.secrets
         auto_consolidate = tuning.auto_consolidate
         response_tone = tuning.response_tone
+        # G1 (tool search) + G7 (memory budget) knobs — stored on
+        # self and threaded into Dependencies per run in _loop.
+        self._tool_search: bool = tuning.tool_search
+        self._tool_search_threshold_tokens: int = (
+            tuning.tool_search_threshold_tokens
+        )
+        self._tool_search_keep: tuple[str, ...] = tuple(tuning.keep_tools)
+        self._memory_token_budget: int | None = tuning.memory_token_budget
+        self._memory_decay_half_life: float | None = (
+            tuning.memory_decay_half_life_days
+        )
+        # G4 — opt-in per-pass checkpoint writing (see Tuning.checkpoint).
+        self._checkpoint_enabled: bool = tuning.checkpoint
 
         # Skills — packaged on-disk playbooks loaded on demand.
         # Build the registry first so frontmatter validation fires
@@ -354,6 +419,17 @@ class Agent:
         from ..runtime.resolver import resolve_runtime
         self._runtime: Runtime = resolve_runtime(runtime)
         self._budget: Budget = budget if budget is not None else NoBudget()
+        # Per-tenant QPS limiter (G5). ``None`` (default) disables —
+        # the ``fast_rate_limit`` flag on Dependencies keeps the
+        # no-limiter hot path zero-overhead. See
+        # :mod:`loomflow.governance.rate_limit`.
+        self._rate_limiter: RateLimiter | None = rate_limiter
+        # Guardrails (G13). ``None`` / empty (default) disables — the
+        # ``fast_guardrails`` flag on Dependencies keeps the no-guard
+        # hot path zero-overhead. Ordered: guards run in the sequence
+        # given, each seeing the previous guard's transform. See
+        # :mod:`loomflow.guardrails`.
+        self._guardrails: tuple[Guardrail, ...] = tuple(guardrails or ())
         self._permissions: Permissions = (
             permissions if permissions is not None else AllowAll()
         )
@@ -661,12 +737,41 @@ class Agent:
 
         # Auto-compact (0.10.19) — third tier of context-budget
         # defence. None (default) → disabled. Pass an int (token
-        # threshold) to enable; the summariser defaults to the
-        # main model if not supplied separately. Fires inside
-        # the Ralph loop between iterations when
-        # ``session.messages`` accumulates past the threshold.
+        # threshold) to enable, or the string ``"auto"`` to derive
+        # "compact at 80% of the model's context window" from
+        # ``context_window_for`` × ``DEFAULT_AUTO_COMPACT_PCT``;
+        # the summariser defaults to the main model if not supplied
+        # separately. Fires inside the Ralph loop between iterations
+        # when ``session.messages`` accumulates past the threshold.
         # See :mod:`loomflow.agent.auto_compact` for the
         # compaction algorithm and trigger semantics.
+        if isinstance(auto_compact_at_tokens, str):
+            if auto_compact_at_tokens != "auto":
+                raise ValueError(
+                    "auto_compact_at_tokens must be an int token "
+                    'threshold, the string "auto", or None '
+                    f"(got {auto_compact_at_tokens!r})"
+                )
+            # ``"auto"`` opts into the derived default. Only models
+            # with a KNOWN window resolve to a threshold — for
+            # unrecognised model names we keep auto-compact DISABLED
+            # (None) rather than deriving a too-small threshold from
+            # ``context_window_for``'s conservative 8k fallback.
+            # Explicit ``auto_compact_at_tokens=<int>`` always wins
+            # by construction (this branch never sees an int).
+            from .auto_compact import (
+                _KNOWN_CONTEXT_WINDOWS,
+                DEFAULT_AUTO_COMPACT_PCT,
+                context_window_for,
+            )
+            lowered_name = self._model.name.lower()
+            if any(h in lowered_name for h in _KNOWN_CONTEXT_WINDOWS):
+                auto_compact_at_tokens = int(
+                    context_window_for(self._model.name)
+                    * DEFAULT_AUTO_COMPACT_PCT
+                )
+            else:
+                auto_compact_at_tokens = None
         if (
             auto_compact_at_tokens is not None
             and auto_compact_at_tokens <= 0
@@ -1639,37 +1744,162 @@ class Agent:
 
     async def resume(
         self,
-        session_id: str,
-        prompt: str,
+        prompt: str | None = None,
         *,
+        session_id: str,
+        from_checkpoint: str = "latest",
         user_id: str | None = None,
-        metadata: Mapping[str, Any] | None = None,
-        context: RunContext | None = None,
-        extra_tools: list[Tool] | None = None,
-        emit: Emit | None = None,
-        output_schema: type[BaseModel] | Any | None = None,
-        output_validation_retries: int = 1,
+        **kwargs: Any,
     ) -> RunResult:
-        """Resume a previously-interrupted run from its journal.
+        """Resume an interrupted run from a durable checkpoint (G4).
 
-        Equivalent to ``agent.run(prompt, session_id=session_id, ...)``
-        with the same kwarg surface as :meth:`run`. Exists as a
-        separate method so the intent is explicit at the call site
-        — when a durable :class:`Runtime` (e.g. :class:`SqliteRuntime`)
-        is configured, completed steps replay from the journal
-        instead of re-executing.
+        When the configured runtime supports checkpoints (the built-in
+        ``InProcRuntime`` / ``JournaledRuntime`` + Sqlite/Postgres
+        subclasses all do) AND a checkpoint exists for ``session_id``,
+        the run continues from the snapshot: ``session.messages``,
+        ``turns`` and ``cumulative_usage`` are restored verbatim, the
+        memory-rehydration seeding is skipped (the restored messages
+        ARE the state — per the architecture re-invocation contract,
+        seeding only happens when ``session.messages`` is empty), and
+        ``prompt`` is appended as a fresh USER turn. Prior turns are
+        never re-billed — the budget only sees model calls made after
+        the restore point.
+
+        ``prompt=None`` injects an internal continuation nudge
+        (``"Continue the interrupted task."``) so the model picks up
+        where the checkpoint left off without new user input.
+
+        ``from_checkpoint`` selects the snapshot: ``"latest"`` (the
+        default) continues the session in place; an explicit
+        checkpoint id that is NOT the latest **forks** — a new
+        session_id is derived (``new_id("sess")``), the checkpoint's
+        messages are copied in, and the run proceeds under the fork id
+        (the returned :class:`RunResult`'s ``session_id`` reflects the
+        fork; the original session's checkpoints are untouched).
+        Passing the id of the latest checkpoint continues in place,
+        same as ``"latest"``.
+
+        **Fallback.** When the runtime has no checkpoint support, or no
+        matching checkpoint exists (e.g. the run predates
+        ``Tuning(checkpoint=True)``), this degrades to the legacy
+        behaviour: ``run(prompt, session_id=session_id, ...)`` — memory
+        rehydration reconstructs the conversation and, with a durable
+        runtime, already-journaled steps replay instead of
+        re-executing.
+
+        ``**kwargs`` passes through to :meth:`run` / the internal loop
+        with full parity — ``metadata``, ``context``, ``extra_tools``,
+        ``emit``, ``output_schema``, ``output_validation_retries``,
+        ``response_tone``, ``effort``.
+
+        Note: checkpoints must have been written by an agent
+        constructed with ``tuning=Tuning(checkpoint=True)``; with
+        ``InProcRuntime`` they are process-local (lost on exit).
         """
-        return await self.run(
-            prompt,
-            user_id=user_id,
-            session_id=session_id,
-            metadata=metadata,
-            context=context,
-            extra_tools=extra_tools,
-            emit=emit,
-            output_schema=output_schema,
-            output_validation_retries=output_validation_retries,
+        effective_prompt = (
+            prompt if prompt is not None else _RESUME_CONTINUATION_PROMPT
         )
+
+        cp: Checkpoint | None = None
+        run_session_id = session_id
+        get_latest = getattr(self._runtime, "get_latest_checkpoint", None)
+        get_by_id = getattr(self._runtime, "get_checkpoint", None)
+        if get_latest is not None and get_by_id is not None:
+            try:
+                if from_checkpoint == "latest":
+                    cp = await get_latest(session_id)
+                else:
+                    cp = await get_by_id(session_id, from_checkpoint)
+                    if cp is not None:
+                        latest = await get_latest(session_id)
+                        if (
+                            latest is None
+                            or latest.checkpoint_id != cp.checkpoint_id
+                        ):
+                            # Time-travel resume from an older
+                            # checkpoint: fork under a fresh id so the
+                            # original session's history stays intact.
+                            run_session_id = new_id("sess")
+            except Exception as exc:  # noqa: BLE001 — lookup failures
+                # degrade to the legacy path rather than killing the
+                # resume outright.
+                _LOG.warning(
+                    "checkpoint lookup failed for session %s "
+                    "(falling back to legacy resume): %s",
+                    session_id,
+                    exc,
+                )
+                cp = None
+                run_session_id = session_id
+
+        if cp is None:
+            # Legacy resume: journal replay + memory rehydration.
+            return await self.run(
+                effective_prompt,
+                user_id=user_id,
+                session_id=session_id,
+                **kwargs,
+            )
+
+        emit = kwargs.pop("emit", None)
+        output_schema = kwargs.pop("output_schema", None)
+        effort = kwargs.pop("effort", None)
+        return await self._loop_guarded(
+            effective_prompt,
+            emit=emit if emit is not None else _noop_emit,
+            user_id=user_id,
+            session_id=run_session_id,
+            output_schema=(
+                output_schema
+                if output_schema is not None
+                else self._default_output_schema
+            ),
+            effort=effort if effort is not None else self._default_effort,
+            restore=cp,
+            **kwargs,
+        )
+
+    async def list_checkpoints(
+        self, session_id: str, limit: int = 50
+    ) -> list[CheckpointMeta]:
+        """Newest-first checkpoint metadata for a session (G4).
+
+        Convenience delegate to the runtime's duck-typed
+        ``list_checkpoints`` extension. Returns ``[]`` when the
+        runtime has no checkpoint support.
+        """
+        lister = getattr(self._runtime, "list_checkpoints", None)
+        if lister is None:
+            return []
+        result: list[CheckpointMeta] = await lister(session_id, limit=limit)
+        return result
+
+    async def signal(
+        self, session_id: str, name: str, payload: Any = None
+    ) -> None:
+        """Deliver a named signal to a (possibly parked) run (G8).
+
+        Convenience delegate to ``runtime.signal(...)`` so callers
+        don't reach into runtime internals — the counterpart of an
+        approval handler (or architecture) parked on
+        ``runtime.wait_for_signal(session_id, name)`` /
+        :func:`loomflow.architecture.helpers.wait_for_user_signal`.
+        No-op with a warning when the runtime doesn't implement the
+        signal channel.
+        """
+        sender = getattr(self._runtime, "signal", None)
+        if sender is None:
+            _LOG.warning(
+                "runtime %r does not support signals; "
+                "signal(%s, %r) dropped",
+                getattr(
+                    self._runtime, "name", type(self._runtime).__name__
+                ),
+                session_id,
+                name,
+            )
+            return
+        await sender(session_id, name, payload)
 
     async def stream(
         self,
@@ -1810,6 +2040,39 @@ class Agent:
             )
         )
 
+    async def _maybe_checkpoint(self, session: AgentSession) -> None:
+        """Persist a transcript snapshot after an architecture pass (G4).
+
+        No-op unless opted in via ``Tuning(checkpoint=True)`` AND the
+        runtime implements the duck-typed ``put_checkpoint`` extension.
+        A failed write is logged as a warning and never kills the run —
+        checkpointing is a durability optimisation, not a correctness
+        requirement.
+        """
+        if not self._checkpoint_enabled:
+            return
+        put = getattr(self._runtime, "put_checkpoint", None)
+        if put is None:
+            return
+        try:
+            await put(
+                Checkpoint(
+                    session_id=session.id,
+                    turn=session.turns,
+                    messages=list(session.messages),
+                    cumulative_usage=session.cumulative_usage,
+                    cursor=None,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 — never kill the run
+            _LOG.warning(
+                "checkpoint write failed for session %s at turn %d "
+                "(run continues): %s",
+                session.id,
+                session.turns,
+                exc,
+            )
+
     # ---- the loop --------------------------------------------------------
 
     async def _loop_guarded(self, prompt: str, **kwargs: Any) -> RunResult:
@@ -1842,6 +2105,7 @@ class Agent:
         output_validation_retries: int = 1,
         response_tone: str | None = None,
         effort: str | None = None,
+        restore: Checkpoint | None = None,
     ) -> RunResult:
         """Setup → delegate iteration to the architecture → teardown.
 
@@ -1910,6 +2174,11 @@ class Agent:
         )
         fast_runtime = isinstance(self._runtime, InProcRuntime)
         fast_budget = isinstance(self._budget, NoBudget)
+        # No rate limiter wired (the default) → budget_gate skips the
+        # ``acquire`` call site entirely; wiring
+        # ``Agent(rate_limiter=...)`` flips this False and every
+        # model step pays the per-tenant QPS gate.
+        fast_rate_limit = self._rate_limiter is None
         # No registered stop hooks → skip the Ralph-loop wrapper
         # entirely so the no-op default keeps the LangChain-class
         # latency promise. Hooks are mostly used for living_plan
@@ -1927,6 +2196,10 @@ class Agent:
         # the default) the architecture skips the snip pass
         # entirely.
         fast_snip = self._snip_window <= 0
+        # G13 — no guardrails wired (the default) → every guard call
+        # site (input / output here, tool_result in
+        # ``run_single_tool``) is skipped entirely.
+        fast_guardrails = len(self._guardrails) == 0
 
         run_trace: contextlib.AbstractAsyncContextManager[Any] = (
             _NULL_CTX
@@ -2035,6 +2308,59 @@ class Agent:
                 )
             await emit(Event.started(session_id, prompt))
 
+            # G13 — input-stage guardrails: run BEFORE the prompt
+            # seeds the run. A block returns an interrupted
+            # RunResult with a refusal text WITHOUT calling the
+            # model (no episode is persisted either — a refused
+            # prompt is not a conversation turn); an annotate
+            # replaces the prompt with the guard's transform.
+            if not fast_guardrails:
+                inbound = await apply_guardrails(
+                    self._guardrails,
+                    prompt,
+                    stage="input",
+                    context=run_ctx,
+                )
+                await _emit_guardrail_triggers(
+                    emit, session_id, inbound.triggered
+                )
+                if inbound.blocked:
+                    refusal = (
+                        f"Blocked by {inbound.guard}: "
+                        f"{inbound.reason or 'no reason given'}"
+                    )
+                    blocked_result = RunResult(
+                        session_id=session_id,
+                        output=refusal,
+                        turns=0,
+                        started_at=started_at,
+                        finished_at=datetime.now(UTC),
+                        interrupted=True,
+                        interruption_reason=(
+                            f"guardrail:{inbound.guard}"
+                        ),
+                    )
+                    if not fast_audit:
+                        await self._audit(
+                            session_id=session_id,
+                            user_id=run_ctx.user_id,
+                            actor="system",
+                            action="guardrail_blocked",
+                            payload={
+                                "stage": "input",
+                                "guard": inbound.guard,
+                                "reason": inbound.reason,
+                            },
+                        )
+                    await emit(
+                        Event.completed(
+                            session_id,
+                            blocked_result.model_dump(mode="json"),
+                        )
+                    )
+                    return blocked_result
+                prompt = inbound.text
+
             # Append the JSON-schema directive when a structured
             # output is requested AND the model adapter doesn't have
             # a provider-native structured-output API. Adapters
@@ -2090,6 +2416,19 @@ class Agent:
                 id=session_id,
                 instructions=effective_instructions,
             )
+            if restore is not None:
+                # G4 — resume from a checkpoint: the snapshot IS the
+                # state. Restoring a non-empty ``messages`` list makes
+                # the architecture skip its seed pass (system prompt +
+                # memory rehydration are already in the transcript) and
+                # append the new prompt as a fresh USER turn, per the
+                # re-invocation contract in ``Architecture.run``.
+                # ``turns`` and ``cumulative_usage`` carry forward so
+                # RunResult totals span the whole logical session while
+                # the budget only sees post-restore model calls.
+                session.messages = list(restore.messages)
+                session.turns = restore.turn
+                session.cumulative_usage = restore.cumulative_usage
             # Per-run tool injection: if extra_tools provided, wrap
             # the agent's host so the model sees them alongside the
             # statically-configured tools. The wrap is local to this
@@ -2132,6 +2471,26 @@ class Agent:
                 if per_run_extras
                 else self._tool_host
             )
+            # G1 — when tool search is enabled, install the local
+            # ``search_tools`` tool on a per-run wrapper host (same
+            # pattern as the skills / workspace extras). The provider
+            # closure lists the PRE-wrap host so search_tools never
+            # returns itself as a match, and re-lists on every call
+            # so dynamic hosts (MCP listChanged) stay searchable.
+            if self._tool_search:
+                from ..tools.search import make_search_tools_tool
+
+                _search_base = effective_tools
+
+                async def _current_defs(
+                    _host: ToolHost = _search_base,
+                ) -> list[ToolDef]:
+                    return await _host.list_tools()
+
+                effective_tools = ExtendedToolHost(
+                    effective_tools,
+                    [make_search_tools_tool(_current_defs)],
+                )
             # Resolve the memory for THIS run: explicit-on-Agent
             # always wins; otherwise check the ambient workflow
             # memory contextvar so ``Workflow(memory=...)`` flows
@@ -2160,6 +2519,11 @@ class Agent:
                 audit_log=self._audit_log,
                 max_turns=self._max_turns,
                 approval_handler=self._approval_handler,
+                # G8 — per-run remember-decision cache for the approval
+                # gate: (user_id, tool) -> bool, populated by handlers
+                # returning remember_allow / remember_deny. Fresh dict
+                # per run; session-scoped, never persisted.
+                approval_memory={},
                 # Forward the per-call output_schema so architectures
                 # can hand it to model.complete()/.stream(); adapters
                 # with native structured-output APIs use it to
@@ -2186,6 +2550,18 @@ class Agent:
                 fast_hooks=fast_hooks,
                 fast_runtime=fast_runtime,
                 fast_budget=fast_budget,
+                fast_rate_limit=fast_rate_limit,
+                rate_limiter=self._rate_limiter,
+                # G13 — guardrails: the tool_result stage runs inside
+                # ``run_single_tool``; ``guardrail_emit`` is its only
+                # event channel (the helper returns a ToolResult, it
+                # can't yield). None when disabled so the field stays
+                # inert on the fast path.
+                guardrails=self._guardrails,
+                fast_guardrails=fast_guardrails,
+                guardrail_emit=(
+                    None if fast_guardrails else emit
+                ),
                 fast_stop_hooks=fast_stop_hooks,
                 fast_tool_summary=fast_tool_summary,
                 tool_result_summarizer=self._tool_result_summarizer,
@@ -2195,6 +2571,15 @@ class Agent:
                 ),
                 fast_snip=fast_snip,
                 snip_window=self._snip_window,
+                # G1 — tool search knobs (default OFF; see Tuning).
+                tool_search=self._tool_search,
+                tool_search_threshold_tokens=(
+                    self._tool_search_threshold_tokens
+                ),
+                tool_search_keep=self._tool_search_keep,
+                # G7 — memory injection budget + decay (default OFF).
+                memory_token_budget=self._memory_token_budget,
+                memory_decay_half_life=self._memory_decay_half_life,
                 context=run_ctx,
             )
 
@@ -2208,6 +2593,12 @@ class Agent:
             # also registering stop hooks. See :meth:`_maybe_compact`
             # (no-op unless opted in; failures never kill the turn).
             await self._maybe_compact(session, emit)
+
+            # G4 — persist a transcript snapshot after the pass (after
+            # compaction, so the checkpoint captures the compacted
+            # state). No-op unless ``Tuning(checkpoint=True)`` and the
+            # runtime supports checkpoints; failures warn, never kill.
+            await self._maybe_checkpoint(session)
 
             # Framework Ralph loop — when stop hooks are registered,
             # run them after the architecture exits. Any hook
@@ -2264,6 +2655,9 @@ class Agent:
                     # after the final one) — same call as after the
                     # first pass above.
                     await self._maybe_compact(session, emit)
+
+                    # G4 — checkpoint after each Ralph iteration too.
+                    await self._maybe_checkpoint(session)
                 else:
                     # Loop exhausted via the cap — record the
                     # interruption on the session so RunResult
@@ -2281,6 +2675,49 @@ class Agent:
                         )
                     )
 
+            # G13 — output-stage guardrails: run AFTER the
+            # architecture (and any stop-hook iterations) finalised
+            # ``session.output``, BEFORE output-schema validation.
+            # A block replaces the output with a refusal text and
+            # marks the run interrupted (schema validation is then
+            # skipped — a refusal can't and shouldn't validate); an
+            # annotate replaces the output with the transform.
+            output_blocked_by_guardrail = False
+            if not fast_guardrails:
+                outbound = await apply_guardrails(
+                    self._guardrails,
+                    session.output,
+                    stage="output",
+                    context=run_ctx,
+                )
+                await _emit_guardrail_triggers(
+                    emit, session_id, outbound.triggered
+                )
+                if outbound.blocked:
+                    session.output = (
+                        f"Blocked by {outbound.guard}: "
+                        f"{outbound.reason or 'no reason given'}"
+                    )
+                    session.interrupted = True
+                    session.interruption_reason = (
+                        f"guardrail:{outbound.guard}"
+                    )
+                    output_blocked_by_guardrail = True
+                    if not fast_audit:
+                        await self._audit(
+                            session_id=session_id,
+                            user_id=run_ctx.user_id,
+                            actor="system",
+                            action="guardrail_blocked",
+                            payload={
+                                "stage": "output",
+                                "guard": outbound.guard,
+                                "reason": outbound.reason,
+                            },
+                        )
+                elif outbound.text != session.output:
+                    session.output = outbound.text
+
             # Structured output validation + retry. Only kicks in
             # when the caller requested a schema; happens AFTER the
             # architecture loop has finalised ``session.output`` and
@@ -2290,7 +2727,7 @@ class Agent:
             # calls are spent fixing the output; on the last
             # failure :class:`OutputValidationError` is raised.
             parsed: Any | None = None
-            if output_schema is not None:
+            if output_schema is not None and not output_blocked_by_guardrail:
                 parsed = await self._validate_output_with_retry(
                     session=session,
                     schema=output_schema,
@@ -2417,6 +2854,26 @@ class Agent:
 
 async def _noop_emit(_event: Event) -> None:
     return None
+
+
+async def _emit_guardrail_triggers(
+    emit: Emit, session_id: str, triggered: Sequence[Any]
+) -> None:
+    """Emit one ``guardrail.triggered`` architecture event per
+    :class:`~loomflow.guardrails.GuardrailTrigger` (blocks and
+    annotate-with-detection only — plain mechanical transforms don't
+    trigger; see :func:`loomflow.guardrails.apply_guardrails`)."""
+    for trig in triggered:
+        await emit(
+            Event.architecture_event(
+                session_id,
+                "guardrail.triggered",
+                guard=trig.guard,
+                stage=trig.stage,
+                action=trig.action,
+                reason=trig.reason,
+            )
+        )
 
 
 _NETWORK_MODEL_CLASS_NAMES = frozenset(

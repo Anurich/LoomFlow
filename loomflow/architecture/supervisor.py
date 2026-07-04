@@ -43,7 +43,7 @@ Composition
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
@@ -52,7 +52,7 @@ from anyio.streams.memory import MemoryObjectSendStream
 
 from ..core.context import get_run_context, inherit_ambient_memory
 from ..core.ids import new_id
-from ..core.protocols import Memory
+from ..core.protocols import Memory, Model
 from ..core.types import Event, Usage
 from ..tools.registry import Tool
 from .base import AgentSession, Architecture, Dependencies
@@ -100,6 +100,19 @@ Available workers:
 {worker_descriptions}
 """
 
+SPAWN_SECTION_TEMPLATE = """\
+
+
+You may also CREATE new specialist workers mid-run with
+`spawn_worker(role, instructions)`:
+- ``role`` must be a valid Python identifier not already in the
+  roster; ``instructions`` become the new worker's system prompt.
+- At most {max_spawned} workers can be spawned per run.
+- A spawned worker is immediately delegable via `delegate(role, ...)`
+  and exists only for the rest of THIS run.
+Prefer the existing roster; spawn only when no current worker fits.
+"""
+
 
 class Supervisor:
     """Coordinator + workers, glued by a ``delegate`` tool.
@@ -131,6 +144,21 @@ class Supervisor:
       `langchain.com/blog/benchmarking-multi-agent-architectures`_
       benchmark showed +50% quality on tasks where the supervisor
       would otherwise paraphrase a worker's output.
+    * ``allow_spawn``: when ``True``, a ``spawn_worker(role,
+      instructions)`` tool is injected alongside ``delegate`` so the
+      coordinator model can create NEW specialist workers mid-run.
+      Spawned workers are **ephemeral** — they live in a per-run
+      overlay merged with the fixed roster for delegate lookup and
+      die when the run ends (never persisted into the agent-level
+      registry, so no cross-run / cross-user leakage). Default
+      ``False`` (no behavior change).
+    * ``max_spawned``: hard cap on spawns **per run**. Exceeding it
+      returns an error string to the model (not an exception).
+    * ``spawn_template``: template :class:`Agent` a spawned worker
+      clones its model + tools from. When ``None``, spawned workers
+      use the coordinator's own model and get no tools. v1 keeps the
+      tool surface minimal on purpose: the model may NOT choose the
+      worker's tools or model (future work — see G15 roadmap spec).
     """
 
     name = "supervisor"
@@ -145,6 +173,9 @@ class Supervisor:
         forward_tool_name: str = "forward_message",
         worker_registry: dict[str, Any] | None = None,
         role_to_worker_id: dict[str, str] | None = None,
+        allow_spawn: bool = False,
+        max_spawned: int = 5,
+        spawn_template: Agent | None = None,
     ) -> None:
         if not workers:
             raise ValueError("Supervisor requires at least one worker")
@@ -164,6 +195,13 @@ class Supervisor:
         self._role_to_worker_id: dict[str, str] | None = (
             role_to_worker_id
         )
+        if max_spawned < 0:
+            raise ValueError(
+                f"max_spawned must be >= 0, got {max_spawned}"
+            )
+        self._allow_spawn = allow_spawn
+        self._max_spawned = max_spawned
+        self._spawn_template: Agent | None = spawn_template
 
     def declared_workers(self) -> dict[str, Agent]:
         return dict(self._workers)
@@ -218,29 +256,52 @@ class Supervisor:
         last_outputs: dict[str, str] = {}
         forward_request: dict[str, str] = {}
 
-        delegate_tool = _make_delegate_tool(
-            self._workers,
-            session,
-            tool_name=self._delegate_name,
-            memory=deps.memory,
-            event_sink=send_chan,
-            last_outputs=last_outputs,
-            worker_registry=self._worker_registry,
-            role_to_worker_id=self._role_to_worker_id,
-            deps=deps,
+        # Spawn support (``allow_spawn=True``): the delegate tool
+        # closes over a PER-RUN copy of the roster plus a per-run
+        # overlay of spawned worker handles. Spawned workers are
+        # never written into ``self._workers`` or (durably) into the
+        # agent-level worker registry — they die with the run.
+        run_workers: dict[str, Agent] = (
+            dict(self._workers) if self._allow_spawn else self._workers
         )
-        forward_tool = _make_forward_message_tool(
-            last_outputs=last_outputs,
-            forward_request=forward_request,
-            tool_name=self._forward_name,
-            worker_names=list(self._workers.keys()),
+        spawn_overlay: dict[str, Any] | None = (
+            {} if self._allow_spawn else None
         )
+        spawned_ids: list[str] = []
+
+        def _build_worker_tools() -> list[Tool]:
+            """(Re)build delegate + forward_message from the CURRENT
+            roster. Called once at run start and again after every
+            spawn so the delegate enum/description reflect spawned
+            workers (ReAct re-fetches ``list_tools()`` each turn, so
+            re-registering on the ExtendedToolHost is enough)."""
+            return [
+                _make_delegate_tool(
+                    run_workers,
+                    session,
+                    tool_name=self._delegate_name,
+                    memory=deps.memory,
+                    event_sink=send_chan,
+                    last_outputs=last_outputs,
+                    worker_registry=self._worker_registry,
+                    role_to_worker_id=self._role_to_worker_id,
+                    deps=deps,
+                    spawn_overlay=spawn_overlay,
+                ),
+                _make_forward_message_tool(
+                    last_outputs=last_outputs,
+                    forward_request=forward_request,
+                    tool_name=self._forward_name,
+                    worker_names=list(run_workers.keys()),
+                ),
+            ]
 
         # 3. Wrap the parent's ToolHost so the model sees `delegate`
         #    + `forward_message` (+ `send_message` when persistent
-        #    subagents are enabled) alongside whatever tools the
+        #    subagents are enabled, + `spawn_worker` when
+        #    ``allow_spawn=True``) alongside whatever tools the
         #    parent already had.
-        extra_tools = [delegate_tool, forward_tool]
+        extra_tools = _build_worker_tools()
         if self._worker_registry is not None:
             # Lazy import to avoid loomflow.tools → loomflow.agent
             # circular at module-load. The tool's closure holds a
@@ -255,6 +316,31 @@ class Supervisor:
             )
             extra_tools.append(send_msg_tool)
         wrapped_host = ExtendedToolHost(deps.tools, extra_tools)
+
+        if self._allow_spawn:
+            assert spawn_overlay is not None  # narrowed for mypy
+
+            def _rebuild_worker_tools() -> None:
+                # ``register`` replaces by name (extras are keyed by
+                # tool name), so the delegate/forward defs the model
+                # sees next turn carry the updated roster enum.
+                for t in _build_worker_tools():
+                    wrapped_host.register(t)
+
+            spawn_tool = _make_spawn_worker_tool(
+                run_workers,
+                spawn_overlay,
+                session=session,
+                template=self._spawn_template,
+                fallback_model=deps.model,
+                max_spawned=self._max_spawned,
+                shared_registry=self._worker_registry,
+                spawned_ids=spawned_ids,
+                rebuild_worker_tools=_rebuild_worker_tools,
+                event_sink=send_chan,
+                delegate_name=self._delegate_name,
+            )
+            wrapped_host.register(spawn_tool)
 
         # 3. Compose instructions: user's domain prompt + supervisor
         #    template (with worker descriptions). Worker descriptions
@@ -276,6 +362,10 @@ class Supervisor:
         supervisor_section = self._template.format(
             worker_descriptions=worker_descriptions
         )
+        if self._allow_spawn:
+            supervisor_section += SPAWN_SECTION_TEMPLATE.format(
+                max_spawned=self._max_spawned
+            )
         composed_instructions = (
             f"{session.instructions}\n\n---\n\n{supervisor_section}"
             if session.instructions
@@ -317,6 +407,17 @@ class Supervisor:
             # though the session is single-use; harmless and keeps
             # the abstraction clean for tests that re-use sessions.
             session.instructions = original_instructions
+            # Ephemeral-spawn cleanup: spawned handles were mirrored
+            # into the SHARED agent-level registry (the same dict the
+            # ``send_message`` tool closes over — preserving the
+            # coordinator._worker_registry identity invariant) so
+            # ``send_message(to=<spawned id>)`` works mid-run. Pop
+            # them here so nothing spawned survives the run (no
+            # cross-run / cross-user leakage). IDs are ULIDs, so
+            # concurrent runs only ever pop their own entries.
+            if self._worker_registry is not None:
+                for spawned_wid in spawned_ids:
+                    self._worker_registry.pop(spawned_wid, None)
 
         # If the supervisor model called forward_message at any
         # point, override the final output with the captured worker
@@ -333,7 +434,8 @@ class Supervisor:
         yield Event.architecture_event(
             session.id,
             "supervisor.completed",
-            workers=list(self._workers.keys()),
+            # ``run_workers`` so spawned roles show up in telemetry.
+            workers=list(run_workers.keys()),
         )
 
 
@@ -370,9 +472,16 @@ def _make_delegate_tool(
     worker_registry: dict[str, Any] | None = None,
     role_to_worker_id: dict[str, str] | None = None,
     deps: Dependencies | None = None,
+    spawn_overlay: dict[str, Any] | None = None,
 ) -> Tool:
     """Build a :class:`Tool` whose ``execute`` routes to the named
     worker :class:`Agent` and returns its final output.
+
+    ``spawn_overlay`` (``allow_spawn=True`` only) maps a spawned
+    role → its per-run :class:`_WorkerHandle`. Spawned handles win
+    the lookup over the fixed roster and go through the exact same
+    ``acquire_worker_session`` discipline (user pinning + lock), so
+    tenant isolation holds for spawned workers too.
 
     Each invocation generates a fresh ULID-suffixed session_id for
     the worker; replay correctness for the parent comes from the
@@ -422,12 +531,19 @@ def _make_delegate_tool(
         # a fresh session_id per call. Preserves the pre-0.10.10
         # behavior for ``Team.supervisor(persistent_subagents=False)``.
         worker_id_for_return: str | None = None
-        if (
+        handle: Any = None
+        if spawn_overlay is not None and worker in spawn_overlay:
+            # Spawned-this-run worker: per-run overlay handle. Same
+            # session/lock/pinning discipline as persistent workers,
+            # but the handle dies with the run.
+            handle = spawn_overlay[worker]
+        elif (
             worker_registry is not None
             and role_to_worker_id is not None
             and worker in role_to_worker_id
         ):
             handle = worker_registry[role_to_worker_id[worker]]
+        if handle is not None:
             worker_id_for_return = handle.worker_id
             caller_user = get_run_context().user_id
             # Cross-user check + lock + touch live in the shared
@@ -694,3 +810,196 @@ def _make_forward_message_tool(
         },
     )
 
+
+
+# ---------------------------------------------------------------------------
+# spawn_worker tool (G15 — dynamic model-driven agent spawning)
+# ---------------------------------------------------------------------------
+
+
+def _make_spawn_worker_tool(
+    run_workers: dict[str, Agent],
+    spawn_overlay: dict[str, Any],
+    *,
+    session: AgentSession,
+    template: Agent | None,
+    fallback_model: Model,
+    max_spawned: int,
+    shared_registry: dict[str, Any] | None,
+    spawned_ids: list[str],
+    rebuild_worker_tools: Callable[[], None],
+    event_sink: MemoryObjectSendStream[Event] | None = None,
+    tool_name: str = "spawn_worker",
+    delegate_name: str = "delegate",
+) -> Tool:
+    """Build the ``spawn_worker(role, instructions)`` tool.
+
+    Design notes (v1 — deliberately minimal surface):
+
+    * ``role`` must be a Python identifier (reuses the same
+      ``_VALID_ROLE`` rule as :func:`new_worker_id` /
+      :meth:`Supervisor.add_worker`) and must not collide with an
+      existing roster entry.
+    * ``instructions`` become the spawned worker's system prompt.
+      The model may NOT pick the worker's tools or model — those are
+      inherited from ``template`` (or the coordinator's model with
+      no tools when no template is set). Letting the model choose
+      tools/model is future work (see G15 in the roadmap).
+    * Every spawn appends the new role to ``run_workers`` (the
+      per-run roster copy the delegate tool closes over) and a
+      :class:`_WorkerHandle` to ``spawn_overlay`` — then calls
+      ``rebuild_worker_tools()`` so the delegate/forward enums the
+      model sees on its NEXT turn include the new role. All state is
+      per-run: nothing spawned survives ``Supervisor.run``.
+    * The handle is also mirrored into ``shared_registry`` (the
+      agent-level dict the ``send_message`` tool closes over) so
+      ``send_message(to=<spawned worker_id>)`` works mid-run;
+      ``Supervisor.run``'s ``finally`` pops those entries, keeping
+      spawned workers ephemeral.
+    * ``user_id`` is pinned at spawn time to the spawning run's user
+      (cross-tenant delegation to a spawned worker is rejected by
+      the shared ``acquire_worker_session`` discipline, exactly like
+      persistent workers).
+    * ``max_spawned`` is enforced per run; exceeding it returns an
+      error string to the model, never an exception.
+    """
+
+    async def _spawn(role: str, instructions: str) -> str:
+        # Lazy import — module scope would pull loomflow.agent at
+        # architecture import time (same pattern as ``_delegate``).
+        from datetime import UTC, datetime
+
+        from ..agent.api import Agent as _Agent
+        from ..agent.worker_registry import (
+            _VALID_ROLE,
+            _WorkerHandle,
+            new_worker_id,
+        )
+
+        def _roster() -> str:
+            return ", ".join(sorted(run_workers)) or "(none)"
+
+        if len(spawned_ids) >= max_spawned:
+            return (
+                f"Error: spawn limit reached — {max_spawned} "
+                f"worker(s) may be spawned per run and you have "
+                f"already spawned {len(spawned_ids)}. Delegate to "
+                f"an existing worker instead. Roster: {_roster()}"
+            )
+        if not _VALID_ROLE.match(role):
+            return (
+                f"Error: invalid role {role!r} — the role must be "
+                "a Python identifier (letters, digits, underscores; "
+                "not starting with a digit)."
+            )
+        if role in run_workers:
+            return (
+                f"Error: a worker named {role!r} already exists. "
+                f"Pick a new role name or delegate to it directly. "
+                f"Roster: {_roster()}"
+            )
+        if not instructions.strip():
+            return (
+                "Error: instructions must be a non-empty system "
+                "prompt for the new worker."
+            )
+
+        # v1 inheritance: model + tools come from the template; with
+        # no template the worker shares the coordinator's model and
+        # gets no tools. Memory is NOT passed — the delegate path
+        # installs the coordinator's memory as ambient
+        # (``inherit_ambient_memory``), so a worker built without an
+        # explicit ``memory=`` inherits it, same as fixed workers.
+        if template is not None:
+            worker_agent = _Agent(
+                instructions,
+                model=template.model,
+                tools=template.tool_host,
+            )
+        else:
+            worker_agent = _Agent(instructions, model=fallback_model)
+
+        worker_id = new_worker_id(role)
+        handle = _WorkerHandle(
+            worker_id=worker_id,
+            role=role,
+            agent=worker_agent,
+            # Run-scoped session id — the handle dies with the run,
+            # so unlike ``persistent_*`` sessions this one is never
+            # revisited by a later run.
+            session_id=f"{session.id}__spawned_{worker_id}",
+            # Pin to the spawning run's user immediately: a spawned
+            # worker belongs to the caller from birth (first-touch
+            # pinning would leave a None window). ``None`` for
+            # anonymous runs keeps first-touch semantics.
+            user_id=get_run_context().user_id,
+            created_at=datetime.now(UTC),
+        )
+
+        run_workers[role] = worker_agent
+        spawn_overlay[role] = handle
+        if shared_registry is not None:
+            shared_registry[worker_id] = handle
+        spawned_ids.append(worker_id)
+        # Refresh delegate/forward defs so the next model turn's
+        # tool list carries the new role in enum + description.
+        rebuild_worker_tools()
+
+        if event_sink is not None:
+            async with event_sink.clone() as sink:
+                await sink.send(
+                    Event.architecture_event(
+                        session.id,
+                        "supervisor.worker_spawned",
+                        role=role,
+                        worker_id=worker_id,
+                        spawned_count=len(spawned_ids),
+                    )
+                )
+
+        return (
+            f"Spawned worker {role!r} [worker_id: {worker_id}] "
+            f"({len(spawned_ids)}/{max_spawned} spawned this run). "
+            f"It is now available via "
+            f"{delegate_name}(worker={role!r}, instructions=...). "
+            f"Current roster: {_roster()}"
+        )
+
+    return Tool(
+        name=tool_name,
+        description=(
+            "Create a NEW specialist worker mid-run and add it to "
+            "the delegation roster. `role` must be a valid Python "
+            "identifier not already in the roster; `instructions` "
+            "become the new worker's system prompt. The worker "
+            "inherits its model and tools from the team's spawn "
+            "template (you cannot choose them) and exists only for "
+            f"the rest of this run. At most {max_spawned} worker(s) "
+            "can be spawned per run. After spawning, use "
+            f"`{delegate_name}(worker=<role>, ...)` to give it work."
+        ),
+        fn=_spawn,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "role": {
+                    "type": "string",
+                    "description": (
+                        "Short identifier for the new worker (e.g. "
+                        "'fact_checker'). Must be a valid Python "
+                        "identifier and not already in the roster."
+                    ),
+                },
+                "instructions": {
+                    "type": "string",
+                    "description": (
+                        "System prompt for the new worker — define "
+                        "its specialty, style, and constraints. Be "
+                        "specific; this is ALL the worker knows "
+                        "about its job."
+                    ),
+                },
+            },
+            "required": ["role", "instructions"],
+        },
+    )

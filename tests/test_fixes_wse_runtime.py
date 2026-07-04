@@ -437,4 +437,5 @@ async def test_postgres_prune_without_filters_deletes_all() -> None:
     assert state.executed == [
         ("DELETE FROM journal_steps", ()),
         ("DELETE FROM journal_streams", ()),
+        ("DELETE FROM checkpoints", ()),
     ]

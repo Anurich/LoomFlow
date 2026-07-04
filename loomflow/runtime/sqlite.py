@@ -24,8 +24,15 @@ class SqliteRuntime(JournaledRuntime):
 
     name = "sqlite"
 
-    def __init__(self, path: str | Path) -> None:
-        store = SqliteJournalStore(path)
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        max_checkpoints_per_session: int = 20,
+    ) -> None:
+        store = SqliteJournalStore(
+            path, max_checkpoints_per_session=max_checkpoints_per_session
+        )
         super().__init__(store=store)
         self._path = store.path
 

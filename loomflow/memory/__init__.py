@@ -36,6 +36,7 @@ from .chroma_facts import ChromaFactStore
 from .consolidator import Consolidator
 from .embedder import CohereEmbedder, HashEmbedder, OpenAIEmbedder, VoyageEmbedder
 from .facts import FactStore, InMemoryFactStore
+from .graph import Edge, FactGraph, Path, recall_graph
 from .inmemory import InMemoryMemory
 from .lazy import LazyMemory
 from .postgres import PostgresMemory
@@ -55,6 +56,8 @@ __all__ = [
     "CohereEmbedder",
     "ConsolidationWorker",
     "Consolidator",
+    "Edge",
+    "FactGraph",
     "FactStore",
     "default_recall_scored",
     "HashEmbedder",
@@ -62,6 +65,7 @@ __all__ = [
     "InMemoryMemory",
     "LazyMemory",
     "OpenAIEmbedder",
+    "Path",
     "PostgresFactStore",
     "PostgresMemory",
     "RedisFactStore",
@@ -70,5 +74,6 @@ __all__ = [
     "SqliteMemory",
     "VectorMemory",
     "VoyageEmbedder",
+    "recall_graph",
     "resolve_memory",
 ]

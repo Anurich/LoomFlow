@@ -28,6 +28,14 @@ voyage = ["voyageai>=0.2.0"]
 cohere = ["cohere>=5.0.0"]
 dbos = ["dbos>=0.7.0"]
 temporal = ["temporalio>=1.7.0"]
+# ASGI server for `loom serve` / running loomflow.serve.create_app.
+# The app itself is framework-free pure ASGI — any server works;
+# this extra just pulls the recommended one.
+serve = ["uvicorn>=0.30"]
+# A2A protocol client (loomflow.a2a.A2AClient). The server side
+# (serve_a2a) is dependency-free pure ASGI; httpx is only needed
+# to CALL remote A2A agents.
+a2a = ["httpx>=0.27.0"]
 otel = [
     "opentelemetry-api>=1.24.0",
     "opentelemetry-sdk>=1.24.0",
@@ -99,6 +107,9 @@ docs = [
     "myst-parser>=2.0",
     "linkify-it-py>=2.0",
 ]
+
+[project.scripts]
+loom = "loomflow.cli:main"
 
 [tool.hatch.build.targets.sdist]
 # The sdist defaults to sweeping the whole repo, which dragged in the

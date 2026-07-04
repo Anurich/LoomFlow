@@ -32,6 +32,8 @@ a worker thread.
 
 from __future__ import annotations
 
+import inspect
+import logging
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from contextlib import AbstractContextManager, AsyncExitStack
@@ -43,14 +45,21 @@ import anyio.to_thread
 from anyio.from_thread import BlockingPortal, start_blocking_portal
 
 from ..core.errors import MCPError
-from .spec import MCPServerSpec
+from .spec import MCPServerSpec, SamplingHandler
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping
+
     from anyio.abc import TaskStatus
+
+logger = logging.getLogger(__name__)
 
 #: How long ``aclose`` waits for the lifecycle task to unwind its
 #: transport stack before abandoning it to portal cancellation.
 _CLOSE_GRACE_S = 30.0
+
+#: JSON-RPC method of the MCP "tool list changed" notification.
+_TOOLS_LIST_CHANGED = "notifications/tools/list_changed"
 
 
 class MCPClient:
@@ -61,15 +70,30 @@ class MCPClient:
         spec: MCPServerSpec,
         *,
         session: Any | None = None,
+        sampling_handler: SamplingHandler | None = None,
     ) -> None:
         self._spec = spec
         self._session: Any | None = session
+        self._sampling_handler = (
+            sampling_handler
+            if sampling_handler is not None
+            else spec.sampling_handler
+        )
         self._connect_lock = anyio.Lock()
         # Populated only for real (non-injected) sessions:
         self._portal_cm: AbstractContextManager[BlockingPortal] | None = None
         self._portal: BlockingPortal | None = None
         self._lifecycle_future: Future[Any] | None = None
         self._shutdown_event: anyio.Event | None = None
+        # Set by MCPRegistry: fires when the server sends
+        # ``notifications/tools/list_changed``. IMPORTANT: the callback
+        # is invoked from the session's message handler, which runs in
+        # this client's *portal thread* event loop — it must be
+        # synchronous, non-blocking, and thread-safe (e.g. flip a
+        # lock-guarded flag). Awaiting/blocking here would stall the
+        # session's read loop; calling back into this client's portal
+        # would deadlock it.
+        self.on_tools_changed: Callable[[str], None] | None = None
 
     # ---- properties -----------------------------------------------------
 
@@ -166,9 +190,114 @@ class MCPClient:
                 "MCP SDK not installed. "
                 "Install with: pip install 'loomflow[mcp]'"
             ) from exc
-        session = await stack.enter_async_context(ClientSession(read, write))
+        session = await stack.enter_async_context(
+            ClientSession(read, write, **self._session_kwargs(ClientSession))
+        )
         await session.initialize()
         return session
+
+    def _session_kwargs(self, session_cls: Any) -> dict[str, Any]:
+        """Extra ``ClientSession(...)`` kwargs, feature-detected.
+
+        Older SDK versions may lack ``message_handler`` /
+        ``sampling_callback`` — inspect the constructor signature and
+        only pass what it accepts, degrading gracefully (with a
+        warning when a user-supplied sampling handler can't be wired).
+        """
+        params: Mapping[str, Any]
+        try:
+            params = inspect.signature(session_cls.__init__).parameters
+        except (TypeError, ValueError):  # pragma: no cover — exotic SDKs
+            params = {}
+        kwargs: dict[str, Any] = {}
+        if "message_handler" in params:
+            kwargs["message_handler"] = self._handle_incoming_message
+        else:  # pragma: no cover — depends on installed SDK
+            logger.debug(
+                "MCP SDK ClientSession lacks message_handler; "
+                "listChanged notifications from %r will be ignored",
+                self._spec.name,
+            )
+        if self._sampling_handler is not None:
+            if "sampling_callback" in params:
+                kwargs["sampling_callback"] = self._make_sampling_callback()
+            else:  # pragma: no cover — depends on installed SDK
+                logger.warning(
+                    "MCP SDK ClientSession lacks sampling_callback; "
+                    "sampling handler for %r will not be wired",
+                    self._spec.name,
+                )
+        return kwargs
+
+    # ---- server-initiated traffic -----------------------------------------
+
+    async def _handle_incoming_message(self, message: Any) -> None:
+        """Session message handler (runs in the portal thread's loop).
+
+        Watches for ``notifications/tools/list_changed`` and fires
+        :attr:`on_tools_changed`. Everything else is ignored — the SDK
+        already routes requests (sampling, roots, ...) to their
+        dedicated callbacks before this handler sees them.
+        """
+        root = getattr(message, "root", message)
+        if getattr(root, "method", None) == _TOOLS_LIST_CHANGED:
+            self._fire_tools_changed()
+
+    def _fire_tools_changed(self) -> None:
+        """Invoke :attr:`on_tools_changed` (isolated; never raises).
+
+        May run on the portal thread — the registry's callback only
+        flips a lock-guarded flag, so this cannot block the session's
+        read loop or deadlock the portal.
+        """
+        callback = self.on_tools_changed
+        if callback is None:
+            return
+        try:
+            callback(self._spec.name)
+        except Exception:  # noqa: BLE001 — a bad callback must not kill the session
+            logger.exception(
+                "on_tools_changed callback for MCP server %r raised",
+                self._spec.name,
+            )
+
+    def _make_sampling_callback(self) -> Any:
+        """Adapt the user's ``(messages, model_preferences) -> str``
+        handler to the SDK's ``SamplingFnT`` shape.
+
+        The returned coroutine function runs inside the portal
+        thread's loop when the server requests a completion. Handler
+        errors are returned to the server as JSON-RPC ``ErrorData``
+        rather than crashing the session.
+        """
+        handler = self._sampling_handler
+        if handler is None:  # pragma: no cover — gated by caller
+            raise MCPError(
+                f"MCP client {self._spec.name!r}: no sampling handler configured"
+            )
+
+        async def _sampling(context: Any, params: Any) -> Any:
+            import mcp.types as types  # type: ignore[import-not-found, import-untyped]
+
+            try:
+                result = handler(
+                    getattr(params, "messages", None),
+                    getattr(params, "modelPreferences", None),
+                )
+                if inspect.isawaitable(result):
+                    result = await result
+            except Exception as exc:  # noqa: BLE001 — surface to the server
+                return types.ErrorData(
+                    code=types.INTERNAL_ERROR,
+                    message=f"sampling handler failed: {exc}",
+                )
+            return types.CreateMessageResult(
+                role="assistant",
+                content=types.TextContent(type="text", text=str(result)),
+                model="loomflow-sampling-handler",
+            )
+
+        return _sampling
 
     async def aclose(self) -> None:
         """Tear down the session and underlying transport.
@@ -247,6 +376,44 @@ class MCPClient:
         if session is None:
             raise MCPError(f"MCP client {self._spec.name!r}: session not initialised")
         return await self._run_session_call(partial(session.call_tool, name, args))
+
+    async def list_resources(self) -> list[Any]:
+        """Return the SDK's resource descriptors (``uri``, ``name``, ...)."""
+        session = await self._require_session()
+        result = await self._run_session_call(session.list_resources)
+        return list(getattr(result, "resources", result) or [])
+
+    async def read_resource(self, uri: str) -> Any:
+        """Read ``uri``. Returns the SDK's ReadResourceResult.
+
+        The SDK validates/coerces the string into an ``AnyUrl`` via
+        its pydantic request params, so plain strings are fine here.
+        """
+        session = await self._require_session()
+        return await self._run_session_call(partial(session.read_resource, uri))
+
+    async def list_prompts(self) -> list[Any]:
+        """Return the SDK's prompt descriptors (``name``, ``arguments``, ...)."""
+        session = await self._require_session()
+        result = await self._run_session_call(session.list_prompts)
+        return list(getattr(result, "prompts", result) or [])
+
+    async def get_prompt(
+        self, name: str, arguments: dict[str, str] | None = None
+    ) -> Any:
+        """Fetch prompt ``name``. Returns the SDK's GetPromptResult."""
+        session = await self._require_session()
+        return await self._run_session_call(
+            partial(session.get_prompt, name, arguments)
+        )
+
+    async def _require_session(self) -> Any:
+        """Connect if needed and return the live session (or raise)."""
+        await self.connect()
+        session = self._session
+        if session is None:
+            raise MCPError(f"MCP client {self._spec.name!r}: session not initialised")
+        return session
 
     async def _run_session_call(self, fn: Any) -> Any:
         """Run one session coroutine in the loop that owns the session.

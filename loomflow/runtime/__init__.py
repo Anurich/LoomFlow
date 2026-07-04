@@ -13,6 +13,8 @@ Future adapters: ``DBOSRuntime`` (Postgres-backed via DBOS workflows),
 
 from .inproc import InProcRuntime, InProcSession
 from .journal import (
+    Checkpoint,
+    CheckpointMeta,
     InMemoryJournalStore,
     JournalEntry,
     JournalStore,
@@ -25,6 +27,8 @@ from .resolver import resolve_runtime
 from .sqlite import SqliteRuntime
 
 __all__ = [
+    "Checkpoint",
+    "CheckpointMeta",
     "InMemoryJournalStore",
     "InProcRuntime",
     "InProcSession",

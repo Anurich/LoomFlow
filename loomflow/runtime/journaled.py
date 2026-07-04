@@ -63,7 +63,13 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from .journal import InMemoryJournalStore, JournalStore
+from ._signals import SignalMailbox
+from .journal import (
+    Checkpoint,
+    CheckpointMeta,
+    InMemoryJournalStore,
+    JournalStore,
+)
 
 _current_session_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "_jeeves_runtime_session",
@@ -119,14 +125,27 @@ def _step_key(
 
 
 class JournaledSession:
-    """The handle yielded by :meth:`JournaledRuntime.session`."""
+    """The handle yielded by :meth:`JournaledRuntime.session`.
+
+    Carries a per-session :class:`SignalMailbox`: ``deliver`` enqueues
+    a named signal, ``wait_signal`` parks until one arrives, and
+    ``poll_signal`` is the non-blocking pop. The mailbox lives only in
+    process memory — signals are not journaled and are dropped when
+    the session's last open context exits.
+    """
 
     def __init__(self, session_id: str) -> None:
         self.id = session_id
-        self._signals: dict[str, Any] = {}
+        self._mailbox = SignalMailbox()
 
     async def deliver(self, name: str, payload: Any) -> None:
-        self._signals[name] = payload
+        self._mailbox.deliver(name, payload)
+
+    async def wait_signal(self, name: str) -> Any:
+        return await self._mailbox.wait(name)
+
+    def poll_signal(self, name: str) -> Any | None:
+        return self._mailbox.poll(name)
 
 
 class JournaledRuntime:
@@ -135,13 +154,29 @@ class JournaledRuntime:
     Pass any :class:`JournalStore` (in-memory for tests, sqlite for
     durable single-process use, future Postgres/DBOS adapters for
     multi-process / multi-host).
+
+    ``max_checkpoints_per_session`` only applies when no ``store`` is
+    given (it configures the default :class:`InMemoryJournalStore`);
+    an explicit store carries its own retention setting.
     """
 
     name = "journaled"
 
-    def __init__(self, store: JournalStore | None = None) -> None:
-        self._store: JournalStore = store if store is not None else InMemoryJournalStore()
+    def __init__(
+        self,
+        store: JournalStore | None = None,
+        *,
+        max_checkpoints_per_session: int = 20,
+    ) -> None:
+        self._store: JournalStore = (
+            store
+            if store is not None
+            else InMemoryJournalStore(
+                max_checkpoints_per_session=max_checkpoints_per_session
+            )
+        )
         self._sessions: dict[str, JournaledSession] = {}
+        self._session_refs: dict[str, int] = {}
 
     @property
     def store(self) -> JournalStore:
@@ -151,19 +186,71 @@ class JournaledRuntime:
 
     @asynccontextmanager
     async def session(self, session_id: str) -> AsyncIterator[JournaledSession]:
+        """Open (or re-enter) a session; in-memory session state — the
+        signal mailbox — is discarded when the last open context for
+        this ``session_id`` exits. Journal/checkpoint data lives in
+        the store and is unaffected."""
         token = _current_session_var.set(session_id)
-        sess = self._sessions.setdefault(
-            session_id, JournaledSession(session_id)
+        sess = self._get_session(session_id)
+        self._session_refs[session_id] = (
+            self._session_refs.get(session_id, 0) + 1
         )
         try:
             yield sess
         finally:
             _current_session_var.reset(token)
+            remaining = self._session_refs.get(session_id, 1) - 1
+            if remaining <= 0:
+                self._session_refs.pop(session_id, None)
+                self._sessions.pop(session_id, None)
+            else:
+                self._session_refs[session_id] = remaining
+
+    def _get_session(self, session_id: str) -> JournaledSession:
+        return self._sessions.setdefault(
+            session_id, JournaledSession(session_id)
+        )
+
+    # ---- signals ----------------------------------------------------------
 
     async def signal(self, session_id: str, name: str, payload: Any) -> None:
+        """Deliver a named signal to a session's FIFO mailbox.
+
+        Signals sent before the session is opened are queued and
+        survive until the session's last open context exits.
+        """
+        await self._get_session(session_id).deliver(name, payload)
+
+    async def wait_for_signal(self, session_id: str, name: str) -> Any:
+        """Park until a matching signal arrives; return its payload."""
+        return await self._get_session(session_id).wait_signal(name)
+
+    def poll_signal(self, session_id: str, name: str) -> Any | None:
+        """Pop a queued signal if present; never blocks."""
         sess = self._sessions.get(session_id)
-        if sess is not None:
-            await sess.deliver(name, payload)
+        return None if sess is None else sess.poll_signal(name)
+
+    # ---- checkpoints -------------------------------------------------------
+
+    async def put_checkpoint(self, cp: Checkpoint) -> None:
+        """Persist a transcript snapshot; store retention prunes the
+        session's oldest beyond its configured limit."""
+        await self._store.put_checkpoint(cp)
+
+    async def get_checkpoint(
+        self, session_id: str, checkpoint_id: str
+    ) -> Checkpoint | None:
+        return await self._store.get_checkpoint(session_id, checkpoint_id)
+
+    async def get_latest_checkpoint(
+        self, session_id: str
+    ) -> Checkpoint | None:
+        return await self._store.get_latest_checkpoint(session_id)
+
+    async def list_checkpoints(
+        self, session_id: str, limit: int = 50
+    ) -> list[CheckpointMeta]:
+        return await self._store.list_checkpoints(session_id, limit=limit)
 
     # ---- step ------------------------------------------------------------
 

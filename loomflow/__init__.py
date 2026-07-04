@@ -50,7 +50,7 @@ from .agent import Agent, Tuning
 from .agent.auto_compact import context_window_for, maybe_auto_compact
 from .agent.snip import snip_messages
 from .agent.stop_hooks import GoalStopHook, StopHook, StopHookResult
-from .architecture import Architecture, ReAct
+from .architecture import ApprovalDecision, Architecture, ReAct
 from .core import (
     Budget,
     BudgetExceeded,
@@ -76,6 +76,7 @@ from .core import (
     OutputValidationError,
     PermissionDecision,
     Permissions,
+    RateLimitExceeded,
     Role,
     RunContext,
     RunResult,
@@ -93,7 +94,12 @@ from .core import (
     new_id,
     set_run_context,
 )
-from .governance import BudgetConfig, NoBudget, StandardBudget
+from .governance import (
+    BudgetConfig,
+    NoBudget,
+    StandardBudget,
+    TokenBucketRateLimiter,
+)
 from .memory import HashEmbedder, InMemoryMemory, resolve_memory
 from .model import EchoModel, ScriptedModel, ScriptedTurn
 from .model.count_tokens import count_tokens
@@ -178,6 +184,7 @@ __all__ = [
     "Embedder",
     "Secrets",
     "AuditLog",
+    "ApprovalDecision",
     "Architecture",
     "GoalStopHook",
     "StopHook",
@@ -196,6 +203,8 @@ __all__ = [
     "HookRegistry",
     "StandardBudget",
     "BudgetConfig",
+    "TokenBucketRateLimiter",
+    "RateLimitExceeded",
     "InProcRuntime",
     "ReAct",
     "HashEmbedder",

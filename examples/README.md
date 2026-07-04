@@ -1,14 +1,17 @@
 # Examples
 
-Nineteen end-to-end examples that exercise Loom's own
+Thirty end-to-end examples that exercise Loom's own
 primitives — loader, vector store, retriever-as-tool pattern,
 multi-agent architectures, multi-user / session-continuity
 primitives, the workflow + agent composition story, observability
 sinks, the reasoning-effort dial, TOML / dict-form declarative
 config, the shared-notebook workspace for multi-agent coordination,
 provider-aware prompt caching, the TodoWrite-style living plan
-primitive, and the workspace lifecycle / self-improvement surface.
-Nothing pulled in from outside the framework.
+primitive, the workspace lifecycle / self-improvement surface, and
+the v0.11 wave (tool search, code mode, durable resume, rich HITL,
+guardrails, evals, fallback chains, rate limiting, graph memory,
+token-budgeted injection). Nothing pulled in from outside the
+framework.
 
 ## Agent + retrieval + memory
 
@@ -85,6 +88,23 @@ The image-bearing examples (01, 02) generate small sample PDFs on
 first run via `reportlab` and cache them under `examples/data/`.
 The on-disk Chroma indices are also cached, so subsequent runs only
 re-execute the agent loop against OpenAI.
+
+## v0.11 release features
+
+Seven examples covering the v0.11 capability wave. All run **offline**
+(no API key) against `ScriptedModel` / `EchoModel` / in-memory
+backends. If an older loomflow is pip-installed, run them against the
+working tree: `pip install -e .` (or `PYTHONPATH=. python examples/NN_....py`).
+
+| File | What it shows | Needs API key? |
+|---|---|---|
+| [`24_tool_search_code_mode.py`](24_tool_search_code_mode.py) | **Tool search / deferred loading** — `Tuning(tool_search=True)` ships name+one-liner stubs instead of 30 fat schemas (prints the token estimate before/after, >70% drop); called tools hydrate to full schemas next turn; `keep_tools=` stays always-full. Then **code mode** — `make_code_mode_tools()` gives the model `search_api` + `run_code`, so it computes over a huge tool result in code and only the computed answer enters context. | No |
+| [`25_durable_resume.py`](25_durable_resume.py) | **Durable checkpoint/resume** — `Tuning(checkpoint=True)` + `SqliteRuntime` snapshots the transcript each pass; a simulated crash mid-task, then `agent.resume(session_id=...)` continues from the checkpoint (no re-billing of prior turns), `list_checkpoints()` walks history, and resuming an *older* checkpoint id forks a new session. | No |
+| [`26_hitl_approvals.py`](26_hitl_approvals.py) | **Rich human-in-the-loop** — the approval handler returns `ApprovalDecision` instead of a bare bool: `deny` with a reason, `edit` (tool runs with corrected args; audit logs `tool_call_edited` with the original), and `remember_allow` (asked once, cached for the rest of the run). Plain `bool` handlers still work. | No |
+| [`27_guardrails.py`](27_guardrails.py) | **Guardrails** — `Agent(guardrails=[...])` at three stages: `PIIGuard` redacts an email + Luhn-valid card from the *input*, `InjectionGuard` wraps a poisoned *tool output* in untrusted-data delimiters (and flags the "ignore previous instructions" heuristic), `RegexGuard` blocks a topic outright — the run returns `interrupted` with `guardrail:<name>` and the model is never called. | No |
+| [`28_eval_harness.py`](28_eval_harness.py) | **Eval harness** — `Dataset` (JSONL round-trip) + `EvalHarness` running cases concurrently; `ExactMatch`, `ToolSelectionAccuracy`, and an `LLMJudge` (scripted judge, `score:` line discipline); `report.summary()` + `assert_thresholds({...})` as a CI release gate (one passing, one deliberately failing). | No |
+| [`29_resilience_governance.py`](29_resilience_governance.py) | **Model fallback + per-tenant rate limiting** — `FallbackModel([primary, backup])` fails over when the primary raises a 429 (never on auth/content-filter); `TokenBucketRateLimiter(rps=5, burst=2)` paces one user's burst with a stopwatch while a second user's independent bucket stays instant. Mentions `request_timeout_s=` per-request wall clocks. | No |
+| [`30_graph_memory_and_budget.py`](30_graph_memory_and_budget.py) | **Graph memory + token-budgeted injection** — `recall_graph()` answers a 2-hop question ("where does alice's employer operate?") over bi-temporal facts, with **point-in-time** traversal: after a job change the current query walks the new edge while `valid_at=<March>` still finds the old employer's city. Then `Tuning(memory_token_budget=400, memory_decay_half_life_days=30)` shrinks a 29k-char recalled block to ~1.6k, relevance×recency-ranked, working blocks pinned. | No |
 
 ## Run
 

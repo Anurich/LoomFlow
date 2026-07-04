@@ -46,7 +46,7 @@ import contextlib
 import json
 import logging
 import re
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from typing import TYPE_CHECKING, Any
 
 import anyio
@@ -61,8 +61,10 @@ from ..core.types import (
     ToolResult,
     Usage,
 )
+from ..guardrails.base import apply_guardrails
+from ..observability.semconv import tool_attrs
 from ..security.audit import AuditLog, wants_full_transcripts
-from .base import Dependencies
+from .base import ApprovalDecision, Dependencies
 
 if TYPE_CHECKING:
     from ..agent.api import Agent
@@ -184,7 +186,17 @@ async def budget_gate(
     ``except TypeError`` fallback for legacy budget impls that
     predate the kwarg. Skipped entirely on the ``fast_budget`` path
     (``NoBudget`` returns OK unconditionally).
+
+    Also the per-tenant QPS choke point (G5): when a rate limiter is
+    wired (``deps.fast_rate_limit`` False), ``acquire`` runs BEFORE
+    the budget check and independently of ``fast_budget``, so a
+    ``NoBudget`` agent is still paced. Throttle mode blocks here via
+    ``anyio.sleep`` until a token frees up; raise mode lets
+    :class:`~loomflow.core.errors.RateLimitExceeded` propagate to
+    the caller.
     """
+    if not deps.fast_rate_limit and deps.rate_limiter is not None:
+        await deps.rate_limiter.acquire(user_id=deps.context.user_id)
     if deps.fast_budget:
         return False, []
     try:
@@ -417,29 +429,94 @@ async def _resolve_ask_decision(
     call: ToolCall,
     handler: Any,  # ApprovalHandler | None — Any keeps the import flat
     user_id: str | None,
-) -> bool:
+    *,
+    approval_memory: dict[tuple[str | None, str], bool] | None = None,
+) -> tuple[bool, ToolCall, str | None]:
     """Translate a ``Decision.ask_`` permissions outcome into an
     allow/deny by invoking the registered approval handler.
 
-    Returns ``True`` when the handler approves the call, ``False``
-    when it declines, when no handler is wired, or when the handler
-    raises. A raising handler is treated as a deny (and logged) so
-    a buggy approval flow never silently green-lights a tool the
-    policy explicitly wanted gated.
+    Returns ``(approved, call, reason)``. ``call`` is the (possibly
+    edited) tool call to execute — identical to the input unless the
+    handler returned ``ApprovalDecision(action="edit")``, in which
+    case its ``args`` are replaced by the handler's ``edited_args``.
+    ``reason`` is the handler-supplied explanation (deny messages /
+    audit), ``None`` when the handler gave none.
+
+    Handler return shapes (G8):
+
+    * ``bool`` — legacy allow/deny, 100% back-compat.
+    * :class:`~loomflow.architecture.base.ApprovalDecision` — rich
+      actions: ``allow`` / ``deny`` / ``edit`` (swap args, proceed as
+      allowed) / ``remember_allow`` / ``remember_deny`` (decide and
+      cache under ``(user_id, tool_name)`` in ``approval_memory`` so
+      the handler is not re-invoked for the same user + tool this
+      run).
+
+    ``approval_memory`` (when not ``None``) is consulted BEFORE the
+    handler; a remembered decision short-circuits entirely.
+
+    Fail-closed: no handler wired, a raising handler, or an
+    unrecognised decision shape all resolve to deny — a buggy
+    approval flow never silently green-lights a tool the policy
+    explicitly wanted gated.
     """
+    log = logging.getLogger("loomflow.architecture.helpers")
+    memory_key = (user_id, call.tool)
+    if approval_memory is not None and memory_key in approval_memory:
+        remembered = approval_memory[memory_key]
+        return (
+            remembered,
+            call,
+            None if remembered else "denied by remembered decision",
+        )
     if handler is None:
-        return False
+        return False, call, None
     try:
-        return bool(await handler(call, user_id))
+        decision = await handler(call, user_id)
     except Exception as exc:  # noqa: BLE001 — defensive: handlers
         # may raise from UI plumbing / network failures. We must
         # not turn a buggy approval flow into a permissive one.
-        logging.getLogger("loomflow.architecture.helpers").warning(
+        log.warning(
             "approval_handler raised for tool=%s; treating as deny: %s",
             call.tool,
             exc,
         )
-        return False
+        return False, call, None
+
+    if not isinstance(decision, ApprovalDecision):
+        return bool(decision), call, None
+
+    # Widen to ``str``: the Literal annotation on the dataclass is not
+    # enforced at runtime, so a handler CAN hand back a bogus action —
+    # the final fail-closed branch below must stay reachable.
+    action: str = decision.action
+    if action == "allow":
+        return True, call, decision.reason
+    if action == "deny":
+        return False, call, decision.reason
+    if action == "edit":
+        if decision.edited_args is not None:
+            call = call.model_copy(
+                update={"args": dict(decision.edited_args)}
+            )
+        return True, call, decision.reason
+    if action == "remember_allow":
+        if approval_memory is not None:
+            approval_memory[memory_key] = True
+        return True, call, decision.reason
+    if action == "remember_deny":
+        if approval_memory is not None:
+            approval_memory[memory_key] = False
+        return False, call, decision.reason
+    # Unrecognised action (should be unreachable given the Literal
+    # type) — fail closed.
+    log.warning(
+        "approval_handler returned unknown action %r for tool=%s; "
+        "treating as deny",
+        action,
+        call.tool,
+    )
+    return False, call, decision.reason
 
 
 async def run_single_tool(
@@ -486,6 +563,7 @@ async def run_single_tool(
             tool=call.tool,
             call_id=call.id,
             turn=turn,
+            **tool_attrs(call.tool, call_id=str(call.id)),
         )
     )
 
@@ -595,21 +673,47 @@ async def run_single_tool(
                 # through the configured approval handler. When no
                 # handler is wired, fall back to a deny so the agent
                 # never silently bypasses the approval gate.
-                approved = await _resolve_ask_decision(
+                # ``_resolve_ask_decision`` handles the G8 rich shapes
+                # (edit-args, remember-decision) and returns the
+                # possibly-edited call to execute.
+                original_call = call
+                approved, call, ask_reason = await _resolve_ask_decision(
                     call,
                     deps.approval_handler,
                     run_user_id,
+                    approval_memory=deps.approval_memory,
                 )
                 if not approved:
                     result = ToolResult.denied_(
                         call.id,
-                        perm.reason or (
+                        ask_reason
+                        or perm.reason
+                        or (
                             "approval required; no approver"
                             if deps.approval_handler is None
                             else "approval declined"
                         ),
                     )
                     execute_call = False
+                elif call is not original_call and not deps.fast_audit:
+                    # The approval handler edited the args — leave an
+                    # explicit audit entry so the trail reflects the
+                    # call that actually executed, not just the
+                    # model-planned one recorded by ``run_gated_tool``.
+                    await audit(
+                        deps.audit_log,
+                        deps.context.session_id or "",
+                        "user",
+                        "tool_call_edited",
+                        {
+                            "tool": call.tool,
+                            "call_id": call.id,
+                            "args": dict(call.args),
+                            "original_args": dict(original_call.args),
+                            "turn": turn,
+                        },
+                        user_id=run_user_id,
+                    )
             if execute_call:
                 resolved_step = (
                     step_name
@@ -665,6 +769,61 @@ async def run_single_tool(
             ok=result.ok,
             denied=result.denied,
         )
+    # G13 — tool_result-stage guardrails. Applied HERE (at the shared
+    # gated executor, where the ToolResult is finalised) so every
+    # architecture's tool path hits the same trust boundary, and
+    # BEFORE the architecture-side summarisation / truncation so
+    # injected delimiters survive. Only successful results are
+    # guarded: denied/error texts are framework-authored, not
+    # untrusted tool output. Zero-cost when unset (fast flag).
+    if not deps.fast_guardrails and result.ok and result.output is not None:
+        result = await _guard_tool_result(deps, result)
+    return result
+
+
+async def _guard_tool_result(
+    deps: Dependencies, result: ToolResult
+) -> ToolResult:
+    """Run tool_result-stage guardrails over a successful result.
+
+    Ordered composition (each guard sees the previous transform);
+    a block rewrites the output to a ``[tool output blocked by
+    guardrail:<name>: <reason>]`` marker the model can observe and
+    react to. ``guardrail.triggered`` events (block or
+    annotate-with-detection) go out through ``deps.guardrail_emit``
+    — this helper returns a ToolResult, so it can't yield events
+    itself.
+    """
+    original = str(result.output)
+    outcome = await apply_guardrails(
+        deps.guardrails,
+        original,
+        stage="tool_result",
+        context=deps.context,
+    )
+    if deps.guardrail_emit is not None:
+        for trig in outcome.triggered:
+            await deps.guardrail_emit(
+                Event.architecture_event(
+                    deps.context.session_id or "",
+                    "guardrail.triggered",
+                    guard=trig.guard,
+                    stage=trig.stage,
+                    action=trig.action,
+                    reason=trig.reason,
+                )
+            )
+    if outcome.blocked:
+        return result.model_copy(
+            update={
+                "output": (
+                    f"[tool output blocked by guardrail:"
+                    f"{outcome.guard}: {outcome.reason}]"
+                )
+            }
+        )
+    if outcome.text != original:
+        return result.model_copy(update={"output": outcome.text})
     return result
 
 
@@ -722,6 +881,54 @@ async def run_gated_tool(
             user_id=deps.context.user_id,
         )
     return result
+
+
+async def wait_for_user_signal(
+    deps: Dependencies,
+    session_id: str,
+    name: str = "resume",
+    *,
+    emit: Callable[[Event], Awaitable[None]] | None = None,
+) -> Any:
+    """Park the run until a user-delivered runtime signal arrives (G8).
+
+    The interrupt primitive for human-in-the-loop flows: an
+    architecture (or any code holding ``deps``) calls this to pause
+    until the application unblocks it via
+    ``Agent.signal(session_id, name, payload)`` (or
+    ``runtime.signal(...)`` directly). Returns the delivered payload.
+
+    Behaviour:
+
+    * When the runtime supports the duck-typed signal channel
+      (``wait_for_signal`` — implemented by ``InProcRuntime`` and
+      ``JournaledRuntime`` + subclasses), an
+      ``Event.architecture_event(session_id, "interrupt.waiting",
+      signal=name)`` is emitted through ``emit`` (when provided — an
+      architecture forwards its own event channel here; ``None`` skips
+      the event) and the task parks on
+      ``runtime.wait_for_signal(session_id, name)``.
+    * When the runtime has no signal support, a warning is logged and
+      ``None`` is returned immediately — the run proceeds rather than
+      deadlocking on a channel that can never be written.
+    """
+    waiter = getattr(deps.runtime, "wait_for_signal", None)
+    if waiter is None:
+        logging.getLogger("loomflow.architecture.helpers").warning(
+            "runtime %r does not support signals; wait_for_user_signal"
+            "(%s, %r) returns None without parking",
+            getattr(deps.runtime, "name", type(deps.runtime).__name__),
+            session_id,
+            name,
+        )
+        return None
+    if emit is not None:
+        await emit(
+            Event.architecture_event(
+                session_id, "interrupt.waiting", signal=name
+            )
+        )
+    return await waiter(session_id, name)
 
 
 def add_usage(a: Usage, b: Usage) -> Usage:

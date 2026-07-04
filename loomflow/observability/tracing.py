@@ -196,6 +196,15 @@ class OTelTelemetry:
 
                 otel_span.set_status(Status(StatusCode.ERROR, str(exc)))
                 raise
+            finally:
+                # Post-hoc attributes: emit sites may add keys to the
+                # yielded handle after the wrapped work completes
+                # (e.g. ``gen_ai.usage.*`` once token counts are
+                # known). Propagate anything new/changed to the OTel
+                # span before it ends.
+                for key, value in our_span.attributes.items():
+                    if value is not None and clean_attrs.get(key) != value:
+                        otel_span.set_attribute(key, value)
 
     async def emit_metric(
         self, name: str, value: float, **attrs: Any
@@ -267,13 +276,17 @@ class InMemoryTelemetry:
             trace_token = _trace_id.set(trace_id)
             parent_token = _parent_span_id.set(span_id)
         exc_repr: str | None = None
+        # Keep a handle on the yielded span: emit sites may set
+        # attributes on it post-hoc (e.g. gen_ai.usage.* once token
+        # counts are known); the captured record reads them at close.
+        span = Span(
+            name=name,
+            trace_id=trace_id,
+            span_id=span_id,
+            attributes=dict(clean_attrs),
+        )
         try:
-            yield Span(
-                name=name,
-                trace_id=trace_id,
-                span_id=span_id,
-                attributes=dict(clean_attrs),
-            )
+            yield span
         except Exception as exc:
             exc_repr = repr(exc)
             raise
@@ -292,7 +305,7 @@ class InMemoryTelemetry:
                     started_at=started_at,
                     ended_at=datetime.now(UTC),
                     duration_ms=elapsed_ms,
-                    attributes=clean_attrs,
+                    attributes=_clean(dict(span.attributes)),
                     exception=exc_repr,
                 )
             )
@@ -376,13 +389,16 @@ class ConsoleTelemetry:
             parent_token = _parent_span_id.set(span_id)
         depth_token = _console_depth.set(depth + 1)
         exc_repr: str | None = None
+        # Yielded span kept so post-hoc attribute sets (gen_ai.usage.*
+        # etc.) show up in the printed line.
+        span = Span(
+            name=name,
+            trace_id=trace_id,
+            span_id=span_id,
+            attributes=dict(clean_attrs),
+        )
         try:
-            yield Span(
-                name=name,
-                trace_id=trace_id,
-                span_id=span_id,
-                attributes=dict(clean_attrs),
-            )
+            yield span
         except Exception as exc:
             exc_repr = repr(exc)
             raise
@@ -394,9 +410,10 @@ class ConsoleTelemetry:
                 _trace_id.reset(trace_token)
             elapsed_ms = (time.perf_counter() - t0) * 1000.0
             indent = "  " * depth
+            final_attrs = _clean(dict(span.attributes))
             attrs_str = (
-                "  " + ", ".join(f"{k}={v}" for k, v in clean_attrs.items())
-                if clean_attrs
+                "  " + ", ".join(f"{k}={v}" for k, v in final_attrs.items())
+                if final_attrs
                 else ""
             )
             err = f"  [ERROR: {exc_repr}]" if exc_repr else ""
@@ -500,6 +517,7 @@ class MultiTelemetry:
             # ensures they all get cleaned up even if one raises
             # mid-enter, and exits them in reverse order at the end.
             async with AsyncExitStack() as stack:
+                sink_spans: list[Any] = []
                 for sink in self._sinks:
                     if getattr(sink, "_accepts_span_ctx", False):
                         cm = sink.trace(
@@ -507,15 +525,38 @@ class MultiTelemetry:
                         )
                     else:
                         cm = sink.trace(name, **attrs)
-                    await stack.enter_async_context(cm)
+                    sink_spans.append(
+                        await stack.enter_async_context(cm)
+                    )
                 # Yield the composed Span — the canonical identity
                 # every ctx-aware sink recorded.
-                yield Span(
+                composed = Span(
                     name=name,
                     trace_id=trace_id,
                     span_id=span_id,
                     attributes=_clean(attrs),
                 )
+                baseline = dict(composed.attributes)
+                try:
+                    yield composed
+                finally:
+                    # Post-hoc attributes set on the composed span
+                    # (e.g. gen_ai.usage.* once token counts are
+                    # known) fan out to every sink's own span handle
+                    # BEFORE the exit stack closes the sinks, so each
+                    # capture records the final attribute set.
+                    added = {
+                        k: v
+                        for k, v in composed.attributes.items()
+                        if v is not None and baseline.get(k) != v
+                    }
+                    if added:
+                        for sink_span in sink_spans:
+                            target = getattr(
+                                sink_span, "attributes", None
+                            )
+                            if isinstance(target, dict):
+                                target.update(added)
         finally:
             _parent_span_id.reset(parent_token)
             _trace_id.reset(trace_token)
@@ -609,13 +650,16 @@ class FileTelemetry:
             trace_token = _trace_id.set(trace_id)
             parent_token = _parent_span_id.set(span_id)
         exc_repr: str | None = None
+        # Yielded span kept so post-hoc attribute sets (gen_ai.usage.*
+        # etc.) land in the written record.
+        span = Span(
+            name=name,
+            trace_id=trace_id,
+            span_id=span_id,
+            attributes=dict(clean_attrs),
+        )
         try:
-            yield Span(
-                name=name,
-                trace_id=trace_id,
-                span_id=span_id,
-                attributes=dict(clean_attrs),
-            )
+            yield span
         except Exception as exc:
             exc_repr = repr(exc)
             raise
@@ -635,7 +679,7 @@ class FileTelemetry:
                     "started_at": started_at.isoformat(),
                     "ended_at": datetime.now(UTC).isoformat(),
                     "duration_ms": elapsed_ms,
-                    "attributes": dict(clean_attrs),
+                    "attributes": _clean(dict(span.attributes)),
                     "exception": exc_repr,
                 }
             )

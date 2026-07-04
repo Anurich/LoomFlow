@@ -21,9 +21,12 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
 
+import anyio
+
 from ..core.ids import new_id
 from ..core.types import Message, ModelChunk, Role, ToolCall, ToolDef, Usage
 from ._pricing import estimate_cost
+from ._timeout import deadline_from, iter_with_deadline, timeout_error
 
 
 @dataclass
@@ -73,8 +76,16 @@ class OpenAIModel:
         base_url: str | None = None,
         secrets: Any | None = None,
         cost_per_mtoken: tuple[float, float] | None = None,
+        request_timeout_s: float | None = None,
     ) -> None:
         self.name = model
+        # Per-call wall clock (seconds). Threaded into the SDK as
+        # the per-request ``timeout=`` option AND enforced with an
+        # anyio deadline (``complete``: fail_after around the call;
+        # ``stream``: shared deadline charged against every chunk
+        # await) so a hung SSE stream can't block forever. Timeouts
+        # raise ``TransientModelError`` — retryable / fallback-worthy.
+        self._request_timeout_s = request_timeout_s
         # Optional ``(input_rate, output_rate)`` USD-per-million-token
         # override — takes precedence over the built-in pricing table
         # (negotiated rates, or models the table doesn't know).
@@ -192,8 +203,24 @@ class OpenAIModel:
         ):
             kwargs["prompt_cache_key"] = prompt_caching.cache_key
 
+        # Per-request timeout: SDK-native option (HTTP-layer
+        # connect/read timeouts) plus an anyio wall clock — belt and
+        # suspenders. Timeout surfaces as a classified
+        # TransientModelError so retry/fallback layers react.
+        timeout_s = self._request_timeout_s
+        if timeout_s is not None:
+            kwargs["timeout"] = timeout_s
+
         try:
-            response = await self._client.chat.completions.create(**kwargs)
+            if timeout_s is not None:
+                with anyio.fail_after(timeout_s):
+                    response = await self._client.chat.completions.create(
+                        **kwargs
+                    )
+            else:
+                response = await self._client.chat.completions.create(**kwargs)
+        except TimeoutError as exc:
+            raise timeout_error(self.name, timeout_s, exc) from exc
         except (AttributeError, TypeError):
             # Duck-typing fallback ONLY: fake / non-conforming
             # clients that don't accept the non-streaming call shape.
@@ -326,12 +353,35 @@ class OpenAIModel:
         ):
             kwargs["prompt_cache_key"] = prompt_caching.cache_key
 
+        # Per-request timeout: forward the SDK-native option and set
+        # up a shared wall-clock deadline covering both the initial
+        # request and the whole chunk iteration below
+        # (``iter_with_deadline`` kills a hung SSE stream by bounding
+        # every next-chunk await against it).
+        timeout_s = self._request_timeout_s
+        if timeout_s is not None:
+            kwargs["timeout"] = timeout_s
+        deadline = deadline_from(timeout_s)
+
         partials: dict[int, _OAIPartial] = {}
         usage = Usage()
         finish_reason: str | None = None
 
-        stream = await self._client.chat.completions.create(**kwargs)
-        async for chunk in stream:
+        try:
+            if deadline is not None:
+                with anyio.fail_after(
+                    max(0.0, deadline - anyio.current_time())
+                ):
+                    stream = await self._client.chat.completions.create(
+                        **kwargs
+                    )
+            else:
+                stream = await self._client.chat.completions.create(**kwargs)
+        except TimeoutError as exc:
+            raise timeout_error(self.name, timeout_s, exc) from exc
+        async for chunk in iter_with_deadline(
+            stream, deadline, self.name, timeout_s
+        ):
             chunk_usage = getattr(chunk, "usage", None)
             if chunk_usage is not None:
                 total_in = getattr(chunk_usage, "prompt_tokens", 0) or 0

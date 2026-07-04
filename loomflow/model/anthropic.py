@@ -29,8 +29,11 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
 
+import anyio
+
 from ..core.types import Message, ModelChunk, Role, ToolCall, ToolDef, Usage
 from ._pricing import estimate_cost
+from ._timeout import deadline_from, iter_with_deadline, timeout_error
 
 
 def _cache_control_for(prompt_caching: Any) -> dict[str, Any] | None:
@@ -229,9 +232,18 @@ class AnthropicModel:
         max_tokens: int = DEFAULT_MAX_TOKENS,
         secrets: Any | None = None,
         cost_per_mtoken: tuple[float, float] | None = None,
+        request_timeout_s: float | None = None,
     ) -> None:
         self.name = model
         self._max_tokens = max_tokens
+        # Per-call wall clock (seconds). Threaded into the SDK as the
+        # per-request ``timeout=`` option AND enforced with an anyio
+        # deadline (``complete``: fail_after around the call;
+        # ``stream``: a shared deadline charged against every SSE
+        # event await), so a hung stream can't block forever.
+        # Timeouts raise ``TransientModelError`` — retryable /
+        # fallback-worthy.
+        self._request_timeout_s = request_timeout_s
         # Optional ``(input_rate, output_rate)`` USD-per-million-token
         # override — takes precedence over the built-in pricing table
         # (negotiated rates, or models the table doesn't know).
@@ -432,8 +444,22 @@ class AnthropicModel:
             messages=anth_messages,
         )
 
+        # Per-request timeout: SDK-native option (HTTP-layer
+        # connect/read timeouts) plus an anyio wall clock below —
+        # belt and suspenders. Timeout surfaces as a classified
+        # TransientModelError so retry/fallback layers react.
+        timeout_s = self._request_timeout_s
+        if timeout_s is not None:
+            kwargs["timeout"] = timeout_s
+
         try:
-            response = await self._client.messages.create(**kwargs)
+            if timeout_s is not None:
+                with anyio.fail_after(timeout_s):
+                    response = await self._client.messages.create(**kwargs)
+            else:
+                response = await self._client.messages.create(**kwargs)
+        except TimeoutError as exc:
+            raise timeout_error(self.name, timeout_s, exc) from exc
         except (AttributeError, TypeError):
             # Duck-typing fallback ONLY: fake / non-conforming
             # clients without a usable ``messages.create``. Real SDK
@@ -635,6 +661,15 @@ class AnthropicModel:
             messages=anth_messages,
         )
 
+        # Per-request timeout: forward the SDK-native option and set
+        # up a shared wall-clock deadline for the event loop below
+        # (``iter_with_deadline`` kills a hung SSE stream by bounding
+        # every next-event await against it).
+        timeout_s = self._request_timeout_s
+        if timeout_s is not None:
+            kwargs["timeout"] = timeout_s
+        deadline = deadline_from(timeout_s)
+
         partials: dict[int, _PartialTool] = {}
         thinking_partials: dict[int, _PartialThinking] = {}
         thinking_blocks: list[dict[str, Any]] = []
@@ -646,7 +681,9 @@ class AnthropicModel:
         finish_reason: str | None = None
 
         async with self._client.messages.stream(**kwargs) as stream:
-            async for event in stream:
+            async for event in iter_with_deadline(
+                stream, deadline, self.name, timeout_s
+            ):
                 etype = getattr(event, "type", None)
 
                 if etype == "message_start":

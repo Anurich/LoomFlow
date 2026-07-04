@@ -16,6 +16,6 @@
 
 from .client import MCPClient
 from .registry import MCPRegistry
-from .spec import MCPServerSpec
+from .spec import MCPServerSpec, SamplingHandler
 
-__all__ = ["MCPClient", "MCPRegistry", "MCPServerSpec"]
+__all__ = ["MCPClient", "MCPRegistry", "MCPServerSpec", "SamplingHandler"]

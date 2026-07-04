@@ -32,6 +32,11 @@ from ..core.types import (
     ToolResult,
     Usage,
 )
+from ..observability.semconv import (
+    chat_attrs,
+    set_span_attributes,
+    usage_attrs,
+)
 from .base import AgentSession, Dependencies
 from .helpers import (
     _NULL_CTX,
@@ -158,6 +163,33 @@ class ReAct:
                 # ``model_chunk`` Event so a ``stream()`` consumer
                 # sees tokens as they arrive.
                 tool_defs = await deps.tools.list_tools()
+                # G1 — tool search / deferred tool loading. When
+                # enabled AND the full def block is heavier than the
+                # threshold, ship stubs (name + one-liner +
+                # permissive schema) for everything except: the
+                # configured keep set, tools the model already
+                # called this session (``hydrated`` — their full
+                # schemas are earned), and ``search_tools`` itself.
+                # Stubs stay callable; server-side dispatch validates
+                # against the REAL tool regardless of what schema the
+                # model saw. Default OFF — this branch is dead code
+                # unless ``Tuning(tool_search=True)``.
+                if deps.tool_search and tool_defs:
+                    from ..tools.search import (
+                        estimate_tool_def_tokens,
+                        stub_defs,
+                    )
+                    if (
+                        estimate_tool_def_tokens(tool_defs)
+                        > deps.tool_search_threshold_tokens
+                    ):
+                        hydrated: set[str] = session.metadata.setdefault(
+                            "_tool_search_hydrated", set()
+                        )
+                        tool_defs = stub_defs(
+                            tool_defs,
+                            set(deps.tool_search_keep) | hydrated,
+                        )
                 # One ``{name: destructive}`` map per turn, built
                 # from the defs we just fetched — passed down into
                 # the tool dispatch so the destructive-flag backstop
@@ -179,15 +211,16 @@ class ReAct:
                             turn=session.turns,
                             session_id=session.id,
                             tool_count=len(tool_defs),
+                            **chat_attrs(deps.model),
                         )
                     )
-                    async with model_trace:
+                    async with model_trace as model_span:
                         if deps.fast_runtime:
                             # Inline path: skip ``runtime.step`` wrapping
                             # (no idempotency_key derivation, no journal
                             # write — InProcRuntime's step is a literal
                             # ``await fn(*args)``).
-                            text, tool_calls, usage, _finish_reason = (
+                            text, tool_calls, usage, finish_reason = (
                                 await deps.model.complete(
                                     session.messages,
                                     tools=tool_defs or None,
@@ -198,7 +231,7 @@ class ReAct:
                                 )
                             )
                         else:
-                            text, tool_calls, usage, _finish_reason = (
+                            text, tool_calls, usage, finish_reason = (
                                 await deps.runtime.step(  # type: ignore[func-returns-value]
                                     f"model_call_{session.turns}",
                                     deps.model.complete,
@@ -210,8 +243,22 @@ class ReAct:
                                     prompt_caching=deps.prompt_caching,
                                 )
                             )
+                        # Usage is only known after the call — set the
+                        # gen_ai.* usage attrs on the still-open span.
+                        # ``model_span`` is None on the fast-telemetry
+                        # null-context path.
+                        if model_span is not None:
+                            set_span_attributes(
+                                model_span,
+                                usage_attrs(
+                                    usage.input_tokens,
+                                    usage.output_tokens,
+                                    finish_reason,
+                                ),
+                            )
                 else:
                     text_parts: list[str] = []
+                    stream_finish_reason: str | None = None
                     stream_trace: contextlib.AbstractAsyncContextManager[Any] = (
                         _NULL_CTX
                         if deps.fast_telemetry
@@ -221,9 +268,10 @@ class ReAct:
                             turn=session.turns,
                             session_id=session.id,
                             tool_count=len(tool_defs),
+                            **chat_attrs(deps.model),
                         )
                     )
-                    async with stream_trace:
+                    async with stream_trace as stream_span:
                         if deps.fast_runtime:
                             chunks = deps.model.stream(
                                 session.messages,
@@ -253,8 +301,24 @@ class ReAct:
                                 and chunk.tool_call is not None
                             ):
                                 tool_calls.append(chunk.tool_call)
-                            elif chunk.kind == "finish" and chunk.usage is not None:
-                                usage = chunk.usage
+                            elif chunk.kind == "finish":
+                                if chunk.usage is not None:
+                                    usage = chunk.usage
+                                if chunk.finish_reason is not None:
+                                    stream_finish_reason = chunk.finish_reason
+                        # Usage is only known once the stream finishes —
+                        # set the gen_ai.* usage attrs on the still-open
+                        # span. ``stream_span`` is None on the
+                        # fast-telemetry null-context path.
+                        if stream_span is not None:
+                            set_span_attributes(
+                                stream_span,
+                                usage_attrs(
+                                    usage.input_tokens,
+                                    usage.output_tokens,
+                                    stream_finish_reason,
+                                ),
+                            )
                     text = "".join(text_parts)
 
                 # 2b. Update budget + telemetry + cumulative usage.
@@ -296,6 +360,16 @@ class ReAct:
                 # 2c. No tool calls = model is done.
                 if not tool_calls:
                     break
+
+                # G1 — hydration: any tool the model chose to call
+                # (stubbed or not) ships its FULL definition from the
+                # next turn onward. Session-scoped: stored on
+                # ``session.metadata`` so re-invocations (Ralph loop)
+                # keep the earned schemas without leaking across runs.
+                if deps.tool_search:
+                    session.metadata.setdefault(
+                        "_tool_search_hydrated", set()
+                    ).update(c.tool for c in tool_calls)
 
                 # 2d. Dispatch tool calls in parallel.
                 #
@@ -488,15 +562,39 @@ async def _build_seed_messages(
         # missing ``user_id``: silent fallback.
         facts = []
 
-    try:
-        episodes = await deps.memory.recall(
-            prompt, kind="episodic", limit=3, user_id=user_id
-        )
-    except TypeError:
-        # Backends that haven't picked up the user_id kwarg yet.
-        episodes = await deps.memory.recall(
-            prompt, kind="episodic", limit=3
-        )
+    # G7 — when a memory token budget is set we prefer SCORED recall
+    # so the budgeter can rank by true retrieval relevance; backends
+    # without ``recall_scored`` fall back to plain recall with a
+    # neutral relevance of 1.0. When no budget is configured the
+    # legacy plain-recall path below runs unchanged (byte-identical
+    # seed messages).
+    episode_scores: dict[str, float] = {}
+    if deps.memory_token_budget is not None:
+        try:
+            matches = await deps.memory.recall_scored(
+                prompt, kind="episodic", limit=3, user_id=user_id
+            )
+            episodes = [m.episode for m in matches]
+            episode_scores = {m.episode.id: m.score for m in matches}
+        except (AttributeError, TypeError):
+            try:
+                episodes = await deps.memory.recall(
+                    prompt, kind="episodic", limit=3, user_id=user_id
+                )
+            except TypeError:
+                episodes = await deps.memory.recall(
+                    prompt, kind="episodic", limit=3
+                )
+    else:
+        try:
+            episodes = await deps.memory.recall(
+                prompt, kind="episodic", limit=3, user_id=user_id
+            )
+        except TypeError:
+            # Backends that haven't picked up the user_id kwarg yet.
+            episodes = await deps.memory.recall(
+                prompt, kind="episodic", limit=3
+            )
 
     # Cross-session recall only — drop any episode that belongs to
     # this same conversation (its content will be rehydrated as a
@@ -505,15 +603,58 @@ async def _build_seed_messages(
         episodes = [e for e in episodes if e.session_id != session_id]
 
     recall_parts: list[str] = []
-    if facts:
-        recall_parts.append(
-            "Known facts:\n" + "\n".join(f"- {f.format()}" for f in facts)
-        )
-    if episodes:
-        recall_parts.append(
-            "Relevant past episodes:\n"
-            + "\n".join(f"- {e.format()}" for e in episodes)
-        )
+    if deps.memory_token_budget is None:
+        # Legacy path — item-count limits only, unchanged.
+        if facts:
+            recall_parts.append(
+                "Known facts:\n" + "\n".join(f"- {f.format()}" for f in facts)
+            )
+        if episodes:
+            recall_parts.append(
+                "Relevant past episodes:\n"
+                + "\n".join(f"- {e.format()}" for e in episodes)
+            )
+    else:
+        # G7 — token-budgeted (optionally decaying) injection.
+        # Working blocks are PINNED by contract: injected above,
+        # never dropped or truncated — but they count against the
+        # budget, so oversized blocks shrink the recall allowance.
+        # Facts + episodes are then ranked relevance x recency-decay
+        # and greedily packed into the remainder as ONE merged list
+        # (uniform treatment; the partitioned "Known facts /
+        # Relevant past episodes" headers only apply to the legacy
+        # path). Facts decay on ``recorded_at``, episodes on
+        # ``occurred_at``; plain-recall items carry relevance 1.0.
+        from datetime import UTC, datetime
+
+        from ..memory._injection import budget_items, estimate_tokens
+
+        block_cost = sum(estimate_tokens(b.format()) for b in blocks)
+        remaining = deps.memory_token_budget - block_cost
+        items: list[tuple[str, float, datetime | None]] = [
+            (f"- {f.format()}", 1.0, getattr(f, "recorded_at", None))
+            for f in facts
+        ]
+        items += [
+            (
+                f"- {e.format()}",
+                episode_scores.get(e.id, 1.0),
+                getattr(e, "occurred_at", None),
+            )
+            for e in episodes
+        ]
+        if items and remaining > 0:
+            selected = budget_items(
+                items,
+                budget_tokens=remaining,
+                half_life_days=deps.memory_decay_half_life,
+                now=datetime.now(UTC),
+            )
+            if selected:
+                recall_parts.append(
+                    "Recalled memory (most relevant first):\n"
+                    + "\n".join(selected)
+                )
     if recall_parts:
         messages.append(
             Message(role=Role.SYSTEM, content="\n\n".join(recall_parts))

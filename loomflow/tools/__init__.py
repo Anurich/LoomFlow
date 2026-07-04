@@ -21,6 +21,8 @@ from .builtin import (
     read_tool,
     write_tool,
 )
+from .code_mode import make_code_mode_tools
+from .executor import CodeExecutor, ExecResult, SubprocessExecutor
 from .plan import (
     LivingPlan,
     LivingPlanStep,
@@ -34,11 +36,14 @@ from .registry import InProcessToolHost, Tool, tool
 from .web import web_tool
 
 __all__ = [
+    "CodeExecutor",
+    "ExecResult",
     "InProcessToolHost",
     "LivingPlan",
     "LivingPlanStep",
     "PathEscapeError",
     "ResolvedLivingPlan",
+    "SubprocessExecutor",
     "Tool",
     "bash_tool",
     "default_workdir",
@@ -49,6 +54,7 @@ __all__ = [
     "grep_tool",
     "living_plan_prompt_section",
     "ls_tool",
+    "make_code_mode_tools",
     "make_plan_tools",
     "make_recall_past_plans_tool",
     "read_tool",

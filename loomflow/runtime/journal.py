@@ -18,9 +18,17 @@ Today's stores:
   (WAL mode, ``busy_timeout=5000``) serialised by a thread lock.
 * :class:`PostgresJournalStore` — asyncpg-pool-backed; multi-host.
 
+Besides step results, all stores persist :class:`Checkpoint` records —
+JSON-serialised transcript snapshots (messages + cumulative usage +
+architecture cursor) written between turns so a crashed run can resume
+without replaying billed model calls. Checkpoints are stored via
+``model_dump_json`` (never pickle) and retention is bounded per
+session by each store's ``max_checkpoints_per_session``.
+
 All stores expose :meth:`~JournalStore.prune` so operators can purge
 completed sessions (by ``session_id``) or old entries (by ``before``
-timestamp) — nothing prunes automatically.
+timestamp) — nothing prunes automatically except the per-session
+checkpoint retention cap applied on ``put_checkpoint``.
 
 .. warning:: **Pickle wire format.**
 
@@ -47,11 +55,19 @@ import sqlite3
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 import anyio
+from pydantic import BaseModel, ConfigDict, Field
+
+from ..core.ids import new_id
+from ..core.types import Message, Usage
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
 
 
 @dataclass(frozen=True)
@@ -60,6 +76,38 @@ class JournalEntry:
 
     value: Any
     created_at: float
+
+
+class Checkpoint(BaseModel):
+    """Durable transcript snapshot taken between turns (G4).
+
+    Unlike journal step entries (pickled step *results* keyed by input
+    fingerprint), a checkpoint captures the whole conversational state
+    an agent loop needs to resume after a crash: the message
+    transcript, cumulative usage, and an architecture-local ``cursor``
+    marking where to re-enter. Serialised as JSON via
+    ``model_dump_json`` — never pickle — so payloads are inspectable
+    and safe to load from an untrusted-writable store.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    session_id: str
+    checkpoint_id: str = Field(default_factory=lambda: new_id("ckpt"))
+    turn: int
+    messages: list[Message] = Field(default_factory=list)
+    cumulative_usage: Usage = Field(default_factory=Usage)
+    cursor: str | None = None
+    created_at: datetime = Field(default_factory=_utcnow)
+
+
+@dataclass(frozen=True)
+class CheckpointMeta:
+    """Cheap listing row for a checkpoint — no message payload."""
+
+    checkpoint_id: str
+    turn: int
+    created_at: datetime
 
 
 @runtime_checkable
@@ -82,12 +130,31 @@ class JournalStore(Protocol):
         self, session_id: str, step_name: str, chunks: list[Any]
     ) -> None: ...
 
+    async def put_checkpoint(self, cp: Checkpoint) -> None:
+        """Persist a checkpoint; prune the session's oldest beyond
+        the store's retention limit."""
+        ...
+
+    async def get_checkpoint(
+        self, session_id: str, checkpoint_id: str
+    ) -> Checkpoint | None: ...
+
+    async def get_latest_checkpoint(
+        self, session_id: str
+    ) -> Checkpoint | None: ...
+
+    async def list_checkpoints(
+        self, session_id: str, limit: int = 50
+    ) -> list[CheckpointMeta]:
+        """Newest-first checkpoint metadata (id/turn/created_at only)."""
+        ...
+
     async def prune(
         self,
         before: datetime | None = None,
         session_id: str | None = None,
     ) -> None:
-        """Delete journal entries matching ALL provided filters.
+        """Delete journal entries AND checkpoints matching ALL filters.
 
         ``before`` drops entries created before that instant (naive
         datetimes are interpreted in local time, matching
@@ -104,13 +171,26 @@ class JournalStore(Protocol):
 # ---------------------------------------------------------------------------
 
 
-class InMemoryJournalStore:
-    """Dict-backed journal. Process-local; lost on exit."""
+def _checkpoint_order(cp: Checkpoint) -> tuple[float, str]:
+    # created_at first; checkpoint_id (prefixed ULID, time-sortable)
+    # breaks ties deterministically.
+    return (cp.created_at.timestamp(), cp.checkpoint_id)
 
-    def __init__(self) -> None:
+
+class InMemoryJournalStore:
+    """Dict-backed journal. Process-local; lost on exit.
+
+    ``max_checkpoints_per_session`` bounds checkpoint retention: on
+    every :meth:`put_checkpoint` the oldest checkpoints beyond the
+    limit are dropped. Values < 1 disable pruning (unbounded).
+    """
+
+    def __init__(self, *, max_checkpoints_per_session: int = 20) -> None:
         self._steps: dict[tuple[str, str], JournalEntry] = {}
         self._streams: dict[tuple[str, str], list[Any]] = {}
         self._stream_times: dict[tuple[str, str], float] = {}
+        self._checkpoints: dict[str, list[Checkpoint]] = {}
+        self._max_checkpoints = max_checkpoints_per_session
         self._lock = anyio.Lock()
 
     async def get_step(
@@ -141,6 +221,48 @@ class InMemoryJournalStore:
             self._streams[(session_id, step_name)] = list(chunks)
             self._stream_times[(session_id, step_name)] = time.time()
 
+    # ---- checkpoint ops ---------------------------------------------------
+
+    async def put_checkpoint(self, cp: Checkpoint) -> None:
+        async with self._lock:
+            cps = self._checkpoints.setdefault(cp.session_id, [])
+            cps.append(cp)
+            cps.sort(key=_checkpoint_order)
+            if self._max_checkpoints > 0:
+                del cps[: -self._max_checkpoints]
+
+    async def get_checkpoint(
+        self, session_id: str, checkpoint_id: str
+    ) -> Checkpoint | None:
+        async with self._lock:
+            for cp in self._checkpoints.get(session_id, []):
+                if cp.checkpoint_id == checkpoint_id:
+                    return cp
+        return None
+
+    async def get_latest_checkpoint(
+        self, session_id: str
+    ) -> Checkpoint | None:
+        async with self._lock:
+            cps = self._checkpoints.get(session_id)
+            return cps[-1] if cps else None
+
+    async def list_checkpoints(
+        self, session_id: str, limit: int = 50
+    ) -> list[CheckpointMeta]:
+        async with self._lock:
+            cps = list(reversed(self._checkpoints.get(session_id, [])))
+        return [
+            CheckpointMeta(
+                checkpoint_id=cp.checkpoint_id,
+                turn=cp.turn,
+                created_at=cp.created_at,
+            )
+            for cp in cps[:limit]
+        ]
+
+    # ---- gc ----------------------------------------------------------------
+
     async def prune(
         self,
         before: datetime | None = None,
@@ -170,6 +292,16 @@ class InMemoryJournalStore:
                 for k, t in self._stream_times.items()
                 if k in kept_streams
             }
+            for sid in list(self._checkpoints):
+                remaining = [
+                    cp
+                    for cp in self._checkpoints[sid]
+                    if not _matches((sid, ""), cp.created_at.timestamp())
+                ]
+                if remaining:
+                    self._checkpoints[sid] = remaining
+                else:
+                    del self._checkpoints[sid]
 
     async def aclose(self) -> None:
         return None
@@ -208,6 +340,21 @@ CREATE TABLE IF NOT EXISTS journal_streams (
 )
 """
 
+_CHECKPOINT_DDL = """
+CREATE TABLE IF NOT EXISTS checkpoints (
+    session_id    TEXT NOT NULL,
+    checkpoint_id TEXT NOT NULL PRIMARY KEY,
+    turn          INTEGER NOT NULL,
+    created_at    REAL NOT NULL,
+    payload       TEXT NOT NULL
+)
+"""
+
+_CHECKPOINT_INDEX_DDL = """
+CREATE INDEX IF NOT EXISTS checkpoints_session_created
+    ON checkpoints (session_id, created_at DESC)
+"""
+
 # Postgres-flavoured DDL for :class:`PostgresJournalStore` below.
 # ``BYTEA`` instead of ``BLOB``; ``DOUBLE PRECISION`` instead of ``REAL``.
 _PG_STEP_DDL = """
@@ -230,6 +377,37 @@ CREATE TABLE IF NOT EXISTS journal_streams (
 )
 """
 
+_PG_CHECKPOINT_DDL = """
+CREATE TABLE IF NOT EXISTS checkpoints (
+    session_id    TEXT NOT NULL,
+    checkpoint_id TEXT NOT NULL PRIMARY KEY,
+    turn          INTEGER NOT NULL,
+    created_at    DOUBLE PRECISION NOT NULL,
+    payload       JSONB NOT NULL
+)
+"""
+
+_PG_CHECKPOINT_INDEX_DDL = """
+CREATE INDEX IF NOT EXISTS checkpoints_session_created
+    ON checkpoints (session_id, created_at DESC)
+"""
+
+# Keep only the newest N checkpoints for a session. Placeholder style
+# differs per backend, so each store formats its own copy.
+_SQLITE_CHECKPOINT_RETENTION_SQL = (
+    "DELETE FROM checkpoints WHERE session_id = ? "
+    "AND checkpoint_id NOT IN ("
+    "SELECT checkpoint_id FROM checkpoints WHERE session_id = ? "
+    "ORDER BY created_at DESC, checkpoint_id DESC LIMIT ?)"
+)
+
+_PG_CHECKPOINT_RETENTION_SQL = (
+    "DELETE FROM checkpoints WHERE session_id = $1 "
+    "AND checkpoint_id NOT IN ("
+    "SELECT checkpoint_id FROM checkpoints WHERE session_id = $1 "
+    "ORDER BY created_at DESC, checkpoint_id DESC LIMIT $2)"
+)
+
 
 class SqliteJournalStore:
     """SQLite-backed journal. Durable across process restarts.
@@ -244,11 +422,17 @@ class SqliteJournalStore:
     because those hops may land on different worker threads.
     """
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        max_checkpoints_per_session: int = 20,
+    ) -> None:
         self._path = Path(path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._closed = False
+        self._max_checkpoints = max_checkpoints_per_session
         self._conn = sqlite3.connect(self._path, check_same_thread=False)
         with self._lock:
             self._conn.execute("PRAGMA journal_mode=WAL")
@@ -256,6 +440,8 @@ class SqliteJournalStore:
             self._conn.execute("PRAGMA busy_timeout=5000")
             self._conn.execute(_STEP_DDL)
             self._conn.execute(_STREAM_DDL)
+            self._conn.execute(_CHECKPOINT_DDL)
+            self._conn.execute(_CHECKPOINT_INDEX_DDL)
             self._conn.commit()
 
     @property
@@ -345,6 +531,98 @@ class SqliteJournalStore:
             )
             self._conn.commit()
 
+    # ---- checkpoint ops ---------------------------------------------------
+
+    async def put_checkpoint(self, cp: Checkpoint) -> None:
+        await anyio.to_thread.run_sync(self._put_checkpoint_sync, cp)
+
+    def _put_checkpoint_sync(self, cp: Checkpoint) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO checkpoints "
+                "(session_id, checkpoint_id, turn, created_at, payload) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    cp.session_id,
+                    cp.checkpoint_id,
+                    cp.turn,
+                    cp.created_at.timestamp(),
+                    cp.model_dump_json(),
+                ),
+            )
+            if self._max_checkpoints > 0:
+                self._conn.execute(
+                    _SQLITE_CHECKPOINT_RETENTION_SQL,
+                    (cp.session_id, cp.session_id, self._max_checkpoints),
+                )
+            self._conn.commit()
+
+    async def get_checkpoint(
+        self, session_id: str, checkpoint_id: str
+    ) -> Checkpoint | None:
+        return await anyio.to_thread.run_sync(
+            self._get_checkpoint_sync, session_id, checkpoint_id
+        )
+
+    def _get_checkpoint_sync(
+        self, session_id: str, checkpoint_id: str
+    ) -> Checkpoint | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT payload FROM checkpoints "
+                "WHERE session_id = ? AND checkpoint_id = ?",
+                (session_id, checkpoint_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return Checkpoint.model_validate_json(row[0])
+
+    async def get_latest_checkpoint(
+        self, session_id: str
+    ) -> Checkpoint | None:
+        return await anyio.to_thread.run_sync(
+            self._get_latest_checkpoint_sync, session_id
+        )
+
+    def _get_latest_checkpoint_sync(
+        self, session_id: str
+    ) -> Checkpoint | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT payload FROM checkpoints WHERE session_id = ? "
+                "ORDER BY created_at DESC, checkpoint_id DESC LIMIT 1",
+                (session_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return Checkpoint.model_validate_json(row[0])
+
+    async def list_checkpoints(
+        self, session_id: str, limit: int = 50
+    ) -> list[CheckpointMeta]:
+        return await anyio.to_thread.run_sync(
+            self._list_checkpoints_sync, session_id, limit
+        )
+
+    def _list_checkpoints_sync(
+        self, session_id: str, limit: int
+    ) -> list[CheckpointMeta]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT checkpoint_id, turn, created_at FROM checkpoints "
+                "WHERE session_id = ? "
+                "ORDER BY created_at DESC, checkpoint_id DESC LIMIT ?",
+                (session_id, limit),
+            ).fetchall()
+        return [
+            CheckpointMeta(
+                checkpoint_id=r[0],
+                turn=r[1],
+                created_at=datetime.fromtimestamp(r[2], tz=UTC),
+            )
+            for r in rows
+        ]
+
     # ---- gc ---------------------------------------------------------------
 
     async def prune(
@@ -370,6 +648,7 @@ class SqliteJournalStore:
         with self._lock:
             self._conn.execute(f"DELETE FROM journal_steps{where}", params)
             self._conn.execute(f"DELETE FROM journal_streams{where}", params)
+            self._conn.execute(f"DELETE FROM checkpoints{where}", params)
             self._conn.commit()
 
     # ---- lifecycle -------------------------------------------------------
@@ -409,8 +688,11 @@ class PostgresJournalStore:
         intrusion on user code.
     """
 
-    def __init__(self, pool: Any) -> None:
+    def __init__(
+        self, pool: Any, *, max_checkpoints_per_session: int = 20
+    ) -> None:
         self._pool = pool
+        self._max_checkpoints = max_checkpoints_per_session
 
     @classmethod
     async def connect(
@@ -419,6 +701,7 @@ class PostgresJournalStore:
         *,
         min_size: int = 1,
         max_size: int = 10,
+        max_checkpoints_per_session: int = 20,
     ) -> PostgresJournalStore:
         """Open an asyncpg pool and return the store rooted at it."""
         try:
@@ -433,7 +716,9 @@ class PostgresJournalStore:
             min_size=min_size,
             max_size=max_size,
         )
-        return cls(pool)
+        return cls(
+            pool, max_checkpoints_per_session=max_checkpoints_per_session
+        )
 
     async def aclose(self) -> None:
         if self._pool is not None and hasattr(self._pool, "close"):
@@ -447,7 +732,12 @@ class PostgresJournalStore:
 
         Idempotent; safe to run on every process start.
         """
-        return [_PG_STEP_DDL.strip(), _PG_STREAM_DDL.strip()]
+        return [
+            _PG_STEP_DDL.strip(),
+            _PG_STREAM_DDL.strip(),
+            _PG_CHECKPOINT_DDL.strip(),
+            _PG_CHECKPOINT_INDEX_DDL.strip(),
+        ]
 
     async def init_schema(self) -> None:
         async with self._pool.acquire() as conn:
@@ -524,6 +814,78 @@ class PostgresJournalStore:
                 time.time(),
             )
 
+    # ---- checkpoint ops ---------------------------------------------------
+
+    async def put_checkpoint(self, cp: Checkpoint) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO checkpoints "
+                "(session_id, checkpoint_id, turn, created_at, payload) "
+                "VALUES ($1, $2, $3, $4, $5) "
+                "ON CONFLICT (checkpoint_id) DO UPDATE "
+                "SET turn = EXCLUDED.turn, "
+                "    created_at = EXCLUDED.created_at, "
+                "    payload = EXCLUDED.payload",
+                cp.session_id,
+                cp.checkpoint_id,
+                cp.turn,
+                cp.created_at.timestamp(),
+                cp.model_dump_json(),
+            )
+            if self._max_checkpoints > 0:
+                await conn.execute(
+                    _PG_CHECKPOINT_RETENTION_SQL,
+                    cp.session_id,
+                    self._max_checkpoints,
+                )
+
+    async def get_checkpoint(
+        self, session_id: str, checkpoint_id: str
+    ) -> Checkpoint | None:
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT payload FROM checkpoints "
+                "WHERE session_id = $1 AND checkpoint_id = $2",
+                session_id,
+                checkpoint_id,
+            )
+        if row is None:
+            return None
+        return Checkpoint.model_validate_json(row["payload"])
+
+    async def get_latest_checkpoint(
+        self, session_id: str
+    ) -> Checkpoint | None:
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT payload FROM checkpoints WHERE session_id = $1 "
+                "ORDER BY created_at DESC, checkpoint_id DESC LIMIT 1",
+                session_id,
+            )
+        if row is None:
+            return None
+        return Checkpoint.model_validate_json(row["payload"])
+
+    async def list_checkpoints(
+        self, session_id: str, limit: int = 50
+    ) -> list[CheckpointMeta]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT checkpoint_id, turn, created_at FROM checkpoints "
+                "WHERE session_id = $1 "
+                "ORDER BY created_at DESC, checkpoint_id DESC LIMIT $2",
+                session_id,
+                limit,
+            )
+        return [
+            CheckpointMeta(
+                checkpoint_id=r["checkpoint_id"],
+                turn=r["turn"],
+                created_at=datetime.fromtimestamp(r["created_at"], tz=UTC),
+            )
+            for r in rows
+        ]
+
     # ---- gc ---------------------------------------------------------------
 
     async def prune(
@@ -546,3 +908,4 @@ class PostgresJournalStore:
             await conn.execute(
                 f"DELETE FROM journal_streams{where}", *params
             )
+            await conn.execute(f"DELETE FROM checkpoints{where}", *params)

@@ -24,6 +24,7 @@ returned by :class:`InMemoryTelemetry`; useful for type
 annotations in test code.
 """
 
+from . import semconv
 from .resolver import resolve_telemetry
 from .tracing import (
     CapturedMetric,
@@ -46,4 +47,5 @@ __all__ = [
     "NoTelemetry",
     "OTelTelemetry",
     "resolve_telemetry",
+    "semconv",
 ]

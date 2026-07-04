@@ -23,6 +23,34 @@ class BudgetExceeded(LoomError):
         self.reason = reason
 
 
+class RateLimitExceeded(LoomError):
+    """A per-tenant QPS rate limit refused a step (``mode="raise"``).
+
+    Raised by :class:`~loomflow.governance.rate_limit
+    .TokenBucketRateLimiter` when the caller opted into
+    ``mode="raise"`` and the tenant's bucket is empty — the step was
+    blocked *before* any provider call was made. Distinct from
+    :class:`RateLimitError`, which is the *provider's* 429 surfacing
+    through a model adapter; catch that for upstream quota problems
+    and this for the framework's own admission gate.
+
+    ``retry_after`` (seconds) is the limiter's estimate of when the
+    next token accrues, so callers can surface a "retry in Ns" hint.
+    """
+
+    def __init__(
+        self,
+        reason: str,
+        *,
+        user_id: str | None = None,
+        retry_after: float | None = None,
+    ) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.user_id = user_id
+        self.retry_after = retry_after
+
+
 class PermissionDenied(LoomError):
     """A tool call was denied by the permission layer or a user hook."""
 
@@ -181,7 +209,9 @@ class RateLimitError(TransientModelError):
     of :class:`TransientModelError` so generic transient handlers
     cover it; catch ``RateLimitError`` specifically when you need
     to surface "slow down" to the caller (e.g. propagate a 429 to
-    your own clients)."""
+    your own clients). Distinct from :class:`RateLimitExceeded`,
+    which is the framework's OWN per-tenant QPS gate firing before
+    any provider call is made."""
 
 
 class PermanentModelError(ModelError):

@@ -26,8 +26,12 @@ class PostgresRuntime(JournaledRuntime):
 
     name = "postgres"
 
-    def __init__(self, pool: Any) -> None:
-        store = PostgresJournalStore(pool)
+    def __init__(
+        self, pool: Any, *, max_checkpoints_per_session: int = 20
+    ) -> None:
+        store = PostgresJournalStore(
+            pool, max_checkpoints_per_session=max_checkpoints_per_session
+        )
         super().__init__(store=store)
         self._pg_store = store
 
@@ -38,10 +42,14 @@ class PostgresRuntime(JournaledRuntime):
         *,
         min_size: int = 1,
         max_size: int = 10,
+        max_checkpoints_per_session: int = 20,
     ) -> PostgresRuntime:
         """Open a fresh asyncpg pool and return the runtime rooted at it."""
         store = await PostgresJournalStore.connect(
-            dsn, min_size=min_size, max_size=max_size
+            dsn,
+            min_size=min_size,
+            max_size=max_size,
+            max_checkpoints_per_session=max_checkpoints_per_session,
         )
         instance = cls.__new__(cls)
         # Bypass ``__init__`` (which creates a new store from a pool)

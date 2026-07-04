@@ -13,16 +13,34 @@ Tool name collisions across servers are auto-disambiguated:
 Either form is accepted at call time: the qualified ``server.tool``
 key is always indexed, and the bare name is indexed too whenever it
 is unambiguous.
+
+Prompts follow the same bare-when-unique / qualified-always naming
+(``server.prompt``); resources are qualified with ``server:uri`` when
+the same URI is exposed by more than one server.
+
+listChanged design
+------------------
+Each client's session lives in its own portal thread; the SDK invokes
+the message handler *inside that thread's event loop*. To avoid ever
+blocking or deadlocking the portal, the notification path is split in
+two: the client-side handler synchronously flips a lock-guarded
+"stale" flag on the registry (:meth:`MCPRegistry._mark_stale` — safe
+from any thread, never awaits), and the registry lazily re-pulls the
+flagged server(s) on its next operation (:meth:`_drain_stale`), in
+the caller's event loop. Index rebuilds diff old vs. new and emit
+:class:`ToolEvent`\\ s to :meth:`watch` subscribers.
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncIterator, Mapping
+import threading
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
 import anyio
+from anyio.streams.memory import MemoryObjectSendStream
 
 from ..core.errors import MCPError
 from ..core.types import ToolDef, ToolEvent, ToolResult
@@ -30,6 +48,10 @@ from .client import MCPClient
 from .spec import MCPServerSpec
 
 logger = logging.getLogger(__name__)
+
+#: Buffered ToolEvents per ``watch()`` subscriber; slow consumers
+#: lose events beyond this rather than blocking index rebuilds.
+_WATCH_BUFFER = 64
 
 
 @dataclass(frozen=True)
@@ -70,6 +92,22 @@ class MCPRegistry:
         # the index but retried on the next ``refresh()``.
         self._unavailable: set[str] = set()
         self._connected = False
+        # Servers flagged stale by a ``listChanged`` notification.
+        # Written from client portal threads (via ``_mark_stale``),
+        # drained in the registry's own loop — hence a *threading*
+        # lock, not an anyio one (it's held for nanoseconds and never
+        # across an await).
+        self._stale_lock = threading.Lock()
+        self._stale: set[str] = set()
+        # Live ``watch()`` subscribers.
+        self._watchers: list[MemoryObjectSendStream[ToolEvent]] = []
+        # Resource / prompt routing state (built lazily on first list).
+        self._resource_owners: dict[str, list[str]] = {}
+        self._resources_pulled = False
+        self._prompt_index: dict[str, tuple[str, str]] = {}
+        self._prompts_pulled = False
+        for client in clients.values():
+            client.on_tools_changed = self._mark_stale
 
     # ---- introspection --------------------------------------------------
 
@@ -139,6 +177,16 @@ class MCPRegistry:
         self._per_server_tools = {}
         self._unavailable = set()
         self._connected = False
+        with self._stale_lock:
+            self._stale = set()
+        self._resource_owners = {}
+        self._resources_pulled = False
+        self._prompt_index = {}
+        self._prompts_pulled = False
+        # End every watch() iterator.
+        watchers, self._watchers = self._watchers, []
+        for send in watchers:
+            send.close()
         if errors:
             raise ExceptionGroup("errors while closing MCP clients", errors)
 
@@ -181,27 +229,100 @@ class MCPRegistry:
 
         self._per_server_tools = per_server
         self._unavailable = failed
-        self._tool_index = _build_index(per_server)
+        self._set_index(_build_index(per_server))
 
     async def _refresh_server(self, server_name: str) -> None:
         """Re-pull ONE server's tools and rebuild the index from the
         cached per-server lists.
 
-        Used after :meth:`_reset_client` so a single reconnect
-        doesn't re-list every healthy server. Raises whatever the
-        pull raises — the caller treats the refresh as best-effort.
+        Used after :meth:`_reset_client` and after a ``listChanged``
+        notification, so a single change doesn't re-list every healthy
+        server. Raises whatever the pull raises — the caller treats
+        the refresh as best-effort.
         """
         client = self._clients.get(server_name)
         if client is None:
             return
         self._per_server_tools[server_name] = await client.list_tools()
         self._unavailable.discard(server_name)
-        self._tool_index = _build_index(self._per_server_tools)
+        self._set_index(_build_index(self._per_server_tools))
+
+    def _set_index(self, new_index: dict[str, _IndexEntry]) -> None:
+        """Swap in a rebuilt index, emitting diff events to watchers."""
+        old_index = self._tool_index
+        self._tool_index = new_index
+        if not self._watchers:
+            return
+        old_defs = _defs_by_display_name(old_index)
+        new_defs = _defs_by_display_name(new_index)
+        events: list[ToolEvent] = []
+        for name, entry in new_defs.items():
+            previous = old_defs.get(name)
+            if previous is None:
+                events.append(
+                    ToolEvent(kind="added", tool=name, server=entry.server)
+                )
+            elif previous.tool_def != entry.tool_def:
+                events.append(
+                    ToolEvent(kind="updated", tool=name, server=entry.server)
+                )
+        for name, entry in old_defs.items():
+            if name not in new_defs:
+                events.append(
+                    ToolEvent(kind="removed", tool=name, server=entry.server)
+                )
+        for send in list(self._watchers):
+            for event in events:
+                try:
+                    send.send_nowait(event)
+                except (
+                    anyio.WouldBlock,
+                    anyio.ClosedResourceError,
+                    anyio.BrokenResourceError,
+                ):
+                    # Slow or gone subscriber — never block a refresh.
+                    break
+
+    # ---- listChanged plumbing ---------------------------------------------
+
+    def _mark_stale(self, server_name: str) -> None:
+        """Flag ``server_name`` for a lazy targeted re-pull.
+
+        Called from :attr:`MCPClient.on_tools_changed`, i.e. possibly
+        from a client's portal thread — must stay synchronous,
+        non-blocking, and thread-safe (see module docstring).
+        """
+        with self._stale_lock:
+            self._stale.add(server_name)
+
+    async def _drain_stale(self) -> None:
+        """Re-pull any servers flagged by ``listChanged`` notifications.
+
+        Runs in the registry caller's event loop (never the portal
+        thread). Best-effort: a failed re-pull keeps the previous
+        (possibly stale) tool list and logs — the server will heal via
+        the normal reconnect-and-retry path on its next call.
+        """
+        with self._stale_lock:
+            if not self._stale:
+                return
+            stale, self._stale = self._stale, set()
+        for server_name in stale:
+            try:
+                await self._refresh_server(server_name)
+            except Exception as exc:  # noqa: BLE001 — keep the previous index
+                logger.warning(
+                    "MCP server %r: re-pull after listChanged failed; "
+                    "keeping previous tool list: %s",
+                    server_name,
+                    exc,
+                )
 
     # ---- ToolHost protocol ----------------------------------------------
 
     async def list_tools(self, *, query: str | None = None) -> list[ToolDef]:
         await self.connect()
+        await self._drain_stale()
         # A tool can be indexed under two keys (bare + qualified);
         # dedupe by entry identity so each tool is listed once.
         defs: list[ToolDef] = []
@@ -227,32 +348,60 @@ class MCPRegistry:
         call_id: str = "",
     ) -> ToolResult:
         await self.connect()
+        await self._drain_stale()
         entry = self._tool_index.get(tool)
         if entry is None:
             return ToolResult.error_(
                 call_id=call_id, message=f"unknown MCP tool: {tool}"
             )
-        server_name = entry.server
-        client = self._clients[server_name]
+        mcp_name = entry.mcp_name
+
+        async def _do_call(client: MCPClient) -> Any:
+            return await client.call_tool(mcp_name, dict(args))
 
         try:
-            sdk_result = await client.call_tool(entry.mcp_name, dict(args))
-        except Exception as first_exc:  # noqa: BLE001 — see retry path
-            # The session may have died (network drop, server restart,
-            # broken pipe). Reset it and retry ONCE so the agent loop
-            # self-heals without bubbling a transport hiccup up as a
-            # permanent tool failure. We ONLY do this for errors that
-            # look like connection/transport failures: a tool-execution
-            # error may mean the server already performed a side effect,
-            # and silently re-running it could repeat that side effect.
-            # We do NOT retry beyond once — repeated failures get
-            # surfaced to the caller, who can decide whether the
-            # underlying tool call is idempotent.
+            sdk_result = await self._call_on_server(entry.server, _do_call)
+        except Exception as exc:  # noqa: BLE001 — surface as ToolResult.error_
+            return ToolResult.error_(call_id=call_id, message=str(exc))
+
+        is_error = bool(getattr(sdk_result, "isError", False))
+        output = _extract_output(sdk_result)
+        if is_error:
+            return ToolResult.error_(
+                call_id=call_id,
+                message=output if isinstance(output, str) else str(output),
+            )
+        return ToolResult.success(call_id=call_id, output=output)
+
+    async def _call_on_server(
+        self,
+        server_name: str,
+        op: Callable[[MCPClient], Awaitable[Any]],
+    ) -> Any:
+        """Run ``op`` against one server with reconnect-and-retry.
+
+        The session may have died (network drop, server restart,
+        broken pipe). Reset it and retry ONCE so the agent loop
+        self-heals without bubbling a transport hiccup up as a
+        permanent failure. We ONLY do this for errors that look like
+        connection/transport failures: an execution error may mean the
+        server already performed a side effect, and silently re-running
+        it could repeat that side effect. We do NOT retry beyond once —
+        repeated failures get surfaced to the caller, who can decide
+        whether the underlying operation is idempotent.
+
+        Raises the FIRST exception when it isn't retryable or the
+        reconnect itself fails (that's what explains the failure to the
+        caller); raises the second exception if the retry also fails.
+        """
+        client = self._clients[server_name]
+        try:
+            return await op(client)
+        except Exception as first_exc:
             if not _is_connection_error(first_exc):
-                return ToolResult.error_(call_id=call_id, message=str(first_exc))
-            reset_ok = await self._reset_client(server_name)
-            if not reset_ok:
-                return ToolResult.error_(call_id=call_id, message=str(first_exc))
+                raise
+            if not await self._reset_client(server_name):
+                raise first_exc from None
             # The reconnected server may expose a different tool set
             # (it might have restarted with new capabilities); re-pull
             # THIS server only — the healthy siblings' cached tool
@@ -265,22 +414,7 @@ class MCPRegistry:
                 pass
             # _reset_client swaps in a fresh client; re-fetch so we
             # don't keep talking to the broken one.
-            client = self._clients[server_name]
-            try:
-                sdk_result = await client.call_tool(entry.mcp_name, dict(args))
-            except Exception as second_exc:  # noqa: BLE001
-                return ToolResult.error_(
-                    call_id=call_id, message=str(second_exc)
-                )
-
-        is_error = bool(getattr(sdk_result, "isError", False))
-        output = _extract_output(sdk_result)
-        if is_error:
-            return ToolResult.error_(
-                call_id=call_id,
-                message=output if isinstance(output, str) else str(output),
-            )
-        return ToolResult.success(call_id=call_id, output=output)
+            return await op(self._clients[server_name])
 
     async def _reset_client(self, server_name: str) -> bool:
         """Tear down + reopen one client's session. Returns ``True``
@@ -302,6 +436,7 @@ class MCPRegistry:
         # Replace with a fresh client bound to the same spec so the
         # AsyncExitStack inside the closed one stays out of our way.
         fresh = self._make_client(client.spec)
+        fresh.on_tools_changed = self._mark_stale
         self._clients[server_name] = fresh
         try:
             await fresh.connect()
@@ -318,11 +453,219 @@ class MCPRegistry:
         """
         return MCPClient(spec)
 
-    async def watch(self) -> AsyncIterator[ToolEvent]:
-        """``listChanged`` notifications. Not yet implemented; yields nothing."""
-        empty: tuple[ToolEvent, ...] = ()
-        for ev in empty:
-            yield ev
+    def watch(self) -> AsyncIterator[ToolEvent]:
+        """Yield :class:`ToolEvent` diffs as the tool index changes.
+
+        Fires whenever a refresh (full, targeted, or listChanged-
+        driven) rebuilds the index with additions/removals/updates.
+        The subscriber is registered eagerly (at call time, not first
+        iteration) so no event between subscribe and iterate is lost.
+        Iterates until the registry is closed (or the subscriber
+        breaks out); each subscriber has a bounded buffer — events
+        beyond it are dropped rather than blocking refreshes.
+        """
+        send, receive = anyio.create_memory_object_stream[ToolEvent](_WATCH_BUFFER)
+        self._watchers.append(send)
+
+        async def _iterate() -> AsyncIterator[ToolEvent]:
+            try:
+                async with receive:
+                    async for event in receive:
+                        yield event
+            finally:
+                if send in self._watchers:
+                    self._watchers.remove(send)
+                send.close()
+
+        return _iterate()
+
+    # ---- resources --------------------------------------------------------
+
+    async def list_resources(self) -> list[dict[str, Any]]:
+        """Aggregate resource listings across every server.
+
+        Returns one dict per resource:
+        ``{"uri", "server", "name", "description", "mime_type"}``.
+        ``uri`` is the server's own URI when unique across servers,
+        or ``server:uri``-qualified when two servers expose the same
+        URI. Per-server failures are isolated (logged + skipped),
+        mirroring :meth:`refresh`.
+        """
+        await self.connect()
+        await self._drain_stale()
+        per_server = await self._pull_all("list_resources")
+        counts: dict[str, int] = {}
+        for resources in per_server.values():
+            for resource in resources:
+                uri = _uri_of(resource)
+                if uri:
+                    counts[uri] = counts.get(uri, 0) + 1
+        owners: dict[str, list[str]] = {}
+        out: list[dict[str, Any]] = []
+        for server_name, resources in per_server.items():
+            for resource in resources:
+                uri = _uri_of(resource)
+                if not uri:
+                    continue
+                owners.setdefault(uri, []).append(server_name)
+                display = uri if counts[uri] == 1 else f"{server_name}:{uri}"
+                out.append(
+                    {
+                        "uri": display,
+                        "server": server_name,
+                        "name": getattr(resource, "name", "") or "",
+                        "description": getattr(resource, "description", "") or "",
+                        "mime_type": getattr(resource, "mimeType", None),
+                    }
+                )
+        self._resource_owners = owners
+        self._resources_pulled = True
+        return out
+
+    async def read_resource(
+        self, uri: str, *, server: str | None = None
+    ) -> Any:
+        """Read one resource, routing to the owning server.
+
+        Accepts a bare URI (routed via the last listing when exactly
+        one server owns it), a ``server:uri``-qualified URI, or an
+        explicit ``server=`` override (which also allows reading URIs
+        the server never listed, e.g. resource-template expansions).
+
+        Text contents are returned verbatim (single block → ``str``);
+        blob contents become a ``{"mime": ..., "size": ...}``
+        placeholder, consistent with how binary tool-result blocks are
+        represented. Multiple content blocks come back as a list.
+        """
+        await self.connect()
+        await self._drain_stale()
+        server_name, bare_uri = await self._route_resource(uri, server)
+
+        async def _do_read(client: MCPClient) -> Any:
+            return await client.read_resource(bare_uri)
+
+        result = await self._call_on_server(server_name, _do_read)
+        return _extract_resource_contents(result)
+
+    async def _route_resource(
+        self, uri: str, server: str | None
+    ) -> tuple[str, str]:
+        """Resolve ``uri`` (+ optional explicit ``server``) to
+        ``(server_name, bare_uri)`` or raise :class:`MCPError`."""
+        if server is not None:
+            if server not in self._clients:
+                raise MCPError(f"unknown MCP server: {server}")
+            prefix = f"{server}:"
+            bare = uri[len(prefix):] if uri.startswith(prefix) else uri
+            return server, bare
+        head, sep, rest = uri.partition(":")
+        if sep and head in self._clients:
+            # ``server:uri`` qualification. A server named after a URI
+            # scheme (e.g. "file") would shadow bare URIs of that
+            # scheme — the explicit ``server=`` argument disambiguates.
+            return head, rest
+        if not self._resources_pulled:
+            await self.list_resources()
+        owners = self._resource_owners.get(uri, [])
+        if len(owners) == 1:
+            return owners[0], uri
+        if len(owners) > 1:
+            raise MCPError(
+                f"resource {uri!r} is exposed by multiple servers "
+                f"({', '.join(sorted(owners))}); qualify as 'server:uri' "
+                f"or pass server="
+            )
+        raise MCPError(f"unknown MCP resource: {uri}")
+
+    # ---- prompts ----------------------------------------------------------
+
+    async def list_prompts(self) -> list[dict[str, Any]]:
+        """Aggregate prompt listings across every server.
+
+        Returns one dict per prompt:
+        ``{"name", "server", "description", "arguments"}``. Names use
+        the same bare-when-unique / ``server.name``-qualified scheme
+        as tools; both forms are accepted by :meth:`get_prompt`.
+        Per-server failures are isolated (logged + skipped).
+        """
+        await self.connect()
+        await self._drain_stale()
+        per_server = await self._pull_all("list_prompts")
+        counts: dict[str, int] = {}
+        for prompts in per_server.values():
+            for prompt in prompts:
+                pname = getattr(prompt, "name", None)
+                if pname:
+                    counts[pname] = counts.get(pname, 0) + 1
+        index: dict[str, tuple[str, str]] = {}
+        out: list[dict[str, Any]] = []
+        for server_name, prompts in per_server.items():
+            for prompt in prompts:
+                pname = getattr(prompt, "name", None)
+                if not pname:
+                    continue
+                unique = counts.get(pname, 0) == 1
+                display = pname if unique else f"{server_name}.{pname}"
+                index[f"{server_name}.{pname}"] = (server_name, pname)
+                if unique:
+                    index[pname] = (server_name, pname)
+                out.append(
+                    {
+                        "name": display,
+                        "server": server_name,
+                        "description": getattr(prompt, "description", "") or "",
+                        "arguments": getattr(prompt, "arguments", None),
+                    }
+                )
+        self._prompt_index = index
+        self._prompts_pulled = True
+        return out
+
+    async def get_prompt(
+        self, name: str, arguments: dict[str, str] | None = None
+    ) -> dict[str, Any]:
+        """Fetch one prompt (bare or ``server.name``-qualified).
+
+        Returns ``{"description": str | None, "messages": [{"role",
+        "content"}, ...]}`` with text content verbatim and binary
+        blocks as placeholders.
+        """
+        await self.connect()
+        await self._drain_stale()
+        if not self._prompts_pulled:
+            await self.list_prompts()
+        entry = self._prompt_index.get(name)
+        if entry is None:
+            raise MCPError(f"unknown MCP prompt: {name}")
+        server_name, bare_name = entry
+
+        async def _do_get(client: MCPClient) -> Any:
+            return await client.get_prompt(bare_name, arguments)
+
+        result = await self._call_on_server(server_name, _do_get)
+        return _extract_prompt(result)
+
+    async def _pull_all(self, method: str) -> dict[str, list[Any]]:
+        """Call ``method`` (``list_resources`` / ``list_prompts``) on
+        every client in parallel, isolating per-server failures the
+        same way :meth:`refresh` does for tools."""
+        per_server: dict[str, list[Any]] = {}
+        async with anyio.create_task_group() as tg:
+
+            async def _pull(server_name: str, client: MCPClient) -> None:
+                try:
+                    per_server[server_name] = await getattr(client, method)()
+                except Exception as exc:  # noqa: BLE001 — isolate flaky servers
+                    logger.warning(
+                        "MCP server %r failed %s; skipping it: %s",
+                        server_name,
+                        method,
+                        exc,
+                    )
+
+            for server_name, client in self._clients.items():
+                tg.start_soon(_pull, server_name, client)
+        return per_server
 
 
 # ---------------------------------------------------------------------------
@@ -422,6 +765,88 @@ def _build_index(
             if unique:
                 index[tname] = entry
     return index
+
+
+def _defs_by_display_name(
+    index: dict[str, _IndexEntry],
+) -> dict[str, _IndexEntry]:
+    """Dedupe an index (bare + qualified keys may alias one entry)
+    down to one entry per outward-facing tool name."""
+    return {entry.tool_def.name: entry for entry in index.values()}
+
+
+def _uri_of(resource: Any) -> str:
+    """Stringify a resource descriptor's ``uri`` (SDK gives AnyUrl)."""
+    uri = getattr(resource, "uri", None)
+    return str(uri) if uri else ""
+
+
+def _base64_size(data: str) -> int:
+    """Approximate decoded byte size of a base64 payload."""
+    return (len(data.rstrip("=")) * 3) // 4
+
+
+def _blob_placeholder(content: Any) -> dict[str, Any] | None:
+    """``{"mime", "size"}`` stand-in for a blob resource content block,
+    consistent with how binary tool-result blocks are represented."""
+    blob = getattr(content, "blob", None)
+    if blob is None:
+        return None
+    if isinstance(blob, (bytes, bytearray)):
+        size = len(blob)
+    elif isinstance(blob, str):
+        size = _base64_size(blob)
+    else:
+        return None
+    return {"mime": getattr(content, "mimeType", None), "size": size}
+
+
+def _extract_resource_contents(sdk_result: Any) -> Any:
+    """Pull usable values out of an MCP ``ReadResourceResult``.
+
+    Text contents come back verbatim; blob contents as
+    ``{"mime", "size"}`` placeholders. A single content block is
+    unwrapped; multiple blocks return a list. An empty result returns
+    the raw ``contents`` list (usually ``[]``).
+    """
+    contents = getattr(sdk_result, "contents", None) or []
+    pieces: list[Any] = []
+    for content in contents:
+        text = getattr(content, "text", None)
+        if isinstance(text, str):
+            pieces.append(text)
+            continue
+        placeholder = _blob_placeholder(content)
+        if placeholder is not None:
+            pieces.append(placeholder)
+    if not pieces:
+        return contents
+    return pieces[0] if len(pieces) == 1 else pieces
+
+
+def _extract_prompt(sdk_result: Any) -> dict[str, Any]:
+    """Flatten an MCP ``GetPromptResult`` into a plain dict.
+
+    ``{"description": ..., "messages": [{"role", "content"}, ...]}``
+    with text content verbatim and non-text blocks represented by the
+    same minimal placeholder used for tool results.
+    """
+    messages: list[dict[str, Any]] = []
+    for message in getattr(sdk_result, "messages", None) or []:
+        block = getattr(message, "content", None)
+        text = getattr(block, "text", None)
+        content: Any
+        if isinstance(text, str):
+            content = text
+        else:
+            content = _describe_binary_block(block) or block
+        messages.append(
+            {"role": getattr(message, "role", None), "content": content}
+        )
+    return {
+        "description": getattr(sdk_result, "description", None),
+        "messages": messages,
+    }
 
 
 def _describe_binary_block(block: Any) -> str | None:

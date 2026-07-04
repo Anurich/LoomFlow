@@ -19,9 +19,16 @@ Public surface:
 """
 
 from .actor_critic import ActorCritic
-from .base import AgentSession, Architecture, Dependencies
+from .base import (
+    AgentSession,
+    ApprovalDecision,
+    ApprovalHandler,
+    Architecture,
+    Dependencies,
+)
 from .blackboard import Blackboard, BlackboardArchitecture, BlackboardEntry
 from .debate import MultiAgentDebate
+from .helpers import wait_for_user_signal
 from .plan_and_execute import Plan, PlanAndExecute, PlanStep, StepResult
 from .react import ReAct
 from .reflexion import Reflexion
@@ -36,6 +43,8 @@ from .tree_of_thoughts import ThoughtNode, TreeOfThoughts
 __all__ = [
     "ActorCritic",
     "AgentSession",
+    "ApprovalDecision",
+    "ApprovalHandler",
     "Architecture",
     "Blackboard",
     "BlackboardArchitecture",
@@ -61,4 +70,5 @@ __all__ = [
     "ThoughtNode",
     "TreeOfThoughts",
     "resolve_architecture",
+    "wait_for_user_signal",
 ]

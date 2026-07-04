@@ -32,7 +32,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 from ..core.context import RunContext
 from ..core.protocols import (
@@ -50,15 +50,74 @@ from ..security.hooks import HookRegistry
 
 if TYPE_CHECKING:
     from ..agent.api import Agent
+    from ..governance.rate_limit import RateLimiter
+    from ..guardrails.base import Guardrail
+
+@dataclass
+class ApprovalDecision:
+    """Rich outcome of an approval handler (G8 HITL).
+
+    ``bool`` returns stay fully supported — ``True`` means allow,
+    ``False`` means deny — so pre-G8 handlers keep working. Return an
+    :class:`ApprovalDecision` when you need more than allow/deny:
+
+    * ``"allow"`` / ``"deny"`` — same as ``True`` / ``False``, but with
+      an optional ``reason`` surfaced in the deny message + audit log.
+    * ``"edit"`` — run the tool with ``edited_args`` instead of the
+      model-planned args. The framework swaps the args (a copy of the
+      original :class:`ToolCall` — the model's transcript is not
+      rewritten) and proceeds as allowed; the tool host re-validates
+      the edited args at execute time exactly as it would the
+      originals. When ``edited_args`` is ``None``, the original args
+      are kept (plain allow).
+    * ``"remember_allow"`` / ``"remember_deny"`` — decide AND cache the
+      decision for ``(user_id, tool_name)`` for the remainder of this
+      run. Subsequent ``ask`` gates for the same user + tool are
+      resolved from the cache without re-invoking the handler. The
+      cache is session-scoped (``Dependencies.approval_memory``,
+      re-initialised per run) and never persisted.
+
+    A raising handler is still fail-closed: the pending call is denied.
+
+    **Interrupt / park pattern.** Approval handlers are async and the
+    runtime signal channel is public, so a handler can park the run
+    until an out-of-band decision arrives — no framework support
+    needed beyond the signal API::
+
+        async def approve(call: ToolCall, user_id: str | None):
+            await notify_slack(call, user_id)          # out-of-band ask
+            payload = await runtime.wait_for_signal(   # park the run
+                session_id, "approval"
+            )
+            # caller unblocks with:
+            #   await agent.signal(session_id, "approval",
+            #                      {"action": "allow"})
+            return ApprovalDecision(action=payload["action"])
+
+    ``Agent.signal(session_id, name, payload)`` is the convenience
+    entry point for the delivering side; architectures can park via
+    :func:`loomflow.architecture.helpers.wait_for_user_signal`.
+    """
+
+    action: Literal[
+        "allow", "deny", "edit", "remember_allow", "remember_deny"
+    ]
+    edited_args: dict[str, Any] | None = None
+    reason: str | None = None
+
 
 # An approval handler is the bridge between a permissions policy
 # returning ``Decision.ask_(...)`` and an actual decision. The
 # framework calls the handler with the pending tool call and the
 # resolved ``user_id`` for the run; the handler returns ``True``
-# to allow the call or ``False`` to deny. Handlers are async so
-# they can await UI prompts, Slack approvals, ticketing systems,
-# etc. without blocking the agent loop.
-ApprovalHandler = Callable[[ToolCall, str | None], Awaitable[bool]]
+# to allow the call or ``False`` to deny — or an
+# :class:`ApprovalDecision` for the rich HITL actions (edit-args,
+# remember-decision; see the dataclass docstring). Handlers are
+# async so they can await UI prompts, Slack approvals, ticketing
+# systems, etc. without blocking the agent loop.
+ApprovalHandler = Callable[
+    [ToolCall, str | None], Awaitable["ApprovalDecision | bool"]
+]
 
 
 @dataclass
@@ -95,10 +154,11 @@ class Dependencies:
     methods on the contained protocols but don't mutate the struct
     itself.
 
-    Multi-agent architectures (Supervisor, Router, etc.) will grow
+    Multi-agent architectures (Supervisor, Router, etc.) may grow
     helper methods on this class — ``fresh_session``,
-    ``scope_for_worker``, ``with_extra_tools``, ``spawn_child`` — as
-    they land in v0.5+. v0.3 keeps it as a passive struct.
+    ``scope_for_worker``, ``with_extra_tools`` — as they land.
+    Today it is a passive struct; dynamic sub-agent spawning is
+    planned as a Supervisor *tool*, not a method here.
     """
 
     model: Model
@@ -251,6 +311,58 @@ class Dependencies:
     :func:`loomflow.agent.snip.snip_messages` call right after
     seed-message rehydration."""
 
+    fast_rate_limit: bool = True
+    """Skip the pre-step ``rate_limiter.acquire(...)`` call in
+    :func:`loomflow.architecture.helpers.budget_gate` when no rate
+    limiter is wired (``Agent(rate_limiter=None)``, the default) —
+    computed like the other ``fast_*`` flags so the no-limiter path
+    stays zero-overhead."""
+
+    rate_limiter: RateLimiter | None = None
+    """Per-tenant QPS limiter (G5) — typically a
+    :class:`~loomflow.governance.rate_limit.TokenBucketRateLimiter`.
+    ``budget_gate`` calls ``await rate_limiter.acquire(user_id=
+    context.user_id)`` before EVERY model step (independently of the
+    budget layer, so a ``NoBudget`` agent can still be paced). In
+    throttle mode the acquire waits; in raise mode it raises
+    :class:`~loomflow.core.errors.RateLimitExceeded`, which
+    propagates out of the run. ``None`` disables rate limiting
+    (see ``fast_rate_limit``)."""
+
+    approval_memory: dict[tuple[str | None, str], bool] | None = None
+    """Per-run cache of remembered approval decisions (G8), keyed by
+    ``(user_id, tool_name)``. Populated when an approval handler
+    returns ``remember_allow`` / ``remember_deny``; consulted BEFORE
+    the handler on subsequent ``ask`` gates so the human is asked at
+    most once per (user, tool) per run. Initialised to a fresh dict by
+    ``Agent._loop`` on every run — session-scoped, never persisted.
+    ``None`` disables remembering (e.g. Dependencies built outside the
+    Agent loop)."""
+
+    guardrails: tuple[Guardrail, ...] = ()
+    """G13 — ordered guard chain (see :mod:`loomflow.guardrails`).
+    Empty (the default) disables the layer entirely; see
+    ``fast_guardrails``. Guards subscribed to the ``tool_result``
+    stage run in :func:`loomflow.architecture.helpers
+    .run_single_tool` on every successful tool result BEFORE the
+    text enters conversation history (and before the
+    ``tool_result_max_chars`` truncation, so injected delimiters
+    survive); ``input`` / ``output`` stage guards run in
+    ``Agent._loop`` around the architecture pass."""
+
+    fast_guardrails: bool = True
+    """Skip the guardrail call sites entirely when no guardrails are
+    configured (``Agent(guardrails=None)``, the default) — computed
+    like the other ``fast_*`` flags so the no-guard hot path stays
+    zero-overhead."""
+
+    guardrail_emit: Callable[[Event], Awaitable[None]] | None = None
+    """Event channel for ``guardrail.triggered`` events fired from
+    the tool-result path (:func:`~loomflow.architecture.helpers
+    .run_single_tool` returns a ``ToolResult``, not events, so it
+    can't yield). Set by ``Agent._loop`` to the run's ``emit``
+    callback when guardrails are active; ``None`` skips emission."""
+
     snip_window: int = 0
     """Number of user-anchored turn groups to keep in the
     rehydrated message list before sending to the model. Zero
@@ -259,6 +371,42 @@ class Dependencies:
     that runs alongside ``tool_result_summarizer`` (0.10.14) and
     the future auto-compact (0.10.19) — see
     :mod:`loomflow.agent.snip` for the slicing rules."""
+
+    tool_search: bool = False
+    """G1 — Tool Search / deferred tool loading. When True AND the
+    estimated token weight of the full tool-def block exceeds
+    ``tool_search_threshold_tokens``, the ReAct loop ships stubbed
+    defs (name + one-liner + permissive schema) instead of full
+    schemas, keeps ``tool_search_keep`` + already-used tools full,
+    and relies on the auto-installed ``search_tools`` tool for
+    catalogue discovery. Default False — zero behaviour change.
+    See :mod:`loomflow.tools.search`."""
+
+    tool_search_threshold_tokens: int = 10_000
+    """Estimated tool-def token weight (chars/4 heuristic) above
+    which stubbing kicks in. Below the threshold the full defs ship
+    even when ``tool_search`` is True — small tool sets don't pay
+    the indirection."""
+
+    tool_search_keep: tuple[str, ...] = ()
+    """Tool names whose FULL definitions always ship (never stubbed)
+    when tool search is active — the always-on core set (read /
+    search / etc.). ``search_tools`` itself is implicitly kept."""
+
+    memory_token_budget: int | None = None
+    """G7 — token budget (chars/4 heuristic) for the seed-time memory
+    injection block. ``None`` (default) preserves the historical
+    item-count behaviour byte-for-byte. When set, working blocks are
+    injected first (pinned: counted against the budget but never
+    dropped) and facts + episodes are ranked
+    ``relevance x recency-decay`` and greedily packed into the
+    remainder — see :mod:`loomflow.memory._injection`."""
+
+    memory_decay_half_life: float | None = None
+    """Half-life in DAYS for the recency decay applied to memory
+    items under ``memory_token_budget``. ``None`` (default) disables
+    decay — items score on relevance alone. Only consulted when
+    ``memory_token_budget`` is set."""
 
     # ---------------------------------------------------------------
     # Per-run context — populated from :class:`~loomflow.RunContext`

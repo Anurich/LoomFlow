@@ -68,6 +68,7 @@ were LLM-driven, tagged via the ``pattern`` span attribute.
 from __future__ import annotations
 
 import inspect
+import math
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -94,6 +95,8 @@ if TYPE_CHECKING:
     # import). ``AuditLog`` IS used in a string annotation on the
     # ``Workflow`` constructor, so it stays.
     from pathlib import Path  # noqa: F401
+
+    from anyio.abc import TaskGroup  # noqa: F401
 
     from ..security.audit import AuditLog  # noqa: F401
 
@@ -444,6 +447,36 @@ class Workflow:
     :class:`WorkflowResult`) or :meth:`stream` (yields
     :class:`~loomflow.Event` per step).
 
+    **Parallel scheduling — fan-out and joins.** Execution is
+    readiness-based: a node runs as soon as its inputs are complete,
+    so independent branches run concurrently (bounded by
+    ``max_concurrency``). The data-flow contract:
+
+    * Calling :meth:`add_edge` more than once from the same source
+      **fans out** — every target receives the source's output and
+      the branches run concurrently.
+    * A router (:meth:`add_router`) still picks exactly **one**
+      branch per evaluation; untaken branches never run.
+    * A node with several in-edges is an **AND-join**: it waits
+      until no in-flight (or upstream-pending) node can still
+      deliver to it, then runs once. With a single delivered input
+      it receives the bare value — exactly the sequential model,
+      so router merge points behave as before. With two or more
+      delivered inputs it receives a ``list`` of the values ordered
+      by edge **declaration** order (the same list contract as
+      :meth:`parallel`'s ``merge``), not by completion order.
+    * Cycles stay first-class. ``max_steps`` /
+      ``max_visits_per_node`` are enforced globally by a single
+      scheduler task that owns all counters, so the caps are
+      race-free under concurrency. Join buffering is per wave: on a
+      later loop iteration where only one in-edge delivers, the
+      join receives that bare value.
+    * A failing node cancels in-flight siblings and fails the run
+      with the original exception.
+
+    Purely sequential graphs (chains, routers) execute exactly as
+    they did under the sequential walker — same events, same order.
+
     Compose with :class:`~loomflow.Agent`:
 
     * **Agent as a step** — pass an ``Agent`` instance to
@@ -467,6 +500,7 @@ class Workflow:
         response_tone: str | None = None,
         max_steps: int = 100,
         max_visits_per_node: int = 25,
+        max_concurrency: int = 8,
         workspace: Any | str | Mapping[str, Any] | None = None,
     ) -> None:
         """Construct an empty workflow.
@@ -483,6 +517,10 @@ class Workflow:
         * ``max_visits_per_node`` — any single node can be entered
           this many times. Tighter than ``max_steps`` because most
           runaways are one node looping on itself.
+        * ``max_concurrency`` — how many nodes may execute at the
+          same time when the graph fans out (multiple ``add_edge``
+          calls from one source). Sequential graphs never have more
+          than one ready node, so this cap is invisible to them.
 
         ``memory`` is the **shared agent memory** for this run.
         Any :class:`~loomflow.Agent` step that did *not* receive
@@ -500,10 +538,16 @@ class Workflow:
             raise ValueError("max_steps must be >= 1")
         if max_visits_per_node < 1:
             raise ValueError("max_visits_per_node must be >= 1")
+        if max_concurrency < 1:
+            raise ValueError("max_concurrency must be >= 1")
         self.name = name
         self._nodes: dict[str, _StepFn] = {}
         self._raw_nodes: dict[str, StepLike] = {}  # for ``as_tool`` schema
-        self._edges: dict[str, _EdgeTarget] = {}
+        # Out-edges per source node, in declaration order. A source
+        # holds EITHER a list of plain targets (several = fan-out)
+        # OR a single ``_Router`` (always alone in its list) — the
+        # builder methods keep the two shapes mutually exclusive.
+        self._edges: dict[str, list[_EdgeTarget]] = {}
         self._start: str | None = None
         # Set when ``add_router(START, ...)`` is called; ``stream``
         # evaluates this on the input to pick the first node when
@@ -527,6 +571,7 @@ class Workflow:
         self._workspace: Any = _resolve_ws(workspace)
         self._max_steps = max_steps
         self._max_visits_per_node = max_visits_per_node
+        self._max_concurrency = max_concurrency
 
     # ---- graph builder ----------------------------------------------------
 
@@ -550,6 +595,14 @@ class Workflow:
         the pattern users coming from LangGraph expect. The
         ``target`` of an ``add_edge(START, ...)`` call must be a
         registered node name (not another sentinel).
+
+        Calling ``add_edge`` again with the **same source** fans
+        out: every target receives the source's output and the
+        branches run concurrently (see the class docstring for the
+        join contract). A repeated identical edge is a no-op, and
+        adding a plain edge to a source that has a router replaces
+        the router (a source is either a fan-out or a router,
+        never both).
         """
         if isinstance(source, _Sentinel):
             if source is not START:
@@ -566,7 +619,16 @@ class Workflow:
                 )
             return self.set_start(target)
         self._validate_source(source)
-        self._edges[source] = target
+        existing = self._edges.get(source)
+        if existing is None or any(
+            isinstance(t, _Router) for t in existing
+        ):
+            # First edge from this source, or replacing a router
+            # (preserves the historical last-call-wins semantics
+            # between add_edge and add_router on one source).
+            self._edges[source] = [target]
+        elif target not in existing:
+            existing.append(target)  # fan-out
         return self
 
     def add_router(
@@ -626,7 +688,12 @@ class Workflow:
             return self
 
         self._validate_source(source)
-        self._edges[source] = _Router(fn=fn, routes=normalized, default=default)
+        # A router always sits alone on its source — it supersedes
+        # any previously added plain edges (last call wins, matching
+        # the historical overwrite semantics).
+        self._edges[source] = [
+            _Router(fn=fn, routes=normalized, default=default)
+        ]
         return self
 
     def set_start(self, node: str) -> Workflow:
@@ -652,8 +719,10 @@ class Workflow:
         session_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> WorkflowResult:
-        """Execute the graph. Each node receives the previous node's
-        return value; the final node's return is ``result.output``.
+        """Execute the graph. Each node receives its upstream
+        node's return value (an AND-join with several delivered
+        inputs receives a list — see the class docstring); the last
+        completed node's return is ``result.output``.
 
         ``user_id`` / ``session_id`` / ``metadata`` populate the
         live :class:`RunContext` for the duration of the run. Any
@@ -707,6 +776,12 @@ class Workflow:
         ``WORKFLOW_STEP_COMPLETED`` pair per visited node, and
         finally ``WORKFLOW_COMPLETED`` (or ``ERROR`` on failure).
         Consumers can break out of the iterator early to cancel.
+
+        When the graph fans out, events from concurrently running
+        branches may interleave (a branch's ``STEP_STARTED`` can
+        appear before a sibling's ``STEP_COMPLETED``); purely
+        sequential graphs yield the exact sequence the sequential
+        walker produced.
         """
         if self._start is None and self._entry_router is None:
             raise RuntimeError(
@@ -767,102 +842,230 @@ class Workflow:
                             f"no default"
                         )
                     if isinstance(self._entry_router.default, _Sentinel):
-                        current = None
+                        first = None
                     else:
-                        current = self._entry_router.default
+                        first = self._entry_router.default
                 elif target == "__END__":
-                    current = None
+                    first = None
                 else:
-                    current = target
+                    first = target
             else:
-                current = self._start
-            value: Any = input
-            # Cycles are supported up to the per-workflow caps.
-            # ``visit_counts`` tracks how many times each node has
-            # been entered; ``total_steps`` tracks the global step
-            # count so a long zig-zag (no single node loops, but
-            # many do) still terminates eventually.
+                first = self._start
+
+            # ---- readiness-based scheduler ----------------------
+            # A SINGLE scheduler (this generator) owns every piece
+            # of mutable state — visit counts, the global step
+            # budget, pending-input buffers, the active set. Node
+            # bodies run in worker tasks spawned into one anyio
+            # task group and report lifecycle messages back over a
+            # memory channel, so no counter is ever touched by two
+            # tasks: caps stay race-free by construction. Cycles
+            # are supported up to the per-workflow caps, exactly as
+            # under the sequential walker.
             visit_counts: dict[str, int] = {}
             total_steps = 0
+            last_value: Any = input
 
-            while current is not None:
+            decl_order, reach = self._edge_topology()
+            # Buffered deliveries per node: (declaration index of
+            # the in-edge, arrival sequence, value). Sorted at fire
+            # time so an AND-join's input list follows edge
+            # declaration order, not completion order.
+            pending: dict[str, list[tuple[int, int, Any]]] = {}
+            active: dict[str, int] = {}  # node -> running instances
+            inflight = 0  # workers spawned but not yet finished
+            arrival = 0
+
+            send, recv = anyio.create_memory_object_stream[
+                tuple[str, str, Any]
+            ](math.inf)
+            limiter = anyio.CapacityLimiter(self._max_concurrency)
+            tel = self._telemetry or NoTelemetry()
+
+            def _deliver(dst: str, idx: int, val: Any) -> None:
+                nonlocal arrival
+                arrival += 1
+                pending.setdefault(dst, []).append((idx, arrival, val))
+
+            def _ready_nodes() -> list[str]:
+                """Nodes whose buffered inputs are complete.
+
+                A node is ready when it has at least one delivered
+                input, is not itself running, and no *other* node
+                that is running or holds buffered input can still
+                reach it through the static edge graph — the
+                AND-join-by-quiescence rule. If nothing is running
+                and mutually-cyclic joins would starve each other,
+                the first pending node (graph declaration order)
+                fires as a documented tie-break.
+                """
+                blockers = {n for n, c in active.items() if c > 0}
+                buffered = {n for n, buf in pending.items() if buf}
+                ready: list[str] = []
+                for d in self._nodes:
+                    if d not in buffered or active.get(d, 0) > 0:
+                        continue
+                    others = (blockers | buffered) - {d}
+                    if any(d in reach.get(o, set()) for o in others):
+                        continue
+                    ready.append(d)
+                if not ready and inflight == 0:
+                    for d in self._nodes:
+                        if d in buffered:
+                            return [d]
+                return ready
+
+            async def _run_node(node: str, fn: _StepFn, val: Any) -> None:
+                # Worker: take a concurrency slot, announce start,
+                # run the node under its telemetry span, report the
+                # outcome. Never raises (short of cancellation) —
+                # failures travel over the channel so the scheduler
+                # can emit STEP_FAILED and fail the run with the
+                # RAW exception, not a task-group ExceptionGroup.
+                async with limiter:
+                    await send.send(("started", node, None))
+                    try:
+                        # Per-step telemetry span. Nested agent runs
+                        # land under this span automatically.
+                        async with tel.trace(
+                            "loom.workflow.step",
+                            step=node,
+                            user_id=user_id,
+                            session_id=sid,
+                            pattern="workflow",
+                        ):
+                            await self._audit(
+                                ctx, "step_started", {"node": node}
+                            )
+                            try:
+                                out = await fn(val)
+                            except Exception as exc:  # noqa: BLE001
+                                await self._audit(
+                                    ctx,
+                                    "step_failed",
+                                    {"node": node, "error": str(exc)},
+                                )
+                                raise
+                            await self._audit(
+                                ctx, "step_completed", {"node": node}
+                            )
+                    except Exception as exc:  # noqa: BLE001
+                        await send.send(("failed", node, exc))
+                        return
+                    await send.send(("completed", node, out))
+
+            def _fire(scope: TaskGroup, node: str) -> None:
+                nonlocal inflight, total_steps
                 total_steps += 1
                 if total_steps > self._max_steps:
                     raise RuntimeError(
                         f"workflow {self.name!r} exceeded max_steps="
-                        f"{self._max_steps} at node {current!r}; "
+                        f"{self._max_steps} at node {node!r}; "
                         "raise the cap or fix the routing logic that "
                         "keeps re-entering nodes"
                     )
-                visit_counts[current] = visit_counts.get(current, 0) + 1
-                if visit_counts[current] > self._max_visits_per_node:
+                visit_counts[node] = visit_counts.get(node, 0) + 1
+                if visit_counts[node] > self._max_visits_per_node:
                     raise RuntimeError(
-                        f"workflow {self.name!r} re-entered {current!r} "
+                        f"workflow {self.name!r} re-entered {node!r} "
                         f"more than max_visits_per_node="
                         f"{self._max_visits_per_node} times; the router "
                         "controlling the loop probably never picks the "
                         "termination branch"
                     )
+                fn = self._nodes[node]
+                buf = sorted(pending.pop(node))
+                vals = [v for _, _, v in buf]
+                # Join contract: one delivered input -> the bare
+                # value (sequential semantics); several -> a list in
+                # edge declaration order (``parallel()``'s contract).
+                node_input = vals[0] if len(vals) == 1 else vals
+                active[node] = active.get(node, 0) + 1
+                inflight += 1
+                scope.start_soon(_run_node, node, fn, node_input)
 
-                fn = self._nodes[current]
-                yield Event(
-                    kind=EventKind.WORKFLOW_STEP_STARTED,
-                    session_id=sid,
-                    payload={"workflow": self.name, "node": current},
-                )
+            # A run failure (failing node, cap exceeded, router
+            # error) is recorded here and re-raised AFTER the task
+            # group has drained, so callers see the original RAW
+            # exception — never an anyio ExceptionGroup — exactly
+            # like the sequential walker.
+            run_failure: BaseException | None = None
 
-                # Per-step telemetry span. Nested agent runs land
-                # under this span automatically.
-                tel = self._telemetry or NoTelemetry()
-                async with tel.trace(
-                    "loom.workflow.step",
-                    step=current,
-                    user_id=user_id,
-                    session_id=sid,
-                    pattern="workflow",
-                ):
-                    await self._audit(
-                        ctx, "step_started", {"node": current}
-                    )
+            async with send, recv:
+                async with anyio.create_task_group() as tg:
                     try:
-                        value = await fn(value)
-                    except Exception as exc:  # noqa: BLE001
-                        yield Event(
-                            kind=EventKind.WORKFLOW_STEP_FAILED,
-                            session_id=sid,
-                            payload={
-                                "workflow": self.name,
-                                "node": current,
-                                "error": str(exc),
-                            },
-                        )
-                        await self._audit(
-                            ctx,
-                            "step_failed",
-                            {"node": current, "error": str(exc)},
-                        )
-                        raise
-                    await self._audit(
-                        ctx, "step_completed", {"node": current}
-                    )
+                        if first is not None:
+                            _deliver(first, -1, input)
+                            for node in _ready_nodes():
+                                _fire(tg, node)
+                        while inflight > 0:
+                            msg_kind, node, data = await recv.receive()
+                            if msg_kind == "started":
+                                yield Event(
+                                    kind=EventKind.WORKFLOW_STEP_STARTED,
+                                    session_id=sid,
+                                    payload={
+                                        "workflow": self.name,
+                                        "node": node,
+                                    },
+                                )
+                            elif msg_kind == "failed":
+                                yield Event(
+                                    kind=EventKind.WORKFLOW_STEP_FAILED,
+                                    session_id=sid,
+                                    payload={
+                                        "workflow": self.name,
+                                        "node": node,
+                                        "error": str(data),
+                                    },
+                                )
+                                # Fail the run with the node's
+                                # original exception; cancelling
+                                # the scope tears down the
+                                # in-flight siblings.
+                                raise data
+                            else:  # completed
+                                inflight -= 1
+                                active[node] -= 1
+                                last_value = data
+                                yield Event(
+                                    kind=EventKind.WORKFLOW_STEP_COMPLETED,
+                                    session_id=sid,
+                                    payload={
+                                        "workflow": self.name,
+                                        "node": node,
+                                        "output": data,
+                                    },
+                                )
+                                for dst in await self._taken_targets(
+                                    node, data
+                                ):
+                                    _deliver(
+                                        dst,
+                                        decl_order[(node, dst)],
+                                        data,
+                                    )
+                                for nxt in _ready_nodes():
+                                    _fire(tg, nxt)
+                    except BaseException as exc:
+                        # BaseException on purpose: besides node /
+                        # scheduler errors this must also catch
+                        # GeneratorExit (consumer broke out of the
+                        # iterator early) and cancellation, cancel
+                        # the in-flight workers, and re-raise AFTER
+                        # the task group has drained — otherwise
+                        # anyio would wrap the original exception
+                        # in an ExceptionGroup.
+                        run_failure = exc
+                        tg.cancel_scope.cancel()
 
-                yield Event(
-                    kind=EventKind.WORKFLOW_STEP_COMPLETED,
-                    session_id=sid,
-                    payload={
-                        "workflow": self.name,
-                        "node": current,
-                        "output": value,
-                    },
-                )
-
-                # Pick the next node from the outgoing edge.
-                current = await self._next_node(current, value)
+            if run_failure is not None:
+                raise run_failure
 
             yield Event(
                 kind=EventKind.WORKFLOW_COMPLETED,
                 session_id=sid,
-                payload={"workflow": self.name, "output": value},
+                payload={"workflow": self.name, "output": last_value},
             )
         finally:
             _ambient_workspace_var.reset(workspace_token)
@@ -933,34 +1136,35 @@ class Workflow:
                 f"    START([START]) --> {_alias(self._start)}"
             )
 
-        for src, target in self._edges.items():
+        for src, targets in self._edges.items():
             src_id = _alias(src)
-            if isinstance(target, _Router):
-                for label, dst in target.routes.items():
-                    if dst == "__END__":
-                        lines.append(
-                            f"    {src_id} -->|{label}| END([END])"
-                        )
-                    else:
-                        lines.append(
-                            f"    {src_id} -->|{label}| {_alias(dst)}"
-                        )
-                # Default branch — dotted to distinguish from
-                # explicit-key branches at a glance.
-                if target.default is not None:
-                    if isinstance(target.default, _Sentinel):
-                        lines.append(
-                            f"    {src_id} -.->|default| END([END])"
-                        )
-                    else:
-                        lines.append(
-                            f"    {src_id} -.->|default| "
-                            f"{_alias(target.default)}"
-                        )
-            elif isinstance(target, _Sentinel):
-                lines.append(f"    {src_id} --> END([END])")
-            else:
-                lines.append(f"    {src_id} --> {_alias(target)}")
+            for target in targets:
+                if isinstance(target, _Router):
+                    for label, dst in target.routes.items():
+                        if dst == "__END__":
+                            lines.append(
+                                f"    {src_id} -->|{label}| END([END])"
+                            )
+                        else:
+                            lines.append(
+                                f"    {src_id} -->|{label}| {_alias(dst)}"
+                            )
+                    # Default branch — dotted to distinguish from
+                    # explicit-key branches at a glance.
+                    if target.default is not None:
+                        if isinstance(target.default, _Sentinel):
+                            lines.append(
+                                f"    {src_id} -.->|default| END([END])"
+                            )
+                        else:
+                            lines.append(
+                                f"    {src_id} -.->|default| "
+                                f"{_alias(target.default)}"
+                            )
+                elif isinstance(target, _Sentinel):
+                    lines.append(f"    {src_id} --> END([END])")
+                else:
+                    lines.append(f"    {src_id} --> {_alias(target)}")
 
         return "\n".join(lines)
 
@@ -1019,37 +1223,38 @@ class Workflow:
             )
 
         end_seen = False
-        for src, target in self._edges.items():
-            if isinstance(target, _Router):
-                for label, dst in target.routes.items():
-                    if dst == "__END__":
-                        lines.append(
-                            f'    "{src}" -> "__end__" '
-                            f'[label="{label}"];'
-                        )
-                        end_seen = True
-                    else:
-                        lines.append(
-                            f'    "{src}" -> "{dst}" '
-                            f'[label="{label}"];'
-                        )
-                if target.default is not None:
-                    if isinstance(target.default, _Sentinel):
-                        lines.append(
-                            f'    "{src}" -> "__end__" '
-                            f'[label="default", style=dashed];'
-                        )
-                        end_seen = True
-                    else:
-                        lines.append(
-                            f'    "{src}" -> "{target.default}" '
-                            f'[label="default", style=dashed];'
-                        )
-            elif isinstance(target, _Sentinel):
-                lines.append(f'    "{src}" -> "__end__";')
-                end_seen = True
-            else:
-                lines.append(f'    "{src}" -> "{target}";')
+        for src, targets in self._edges.items():
+            for target in targets:
+                if isinstance(target, _Router):
+                    for label, dst in target.routes.items():
+                        if dst == "__END__":
+                            lines.append(
+                                f'    "{src}" -> "__end__" '
+                                f'[label="{label}"];'
+                            )
+                            end_seen = True
+                        else:
+                            lines.append(
+                                f'    "{src}" -> "{dst}" '
+                                f'[label="{label}"];'
+                            )
+                    if target.default is not None:
+                        if isinstance(target.default, _Sentinel):
+                            lines.append(
+                                f'    "{src}" -> "__end__" '
+                                f'[label="default", style=dashed];'
+                            )
+                            end_seen = True
+                        else:
+                            lines.append(
+                                f'    "{src}" -> "{target.default}" '
+                                f'[label="default", style=dashed];'
+                            )
+                elif isinstance(target, _Sentinel):
+                    lines.append(f'    "{src}" -> "__end__";')
+                    end_seen = True
+                else:
+                    lines.append(f'    "{src}" -> "{target}";')
 
         if end_seen or end_seen_start:
             lines.append('    "__end__" [label="END", shape=oval];')
@@ -1369,30 +1574,88 @@ class Workflow:
                 f"call add_node({source!r}, ...) first"
             )
 
-    async def _next_node(self, current: str, value: Any) -> str | None:
-        edge = self._edges.get(current)
-        if edge is None:
-            # No outgoing edge — terminal.
-            return None
-        if isinstance(edge, _Sentinel):
-            return None
-        if isinstance(edge, _Router):
-            key = await _eval_classifier(edge.fn, value)
-            target = edge.routes.get(str(key))
-            if target is None:
-                if edge.default is None:
-                    raise RuntimeError(
-                        f"router on {current!r} produced key {key!r} "
-                        f"with no matching route and no default"
-                    )
-                if isinstance(edge.default, _Sentinel):
-                    return None
-                return edge.default
-            if target == "__END__":
-                return None
-            return target
-        # Plain string target.
-        return edge
+    async def _taken_targets(self, current: str, value: Any) -> list[str]:
+        """Resolve which out-edges of ``current`` fire after it
+        produced ``value``. Plain edges all fire (fan-out); a router
+        fires exactly one branch (or none, when the pick is END); an
+        END sentinel edge fires nothing. Returns the taken next-node
+        names in edge declaration order."""
+        taken: list[str] = []
+        for edge in self._edges.get(current, []):
+            if isinstance(edge, _Sentinel):
+                continue
+            if isinstance(edge, _Router):
+                key = await _eval_classifier(edge.fn, value)
+                target = edge.routes.get(str(key))
+                if target is None:
+                    if edge.default is None:
+                        raise RuntimeError(
+                            f"router on {current!r} produced key {key!r} "
+                            f"with no matching route and no default"
+                        )
+                    if not isinstance(edge.default, _Sentinel):
+                        taken.append(edge.default)
+                elif target != "__END__":
+                    taken.append(target)
+                continue
+            # Plain string target.
+            if edge not in taken:
+                taken.append(edge)
+        return taken
+
+    def _edge_topology(
+        self,
+    ) -> tuple[dict[tuple[str, str], int], dict[str, set[str]]]:
+        """Precompute static edge metadata for one scheduler run.
+
+        Returns ``(decl_order, reach)``:
+
+        * ``decl_order`` — ``(source, target) -> declaration index``
+          across ALL potential edges (plain targets, every router
+          route, router defaults). AND-join inputs are sorted by
+          this index so the joined list follows edge declaration
+          order.
+        * ``reach`` — per node, the set of nodes reachable from it
+          through any static edge (routers over-approximated as
+          "could take any branch"). Used by the readiness rule: a
+          join must not fire while an in-flight or pending node
+          could still deliver to it.
+        """
+        decl: dict[tuple[str, str], int] = {}
+        succ: dict[str, set[str]] = {}
+        idx = 0
+        for src, targets in self._edges.items():
+            for target in targets:
+                dsts: list[str] = []
+                if isinstance(target, _Router):
+                    for dst in target.routes.values():
+                        if dst != "__END__":
+                            dsts.append(dst)
+                    if target.default is not None and not isinstance(
+                        target.default, _Sentinel
+                    ):
+                        dsts.append(target.default)
+                elif isinstance(target, _Sentinel):
+                    continue
+                else:
+                    dsts.append(target)
+                for dst in dsts:
+                    if (src, dst) not in decl:
+                        decl[(src, dst)] = idx
+                        idx += 1
+                    succ.setdefault(src, set()).add(dst)
+        reach: dict[str, set[str]] = {}
+        for node in self._nodes:
+            seen: set[str] = set()
+            stack = list(succ.get(node, ()))
+            while stack:
+                nxt = stack.pop()
+                if nxt in seen:
+                    continue
+                seen.add(nxt)
+                stack.extend(succ.get(nxt, ()))
+            reach[node] = seen
+        return decl, reach
 
     async def _audit(
         self, ctx: RunContext, action: str, payload: dict[str, Any]

@@ -316,6 +316,9 @@ class Team:
         delegate_tool_name: str = "delegate",
         forward_tool_name: str = "forward_message",
         persistent_subagents: bool = True,
+        allow_spawn: bool = False,
+        max_spawned: int = 5,
+        spawn_template: Agent | None = None,
     ) -> Agent:
         """Build a coordinator Agent that delegates to ``workers``.
 
@@ -323,6 +326,14 @@ class Team:
         to dispatch a subtask, or ``forward_message(worker)`` to
         return a worker's output verbatim. Multiple delegations in
         one turn run in parallel.
+
+        ``allow_spawn=True`` additionally injects a
+        ``spawn_worker(role, instructions)`` tool so the coordinator
+        model can create NEW ephemeral specialists mid-run (at most
+        ``max_spawned`` per run; they die when the run ends).
+        ``spawn_template`` provides the model/tools spawned workers
+        inherit; without it they use the coordinator's model and no
+        tools. See :class:`~loomflow.architecture.Supervisor`.
 
         ``workspace`` wires a shared notebook onto the coordinator
         and every worker. The worker's dict key becomes its author
@@ -357,6 +368,9 @@ class Team:
                 forward_tool_name=forward_tool_name,
                 worker_registry=worker_registry,
                 role_to_worker_id=role_to_worker_id,
+                allow_spawn=allow_spawn,
+                max_spawned=max_spawned,
+                spawn_template=spawn_template,
             ),
             workspace=coord_ws,
             worker_registry=worker_registry,

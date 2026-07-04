@@ -307,7 +307,25 @@ class RuntimeSession(Protocol):
 
 @runtime_checkable
 class Runtime(Protocol):
-    """Durable execution. Wraps every side effect in a journal entry."""
+    """Durable execution. Wraps every side effect in a journal entry.
+
+    Optional duck-typed extensions (NOT part of the protocol, so
+    existing third-party runtimes keep satisfying ``isinstance``
+    checks; callers must ``hasattr``-check before use). The built-in
+    runtimes (``InProcRuntime``, ``JournaledRuntime`` and its
+    Sqlite/Postgres subclasses) implement all of them:
+
+    * ``async wait_for_signal(session_id, name) -> Any`` — park until
+      a signal delivered via :meth:`signal` arrives; FIFO per name.
+    * ``poll_signal(session_id, name) -> Any | None`` — non-blocking
+      pop of a queued signal.
+    * ``async put_checkpoint(cp: Checkpoint) -> None`` /
+      ``async get_checkpoint(session_id, checkpoint_id)`` /
+      ``async get_latest_checkpoint(session_id)`` /
+      ``async list_checkpoints(session_id, limit=50)`` — durable
+      transcript snapshots for crash resume (see
+      ``loomflow.runtime.journal.Checkpoint``).
+    """
 
     name: str
 

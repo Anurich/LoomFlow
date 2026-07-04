@@ -79,10 +79,14 @@ import shutil
 import tempfile
 from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import anyio
 
 from .registry import Tool
+
+if TYPE_CHECKING:
+    from .executor import CodeExecutor
 
 # ---------------------------------------------------------------------------
 # Default workdir — lazily created on first use, shared across all
@@ -518,6 +522,7 @@ def bash_tool(
     extra_env: dict[str, str] | None = None,
     env_allowlist: Sequence[str] | None = None,
     inherit_env: bool = False,
+    executor: CodeExecutor | None = None,
 ) -> Tool:
     """Build a :class:`Tool` that runs a shell command with the
     workdir as the current working directory.
@@ -561,6 +566,15 @@ def bash_tool(
       subprocess env (applied last, on top of whichever base the
       two knobs above produced).
     * ``timeout`` — seconds before the command is killed.
+    * ``executor`` — a :class:`~loomflow.tools.executor.CodeExecutor`
+      to route execution through (Docker / remote sandbox adapters,
+      or :class:`~loomflow.tools.executor.SubprocessExecutor`).
+      Deny-pattern checks, the timeout, the computed env, and output
+      caps/formatting all still apply — only the process-spawning is
+      delegated. NOTE: the executor decides the working directory;
+      pass ``SubprocessExecutor(cwd=<same workdir>)`` to preserve
+      this tool's workdir-cwd semantics (remote executors have their
+      own filesystem). Default ``None`` = run on the host directly.
 
     ``workdir`` is optional; ``None`` uses the framework's default
     tempdir (shared with the other built-in tools).
@@ -609,44 +623,68 @@ def bash_tool(
         if extra_env:
             env.update(extra_env)
 
-        # Pick the host shell. ``/bin/sh`` doesn't exist on Windows
-        # — invoking it there raises ``FileNotFoundError`` with the
-        # confusing "[WinError 2] system cannot find the file
-        # specified" message. ``cmd.exe`` is the cross-version
-        # Windows fallback (PowerShell would also work but quoting
-        # rules diverge more from sh, so cmd is the safer default).
-        import sys as _sys
-        if _sys.platform == "win32":
-            argv = ["cmd.exe", "/c", command]
-        else:
-            argv = ["/bin/sh", "-c", command]
-
-        # Use anyio's subprocess support so we don't block the loop.
-        try:
-            with anyio.fail_after(effective_timeout):
-                process = await anyio.run_process(
-                    argv,
-                    cwd=str(workdir_path),
+        if executor is not None:
+            # Executor seam: delegate the spawn to the configured
+            # CodeExecutor (SubprocessExecutor / Docker / remote).
+            # The deny check ran above and the computed env is
+            # forwarded; timeout + output caps + formatting below
+            # stay identical to the host path.
+            try:
+                exec_result = await executor.run(
+                    command,
+                    language="bash",
+                    timeout_s=effective_timeout,
                     env=env,
-                    check=False,
                 )
-        except TimeoutError:
-            return (
-                f"ERROR: command timed out after "
-                f"{effective_timeout:.1f}s: {command!r}"
-            )
+            except Exception as exc:  # noqa: BLE001 — surface as tool text
+                return f"ERROR: executor failed: {type(exc).__name__}: {exc}"
+            if exec_result.timed_out:
+                return (
+                    f"ERROR: command timed out after "
+                    f"{effective_timeout:.1f}s: {command!r}"
+                )
+            stdout = exec_result.stdout
+            stderr = exec_result.stderr
+            rc: int | None = exec_result.returncode
+        else:
+            # Pick the host shell. ``/bin/sh`` doesn't exist on Windows
+            # — invoking it there raises ``FileNotFoundError`` with the
+            # confusing "[WinError 2] system cannot find the file
+            # specified" message. ``cmd.exe`` is the cross-version
+            # Windows fallback (PowerShell would also work but quoting
+            # rules diverge more from sh, so cmd is the safer default).
+            import sys as _sys
+            if _sys.platform == "win32":
+                argv = ["cmd.exe", "/c", command]
+            else:
+                argv = ["/bin/sh", "-c", command]
 
-        stdout = (
-            process.stdout.decode("utf-8", errors="replace")
-            if process.stdout
-            else ""
-        )
-        stderr = (
-            process.stderr.decode("utf-8", errors="replace")
-            if process.stderr
-            else ""
-        )
-        rc = process.returncode
+            # Use anyio's subprocess support so we don't block the loop.
+            try:
+                with anyio.fail_after(effective_timeout):
+                    process = await anyio.run_process(
+                        argv,
+                        cwd=str(workdir_path),
+                        env=env,
+                        check=False,
+                    )
+            except TimeoutError:
+                return (
+                    f"ERROR: command timed out after "
+                    f"{effective_timeout:.1f}s: {command!r}"
+                )
+
+            stdout = (
+                process.stdout.decode("utf-8", errors="replace")
+                if process.stdout
+                else ""
+            )
+            stderr = (
+                process.stderr.decode("utf-8", errors="replace")
+                if process.stderr
+                else ""
+            )
+            rc = process.returncode
 
         # Truncate huge outputs so the model isn't blown up
         max_len = 10_000

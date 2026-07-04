@@ -96,6 +96,7 @@ class LiteLLMModel(OpenAIModel):
         client: Any | None = None,
         secrets: Any | None = None,
         cost_per_mtoken: tuple[float, float] | None = None,
+        request_timeout_s: float | None = None,
         **litellm_kwargs: Any,
     ) -> None:
         if client is None:
@@ -128,11 +129,17 @@ class LiteLLMModel(OpenAIModel):
         # purely to satisfy OpenAIModel's signature; LiteLLM itself
         # picks up provider-specific keys from environment variables
         # or the ``api_key=`` we shoved into the defaults above.
+        # ``request_timeout_s`` rides OpenAIModel's implementation:
+        # the inherited ``complete`` / ``stream`` put ``timeout=``
+        # into the request kwargs (LiteLLM's ``acompletion`` accepts
+        # it and forwards per provider) and enforce the same anyio
+        # wall-clock deadline over the chunk iteration.
         super().__init__(
             model,
             client=client,
             api_key=api_key,
             cost_per_mtoken=cost_per_mtoken,
+            request_timeout_s=request_timeout_s,
         )
 
     def _response_format(self, output_schema: Any | None) -> dict[str, Any] | None:

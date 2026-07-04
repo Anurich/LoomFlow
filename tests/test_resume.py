@@ -32,8 +32,11 @@ async def test_run_with_session_id_uses_provided_value() -> None:
 
 
 async def test_resume_is_alias_for_run_with_session_id() -> None:
+    """With no checkpoint recorded (checkpointing is opt-in via
+    ``Tuning(checkpoint=True)``), ``resume`` falls back to the legacy
+    behaviour: ``run(prompt, session_id=...)``."""
     agent = Agent("hi", model="echo")
-    via_resume = await agent.resume("custom-sess-2", "hello")
+    via_resume = await agent.resume("hello", session_id="custom-sess-2")
     assert via_resume.session_id == "custom-sess-2"
 
 
@@ -88,7 +91,7 @@ async def test_resume_replays_model_call_from_journal() -> None:
     # the model input genuinely different — a conversation
     # continuation, not a crash-resume).
     agent_b = Agent("hi", model=model, runtime=runtime)
-    r2 = await agent_b.resume("fixed", "what is the answer")
+    r2 = await agent_b.resume("what is the answer", session_id="fixed")
     assert r2.output == "The answer is 42."
     assert model.remaining == 0  # still consumed; nothing new asked
 
@@ -129,7 +132,7 @@ async def test_resume_replays_tool_call_from_journal() -> None:
     # true after a restart, but not with the same live agent whose
     # memory now rehydrates the completed first turn into the prompt.
     agent_b = Agent("hi", model=model, tools=[expensive], runtime=runtime)
-    r2 = await agent_b.resume("fixed-tool", "do the thing")
+    r2 = await agent_b.resume("do the thing", session_id="fixed-tool")
     assert r2.output == r1.output
     # Tool function NEVER ran a second time.
     assert call_log == ["x"]
@@ -175,7 +178,7 @@ async def test_resume_against_fresh_sqlite_runtime(tmp_path: Path) -> None:
     )
     rt_b = SqliteRuntime(db)
     agent_b = Agent("hi", model=model_b, tools=[expensive], runtime=rt_b)
-    r_b = await agent_b.resume("resumable", "go")
+    r_b = await agent_b.resume("go", session_id="resumable")
 
     # Same output (model chunks replayed from journal); tool function
     # NEVER ran again.
