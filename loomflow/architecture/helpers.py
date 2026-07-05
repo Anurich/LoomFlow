@@ -655,20 +655,22 @@ async def run_single_tool(
             # block below. ``execute_call`` stays True only when
             # every gate (deny / ask) approved.
             execute_call = True
-            # When ``deps.fast_hooks`` is True we never actually
-            # ran a hook — the ``allow_()`` we pre-set above is a
-            # default, not an explicit approval. Distinguish so an
-            # ``ask`` from permissions doesn't get silently bypassed
-            # by the absence of a hook layer.
-            hook_explicitly_allowed = (
-                (not deps.fast_hooks) and hook_decision.allow
-            )
+            # An ``ask`` from permissions ALWAYS routes through the
+            # approval handler. The hook layer cannot pre-approve it:
+            # ``HookRegistry.pre_tool`` is "first deny wins, otherwise
+            # allow", so its ``allow_()`` is a no-opinion default —
+            # never an explicit approval. An earlier version treated
+            # that default as explicit whenever ANY hook was attached
+            # (``not fast_hooks and hook_decision.allow``), which
+            # silently disabled the approval gate for every agent with
+            # a hook registered — destructive writes/edits/bash ran
+            # ungated. Hooks influence the gate by DENYING only.
             if perm.deny:
                 result = ToolResult.denied_(
                     call.id, perm.reason or "denied by policy"
                 )
                 execute_call = False
-            elif perm.ask and not hook_explicitly_allowed:
+            elif perm.ask:
                 # Permissions returned ``ask`` — route the decision
                 # through the configured approval handler. When no
                 # handler is wired, fall back to a deny so the agent

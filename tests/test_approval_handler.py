@@ -183,3 +183,106 @@ async def test_handler_raising_treated_as_deny() -> None:
     result = await agent.run("go", user_id="alice")
     assert result.output == "aborted"
     assert invocations == []
+
+
+# ---------------------------------------------------------------------------
+# Hooks must not pre-approve an ask (regression)
+# ---------------------------------------------------------------------------
+
+
+async def test_ask_still_routes_to_handler_with_hooks_attached() -> None:
+    """A registered hook must NOT bypass the approval gate.
+
+    Regression: the loop treated the hook layer's default
+    ``allow_()`` (HookRegistry.pre_tool is "first deny wins,
+    otherwise allow") as an EXPLICIT approval whenever any hook was
+    attached (``not fast_hooks and hook_decision.allow``). Result:
+    an agent with any pre- OR post-tool hook registered silently
+    skipped the approval handler for every destructive call —
+    writes/edits/bash ran ungated in DEFAULT mode.
+    """
+    from loomflow import HookRegistry
+
+    seen: list[str] = []
+
+    async def approve(call: ToolCall, user_id: str | None) -> bool:
+        seen.append(call.tool)
+        return True
+
+    hooks = HookRegistry()
+
+    # A no-op post-tool hook — the loom-code shape (loop_guard /
+    # diagnostics): its mere PRESENCE flipped fast_hooks off and
+    # triggered the bypass.
+    async def _observe(call: ToolCall, result) -> None:  # noqa: ANN001
+        return None
+
+    hooks.register_post_tool(_observe)
+
+    # And a no-opinion pre-tool hook (returns None → registry
+    # default-allows) — the other half of the bypass condition.
+    async def _no_opinion(call: ToolCall):  # noqa: ANN202
+        return None
+
+    hooks.register_pre_tool(_no_opinion)
+
+    agent = Agent(
+        "delete things when asked",
+        model=ScriptedModel([
+            ScriptedTurn(tool_calls=[
+                ToolCall(tool="_delete_tool", args={"_path": "/tmp/x"},
+                         destructive=True)
+            ]),
+            ScriptedTurn(text="done"),
+        ]),
+        memory=InMemoryMemory(),
+        permissions=StandardPermissions(mode=Mode.DEFAULT),
+        tools=[_delete_tool],
+        approval_handler=approve,
+        hooks=hooks,
+    )
+
+    result = await agent.run("go", user_id="alice")
+    assert result.output == "done"
+    # The gate MUST have consulted the handler despite the hooks.
+    assert seen == ["_delete_tool"]
+
+
+async def test_ask_denied_with_hooks_and_no_handler() -> None:
+    """With hooks attached and NO approval handler, an ask must
+    still fall back to deny — not silently execute."""
+    from loomflow import HookRegistry
+
+    executed: list[str] = []
+
+    def _delete_recording(_path: str) -> str:
+        executed.append(_path)
+        return "deleted"
+
+    hooks = HookRegistry()
+
+    async def _observe(call: ToolCall, result) -> None:  # noqa: ANN001
+        return None
+
+    hooks.register_post_tool(_observe)
+
+    agent = Agent(
+        "delete things when asked",
+        model=ScriptedModel([
+            ScriptedTurn(tool_calls=[
+                ToolCall(tool="_delete_recording",
+                         args={"_path": "/tmp/x"},
+                         destructive=True)
+            ]),
+            ScriptedTurn(text="blocked"),
+        ]),
+        memory=InMemoryMemory(),
+        permissions=StandardPermissions(mode=Mode.DEFAULT),
+        tools=[_delete_recording],
+        hooks=hooks,
+    )
+
+    result = await agent.run("go", user_id="alice")
+    assert result.output == "blocked"
+    # The tool must NOT have executed — ask with no handler is deny.
+    assert executed == []
