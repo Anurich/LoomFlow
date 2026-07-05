@@ -136,6 +136,42 @@ class ReAct:
             if blocked:
                 break
 
+            # Steering — mid-run user guidance. The application can
+            # pass a queue-like object in the run context's metadata
+            # under ``_loom_steering`` (the ``_loom_images`` pattern);
+            # anything the user typed while the loop was working is
+            # appended as fresh USER messages before the next model
+            # call, so guidance lands mid-run instead of waiting for
+            # the whole run to finish. Duck-typed: the object needs a
+            # ``pop_all() -> list[str]``; absent/empty → zero-cost
+            # no-op. Each injection is surfaced as a
+            # ``react.steering_injected`` event so streaming UIs can
+            # render it.
+            try:
+                from ..core import get_run_context
+
+                _steer_ctx = get_run_context()
+                _steer = (
+                    (_steer_ctx.metadata or {}).get("_loom_steering")
+                    if _steer_ctx
+                    else None
+                )
+                if _steer is not None and hasattr(_steer, "pop_all"):
+                    for _steer_msg in _steer.pop_all():
+                        _steer_text = str(_steer_msg).strip()
+                        if not _steer_text:
+                            continue
+                        session.messages.append(
+                            Message(role=Role.USER, content=_steer_text)
+                        )
+                        yield Event.architecture_event(
+                            session.id,
+                            "react.steering_injected",
+                            content=_steer_text,
+                        )
+            except Exception:  # noqa: BLE001 — steering is best-effort
+                pass
+
             session.turns += 1
 
             turn_trace: contextlib.AbstractAsyncContextManager[Any] = (
