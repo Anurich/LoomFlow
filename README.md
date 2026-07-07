@@ -106,6 +106,13 @@ multi-tenancy / structured outputs / retries by hand.
   `model="claude-opus-4-7"`, `"gpt-4.1-mini"`, `"mistral-large"`, …
 * **Pluggable architectures** — twelve shipped, same `Agent`
   surface, one kwarg switches the iteration strategy.
+* **Per-role model routing** — plan with a frontier model, execute
+  with a cheap one, *inside one agent*:
+  `PlanAndExecute(planner_model="claude-fable-5",
+  executor_model="claude-haiku-4-5")`. Same `<role>_model=` kwargs
+  on `TreeOfThoughts` / `ReWOO` / `Reflexion` / `SelfRefine`; every
+  `Team` seat already carries its own `model=`. Right model for the
+  right task — 60–90% cheaper architecture runs.
 * **MCP-native** — MCP is the tool spine, not an integration. Any
   MCP server (Composio, custom hosted gateways, local stdio
   servers) plugs into a single `MCPRegistry`.

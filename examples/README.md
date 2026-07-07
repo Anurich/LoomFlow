@@ -1,6 +1,6 @@
 # Examples
 
-Thirty end-to-end examples that exercise Loom's own
+Thirty-one end-to-end examples that exercise Loom's own
 primitives — loader, vector store, retriever-as-tool pattern,
 multi-agent architectures, multi-user / session-continuity
 primitives, the workflow + agent composition story, observability
@@ -10,8 +10,8 @@ provider-aware prompt caching, the TodoWrite-style living plan
 primitive, the workspace lifecycle / self-improvement surface, and
 the v0.11 wave (tool search, code mode, durable resume, rich HITL,
 guardrails, evals, fallback chains, rate limiting, graph memory,
-token-budgeted injection). Nothing pulled in from outside the
-framework.
+token-budgeted injection, per-role model routing). Nothing pulled in
+from outside the framework.
 
 ## Agent + retrieval + memory
 
@@ -105,6 +105,7 @@ working tree: `pip install -e .` (or `PYTHONPATH=. python examples/NN_....py`).
 | [`28_eval_harness.py`](28_eval_harness.py) | **Eval harness** — `Dataset` (JSONL round-trip) + `EvalHarness` running cases concurrently; `ExactMatch`, `ToolSelectionAccuracy`, and an `LLMJudge` (scripted judge, `score:` line discipline); `report.summary()` + `assert_thresholds({...})` as a CI release gate (one passing, one deliberately failing). | No |
 | [`29_resilience_governance.py`](29_resilience_governance.py) | **Model fallback + per-tenant rate limiting** — `FallbackModel([primary, backup])` fails over when the primary raises a 429 (never on auth/content-filter); `TokenBucketRateLimiter(rps=5, burst=2)` paces one user's burst with a stopwatch while a second user's independent bucket stays instant. Mentions `request_timeout_s=` per-request wall clocks. | No |
 | [`30_graph_memory_and_budget.py`](30_graph_memory_and_budget.py) | **Graph memory + token-budgeted injection** — `recall_graph()` answers a 2-hop question ("where does alice's employer operate?") over bi-temporal facts, with **point-in-time** traversal: after a job change the current query walks the new edge while `valid_at=<March>` still finds the old employer's city. Then `Tuning(memory_token_budget=400, memory_decay_half_life_days=30)` shrinks a 29k-char recalled block to ~1.6k, relevance×recency-ranked, working blocks pinned. | No |
+| [`31_model_routing.py`](31_model_routing.py) | **Per-role model routing** — "plan expensive, execute cheap" inside ONE agent: `PlanAndExecute(planner_model=<frontier>, executor_model=<cheap>)` and `TreeOfThoughts(evaluator_model=<cheap>)`. Recording fakes prove which model served which call (planner 1 call, executor N calls, scorer calls all rerouted). Also covers the between-agents version via `Team` workers each carrying their own `model=`. Same kwargs on `ReWOO`/`Reflexion`/`SelfRefine`. | No |
 
 ## Run
 

@@ -58,12 +58,14 @@ from .helpers import (
     budget_gate,
     consume_usage,
     parse_fenced_json,
+    resolve_role_model,
     strip_markdown_fences,
     text_only_model_call,
 )
 
 if TYPE_CHECKING:
     from ..agent.api import Agent
+    from ..core.protocols import Model
 
 
 DEFAULT_PLANNER_PROMPT = """\
@@ -124,6 +126,9 @@ class PlanAndExecute:
         planner_prompt: str | None = None,
         executor_prompt: str | None = None,
         synthesizer_prompt: str | None = None,
+        planner_model: str | Model | None = None,
+        executor_model: str | Model | None = None,
+        synthesizer_model: str | Model | None = None,
     ) -> None:
         if max_steps < 1:
             raise ValueError("max_steps must be >= 1")
@@ -137,6 +142,12 @@ class PlanAndExecute:
         self._synthesizer_prompt = (
             synthesizer_prompt or DEFAULT_SYNTHESIZER_PROMPT
         )
+        # Per-role model routing — the "plan with a frontier model,
+        # execute with a cheap one" split, inside one agent. ``None``
+        # = the agent's main model (``deps.model``).
+        self._planner_model = resolve_role_model(planner_model)
+        self._executor_model = resolve_role_model(executor_model)
+        self._synthesizer_model = resolve_role_model(synthesizer_model)
 
     def declared_workers(self) -> dict[str, Agent]:
         return {}
@@ -237,7 +248,7 @@ class PlanAndExecute:
             Message(role=Role.USER, content=prompt),
         ]
         text, usage = await text_only_model_call(
-            deps, "plan_planner", msgs
+            deps, "plan_planner", msgs, model=self._planner_model
         )
         await consume_usage(deps, session, usage)
         return _parse_plan(text)
@@ -279,7 +290,7 @@ class PlanAndExecute:
             Message(role=Role.USER, content=user_content),
         ]
         text, usage = await text_only_model_call(
-            deps, f"plan_step_{step.id}", msgs
+            deps, f"plan_step_{step.id}", msgs, model=self._executor_model
         )
         await consume_usage(deps, session, usage)
         return text.strip()
@@ -316,6 +327,7 @@ class PlanAndExecute:
             deps,
             "plan_synthesizer",
             msgs,
+            model=self._synthesizer_model,
             output_schema=deps.output_schema,
         )
         await consume_usage(deps, session, usage)

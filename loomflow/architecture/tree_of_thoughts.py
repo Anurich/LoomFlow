@@ -78,11 +78,13 @@ from .helpers import (
     budget_gate,
     consume_usage,
     parse_score,
+    resolve_role_model,
     text_only_model_call,
 )
 
 if TYPE_CHECKING:
     from ..agent.api import Agent
+    from ..core.protocols import Model
 
 
 DEFAULT_PROPOSER_PROMPT = """\
@@ -163,6 +165,9 @@ class TreeOfThoughts:
         evaluator_prompt: str | None = None,
         synthesize_final: bool = True,
         synthesizer_prompt: str | None = None,
+        proposer_model: str | Model | None = None,
+        evaluator_model: str | Model | None = None,
+        synthesizer_model: str | Model | None = None,
     ) -> None:
         if branch_factor < 1:
             raise ValueError("branch_factor must be >= 1")
@@ -207,6 +212,14 @@ class TreeOfThoughts:
         self._synthesizer_prompt = (
             synthesizer_prompt or DEFAULT_SYNTHESIZER_PROMPT
         )
+        # Per-role model routing: the evaluator's "rate this thought
+        # 0-1" calls are cheap-model territory (branch_factor *
+        # beam_width * depth of them per run), while proposals and the
+        # final synthesis may warrant the main model. ``None`` = use
+        # the agent's model (``deps.model``) — today's behavior.
+        self._proposer_model = resolve_role_model(proposer_model)
+        self._evaluator_model = resolve_role_model(evaluator_model)
+        self._synthesizer_model = resolve_role_model(synthesizer_model)
 
     def declared_workers(self) -> dict[str, Agent]:
         return {}
@@ -287,6 +300,7 @@ class TreeOfThoughts:
                     deps,
                     f"tot_propose_d{depth}_p{parent.id}",  # noqa: B023
                     msgs,
+                    model=self._proposer_model,
                 )
                 propose_results[idx] = (text, usage)  # noqa: B023
 
@@ -337,7 +351,10 @@ class TreeOfThoughts:
                     self._evaluator_prompt, prompt, chain, cand
                 )
                 text, usage = await text_only_model_call(
-                    deps, f"tot_eval_d{depth}_n{cand.id}", msgs  # noqa: B023
+                    deps,
+                    f"tot_eval_d{depth}_n{cand.id}",  # noqa: B023
+                    msgs,
+                    model=self._evaluator_model,
                 )
                 eval_results[idx] = (parse_score(text), usage)  # noqa: B023
 
@@ -448,6 +465,7 @@ class TreeOfThoughts:
                 deps,
                 "tot_synthesize",
                 synth_msgs,
+                model=self._synthesizer_model,
                 output_schema=deps.output_schema,
             )
             await consume_usage(deps, session, synth_usage)

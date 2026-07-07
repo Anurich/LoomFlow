@@ -79,12 +79,14 @@ from .helpers import (
     budget_gate,
     consume_usage,
     parse_score,
+    resolve_role_model,
     text_only_model_call,
 )
 from .react import ReAct
 
 if TYPE_CHECKING:
     from ..agent.api import Agent
+    from ..core.protocols import Model
     from ..vectorstore.base import VectorStore
 
 
@@ -159,6 +161,8 @@ class Reflexion:
         lessons_block_name: str = "reflexion_lessons",
         lesson_store: VectorStore | None = None,
         top_k_lessons: int = 5,
+        evaluator_model: str | Model | None = None,
+        reflector_model: str | Model | None = None,
     ) -> None:
         if max_attempts < 1:
             raise ValueError("max_attempts must be >= 1")
@@ -174,6 +178,11 @@ class Reflexion:
         self._lessons_block = lessons_block_name
         self._lesson_store = lesson_store
         self._top_k = top_k_lessons
+        # Per-role model routing — the pass/fail evaluator and the
+        # one-sentence reflector are cheap-model territory; the base
+        # attempt keeps the agent's main model. ``None`` = main model.
+        self._evaluator_model = resolve_role_model(evaluator_model)
+        self._reflector_model = resolve_role_model(reflector_model)
 
     def declared_workers(self) -> dict[str, Agent]:
         return {}
@@ -365,7 +374,10 @@ class Reflexion:
             ),
         ]
         text, usage = await text_only_model_call(
-            deps, f"reflexion_eval_{attempt}", msgs
+            deps,
+            f"reflexion_eval_{attempt}",
+            msgs,
+            model=self._evaluator_model,
         )
         await consume_usage(deps, session, usage)
         return parse_score(text)
@@ -390,7 +402,10 @@ class Reflexion:
             ),
         ]
         text, usage = await text_only_model_call(
-            deps, f"reflexion_reflect_{attempt}", msgs
+            deps,
+            f"reflexion_reflect_{attempt}",
+            msgs,
+            model=self._reflector_model,
         )
         await consume_usage(deps, session, usage)
         return text.strip()

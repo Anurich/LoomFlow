@@ -70,12 +70,14 @@ from .helpers import (
     budget_gate,
     consume_usage,
     parse_fenced_json,
+    resolve_role_model,
     run_gated_tool,
     text_only_model_call,
 )
 
 if TYPE_CHECKING:
     from ..agent.api import Agent
+    from ..core.protocols import Model
 
 
 DEFAULT_PLANNER_PROMPT = """\
@@ -149,6 +151,8 @@ class ReWOO:
         planner_prompt: str | None = None,
         solver_prompt: str | None = None,
         parallel_levels: bool = True,
+        planner_model: str | Model | None = None,
+        solver_model: str | Model | None = None,
     ) -> None:
         if max_steps < 1:
             raise ValueError("max_steps must be >= 1")
@@ -160,6 +164,11 @@ class ReWOO:
             solver_prompt or DEFAULT_SOLVER_PROMPT
         )
         self._parallel_levels = parallel_levels
+        # Per-role model routing — plan with one model, solve with
+        # another; tool steps run through the tool host (no model).
+        # ``None`` = the agent's main model (``deps.model``).
+        self._planner_model = resolve_role_model(planner_model)
+        self._solver_model = resolve_role_model(solver_model)
 
     def declared_workers(self) -> dict[str, Agent]:
         return {}
@@ -290,7 +299,7 @@ class ReWOO:
             Message(role=Role.USER, content=prompt),
         ]
         text, usage = await text_only_model_call(
-            deps, "rewoo_planner", msgs
+            deps, "rewoo_planner", msgs, model=self._planner_model
         )
         await consume_usage(deps, session, usage)
         return _parse_rewoo_plan(text)
@@ -329,6 +338,7 @@ class ReWOO:
             deps,
             "rewoo_solver",
             msgs,
+            model=self._solver_model,
             output_schema=deps.output_schema,
         )
         await consume_usage(deps, session, usage)

@@ -80,6 +80,29 @@ if TYPE_CHECKING:
 _NULL_CTX: contextlib.AbstractAsyncContextManager[None] = contextlib.nullcontext()
 
 
+def resolve_role_model(spec: str | Model | None) -> Model | None:
+    """Resolve a per-role model kwarg (``planner_model=`` etc.).
+
+    Architectures let callers assign a *different* model to an
+    internal role — e.g. a Haiku-class scorer for
+    ``TreeOfThoughts(evaluator_model=...)`` while ``deps.model``
+    stays on the frontier model. Accepts the same forms as
+    ``Agent(model=)``: a spec string (``"claude-haiku-4-5"``), a
+    ``Model`` instance (incl. ``RetryingModel`` / ``FallbackModel``
+    wrappers — role models are NOT auto-wrapped with retries, same
+    convention as the ``run_until`` checker), or ``None`` meaning
+    "use the agent's main model".
+
+    The import is lazy to avoid the agent<->architecture module
+    cycle (same pattern as the worker_registry imports below).
+    """
+    if spec is None or not isinstance(spec, str):
+        return spec
+    from ..agent.api import _resolve_model  # lazy, cycle-safe
+
+    return _resolve_model(spec)
+
+
 async def text_only_model_call(
     deps: Dependencies,
     step_name: str,

@@ -45,11 +45,17 @@ from typing import TYPE_CHECKING
 
 from ..core.types import Event, Message, Role
 from .base import AgentSession, Architecture, Dependencies
-from .helpers import budget_gate, consume_usage, text_only_model_call
+from .helpers import (
+    budget_gate,
+    consume_usage,
+    resolve_role_model,
+    text_only_model_call,
+)
 from .react import ReAct
 
 if TYPE_CHECKING:
     from ..agent.api import Agent
+    from ..core.protocols import Model
 
 
 DEFAULT_CRITIC_PROMPT = """\
@@ -93,6 +99,8 @@ class SelfRefine:
         critic_prompt: str | None = None,
         refiner_prompt: str | None = None,
         stop_phrase: str = "no issues",
+        critic_model: str | Model | None = None,
+        refiner_model: str | Model | None = None,
     ) -> None:
         if max_rounds < 1:
             raise ValueError("max_rounds must be >= 1")
@@ -101,6 +109,11 @@ class SelfRefine:
         self._critic_prompt = critic_prompt or DEFAULT_CRITIC_PROMPT
         self._refiner_prompt = refiner_prompt or DEFAULT_REFINER_PROMPT
         self._stop_phrase = stop_phrase
+        # Per-role model routing — critique with a cheap model while
+        # the initial draft (base architecture) keeps the agent's
+        # main model. ``None`` = main model (``deps.model``).
+        self._critic_model = resolve_role_model(critic_model)
+        self._refiner_model = resolve_role_model(refiner_model)
 
     def declared_workers(self) -> dict[str, Agent]:
         return {}
@@ -153,7 +166,10 @@ class SelfRefine:
                 ),
             ]
             critique, critic_usage = await text_only_model_call(
-                deps, f"self_refine_critic_{round_num}", critic_messages
+                deps,
+                f"self_refine_critic_{round_num}",
+                critic_messages,
+                model=self._critic_model,
             )
             await consume_usage(deps, session, critic_usage)
 
@@ -198,6 +214,7 @@ class SelfRefine:
                 deps,
                 f"self_refine_refiner_{round_num}",
                 refiner_messages,
+                model=self._refiner_model,
                 output_schema=deps.output_schema,
             )
             await consume_usage(deps, session, refiner_usage)
