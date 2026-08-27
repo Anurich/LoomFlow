@@ -12,10 +12,12 @@ target by default. Two ways to keep up:
 
 * Override at the call site — adapters accept a ``cost_per_mtoken=``
   constructor kwarg (an ``(input_rate, output_rate)`` tuple in USD
-  per million tokens) which flows through :func:`estimate_cost`'s
-  ``override=`` parameter and takes precedence over the table. For
-  users with negotiated rates / enterprise discounts, or models the
-  table doesn't know.
+  per million tokens, optionally with a third ``cached_input_rate``
+  element) which flows through :func:`estimate_cost`'s ``override=``
+  parameter and takes precedence over the table. For users with
+  negotiated rates / enterprise discounts, models the table doesn't
+  know, or gateways whose cached rate isn't a standard fraction of
+  the input rate.
 * Update :data:`PRICING_PER_MTOKEN` and ship a patch release.
 
 Models the table doesn't recognise fall through to a longest-prefix
@@ -84,6 +86,16 @@ PRICING_PER_MTOKEN: dict[str, tuple[float, float]] = {
     "claude-3-opus":    (15.00, 75.00),
     "claude-3-haiku":   (0.25,   1.25),
 
+    # ----- DeepSeek -------------------------------------------------------
+    # V3.2 unified pricing (chat and reasoner converged). Cache hits
+    # bill at 10% of the input rate — the "deepseek" entry in
+    # _CACHE_READ_MULTIPLIER. The V4 gateway names (deepseek-v4-flash /
+    # deepseek-v4-pro) are resold at gateway-specific rates, so they
+    # are deliberately NOT listed: pass cost_per_mtoken=(in, out,
+    # cached_in) with your gateway's actual rates instead.
+    "deepseek-chat":     (0.28,   0.42),
+    "deepseek-reasoner": (0.28,   0.42),
+
     # ----- LiteLLM-routed common providers --------------------------------
     "mistral-large":    (3.00,   9.00),
     "mistral-medium":   (2.70,   8.10),
@@ -116,6 +128,7 @@ _CACHE_READ_MULTIPLIER: dict[str, float] = {
     "openai": 0.5,
     "anthropic": 0.1,
     "gemini": 0.1,
+    "deepseek": 0.1,  # official context-caching hit rate
     "litellm": 0.5,   # routed; conservative
 }
 
@@ -123,6 +136,7 @@ _CACHE_WRITE_MULTIPLIER: dict[str, dict[str, float]] = {
     "openai": {"5m": 0.0, "1h": 0.0},     # OpenAI doesn't bill writes
     "anthropic": {"5m": 1.25, "1h": 2.0},
     "gemini": {"5m": 0.0, "1h": 0.0},     # cache storage billed separately
+    "deepseek": {"5m": 0.0, "1h": 0.0},   # writes bill as normal input
     "litellm": {"5m": 1.25, "1h": 2.0},   # assume Anthropic-style
 }
 
@@ -165,6 +179,8 @@ def _provider_for(model: str) -> str:
         return "openai"
     if model.startswith("gemini-"):
         return "gemini"
+    if model.startswith("deepseek"):
+        return "deepseek"
     return "openai"  # safe default for the longest-prefix fallback path
 
 
@@ -176,7 +192,7 @@ def estimate_cost(
     cached_input_tokens: int = 0,
     cache_write_tokens: int = 0,
     cache_ttl: str = "5m",
-    override: tuple[float, float] | None = None,
+    override: tuple[float, float] | tuple[float, float, float] | None = None,
 ) -> float:
     """Return the USD cost of a model call given its token buckets.
 
@@ -191,10 +207,14 @@ def estimate_cost(
     * ``output_tokens`` — completion at the model's output rate.
     * ``cache_ttl`` — ``"5m"`` (default) or ``"1h"``. Affects only
       the cache-write rate.
-    * ``override`` — optional ``(input_rate, output_rate)`` in USD
-      per million tokens. Wired from the adapters'
-      ``cost_per_mtoken=`` constructor kwarg; skips the table lookup
-      (and the unknown-model warning) entirely.
+    * ``override`` — optional ``(input_rate, output_rate)`` or
+      ``(input_rate, output_rate, cached_input_rate)`` in USD per
+      million tokens. Wired from the adapters' ``cost_per_mtoken=``
+      constructor kwarg; skips the table lookup (and the
+      unknown-model warning) entirely. The 3-tuple form bills cache
+      hits at the given **absolute** rate instead of the provider's
+      multiplier — for gateways / resellers whose cached rate isn't
+      a standard fraction of the input rate.
 
     Lookup order:
 
@@ -224,17 +244,25 @@ def estimate_cost(
                 stacklevel=3,
             )
         return 0.0
-    in_rate, out_rate = pricing
+    # 3-tuple override carries an absolute cached-input rate; the
+    # 2-tuple form (and the table) falls back to the provider's
+    # cache-read multiplier.
+    cached_rate: float | None = None
+    if len(pricing) == 3:
+        in_rate, out_rate, cached_rate = pricing
+    else:
+        in_rate, out_rate = pricing
 
     provider = _provider_for(model)
-    read_mult = _cache_read_multiplier(model, provider)
+    if cached_rate is None:
+        cached_rate = in_rate * _cache_read_multiplier(model, provider)
     write_mult = _CACHE_WRITE_MULTIPLIER.get(provider, {}).get(
         cache_ttl, 1.25
     )
 
     total = (
         input_tokens * in_rate
-        + cached_input_tokens * (in_rate * read_mult)
+        + cached_input_tokens * cached_rate
         + cache_write_tokens * (in_rate * write_mult)
         + output_tokens * out_rate
     )

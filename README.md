@@ -46,8 +46,9 @@ asyncio.run(main())
 ```
 
 Set `OPENAI_API_KEY` and run. Swap `"gpt-4.1-mini"` for
-`"claude-opus-4-7"`, `"mistral-large"`, `"command-r-plus"`,
-`"echo"` (zero-key fake), or any of ~100 providers via LiteLLM.
+`"claude-opus-4-7"`, `"deepseek-chat"`, `"mistral-large"`,
+`"command-r-plus"`, `"echo"` (zero-key fake), or any of ~100
+providers via LiteLLM.
 
 **What's actually different about this framework:**
 
@@ -101,9 +102,9 @@ multi-tenancy / structured outputs / retries by hand.
 
 **Capabilities at a glance:**
 
-* **Model-agnostic** — Anthropic, OpenAI, and ~100 more via LiteLLM
-  behind one `Model` protocol. String-based resolver:
-  `model="claude-opus-4-7"`, `"gpt-4.1-mini"`, `"mistral-large"`, …
+* **Model-agnostic** — Anthropic, OpenAI, DeepSeek, and ~100 more via
+  LiteLLM behind one `Model` protocol. String-based resolver:
+  `model="claude-opus-4-7"`, `"gpt-4.1-mini"`, `"deepseek-chat"`, …
 * **Pluggable architectures** — twelve shipped, same `Agent`
   surface, one kwarg switches the iteration strategy.
 * **Per-role model routing** — plan with a frontier model, execute

@@ -75,7 +75,9 @@ class OpenAIModel:
         api_key: str | None = None,
         base_url: str | None = None,
         secrets: Any | None = None,
-        cost_per_mtoken: tuple[float, float] | None = None,
+        cost_per_mtoken: tuple[float, float]
+        | tuple[float, float, float]
+        | None = None,
         request_timeout_s: float | None = None,
     ) -> None:
         self.name = model
@@ -198,8 +200,16 @@ class OpenAIModel:
         # cache-hit routing when many requests share a long prefix
         # (e.g. per-user system prompt). Forward it when the caller
         # supplied one via ``PromptCacheConfig(cache_key=...)``.
-        if prompt_caching is not None and getattr(
-            prompt_caching, "cache_key", None
+        # For OpenAI-compatible gateways that fail over across
+        # upstream hosts, this key is what pins consecutive requests
+        # to one host — without it the prefix cache never gets a
+        # second look, so it is the ONLY wire-visible caching knob on
+        # this path. Gated on ``enabled`` (the config's master
+        # switch); duck-typed configs without the field still forward.
+        if (
+            prompt_caching is not None
+            and getattr(prompt_caching, "enabled", True)
+            and getattr(prompt_caching, "cache_key", None)
         ):
             kwargs["prompt_cache_key"] = prompt_caching.cache_key
 
@@ -296,6 +306,12 @@ class OpenAIModel:
         # convention so downstream Usage math doesn't double-count.
         details = getattr(u, "prompt_tokens_details", None)
         cache_read = getattr(details, "cached_tokens", 0) or 0
+        if not cache_read:
+            # DeepSeek's OpenAI-compatible API reports cache hits as
+            # a top-level ``prompt_cache_hit_tokens`` field (same
+            # subset-of-prompt_tokens semantics). Fall back to it so
+            # direct-to-DeepSeek callers get honest cache accounting.
+            cache_read = getattr(u, "prompt_cache_hit_tokens", 0) or 0
         in_tok = max(0, total_in - cache_read)  # uncached portion
         usage = Usage(
             input_tokens=in_tok,
@@ -347,9 +363,12 @@ class OpenAIModel:
         kwargs.update(self._effort_kwargs(effort, strict_effort))
         # See the ``complete()`` path for the rationale — caching is
         # automatic on OpenAI; only the optional routing hint flows
-        # through here.
-        if prompt_caching is not None and getattr(
-            prompt_caching, "cache_key", None
+        # through here (and it's what pins failover gateways to one
+        # upstream host so the prefix cache can hit).
+        if (
+            prompt_caching is not None
+            and getattr(prompt_caching, "enabled", True)
+            and getattr(prompt_caching, "cache_key", None)
         ):
             kwargs["prompt_cache_key"] = prompt_caching.cache_key
 
@@ -391,6 +410,12 @@ class OpenAIModel:
                 # them as separate buckets.
                 details = getattr(chunk_usage, "prompt_tokens_details", None)
                 cache_read = getattr(details, "cached_tokens", 0) or 0
+                if not cache_read:
+                    # DeepSeek-native field name; see ``complete()``.
+                    cache_read = (
+                        getattr(chunk_usage, "prompt_cache_hit_tokens", 0)
+                        or 0
+                    )
                 in_tok = max(0, total_in - cache_read)
                 usage = Usage(
                     input_tokens=in_tok,

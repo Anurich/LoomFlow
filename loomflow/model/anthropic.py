@@ -231,7 +231,9 @@ class AnthropicModel:
         api_key: str | None = None,
         max_tokens: int = DEFAULT_MAX_TOKENS,
         secrets: Any | None = None,
-        cost_per_mtoken: tuple[float, float] | None = None,
+        cost_per_mtoken: tuple[float, float]
+        | tuple[float, float, float]
+        | None = None,
         request_timeout_s: float | None = None,
     ) -> None:
         self.name = model

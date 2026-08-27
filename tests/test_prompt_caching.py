@@ -517,3 +517,132 @@ async def test_run_result_carries_cache_fields() -> None:
     assert result.cache_write_tokens == 50
     assert result.tokens_out == 20
     assert result.cost_usd == pytest.approx(0.123, abs=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# DeepSeek + gateway support — provider rates, 3-tuple override,
+# native usage-field fallback, enabled gate on the cache key
+# ---------------------------------------------------------------------------
+
+
+def test_deepseek_cache_read_is_10pct() -> None:
+    """DeepSeek's official context-caching hit rate is 10% of the
+    input rate. deepseek-chat at $0.28/MTok: 1000 cached tokens →
+    $0.28 × 0.1 / 1000 = $0.000028."""
+    assert estimate_cost(
+        "deepseek-chat", 0, 0, cached_input_tokens=1000
+    ) == pytest.approx(0.000028, abs=1e-12)
+
+
+def test_cost_override_three_tuple_bills_cached_at_absolute_rate() -> None:
+    """The 3-tuple ``cost_per_mtoken`` override carries an ABSOLUTE
+    cached-input rate (USD/MTok) — for gateways whose cached price
+    isn't a standard fraction of the input rate. 471 uncached at
+    $0.75/M + 5120 cached at $0.008/M + 300 out at $3.00/M."""
+    cost = estimate_cost(
+        "deepseek-v4-pro", 471, 300,
+        cached_input_tokens=5120,
+        override=(0.75, 3.00, 0.008),
+    )
+    expected = (471 * 0.75 + 5120 * 0.008 + 300 * 3.00) / 1_000_000
+    assert cost == pytest.approx(expected, abs=1e-12)
+
+
+def test_cost_override_two_tuple_keeps_provider_multiplier() -> None:
+    """The 2-tuple override still uses the provider's cache-read
+    multiplier — deepseek-* resolves to the 0.1x deepseek rate, so
+    1000 cached tokens at a $0.75/M input override bill $0.075/M."""
+    cost = estimate_cost(
+        "deepseek-v4-flash", 0, 0,
+        cached_input_tokens=1000,
+        override=(0.75, 3.00),
+    )
+    assert cost == pytest.approx(1000 * 0.075 / 1_000_000, abs=1e-12)
+
+
+def test_openai_complete_parses_deepseek_native_cache_field() -> None:
+    """DeepSeek's OpenAI-compatible API reports cache hits as a
+    top-level ``prompt_cache_hit_tokens`` (no
+    ``prompt_tokens_details``). The adapter must fall back to it and
+    apply the same subset-to-separate-buckets split."""
+
+    class _FakeUsage:
+        prompt_tokens = 2000  # total; 1500 of which are cache hits
+        completion_tokens = 300
+        prompt_cache_hit_tokens = 1500
+        prompt_cache_miss_tokens = 500
+
+    class _FakeMessage:
+        content = "hi"
+        tool_calls = None
+
+    class _FakeChoice:
+        message = _FakeMessage()
+        finish_reason = "stop"
+
+    class _FakeResponse:
+        usage = _FakeUsage()
+        choices = [_FakeChoice()]
+
+    class _FakeCompletions:
+        async def create(self, **_kwargs: object) -> _FakeResponse:
+            return _FakeResponse()
+
+    class _FakeChat:
+        completions = _FakeCompletions()
+
+    class _FakeClient:
+        chat = _FakeChat()
+
+    model = OpenAIModel("deepseek-chat", api_key="sk-fake")
+    model._client = _FakeClient()  # type: ignore[attr-defined]  # noqa: SLF001
+
+    _text, _calls, usage, _finish = asyncio.run(model.complete(messages=[]))
+    assert usage.input_tokens == 500   # 2000 - 1500
+    assert usage.cached_input_tokens == 1500
+    assert usage.output_tokens == 300
+    # 500 × $0.28/M + 1500 × $0.028/M + 300 × $0.42/M
+    expected = (500 * 0.28 + 1500 * 0.028 + 300 * 0.42) / 1_000_000
+    assert usage.cost_usd == pytest.approx(expected, abs=1e-12)
+
+
+def test_openai_cache_key_not_forwarded_when_disabled() -> None:
+    """``enabled`` is the master switch: a config carrying a
+    cache_key but ``enabled=False`` must NOT put ``prompt_cache_key``
+    on the wire."""
+
+    captured: dict[str, object] = {}
+
+    class _FakeMessage:
+        content = "x"
+        tool_calls = None
+
+    class _FakeChoice:
+        message = _FakeMessage()
+        finish_reason = "stop"
+
+    class _FakeResponse:
+        usage = None
+        choices = [_FakeChoice()]
+
+    class _FakeCompletions:
+        async def create(self, **kwargs: object) -> _FakeResponse:
+            captured.update(kwargs)
+            return _FakeResponse()
+
+    class _FakeChat:
+        completions = _FakeCompletions()
+
+    class _FakeClient:
+        chat = _FakeChat()
+
+    model = OpenAIModel("gpt-4.1-mini", api_key="sk-fake")
+    model._client = _FakeClient()  # type: ignore[attr-defined]  # noqa: SLF001
+
+    asyncio.run(model.complete(
+        messages=[],
+        prompt_caching=PromptCacheConfig(
+            enabled=False, cache_key="user_42"
+        ),
+    ))
+    assert "prompt_cache_key" not in captured

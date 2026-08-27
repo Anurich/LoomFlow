@@ -30,6 +30,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import os
 import warnings
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, fields
@@ -3276,6 +3277,10 @@ def _resolve_model(
     * ``claude-*`` -> :class:`AnthropicModel` (direct, no LiteLLM hop)
     * ``gpt-*`` / ``o1-*`` / ``o3-*`` / ``o4-*`` -> :class:`OpenAIModel`
       (direct)
+    * ``deepseek-*`` -> :class:`OpenAIModel` pointed at DeepSeek's
+      OpenAI-compatible endpoint (needs ``DEEPSEEK_API_KEY``). For a
+      reseller / gateway, construct ``OpenAIModel(...,
+      base_url=<gateway>)`` directly instead.
     * ``echo`` -> :class:`EchoModel` (zero-key dev / tests)
     * ``mistral-``, ``command-``, ``bedrock/``, ``vertex_ai/``,
       ``together_ai/``, ``ollama/``, ``gemini/``, ``groq/``,
@@ -3314,6 +3319,33 @@ def _resolve_model(
     if spec.startswith(("gpt-", "o1-", "o3-", "o4-")):
         from ..model.openai import OpenAIModel
         return OpenAIModel(spec, secrets=secrets)
+    if spec.startswith("deepseek-"):
+        from ..model.openai import OpenAIModel
+
+        # DeepSeek speaks the OpenAI wire format at its own endpoint.
+        # Resolve the key HERE (secrets backend, then env) instead of
+        # letting OpenAIModel fall back to OPENAI_API_KEY — sending
+        # the OpenAI secret to api.deepseek.com would be both wrong
+        # and a credential leak.
+        deepseek_key: str | None = None
+        if secrets is not None:
+            deepseek_key = secrets.lookup_sync("DEEPSEEK_API_KEY")
+        if deepseek_key is None:
+            deepseek_key = os.environ.get("DEEPSEEK_API_KEY")
+        if deepseek_key is None:
+            raise ConfigError(
+                f"model spec {spec!r} needs a DEEPSEEK_API_KEY (env var "
+                "or Secrets backend). Using DeepSeek through an "
+                "OpenAI-compatible gateway instead? Construct the "
+                "adapter directly:\n"
+                f"  OpenAIModel({spec!r}, api_key=..., "
+                "base_url='https://<gateway>/v1')"
+            )
+        return OpenAIModel(
+            spec,
+            api_key=deepseek_key,
+            base_url="https://api.deepseek.com",
+        )
     if spec == "echo":
         return EchoModel()
     if spec.startswith(_LITELLM_PREFIXES):
@@ -3324,7 +3356,8 @@ def _resolve_model(
         return LiteLLMModel(inner, secrets=secrets)
     raise ConfigError(
         f"unknown model spec: {spec!r}. Recognised prefixes:\n"
-        "  claude-*, gpt-*, o1-*, o3-*, o4-* (direct adapters)\n"
+        "  claude-*, gpt-*, o1-*, o3-*, o4-*, deepseek-* "
+        "(direct adapters)\n"
         "  mistral-, command-, bedrock/, vertex_ai/, ollama/, "
         "gemini/, groq/, together_ai/, replicate/, azure/ "
         "(via LiteLLM)\n"

@@ -9,6 +9,38 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 
 ## [Unreleased]
 
+### Added — first-class DeepSeek support on the OpenAI-compatible path
+
+* `model="deepseek-*"` specs resolve directly to `OpenAIModel` pointed
+  at `https://api.deepseek.com`, keyed by `DEEPSEEK_API_KEY` (Secrets
+  backend, then env). A missing key raises a loud `ConfigError` rather
+  than silently falling back to `OPENAI_API_KEY` — which would have
+  sent the wrong secret to DeepSeek.
+* Cache-hit accounting falls back to DeepSeek's native
+  `prompt_cache_hit_tokens` usage field when
+  `prompt_tokens_details.cached_tokens` is absent (`complete` and
+  `stream` both).
+* Pricing: `deepseek-chat` / `deepseek-reasoner` table entries plus a
+  `deepseek` provider cache-read multiplier (0.1x — the official
+  context-caching hit rate).
+
+### Added — absolute cached-input rate in `cost_per_mtoken`
+
+`cost_per_mtoken=` on every adapter now also accepts a 3-tuple
+`(input, output, cached_input)` in USD/MTok. The third element bills
+cache hits at that **absolute** rate instead of the provider's
+multiplier — for gateways / resellers whose cached price isn't a
+standard fraction of the input rate. The 2-tuple form is unchanged.
+
+### Fixed — `prompt_caching` honours `enabled` on the OpenAI path
+
+A config carrying a `cache_key` with `enabled=False` no longer
+forwards `prompt_cache_key` — `enabled` is the documented master
+switch. (On OpenAI-compatible failover gateways the cache key is the
+only wire-visible caching knob: it pins consecutive requests to one
+upstream host so the prefix cache can actually hit. Set
+`prompt_caching={"enabled": True, "cache_key": <run or session id>}`.)
+
 ## [0.10.28] — 2026-06-30
 
 ### Fixed — durable runtime now honours `idempotency_key`

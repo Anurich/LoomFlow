@@ -95,7 +95,9 @@ class LiteLLMModel(OpenAIModel):
         api_key: str | None = None,
         client: Any | None = None,
         secrets: Any | None = None,
-        cost_per_mtoken: tuple[float, float] | None = None,
+        cost_per_mtoken: tuple[float, float]
+        | tuple[float, float, float]
+        | None = None,
         request_timeout_s: float | None = None,
         **litellm_kwargs: Any,
     ) -> None:

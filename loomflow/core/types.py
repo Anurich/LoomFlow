@@ -227,6 +227,15 @@ class PromptCacheConfig(BaseModel):
       injected on the LAST system block + the LAST tool definition
       (2 of the 4 available breakpoints). Read tokens billed at
       0.1x; write tokens at 1.25x (5m) or 2x (1h).
+    * **DeepSeek / OpenAI-compatible gateways** — caching is
+      automatic server-side; ``cache_key`` is the only wire-visible
+      knob (forwarded as ``prompt_cache_key``). On failover gateways
+      that spread requests across upstream hosts, setting it is
+      **required** for hits — it pins consecutive requests to one
+      host so the prefix cache gets a second look. Hit counts are
+      read from ``prompt_tokens_details.cached_tokens`` with a
+      fallback to DeepSeek's native ``prompt_cache_hit_tokens``.
+      ``ttl`` is ignored on this path.
     * **Gemini** — not supported in this release (Gemini requires a
       separate ``CachedContent.create`` API call; planned for a
       future loomflow version).

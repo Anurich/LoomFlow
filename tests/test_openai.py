@@ -303,3 +303,32 @@ async def test_unknown_model_string_raises() -> None:
 
     with pytest.raises(ConfigError, match="unknown model spec"):
         Agent("hi", model="totally-unknown-prefix-xyz")
+
+
+async def test_deepseek_spec_resolves_to_openai_adapter_with_base_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``deepseek-*`` specs ride the OpenAI-compatible adapter pointed
+    at DeepSeek's endpoint, keyed by DEEPSEEK_API_KEY — never the
+    OPENAI_API_KEY fallback."""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-test-key")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    a = Agent("hi", model="deepseek-chat")
+    assert type(a._model).__name__ == "OpenAIModel"
+    assert a._model.name == "deepseek-chat"
+    assert "api.deepseek.com" in str(a._model._client.base_url)  # type: ignore[attr-defined]
+
+
+async def test_deepseek_spec_without_key_raises_config_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No DEEPSEEK_API_KEY anywhere → loud ConfigError (falling back
+    to OPENAI_API_KEY would leak the wrong secret to DeepSeek)."""
+    from loomflow.core.errors import ConfigError
+
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-should-not-be-used")
+
+    with pytest.raises(ConfigError, match="DEEPSEEK_API_KEY"):
+        Agent("hi", model="deepseek-chat")
