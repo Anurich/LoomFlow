@@ -258,6 +258,10 @@ class Skill:
                     return await vs.search_hybrid(query=query)
                 return [retreiver]
 
+        (``search_hybrid`` is available on ``InMemoryVectorStore``
+        and ``PostgresVectorStore``; for Chroma / FAISS use
+        ``vs.search(...)``.)
+
         When ``tools.py`` does *not* export ``build_tools``, the
         framework falls back to discovering module-level
         ``@tool``-decorated globals (back-compat behaviour).

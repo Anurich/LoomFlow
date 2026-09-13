@@ -5,8 +5,11 @@ lower-cased. Good enough for the hybrid-search use case where BM25
 catches exact terms (model names, error codes, person names) that
 embedding similarity smears together.
 
-Used internally by :class:`InMemoryVectorStore.search_hybrid` —
-not part of the public surface (yet).
+Used internally by :class:`InMemoryVectorStore.search_hybrid`;
+:func:`reciprocal_rank_fusion` / :func:`fuse_weighted` are also the
+fusion layer under :class:`PostgresVectorStore.search_hybrid` (which
+gets its lexical ranking from Postgres full-text search instead of
+this BM25 index). Not part of the public surface (yet).
 """
 
 from __future__ import annotations
@@ -14,6 +17,10 @@ from __future__ import annotations
 import math
 import re
 from collections import Counter
+from collections.abc import Hashable
+from typing import TypeVar
+
+K = TypeVar("K", bound=Hashable)
 
 _TOKEN_RE = re.compile(r"\w+")
 
@@ -107,22 +114,53 @@ class BM25Index:
 
 
 def reciprocal_rank_fusion(
-    rankings: list[list[tuple[int, float]]],
+    rankings: list[list[tuple[K, float]]],
     *,
     k: int = 60,
-) -> list[tuple[int, float]]:
+) -> list[tuple[K, float]]:
     """Combine multiple rankings via Reciprocal Rank Fusion.
 
-    Each ranking is ``[(doc_idx, score), ...]`` already sorted
-    best-first. RRF scores by rank position only (ignores raw
-    scores), which is robust when the rankings come from different
-    scoring systems (cosine vs BM25). The constant ``k=60`` is the
-    convention from Cormack et al. — it dampens the weight of
-    top-1 just enough that doc #2 in ranking A can outrank doc #1
-    in ranking B if it appears in both.
+    Each ranking is ``[(doc_key, score), ...]`` already sorted
+    best-first — keys are any hashable (int positions for the
+    in-memory store, row ids for Postgres). RRF scores by rank
+    position only (ignores raw scores), which is robust when the
+    rankings come from different scoring systems (cosine vs BM25).
+    The constant ``k=60`` is the convention from Cormack et al. —
+    it dampens the weight of top-1 just enough that doc #2 in
+    ranking A can outrank doc #1 in ranking B if it appears in both.
     """
-    fused: dict[int, float] = {}
+    fused: dict[K, float] = {}
     for ranking in rankings:
         for rank, (idx, _score) in enumerate(ranking):
             fused[idx] = fused.get(idx, 0.0) + 1.0 / (k + rank + 1)
     return sorted(fused.items(), key=lambda x: x[1], reverse=True)
+
+
+def fuse_weighted(
+    vector_ranking: list[tuple[K, float]],
+    lexical_ranking: list[tuple[K, float]],
+    alpha: float,
+) -> list[tuple[K, float]]:
+    """Alpha-weighted RRF over one vector and one lexical ranking.
+
+    ``alpha`` is in [0, 1]: 0 = pure lexical, 1 = pure vector,
+    0.5 = even weighting (RRF default). RRF ignores raw score
+    magnitudes, so we apply ``alpha`` by replicating the favoured
+    ranking proportionally — alpha=0.7 means "the vector ranking
+    counts ~70%, lexical ~30%". Three buckets cover the common
+    cases. Shared by every store's ``search_hybrid`` so the alpha
+    semantics can't drift between backends.
+    """
+    alpha = max(0.0, min(1.0, alpha))
+    rankings: list[list[tuple[K, float]]] = []
+    if alpha > 0:
+        rankings.append(vector_ranking)
+    if alpha < 1:
+        rankings.append(lexical_ranking)
+    if 0 < alpha < 1 and abs(alpha - 0.5) > 0.05:
+        extra = vector_ranking if alpha > 0.5 else lexical_ranking
+        weight_replications = max(
+            1, int(round(abs(alpha - 0.5) * 8))
+        )
+        rankings.extend([extra] * weight_replications)
+    return reciprocal_rank_fusion(rankings)

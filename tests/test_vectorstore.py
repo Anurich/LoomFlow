@@ -1070,3 +1070,213 @@ def test_chroma_filter_not_unsupported() -> None:
 @pytest.fixture
 def anyio_backend() -> str:
     return "asyncio"
+
+
+# ---------------------------------------------------------------------------
+# Postgres hybrid search (no DB required — fake pool captures SQL and
+# serves canned rows)
+# ---------------------------------------------------------------------------
+
+
+class _HybridConn:
+    """Fake asyncpg connection: dispatches on the SQL text — the FTS
+    query is recognisable by ``websearch_to_tsquery``, the ANN query
+    by the ``<=>`` operator — and records everything it runs."""
+
+    def __init__(
+        self,
+        log: list[tuple[str, tuple[object, ...]]],
+        *,
+        vector_rows: list[dict[str, object]],
+        fts_rows: list[dict[str, object]],
+        fts_error: Exception | None = None,
+    ) -> None:
+        self._log = log
+        self._vector_rows = vector_rows
+        self._fts_rows = fts_rows
+        self._fts_error = fts_error
+
+    async def fetch(
+        self, sql: str, *args: object
+    ) -> list[dict[str, object]]:
+        self._log.append((sql, args))
+        if "websearch_to_tsquery" in sql:
+            if self._fts_error is not None:
+                raise self._fts_error
+            return self._fts_rows
+        return self._vector_rows
+
+    async def execute(self, sql: str, *args: object) -> str:
+        self._log.append((sql, args))
+        return "OK"
+
+
+class _HybridPool:
+    def __init__(self, conn: _HybridConn) -> None:
+        self._conn = conn
+
+    async def acquire(self) -> _HybridConn:
+        return self._conn
+
+    async def release(self, conn: object) -> None:
+        return None
+
+
+def _row(id: str, score: float) -> dict[str, object]:
+    return {
+        "id": id,
+        "content": f"content of {id}",
+        "metadata": {"src": id},
+        "score": score,
+    }
+
+
+def _hybrid_store(
+    log: list[tuple[str, tuple[object, ...]]],
+    *,
+    vector_rows: list[dict[str, object]],
+    fts_rows: list[dict[str, object]],
+    fts_error: Exception | None = None,
+) -> object:
+    from loomflow.vectorstore.postgres import PostgresVectorStore
+
+    store = PostgresVectorStore(
+        embedder=HashEmbedder(dimensions=8), dsn="postgres://unused"
+    )
+    store._pool_obj = _HybridPool(_HybridConn(  # noqa: SLF001
+        log,
+        vector_rows=vector_rows,
+        fts_rows=fts_rows,
+        fts_error=fts_error,
+    ))
+    store._initialized = True  # noqa: SLF001
+    return store
+
+
+@pytest.mark.anyio
+async def test_postgres_search_hybrid_fuses_vector_and_fts() -> None:
+    """A doc ranked top by BOTH legs must out-fuse docs that appear
+    in only one; docs unique to either leg still surface."""
+    log: list[tuple[str, tuple[object, ...]]] = []
+    store = _hybrid_store(
+        log,
+        vector_rows=[_row("shared", 0.9), _row("veconly", 0.8)],
+        fts_rows=[_row("shared", 5.0), _row("lexonly", 4.0)],
+    )
+    results = await store.search_hybrid("exact term", k=3)
+    assert results[0].id == "shared"
+    assert {r.id for r in results} == {"shared", "veconly", "lexonly"}
+    # Chunk content/metadata survive the fusion round-trip.
+    assert results[0].chunk.content == "content of shared"
+    assert results[0].chunk.metadata == {"src": "shared"}
+    # Both legs actually ran, with the expected shapes.
+    sqls = [sql for sql, _ in log]
+    assert any("<=>" in s for s in sqls)
+    assert any(
+        "ts_rank_cd" in s and "content_tsv @@" in s for s in sqls
+    )
+
+
+@pytest.mark.anyio
+async def test_postgres_search_hybrid_alpha_extremes_skip_legs() -> None:
+    """alpha=1 runs only the ANN query; alpha=0 runs only FTS and
+    never embeds the query."""
+
+    class _CountingEmbedder(HashEmbedder):
+        calls = 0
+
+        async def embed(self, text: str) -> list[float]:
+            type(self).calls += 1
+            return await HashEmbedder.embed(self, text)
+
+    from loomflow.vectorstore.postgres import PostgresVectorStore
+
+    log: list[tuple[str, tuple[object, ...]]] = []
+    store = PostgresVectorStore(
+        embedder=_CountingEmbedder(dimensions=8),
+        dsn="postgres://unused",
+    )
+    store._pool_obj = _HybridPool(_HybridConn(  # noqa: SLF001
+        log, vector_rows=[_row("v", 0.9)], fts_rows=[_row("l", 3.0)]
+    ))
+
+    vec_only = await store.search_hybrid("q", k=2, alpha=1.0)
+    assert [r.id for r in vec_only] == ["v"]
+    assert not any("websearch_to_tsquery" in sql for sql, _ in log)
+
+    log.clear()
+    _CountingEmbedder.calls = 0
+    lex_only = await store.search_hybrid("q", k=2, alpha=0.0)
+    assert [r.id for r in lex_only] == ["l"]
+    assert all("websearch_to_tsquery" in sql for sql, _ in log)
+    assert _CountingEmbedder.calls == 0  # no embedding for pure FTS
+
+
+@pytest.mark.anyio
+async def test_postgres_search_hybrid_filter_reaches_both_legs() -> None:
+    log: list[tuple[str, tuple[object, ...]]] = []
+    store = _hybrid_store(
+        log,
+        vector_rows=[_row("a", 0.9)],
+        fts_rows=[_row("a", 2.0)],
+    )
+    await store.search_hybrid("q", k=2, filter={"source": "router.md"})
+    assert len(log) == 2
+    for sql, args in log:
+        assert "metadata->>'source'" in sql
+        assert "router.md" in args
+
+
+@pytest.mark.anyio
+async def test_postgres_search_hybrid_missing_tsv_raises_config_error() -> None:
+    """A pre-0.13 table (no content_tsv column) should produce a
+    ConfigError pointing at init_schema, not a raw asyncpg error."""
+    from loomflow import ConfigError
+
+    class _UndefinedColumn(Exception):
+        sqlstate = "42703"
+
+    log: list[tuple[str, tuple[object, ...]]] = []
+    store = _hybrid_store(
+        log,
+        vector_rows=[_row("v", 0.9)],
+        fts_rows=[],
+        fts_error=_UndefinedColumn(),
+    )
+    with pytest.raises(ConfigError, match="init_schema"):
+        await store.search_hybrid("q", k=2)
+
+
+@pytest.mark.anyio
+async def test_postgres_init_schema_creates_tsv_and_gin() -> None:
+    log: list[tuple[str, tuple[object, ...]]] = []
+    store = _hybrid_store(log, vector_rows=[], fts_rows=[])
+    await store.init_schema(8)
+    sqls = [sql for sql, _ in log]
+    assert any(
+        "ADD COLUMN IF NOT EXISTS content_tsv" in s for s in sqls
+    )
+    assert any("to_tsvector('english', content)" in s for s in sqls)
+    assert any("USING gin (content_tsv)" in s for s in sqls)
+
+
+def test_postgres_invalid_fts_language_raises() -> None:
+    from loomflow.vectorstore.postgres import PostgresVectorStore
+
+    with pytest.raises(ValueError, match="fts_language"):
+        PostgresVectorStore(
+            embedder=HashEmbedder(dimensions=8),
+            dsn="postgres://unused",
+            fts_language="english'; DROP TABLE users;--",
+        )
+
+
+def test_fuse_weighted_alpha_extremes() -> None:
+    from loomflow.vectorstore._bm25 import fuse_weighted
+
+    v = [("v1", 0.9), ("both", 0.8)]
+    lx = [("both", 5.0), ("l1", 4.0)]
+    assert {k for k, _ in fuse_weighted(v, lx, 1.0)} == {"v1", "both"}
+    assert {k for k, _ in fuse_weighted(v, lx, 0.0)} == {"both", "l1"}
+    fused = fuse_weighted(v, lx, 0.5)
+    assert fused[0][0] == "both"  # present in both rankings wins

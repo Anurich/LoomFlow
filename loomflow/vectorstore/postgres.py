@@ -11,9 +11,17 @@ Schema (auto-created via :meth:`init_schema`)::
         id          TEXT PRIMARY KEY,
         content     TEXT NOT NULL,
         metadata    JSONB,
-        embedding   vector(N) NOT NULL
+        embedding   vector(N) NOT NULL,
+        content_tsv tsvector GENERATED ALWAYS AS
+                    (to_tsvector('english', content)) STORED
     );
     CREATE INDEX ON jeeves_vectors USING hnsw (embedding vector_cosine_ops);
+    CREATE INDEX ON jeeves_vectors USING gin (content_tsv);
+
+``content_tsv`` powers :meth:`search_hybrid` (full-text lexical
+ranking fused with the vector ranking via RRF). Tables created by
+older loomflow versions upgrade in place — ``init_schema`` adds the
+column and GIN index idempotently.
 
 Filter language: full Mongo-style operators translated to JSONB
 SQL. ``$eq`` / ``$ne`` / ``$gt`` / ``$gte`` / ``$lt`` / ``$lte`` /
@@ -30,8 +38,10 @@ from typing import Any
 
 import anyio
 
+from ..core.errors import ConfigError
 from ..core.protocols import Embedder
 from ..loader.base import Chunk
+from ._bm25 import fuse_weighted
 from ._filter import COMPARISON_OPERATORS, LOGICAL_OPERATORS, FilterError
 from ._mmr import rerank_tail
 from ._util import embed_all, resolve_ids
@@ -49,6 +59,11 @@ _SQL_BIN_OPS: dict[str, str] = {
     "$lte": "<=",
 }
 
+# Text-search config names are interpolated as SQL literals (generated
+# columns can't take bind parameters), so allow only bare regconfig
+# identifiers — same conservative posture as ``_safe_key``.
+_FTS_LANG_RE = re.compile(r"[a-z_]+\Z")
+
 
 class PostgresVectorStore:
     """Vector store backed by Postgres + ``pgvector``."""
@@ -63,15 +78,26 @@ class PostgresVectorStore:
         table: str = "jeeves_vectors",
         dimension: int | None = None,
         pool_size: int = 10,
+        fts_language: str = "english",
     ) -> None:
         if embedder is None:
             raise ValueError("embedder is required")
+        # The language is interpolated as a SQL literal (a GENERATED
+        # column expression can't take a bind parameter), so it must
+        # be a bare regconfig name — 'english', 'simple', 'german', …
+        if not _FTS_LANG_RE.fullmatch(fts_language):
+            raise ValueError(
+                f"invalid fts_language: {fts_language!r} (expected a "
+                "bare Postgres text-search config name like 'english' "
+                "or 'simple')"
+            )
         self._embedder = embedder
         self._dsn = dsn
         self._table = table
         self._dimension = dimension
         self._initialized = False
         self._pool_size = pool_size
+        self._fts_language = fts_language
         self._pool_obj: Any = None
         self._pool_lock = anyio.Lock()
 
@@ -93,6 +119,7 @@ class PostgresVectorStore:
         dsn: str,
         table: str = "jeeves_vectors",
         dimension: int | None = None,
+        fts_language: str = "english",
     ) -> PostgresVectorStore:
         """One-shot: construct a PostgresVectorStore + add ``chunks``.
 
@@ -106,6 +133,7 @@ class PostgresVectorStore:
             dsn=dsn,
             table=table,
             dimension=dimension,
+            fts_language=fts_language,
         )
         await store.add(chunks, ids=ids)
         return store
@@ -121,6 +149,7 @@ class PostgresVectorStore:
         dsn: str,
         table: str = "jeeves_vectors",
         dimension: int | None = None,
+        fts_language: str = "english",
     ) -> PostgresVectorStore:
         """One-shot: construct a PostgresVectorStore from raw text
         strings (each becomes a :class:`Chunk` with the matching
@@ -132,6 +161,7 @@ class PostgresVectorStore:
             dsn=dsn,
             table=table,
             dimension=dimension,
+            fts_language=fts_language,
         )
 
     async def _pool(self) -> Any:
@@ -187,8 +217,18 @@ class PostgresVectorStore:
             self._pool_obj = None
 
     async def init_schema(self, dimension: int) -> None:
-        """Create the table + HNSW index. Idempotent."""
+        """Create the table + HNSW and GIN indexes. Idempotent.
+
+        Also upgrades tables created by older loomflow versions in
+        place: ``ADD COLUMN IF NOT EXISTS content_tsv`` back-fills
+        the full-text column (generated, so Postgres computes it for
+        existing rows) that :meth:`search_hybrid` ranks on.
+        """
         self._dimension = dimension
+        tsv_expr = (
+            f"tsvector GENERATED ALWAYS AS "
+            f"(to_tsvector('{self._fts_language}', content)) STORED"
+        )
         async with self._acquire() as conn:
             await conn.execute(
                 "CREATE EXTENSION IF NOT EXISTS vector"
@@ -199,8 +239,19 @@ class PostgresVectorStore:
                     id TEXT PRIMARY KEY,
                     content TEXT NOT NULL,
                     metadata JSONB,
-                    embedding vector({dimension}) NOT NULL
+                    embedding vector({dimension}) NOT NULL,
+                    content_tsv {tsv_expr}
                 )
+                """
+            )
+            # Pre-0.13 tables lack the column; the generated
+            # expression keeps the fts_language the column was FIRST
+            # created with (changing the kwarg later doesn't rewrite
+            # an existing column — drop it manually to re-language).
+            await conn.execute(
+                f"""
+                ALTER TABLE {self._table}
+                ADD COLUMN IF NOT EXISTS content_tsv {tsv_expr}
                 """
             )
             await conn.execute(
@@ -209,6 +260,14 @@ class PostgresVectorStore:
                     {self._table}_embedding_hnsw
                 ON {self._table}
                 USING hnsw (embedding vector_cosine_ops)
+                """
+            )
+            await conn.execute(
+                f"""
+                CREATE INDEX IF NOT EXISTS
+                    {self._table}_content_tsv_gin
+                ON {self._table}
+                USING gin (content_tsv)
                 """
             )
             self._initialized = True
@@ -356,6 +415,134 @@ class PostgresVectorStore:
                 cand_vecs.append(_pg_to_vec(row["embedding"]))
 
         return rerank_tail(vector, candidates, cand_vecs, k, diversity)
+
+    async def search_hybrid(
+        self,
+        query: str,
+        *,
+        k: int = 4,
+        filter: Mapping[str, Any] | None = None,
+        alpha: float = 0.5,
+    ) -> list[SearchResult]:
+        """Hybrid lexical + vector search via RRF — same contract as
+        :meth:`InMemoryVectorStore.search_hybrid`.
+
+        ``alpha`` is in [0, 1]: 0 = pure lexical, 1 = pure vector,
+        0.5 = even weighting. Two indexed queries run — HNSW top-N
+        by cosine, and Postgres full-text search top-N ranked by
+        ``ts_rank_cd`` over the stored GIN-indexed ``content_tsv``
+        column — and their rankings are fused by weighted Reciprocal
+        Rank Fusion.
+
+        Because the lexical leg is real FTS over the WHOLE corpus
+        (not BM25 over the vector candidates), an exact-term match —
+        an error code, a model name — surfaces even when it isn't
+        vector-close to the query. That's the case hybrid exists for.
+
+        Requires the ``content_tsv`` column: tables created before
+        loomflow 0.13 need one ``await store.init_schema(dimension)``
+        to upgrade in place (idempotent; raises :class:`ConfigError`
+        with that instruction if the column is missing).
+        """
+        alpha = max(0.0, min(1.0, alpha))
+        n_fetch = max(k * 4, 20)
+
+        # --- vector ranking: HNSW top-N (skipped when alpha=0 —
+        # also skips the embedding call) ---
+        v_rows: list[Any] = []
+        v_sql = ""
+        v_params: list[Any] = []
+        if alpha > 0:
+            q_vec = await self._embedder.embed(query)
+            v_params = [_vec_to_pg(q_vec)]
+            v_where = ""
+            if filter:
+                v_where, v_params = _build_where_sql(filter, v_params)
+            v_params.append(n_fetch)
+            v_sql = f"""
+                SELECT id, content, metadata,
+                       1 - (embedding <=> $1::vector) AS score
+                FROM {self._table}
+                {v_where}
+                ORDER BY embedding <=> $1::vector
+                LIMIT ${len(v_params)}
+            """
+
+        # --- lexical ranking: FTS top-N (skipped when alpha=1).
+        # ``websearch_to_tsquery`` never raises on arbitrary user
+        # input (unlike ``to_tsquery``); an all-stopword query just
+        # matches nothing and fusion proceeds on the vector leg. ---
+        l_sql = ""
+        l_params: list[Any] = []
+        if alpha < 1:
+            l_params = []
+            l_where = ""
+            if filter:
+                l_where, l_params = _build_where_sql(filter, l_params)
+            l_params.append(self._fts_language)
+            lang_ref = f"${len(l_params)}::regconfig"
+            l_params.append(query)
+            tsq = f"websearch_to_tsquery({lang_ref}, ${len(l_params)})"
+            match_sql = f"content_tsv @@ {tsq}"
+            l_where = (
+                f"{l_where} AND {match_sql}"
+                if l_where
+                else f"WHERE {match_sql}"
+            )
+            l_params.append(n_fetch)
+            l_sql = f"""
+                SELECT id, content, metadata,
+                       ts_rank_cd(content_tsv, {tsq}) AS score
+                FROM {self._table}
+                {l_where}
+                ORDER BY score DESC
+                LIMIT ${len(l_params)}
+            """
+
+        l_rows: list[Any] = []
+        async with self._acquire() as conn:
+            if v_sql:
+                v_rows = await conn.fetch(v_sql, *v_params)
+            if l_sql:
+                try:
+                    l_rows = await conn.fetch(l_sql, *l_params)
+                except Exception as exc:
+                    # 42703 = undefined_column: a pre-0.13 table
+                    # without content_tsv. Point at the one-call fix
+                    # instead of leaking a bare asyncpg error.
+                    if getattr(exc, "sqlstate", None) == "42703":
+                        raise ConfigError(
+                            f"hybrid search needs the "
+                            f"'{self._table}.content_tsv' full-text "
+                            "column (loomflow 0.13 schema). Upgrade "
+                            "the table in place with: await "
+                            "store.init_schema(dimension) — "
+                            "idempotent; adds the generated tsvector "
+                            "column + GIN index."
+                        ) from exc
+                    raise
+
+        chunks_by_id: dict[str, Chunk] = {}
+
+        def _ranking(rows: list[Any]) -> list[tuple[str, float]]:
+            out: list[tuple[str, float]] = []
+            for row in rows:
+                md = row["metadata"]
+                metadata = (
+                    json.loads(md) if isinstance(md, str) else (md or {})
+                )
+                chunks_by_id.setdefault(
+                    row["id"],
+                    Chunk(content=row["content"], metadata=metadata),
+                )
+                out.append((row["id"], float(row["score"])))
+            return out
+
+        fused = fuse_weighted(_ranking(v_rows), _ranking(l_rows), alpha)
+        return [
+            SearchResult(chunk=chunks_by_id[cid], score=score, id=cid)
+            for cid, score in fused[:k]
+        ]
 
     async def count(self) -> int:
         async with self._acquire() as conn:

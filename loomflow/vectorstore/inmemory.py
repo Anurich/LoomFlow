@@ -26,7 +26,7 @@ from typing import Any
 
 from ..core.protocols import Embedder
 from ..loader.base import Chunk
-from ._bm25 import BM25Index, reciprocal_rank_fusion
+from ._bm25 import BM25Index, fuse_weighted
 from ._filter import evaluate_filter
 from ._mmr import mmr_select
 from ._util import embed_all, resolve_ids
@@ -259,7 +259,6 @@ class InMemoryVectorStore:
         """
         if not self._vectors:
             return []
-        alpha = max(0.0, min(1.0, alpha))
 
         # Build BM25 index lazily (covers the whole corpus including
         # filtered-out items; we apply the filter post-rank).
@@ -285,24 +284,9 @@ class InMemoryVectorStore:
             if evaluate_filter(filter, self._chunks[i].metadata)
         ]
 
-        # Fuse. RRF ignores raw score magnitudes so we use ``alpha``
-        # by replicating each ranking proportionally — alpha=0.7
-        # means "vector ranking counts 70%, BM25 30%".
-        rankings: list[list[tuple[int, float]]] = []
-        if alpha > 0:
-            rankings.append(vector_scored)
-        if alpha < 1:
-            rankings.append(bm25_scored)
-        # Weight by replicating: scale tells RRF how strongly to
-        # weight each list. Three buckets cover the common cases.
-        if 0 < alpha < 1 and abs(alpha - 0.5) > 0.05:
-            extra = vector_scored if alpha > 0.5 else bm25_scored
-            weight_replications = max(
-                1, int(round(abs(alpha - 0.5) * 8))
-            )
-            rankings.extend([extra] * weight_replications)
-
-        fused = reciprocal_rank_fusion(rankings)
+        # Fuse — alpha-weighted RRF, shared with the Postgres store
+        # so weighting semantics can't drift between backends.
+        fused = fuse_weighted(vector_scored, bm25_scored, alpha)
         top = fused[:k]
         return [
             SearchResult(

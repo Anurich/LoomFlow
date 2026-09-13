@@ -9,6 +9,31 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 
 ## [Unreleased]
 
+### Added — hybrid search on `PostgresVectorStore`
+
+`PostgresVectorStore.search_hybrid()` — same contract and `alpha`
+semantics as the in-memory store, but the lexical leg is real
+Postgres full-text search: a generated `content_tsv` column
+(GIN-indexed) ranked by `ts_rank_cd` over `websearch_to_tsquery`,
+fused with the HNSW cosine ranking by weighted Reciprocal Rank
+Fusion. Because FTS scans the whole corpus by index, an exact-term
+match (error code, model name) surfaces even when it isn't
+vector-close to the query. Metadata filters apply to both legs;
+`alpha=0` / `alpha=1` skip the unused leg (pure-lexical never calls
+the embedder).
+
+* `init_schema` now creates the full-text column + GIN index and
+  upgrades pre-0.13 tables in place (`ADD COLUMN IF NOT EXISTS`;
+  Postgres back-fills the generated column). Calling `search_hybrid`
+  against an un-upgraded table raises `ConfigError` naming the fix.
+* New `fts_language=` kwarg (default `"english"`; validated —
+  it's interpolated into DDL). Use `"simple"` for no stemming.
+* The alpha-weighted RRF fusion moved to a shared
+  `fuse_weighted()` helper used by both stores, so weighting
+  semantics can't drift between backends.
+
+## [0.12.0] — 2026-08-27
+
 ### Added — first-class DeepSeek support on the OpenAI-compatible path
 
 * `model="deepseek-*"` specs resolve directly to `OpenAIModel` pointed
