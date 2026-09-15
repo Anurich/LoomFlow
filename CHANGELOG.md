@@ -9,6 +9,8 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 
 ## [Unreleased]
 
+## [0.13.0] — 2026-09-15
+
 ### Added — hybrid search on `PostgresVectorStore`
 
 `PostgresVectorStore.search_hybrid()` — same contract and `alpha`
