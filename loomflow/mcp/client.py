@@ -460,14 +460,25 @@ class MCPClient:
 
         if self._spec.transport == "http":
             try:
-                from mcp.client.streamable_http import (  # type: ignore[import-not-found, import-untyped]
-                    streamablehttp_client,
+                from mcp.client import (  # type: ignore[import-not-found, import-untyped]
+                    streamable_http as _shttp,
                 )
             except ImportError as exc:  # pragma: no cover
                 raise MCPError(
                     "MCP SDK not installed. "
                     "Install with: pip install 'loomflow[mcp]'"
                 ) from exc
+            # The MCP SDK renamed ``streamablehttp_client`` →
+            # ``streamable_http_client``; resolve whichever this
+            # installation ships so both SDK generations work.
+            streamablehttp_client = getattr(
+                _shttp, "streamable_http_client", None
+            ) or getattr(_shttp, "streamablehttp_client", None)
+            if streamablehttp_client is None:  # pragma: no cover
+                raise MCPError(
+                    "mcp.client.streamable_http has no client factory "
+                    "(unrecognised MCP SDK version)"
+                )
             if not self._spec.url:
                 raise MCPError(
                     f"http MCP spec {self._spec.name!r} has no url set"
