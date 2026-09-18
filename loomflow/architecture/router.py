@@ -113,6 +113,7 @@ class Router:
         fallback_route: str | None = None,
         require_confidence_above: float = 0.0,
         classifier_prompt: str | None = None,
+        decider: Any | None = None,
         worker_registry: _RouterRegistryT | None = None,
         role_to_worker_id: _RouterRoleMapT | None = None,
         conversation_scope: Literal["per_route", "shared"] = "per_route",
@@ -149,6 +150,17 @@ class Router:
         self._classifier_prompt = (
             classifier_prompt or DEFAULT_CLASSIFIER_PROMPT
         )
+        # System One classification (G-JEV): when a decider is wired,
+        # step 1 becomes one Choice question over the route registry —
+        # no LLM classifier call. The decider's confidence feeds the
+        # SAME ``require_confidence_above`` gate + fallback_route
+        # machinery, so low-confidence handling is identical either
+        # way. Local import: Tier-2 package, off the hot import path.
+        self._decider: Any | None = None
+        if decider is not None:
+            from ..decisions.base import resolve_decision_model
+
+            self._decider = resolve_decision_model(decider)
         # Persistent-subagent wiring — when Team.router was built
         # with ``persistent_subagents=True``, the chosen specialist
         # runs under its registered handle's stable session_id so
@@ -184,36 +196,70 @@ class Router:
         prompt: str,
     ) -> AsyncIterator[Event]:
         # === 1. Classify ===
-        descriptions = "\n".join(
-            f"  - {r.name}: {r.description or '(no description)'}"
-            for r in self._routes
-        )
-        classifier_prompt = self._classifier_prompt.format(
-            route_descriptions=descriptions
-        )
-        msgs = [
-            Message(role=Role.SYSTEM, content=classifier_prompt),
-            Message(role=Role.USER, content=prompt),
-        ]
-        classification_text, usage = await text_only_model_call(
-            deps, "router_classify", msgs
-        )
-        await consume_usage(deps, session, usage)
+        if self._decider is not None:
+            # System One path: one Choice over the route registry.
+            # ``.choice`` is schema-constrained to a real route name
+            # and ``.confidence`` is native — no line-format parsing.
+            from ..decisions.types import Choice as _RouteChoice
 
-        parsed_route, parsed_confidence = _parse_classification(
-            classification_text
-        )
-        if parsed_confidence is None:
-            # The classifier omitted (or garbled) the confidence
-            # line. When a threshold is configured, treat missing as
-            # BELOW threshold (0.0) so ``require_confidence_above``
-            # keeps meaning — the pre-fix default of 1.0 let any
-            # confidence-less classification sail past the gate.
-            # Without a threshold, keep the legacy "assume sure"
-            # 1.0 (the value is only reported, never compared).
-            confidence = 0.0 if self._min_confidence > 0.0 else 1.0
+            decisions = await self._decider.decide(
+                prompt,
+                questions={
+                    "route": _RouteChoice(
+                        instructions=(
+                            "Which specialist route best handles the "
+                            "user's request?"
+                        ),
+                        criteria={
+                            r.name: r.description or "(no description)"
+                            for r in self._routes
+                        },
+                    )
+                },
+            )
+            await consume_usage(deps, session, decisions.usage)
+            route_answer = decisions.answers["route"]
+            parsed_route: str = str(
+                getattr(route_answer, "choice", "") or ""
+            )
+            confidence = float(
+                getattr(route_answer, "confidence", 0.0) or 0.0
+            )
+            classification_text = (
+                f"decider:{self._decider.name} route={parsed_route} "
+                f"confidence={confidence:.3f}"
+            )
         else:
-            confidence = parsed_confidence
+            descriptions = "\n".join(
+                f"  - {r.name}: {r.description or '(no description)'}"
+                for r in self._routes
+            )
+            classifier_prompt = self._classifier_prompt.format(
+                route_descriptions=descriptions
+            )
+            msgs = [
+                Message(role=Role.SYSTEM, content=classifier_prompt),
+                Message(role=Role.USER, content=prompt),
+            ]
+            classification_text, usage = await text_only_model_call(
+                deps, "router_classify", msgs
+            )
+            await consume_usage(deps, session, usage)
+
+            parsed_route, parsed_confidence = _parse_classification(
+                classification_text
+            )
+            if parsed_confidence is None:
+                # The classifier omitted (or garbled) the confidence
+                # line. When a threshold is configured, treat missing as
+                # BELOW threshold (0.0) so ``require_confidence_above``
+                # keeps meaning — the pre-fix default of 1.0 let any
+                # confidence-less classification sail past the gate.
+                # Without a threshold, keep the legacy "assume sure"
+                # 1.0 (the value is only reported, never compared).
+                confidence = 0.0 if self._min_confidence > 0.0 else 1.0
+            else:
+                confidence = parsed_confidence
         yield Event.architecture_event(
             session.id,
             "router.classified",

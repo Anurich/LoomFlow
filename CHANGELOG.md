@@ -9,6 +9,44 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 
 ## [Unreleased]
 
+### Added — System One decisions (`loomflow.decisions`)
+
+A new primitive beside `Model`: a `DecisionModel` evaluates typed
+questions (`Choice` / `Score` / `Noul`) against state and returns
+probabilistic answers — the shape of TypeSafe AI's Jev ("System One"
+models). Three backends: `JevModel` (wire adapter, lazy
+`typesafe_sdk` import, `loomflow[typesafe]` extra, `TYPESAFE_API_KEY`
+via Secrets→env), `LLMDecisionModel` (any loomflow `Model`
+constrained to identical result shapes — works with no waitlist),
+and `ScriptedDecisions` (test fake). `resolve_decision_model`
+dispatches `"jev"` / model specs / instances.
+
+Wired into four seams, all opt-in via one kwarg name:
+
+* `Team.router(decider=...)` / `Router(decider=...)` — classification
+  as one `Choice`; confidence feeds the existing
+  `require_confidence_above` / `fallback_route` gate.
+* `Agent(run_until={"decider": ...})` — goal check as one `Noul`;
+  P ≥ 0.75 stops, P ≤ 0.25 re-prompts, the uncertain middle falls
+  through to the LLM `checker`.
+* `TreeOfThoughts(evaluator_decider=...)` — thought scoring as a
+  5-level `Score` mapped onto the existing 0–1 scale.
+* `DecisionApprovalPolicy` (an `ApprovalHandler`) — allow / escalate
+  / deny by calibrated risk with per-tool threshold overrides;
+  fail-closed on the unhandled middle band and on decider errors.
+  `DecisionGuard` (a `Guardrail`) blocks on a `Noul` threshold.
+
+Every `decide()` carries loomflow `Usage` (`jev-latest` priced at
+$0.042/M in, output free). Example `32_decisions.py` tours all four
+seams offline. 28 new tests.
+
+### Fixed — MCP SDK rename tolerated
+
+`mcp.client.streamable_http` renamed `streamablehttp_client` →
+`streamable_http_client`; the client now resolves whichever the
+installed SDK ships (the old from-import made a NEW SDK look "not
+installed" and failed CI).
+
 ## [0.13.0] — 2026-09-15
 
 ### Added — hybrid search on `PostgresVectorStore`

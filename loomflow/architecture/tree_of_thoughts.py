@@ -66,7 +66,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import AsyncIterator
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import anyio
 from pydantic import BaseModel
@@ -112,6 +112,18 @@ ANSWER to the problem, using the reasoning chain. Do not describe
 the steps — deliver the completed solution the user asked for.
 """
 
+
+# Score levels for the System One evaluator path
+# (``evaluator_decider=``). Ordered worst-first; ``.normalized`` maps
+# the returned level position onto the same 0-1 scale the LLM
+# evaluator emits, so pruning / early-exit logic is shared.
+DEFAULT_EVALUATOR_LEVELS: tuple[str, ...] = (
+    "Dead end — contradicts the task or cannot lead to a solution.",
+    "Weak — mostly unpromising; little salvageable direction.",
+    "Plausible — could work, but unproven or incomplete.",
+    "Strong — clear, likely-correct progress toward the solution.",
+    "Near-solution — essentially solves the task already.",
+)
 
 DEFAULT_EVALUATOR_PROMPT = """\
 You evaluate a candidate reasoning step. Given the original problem
@@ -168,6 +180,7 @@ class TreeOfThoughts:
         proposer_model: str | Model | None = None,
         evaluator_model: str | Model | None = None,
         synthesizer_model: str | Model | None = None,
+        evaluator_decider: Any | None = None,
     ) -> None:
         if branch_factor < 1:
             raise ValueError("branch_factor must be >= 1")
@@ -220,6 +233,18 @@ class TreeOfThoughts:
         self._proposer_model = resolve_role_model(proposer_model)
         self._evaluator_model = resolve_role_model(evaluator_model)
         self._synthesizer_model = resolve_role_model(synthesizer_model)
+        # System One evaluation (G-JEV): score each thought with one
+        # 5-level Score question instead of an LLM call. This is the
+        # hottest internal loop in the framework — takes precedence
+        # over ``evaluator_model`` when both are set. Local import:
+        # Tier-2 package, off the hot import path.
+        self._evaluator_decider: Any | None = None
+        if evaluator_decider is not None:
+            from ..decisions.base import resolve_decision_model
+
+            self._evaluator_decider = resolve_decision_model(
+                evaluator_decider
+            )
 
     def declared_workers(self) -> dict[str, Agent]:
         return {}
@@ -350,6 +375,33 @@ class TreeOfThoughts:
                 msgs = _evaluator_messages(
                     self._evaluator_prompt, prompt, chain, cand
                 )
+                if self._evaluator_decider is not None:
+                    # System One path: one 5-level Score instead of an
+                    # LLM call. State reuses the evaluator message's
+                    # rendered task+chain+candidate text so both paths
+                    # judge identical context. ``.normalized`` maps
+                    # the level position onto the existing 0-1 scale.
+                    from ..decisions.types import Score as _EvalScore
+
+                    decisions = await self._evaluator_decider.decide(
+                        str(msgs[-1].content),
+                        questions={
+                            "promise": _EvalScore(
+                                instructions=(
+                                    "How promising is the candidate "
+                                    "thought as the next step toward "
+                                    "solving the task?"
+                                ),
+                                criteria=list(DEFAULT_EVALUATOR_LEVELS),
+                            )
+                        },
+                    )
+                    answer = decisions.answers["promise"]
+                    eval_results[idx] = (  # noqa: B023
+                        answer.normalized,
+                        decisions.usage,
+                    )
+                    return
                 text, usage = await text_only_model_call(
                     deps,
                     f"tot_eval_d{depth}_n{cand.id}",  # noqa: B023

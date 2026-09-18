@@ -659,6 +659,7 @@ class Agent:
         # with no new fast-mode flag.
         run_until_spec = _normalize_run_until_spec(run_until)
         self._goal_checker: Model | None = None
+        self._goal_decider: Any | None = None
         if run_until_spec is not None:
             checker_spec = run_until_spec.pop("checker", None)
             self._goal_checker = (
@@ -666,6 +667,17 @@ class Agent:
                 if checker_spec is None
                 else _resolve_model(checker_spec, secrets=self._secrets)
             )
+            # System One goal check (G-JEV). Resolved here like the
+            # checker; the hook reads it off deps. Local import —
+            # loomflow.decisions is a Tier-2 package the hot import
+            # path shouldn't pay for unless the feature is used.
+            decider_spec = run_until_spec.pop("decider", None)
+            if decider_spec is not None:
+                from ..decisions.base import resolve_decision_model
+
+                self._goal_decider = resolve_decision_model(
+                    decider_spec, secrets=self._secrets
+                )
             auto_hooks.append(GoalStopHook(**run_until_spec))
         self._stop_hooks: list[StopHook] = [
             *auto_hooks,
@@ -2567,6 +2579,7 @@ class Agent:
                 fast_tool_summary=fast_tool_summary,
                 tool_result_summarizer=self._tool_result_summarizer,
                 goal_checker=self._goal_checker,
+                goal_decider=self._goal_decider,
                 tool_result_summary_threshold=(
                     self._tool_result_summary_threshold
                 ),
@@ -3196,6 +3209,7 @@ _RUN_UNTIL_KEYS = frozenset(
     {
         "condition",
         "checker",
+        "decider",
         "max_iterations",
         "max_no_progress",
         "max_cost_usd",
@@ -3215,11 +3229,13 @@ def _normalize_run_until_spec(
     * ``str`` -> ``{"condition": <str>}`` (all guardrails defaulted).
     * ``Mapping`` -> validated dict. Recognised keys: ``condition``
       (required, non-empty), ``checker`` (``Model | str | dict``),
-      ``max_iterations``, ``max_no_progress``, ``max_cost_usd``,
-      ``checker_prompt``.
+      ``decider`` (``DecisionModel | Model | str`` — a System One
+      goal check; the LLM ``checker`` remains the fallback for its
+      uncertain middle band), ``max_iterations``, ``max_no_progress``,
+      ``max_cost_usd``, ``checker_prompt``.
 
-    Returns a dict whose ``checker`` (if present) the caller pops and
-    resolves to a :class:`Model`; the remaining keys are GoalStopHook
+    Returns a dict whose ``checker`` / ``decider`` (if present) the
+    caller pops and resolves; the remaining keys are GoalStopHook
     constructor kwargs. Raises :class:`~loomflow.core.errors.ConfigError`
     on an empty condition or an unrecognised key.
     """
@@ -3252,6 +3268,7 @@ def _normalize_run_until_spec(
         spec: dict[str, Any] = {"condition": condition}
         for key in (
             "checker",
+            "decider",
             "max_iterations",
             "max_no_progress",
             "max_cost_usd",

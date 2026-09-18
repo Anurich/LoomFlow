@@ -304,6 +304,66 @@ class GoalStopHook:
             self._exit(session, "no_progress")
             return None
 
+        # --- Decider: System One goal check (when wired). One Noul
+        # settles decisive cases in ~100ms without an LLM call; the
+        # uncertain middle band (0.25 < P < 0.75 — "near 0.5 means
+        # uncertain" per the wire semantics) falls THROUGH to the LLM
+        # checker below, which sees the full nuance. ---
+        decider = getattr(deps, "goal_decider", None)
+        if decider is not None:
+            from ..decisions.types import Noul
+
+            decisions = await decider.decide(
+                {
+                    "stop_condition": self._condition,
+                    "latest_output": session.output or "",
+                },
+                questions={
+                    "met": Noul(
+                        instructions=(
+                            "Has the stop condition been fully "
+                            "satisfied by the agent's latest output?"
+                        ),
+                    )
+                },
+            )
+            d_usage = decisions.usage
+            if not deps.fast_budget:
+                try:
+                    await deps.budget.consume(
+                        tokens_in=d_usage.input_tokens,
+                        tokens_out=d_usage.output_tokens,
+                        cost_usd=d_usage.cost_usd,
+                        user_id=user_id,
+                    )
+                except TypeError:  # legacy Budget without user_id kwarg
+                    await deps.budget.consume(
+                        tokens_in=d_usage.input_tokens,
+                        tokens_out=d_usage.output_tokens,
+                        cost_usd=d_usage.cost_usd,
+                    )
+            session.cumulative_usage = add_usage(
+                session.cumulative_usage, d_usage
+            )
+            p_met = decisions.answers["met"].noul  # type: ignore[union-attr]
+            if p_met >= 0.75:
+                self._exit(session, "condition_met")
+                return None
+            if p_met <= 0.25:
+                return StopHookResult(
+                    inject_message=(
+                        "Your run-until goal is NOT yet met. The stop "
+                        f"condition is:\n\n{self._condition}\n\n"
+                        f"Goal check: P(met) = {p_met:.2f}.\n\n"
+                        "Keep working: take concrete actions to "
+                        "satisfy the condition, then verify it. Do "
+                        "not claim completion without evidence the "
+                        "condition holds."
+                    ),
+                    reason="condition_unmet",
+                )
+            # Uncertain — let the LLM checker adjudicate.
+
         # --- Checker: is the condition satisfied? ---
         checker = deps.goal_checker or deps.model
         messages = [

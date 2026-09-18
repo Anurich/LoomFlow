@@ -534,6 +534,7 @@ class Team:
         fallback_route: str | None = None,
         require_confidence_above: float = 0.0,
         classifier_prompt: str | None = None,
+        decider: Any | None = None,
         persistent_subagents: bool = True,
         conversation_scope: str = "per_route",
     ) -> Agent:
@@ -580,6 +581,7 @@ class Team:
                 fallback_route=fallback_route,
                 require_confidence_above=require_confidence_above,
                 classifier_prompt=classifier_prompt,
+                decider=decider,
                 worker_registry=worker_registry,
                 role_to_worker_id=role_to_worker_id,
                 conversation_scope=conversation_scope,  # type: ignore[arg-type]

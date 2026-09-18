@@ -20,6 +20,10 @@ dependencies = [
 anthropic = ["anthropic>=0.40.0"]
 openai = ["openai>=1.30.0"]
 litellm = ["litellm>=1.40.0"]
+# TypeSafe AI's Jev — System One decisions (loomflow.decisions.JevModel).
+# Early access; needs TYPESAFE_API_KEY. The LLM-backed fallback
+# (LLMDecisionModel) needs no extra at all.
+typesafe = ["typesafe-sdk>=0.1"]
 mcp = ["mcp>=1.0.0", "httpx>=0.27.0"]
 postgres = ["asyncpg>=0.29.0", "pgvector>=0.2.5"]
 chroma = ["chromadb>=0.5.0"]

@@ -1,6 +1,6 @@
 # Examples
 
-Thirty-one end-to-end examples that exercise Loom's own
+Thirty-two end-to-end examples that exercise Loom's own
 primitives — loader, vector store, retriever-as-tool pattern,
 multi-agent architectures, multi-user / session-continuity
 primitives, the workflow + agent composition story, observability
@@ -106,6 +106,7 @@ working tree: `pip install -e .` (or `PYTHONPATH=. python examples/NN_....py`).
 | [`29_resilience_governance.py`](29_resilience_governance.py) | **Model fallback + per-tenant rate limiting** — `FallbackModel([primary, backup])` fails over when the primary raises a 429 (never on auth/content-filter); `TokenBucketRateLimiter(rps=5, burst=2)` paces one user's burst with a stopwatch while a second user's independent bucket stays instant. Mentions `request_timeout_s=` per-request wall clocks. | No |
 | [`30_graph_memory_and_budget.py`](30_graph_memory_and_budget.py) | **Graph memory + token-budgeted injection** — `recall_graph()` answers a 2-hop question ("where does alice's employer operate?") over bi-temporal facts, with **point-in-time** traversal: after a job change the current query walks the new edge while `valid_at=<March>` still finds the old employer's city. Then `Tuning(memory_token_budget=400, memory_decay_half_life_days=30)` shrinks a 29k-char recalled block to ~1.6k, relevance×recency-ranked, working blocks pinned. | No |
 | [`31_model_routing.py`](31_model_routing.py) | **Per-role model routing** — "plan expensive, execute cheap" inside ONE agent: `PlanAndExecute(planner_model=<frontier>, executor_model=<cheap>)` and `TreeOfThoughts(evaluator_model=<cheap>)`. Recording fakes prove which model served which call (planner 1 call, executor N calls, scorer calls all rerouted). Also covers the between-agents version via `Team` workers each carrying their own `model=`. Same kwargs on `ReWOO`/`Reflexion`/`SelfRefine`. | No |
+| [`32_decisions.py`](32_decisions.py) | **System One decisions** (`loomflow.decisions`) — typed probabilistic judgments (`Choice`/`Score`/`Noul`) instead of generated text, backed by TypeSafe's Jev (`JevModel`), any LLM (`LLMDecisionModel`), or a scripted fake. Demos all four seams: `Team.router(decider=...)` classification, `run_until={"decider": ...}` goal checks with uncertain-band fallback, `DecisionApprovalPolicy` (allow / escalate / deny by calibrated risk), and `DecisionGuard` semantic guardrails. | No |
 
 ## Run
 

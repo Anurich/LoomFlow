@@ -114,6 +114,14 @@ multi-tenancy / structured outputs / retries by hand.
   on `TreeOfThoughts` / `ReWOO` / `Reflexion` / `SelfRefine`; every
   `Team` seat already carries its own `model=`. Right model for the
   right task — 60–90% cheaper architecture runs.
+* **System One decisions** (`loomflow.decisions`) — typed
+  probabilistic judgments (`Choice`/`Score`/`Noul`) instead of
+  generated text, backed by TypeSafe's Jev (`JevModel`) or any LLM
+  (`LLMDecisionModel`). One `decider=` kwarg swaps the router's
+  classifier, `run_until` goal checks, and ToT thought scoring onto
+  ~100ms calibrated decisions; `DecisionApprovalPolicy` /
+  `DecisionGuard` turn tool approval and guardrails into
+  confidence-gated, fail-closed policies.
 * **MCP-native** — MCP is the tool spine, not an integration. Any
   MCP server (Composio, custom hosted gateways, local stdio
   servers) plugs into a single `MCPRegistry`.

@@ -86,6 +86,10 @@ PRICING_PER_MTOKEN: dict[str, tuple[float, float]] = {
     "claude-3-opus":    (15.00, 75.00),
     "claude-3-haiku":   (0.25,   1.25),
 
+    # ----- TypeSafe (System One decisions — loomflow.decisions) -----------
+    # Output is "free (too cheap to meter)" per launch pricing.
+    "jev-latest":        (0.042,  0.00),
+
     # ----- DeepSeek -------------------------------------------------------
     # V3.2 unified pricing (chat and reasoner converged). Cache hits
     # bill at 10% of the input rate — the "deepseek" entry in

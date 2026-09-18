@@ -298,6 +298,15 @@ class Dependencies:
     cheap checker (typically Haiku). Forwarded into the hook via
     ``deps``; the hook never holds its own model."""
 
+    goal_decider: Any | None = None
+    """Optional System One goal check
+    (:class:`~loomflow.decisions.DecisionModel`), wired via
+    ``Agent(run_until={"decider": ...})``. The hook asks one Noul
+    ("is the stop condition satisfied?"): a decisive probability
+    settles the check without an LLM call; the uncertain middle band
+    falls through to ``goal_checker`` / ``deps.model``. Typed ``Any``
+    to keep ``loomflow.decisions`` off the core import path."""
+
     tool_result_summary_threshold: int = 500
     """Char count below which a tool result is shipped verbatim
     (the summariser round-trip would cost more than it saves).
