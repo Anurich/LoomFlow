@@ -116,8 +116,12 @@ class _FakeJevClient:
         self._answers = answers
         self.calls: list[dict[str, Any]] = []
 
-    async def system_one(self, *, state: Any, questions: Any) -> Any:
-        self.calls.append({"state": state, "questions": questions})
+    async def system_one(
+        self, *, state: Any, questions: Any, model: Any = None
+    ) -> Any:
+        self.calls.append(
+            {"state": state, "questions": questions, "model": model}
+        )
         return _FakeJevResponse(self._answers)
 
 
@@ -171,6 +175,74 @@ async def test_jev_model_missing_answer_raises() -> None:
 def test_jev_model_without_sdk_or_client_raises_import_error() -> None:
     with pytest.raises(ImportError, match="loomflow\\[typesafe\\]"):
         JevModel()
+
+
+async def test_jev_model_score_mapping_forms_coerced_in_order() -> None:
+    """The SDK returns Score legend/probabilities as MAPPINGS (levels
+    keyed by number). ``list(mapping)`` yields keys — the regression
+    that turned [0.1, 0.3, 0.6] into [0, 1, 2]. Both number-keyed and
+    text-keyed forms must land in level order."""
+    client = _FakeJevClient(
+        {
+            "mood": _FakeJevAnswer(
+                score=1.5,
+                legend={"0": "calm", "1": "annoyed", "2": "angry"},
+                probabilities={"0": 0.1, "1": 0.3, "2": 0.6},
+                confidence=0.6,
+            ),
+            "tone": _FakeJevAnswer(
+                score=0.5,
+                legend={0: "soft", 1: "loud"},
+                probabilities={"loud": 0.4, "soft": 0.6},  # text-keyed
+                confidence=0.6,
+            ),
+        }
+    )
+    jev = JevModel(client=client)
+    d = await jev.decide(
+        "s",
+        questions={
+            "mood": Score("?", criteria=["calm", "annoyed", "angry"]),
+            "tone": Score("?", criteria=["soft", "loud"]),
+        },
+    )
+    mood = d["mood"]
+    assert isinstance(mood, ScoreDecision)
+    assert mood.legend == ["calm", "annoyed", "angry"]
+    assert mood.probabilities == pytest.approx([0.1, 0.3, 0.6])
+    tone = d["tone"]
+    assert isinstance(tone, ScoreDecision)
+    assert tone.legend == ["soft", "loud"]
+    assert tone.probabilities == pytest.approx([0.6, 0.4])
+
+
+async def test_jev_model_forwards_model_version() -> None:
+    client = _FakeJevClient({"q": _FakeJevAnswer(noul=0.5)})
+    jev = JevModel("jev-1.13.0", client=client)
+    await jev.decide("s", questions={"q": Noul("?")})
+    assert client.calls[0]["model"] == "jev-1.13.0"
+
+
+async def test_jev_model_falls_back_when_client_lacks_model_param() -> None:
+    """Clients predating per-call model selection (or old fakes) get
+    one precise retry without the kwarg; unrelated TypeErrors are
+    not swallowed."""
+
+    class _LegacyClient:
+        def __init__(self) -> None:
+            self.calls: list[Any] = []
+
+        async def system_one(self, *, state: Any, questions: Any) -> Any:
+            self.calls.append(state)
+            return _FakeJevResponse({"q": _FakeJevAnswer(noul=0.7)})
+
+    legacy = _LegacyClient()
+    jev = JevModel("jev-1.13.0", client=legacy)
+    d = await jev.decide("s", questions={"q": Noul("?")})
+    q = d["q"]
+    assert isinstance(q, NoulDecision)
+    assert q.noul == pytest.approx(0.7)
+    assert legacy.calls == ["s"]
 
 
 # ---------------------------------------------------------------------------

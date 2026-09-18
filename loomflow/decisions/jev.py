@@ -80,9 +80,22 @@ class JevModel:
         sdk_questions = {
             name: _to_sdk_question(q) for name, q in questions.items()
         }
-        response = await self._client.system_one(
-            state=state, questions=sdk_questions
-        )
+        # Forward the requested model version — ``JevModel("jev-1.13.0")``
+        # must pin that version on the wire, not silently use the
+        # client's configured default. Clients/SDKs predating per-call
+        # model selection get one precise retry without the kwarg.
+        call_kwargs: dict[str, Any] = {
+            "state": state,
+            "questions": sdk_questions,
+            "model": self.name,
+        }
+        try:
+            response = await self._client.system_one(**call_kwargs)
+        except TypeError as exc:
+            if "model" not in str(exc):
+                raise
+            call_kwargs.pop("model")
+            response = await self._client.system_one(**call_kwargs)
         raw_answers = getattr(response, "answers", None) or {}
         answers: dict[str, DecisionAnswer] = {}
         for name, question in questions.items():
@@ -156,11 +169,20 @@ def _parse_answer(
             confidence=float(getattr(raw, "confidence", 0.0) or 0.0),
         )
     if isinstance(question, Score):
-        legend = getattr(raw, "legend", None) or list(question.criteria)
+        # The SDK returns Score ``legend`` / ``probabilities`` as
+        # MAPPINGS ("levels repeated by number"). ``list(mapping)``
+        # yields the KEYS — the bug that turned [0.1, 0.3, 0.6] into
+        # [0, 1, 2] — so both fields go through order-aware coercion
+        # that accepts mapping and sequence forms alike.
+        legend = _level_texts(
+            getattr(raw, "legend", None), question.criteria
+        )
         return ScoreDecision(
             score=float(getattr(raw, "score", 0.0) or 0.0),
-            legend=list(legend),
-            probabilities=list(getattr(raw, "probabilities", []) or []),
+            legend=legend,
+            probabilities=_level_probs(
+                getattr(raw, "probabilities", None), legend
+            ),
             confidence=float(getattr(raw, "confidence", 0.0) or 0.0),
         )
     if isinstance(question, Noul):
@@ -172,3 +194,46 @@ def _parse_answer(
             )
         return NoulDecision(noul=float(noul))
     raise DecisionError(f"unknown question type: {type(question).__name__}")
+
+
+def _level_texts(
+    value: Any, fallback: Any
+) -> list[str]:
+    """Coerce a Score ``legend`` into an ordered list of level texts.
+
+    Accepts the SDK's number-keyed mapping form (``{0: "Calm", ...}``,
+    int or numeric-string keys), a plain sequence, or ``None`` (falls
+    back to the question's own criteria).
+    """
+    if value is None:
+        return [str(level) for level in fallback]
+    if isinstance(value, Mapping):
+        if not value:
+            return [str(level) for level in fallback]
+        try:
+            items = sorted(value.items(), key=lambda kv: int(kv[0]))
+        except (TypeError, ValueError):
+            items = list(value.items())
+        return [str(text) for _, text in items]
+    texts = [str(level) for level in value]
+    return texts if texts else [str(level) for level in fallback]
+
+
+def _level_probs(value: Any, legend: list[str]) -> list[float]:
+    """Coerce Score ``probabilities`` into level order.
+
+    Mapping forms may be keyed by level NUMBER (int / numeric string
+    → numeric order) or by level TEXT (→ aligned to ``legend``);
+    sequences pass through. Missing → empty list.
+    """
+    if value is None:
+        return []
+    if isinstance(value, Mapping):
+        if not value:
+            return []
+        try:
+            items = sorted(value.items(), key=lambda kv: int(kv[0]))
+            return [float(p) for _, p in items]
+        except (TypeError, ValueError):
+            return [float(value.get(text, 0.0)) for text in legend]
+    return [float(p) for p in value]

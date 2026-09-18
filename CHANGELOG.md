@@ -9,6 +9,21 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 
 ## [Unreleased]
 
+### Fixed — Jev adapter: Score mapping coercion + model forwarding
+
+* Score answers whose ``legend`` / ``probabilities`` arrive in the
+  SDK's mapping form ("levels repeated by number") were collapsed to
+  their KEYS (``[0, 1, 2]`` instead of ``[0.1, 0.3, 0.6]``). Both
+  fields now coerce order-aware from number-keyed mappings,
+  text-keyed mappings (aligned to the legend), and plain sequences.
+* ``JevModel("jev-<version>")`` now forwards the model version to
+  ``system_one`` on every call (previously only used for pricing —
+  the wire request silently ran the client's default model). Clients
+  without per-call model selection get one precise retry without the
+  kwarg.
+
+## [0.14.0] — 2026-09-18
+
 ### Added — System One decisions (`loomflow.decisions`)
 
 A new primitive beside `Model`: a `DecisionModel` evaluates typed
