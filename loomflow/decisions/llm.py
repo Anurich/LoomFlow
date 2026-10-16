@@ -13,6 +13,12 @@ Not calibrated the way Jev claims to be — an LLM's self-reported
 probabilities are directional, not statistical. Good enough to build
 and test every seam today; revisit thresholds when real traffic moves
 onto Jev.
+
+Images in the state or questions are attached to the user message
+(placeholders ``<image 1>``, ``<image 2>``, … mark where each one
+sits), so wrap a VISION-capable model when you send them. Box answers
+from an LLM are rough — fine for development, use Jev for real
+localisation.
 """
 
 from __future__ import annotations
@@ -22,17 +28,21 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from ..core.protocols import Model
-from ..core.types import Message, Role, Usage
+from ..core.types import Image, Message, Role, Usage
 from .base import DecisionError, DecisionState
 from .types import (
+    Box,
+    BoxDecision,
     Choice,
     ChoiceDecision,
     DecisionAnswer,
     Decisions,
+    Noul,
     NoulDecision,
     Question,
     Score,
     ScoreDecision,
+    describe_content,
 )
 
 __all__ = ["LLMDecisionModel"]
@@ -54,6 +64,10 @@ Rules:
   - score:   {"level_probabilities": [<p per level, in order>]}
     (one entry per listed level, summing to ~1)
   - noul:    {"yes_probability": <p that the answer is yes>}
+  - box:     {"box": {"top": <t>, "left": <l>, "bottom": <b>,
+    "right": <r>}} — edges of the target's bounding box as fractions
+    (0-1) of the image height (top/bottom) and width (left/right),
+    measured from the top-left corner
 
 QUESTIONS:
 {questions}
@@ -75,12 +89,23 @@ class LLMDecisionModel:
     ) -> Decisions:
         if not questions:
             raise DecisionError("decide() requires at least one question")
+        # State first, so its images take the low placeholder numbers.
+        render = _Renderer()
+        user = _render_state(state, render)
         system = _SYSTEM_PROMPT.replace(
-            "{questions}", _render_questions(questions)
+            "{questions}", _render_questions(questions, render)
         )
+        if render.images:
+            user += (
+                f"\n\nIMAGES: {len(render.images)} attached, in order, "
+                "as <image 1> … <image "
+                f"{len(render.images)}>."
+            )
         messages = [
             Message(role=Role.SYSTEM, content=system),
-            Message(role=Role.USER, content=_render_state(state)),
+            Message(
+                role=Role.USER, content=user, images=tuple(render.images)
+            ),
         ]
         total = Usage()
         last_error = ""
@@ -138,39 +163,88 @@ class LLMDecisionModel:
         return "".join(parts), usage
 
 
-def _render_questions(questions: Mapping[str, Question]) -> str:
+class _Renderer:
+    """Renders question/state content to text, swapping each distinct
+    :class:`Image` for an ``<image N>`` placeholder and collecting the
+    images, in order, for the user message."""
+
+    def __init__(self) -> None:
+        self.images: list[Image] = []
+        self._index: dict[int, int] = {}
+
+    def placeholder(self, image: Image) -> str:
+        n = self._index.get(id(image))
+        if n is None:
+            self.images.append(image)
+            n = self._index[id(image)] = len(self.images)
+        return f"<image {n}>"
+
+    def text(self, value: Any, *, indent: int | None = None) -> str:
+        if value is None:
+            return "(no description)"
+        if isinstance(value, str):
+            return value
+        if isinstance(value, Image):
+            return self.placeholder(value)
+        return json.dumps(
+            value,
+            indent=indent,
+            default=lambda o: (
+                self.placeholder(o) if isinstance(o, Image) else str(o)
+            ),
+        )
+
+
+def _render_questions(
+    questions: Mapping[str, Question], render: _Renderer | None = None
+) -> str:
+    render = render or _Renderer()
     lines: list[str] = []
     for name, q in questions.items():
+        instructions = (
+            "" if q.instructions is None else render.text(q.instructions)
+        )
         if isinstance(q, Choice):
             opts = "; ".join(
-                f"{key}: {desc}" for key, desc in q.criteria.items()
+                f"{key}: {render.text(desc)}"
+                for key, desc in q.criteria.items()
             )
             lines.append(
-                f"- {name} (choice): {q.instructions}\n  options: {opts}"
+                f"- {name} (choice): {instructions}\n  options: {opts}"
             )
         elif isinstance(q, Score):
             levels = "; ".join(
-                f"[{i}] {level}" for i, level in enumerate(q.criteria)
+                f"[{i}] {render.text(level)}"
+                for i, level in enumerate(q.criteria)
             )
             lines.append(
-                f"- {name} (score): {q.instructions}\n  levels: {levels}"
+                f"- {name} (score): {instructions}\n  levels: {levels}"
             )
+        elif isinstance(q, Box):
+            lines.append(f"- {name} (box): locate {instructions}")
         else:
             clar = ""
-            if q.criteria:
+            outcomes = q.wire_criteria()
+            if outcomes:
                 clar = " (" + "; ".join(
-                    f"{k}: {v}" for k, v in q.criteria.items()
+                    f"{'yes' if k == 'true' else 'no'} means: "
+                    f"{render.text(v)}"
+                    for k, v in outcomes.items()
+                    if v is not None
                 ) + ")"
-            lines.append(f"- {name} (noul): {q.instructions}{clar}")
+            lines.append(f"- {name} (noul): {instructions}{clar}")
     return "\n".join(lines)
 
 
-def _render_state(state: DecisionState) -> str:
-    if isinstance(state, str):
-        return f"STATE:\n{state}"
+def _render_state(
+    state: DecisionState, render: _Renderer | None = None
+) -> str:
+    render = render or _Renderer()
+    if isinstance(state, str | Image):
+        return f"STATE:\n{render.text(state)}"
     if isinstance(state, Mapping):
-        return "STATE:\n" + json.dumps(state, default=str, indent=2)
-    return "STATE:\n" + "\n".join(str(part) for part in state)
+        return "STATE:\n" + render.text(state, indent=2)
+    return "STATE:\n" + "\n".join(render.text(part) for part in state)
 
 
 def _coerce(
@@ -189,8 +263,10 @@ def _coerce(
             out[name] = _coerce_choice(name, question, raw)
         elif isinstance(question, Score):
             out[name] = _coerce_score(name, question, raw)
-        else:
+        elif isinstance(question, Noul):
             out[name] = _coerce_noul(name, raw)
+        else:
+            out[name] = _coerce_box(name, raw)
     return out
 
 
@@ -280,7 +356,7 @@ def _coerce_score(
     score = sum(i * p for i, p in enumerate(probs))
     return ScoreDecision(
         score=score,
-        legend=list(question.criteria),
+        legend=[describe_content(level) for level in question.criteria],
         probabilities=probs,
         confidence=max(probs),
     )
@@ -295,6 +371,26 @@ def _coerce_noul(name: str, raw: Mapping[str, Any]) -> NoulDecision:
             f"noul answer {name!r} needs a numeric 'yes_probability'"
         ) from exc
     return NoulDecision(noul=min(1.0, max(0.0, p)))
+
+
+def _coerce_box(name: str, raw: Mapping[str, Any]) -> BoxDecision:
+    box = raw.get("box")
+    if not isinstance(box, Mapping):
+        raise DecisionError(f"box answer {name!r} needs a 'box' object")
+    try:
+        edges = {
+            k: min(1.0, max(0.0, float(box[k])))
+            for k in ("top", "left", "bottom", "right")
+        }
+    except (KeyError, TypeError, ValueError) as exc:
+        raise DecisionError(
+            f"box answer {name!r} needs numeric top/left/bottom/right"
+        ) from exc
+    # Tolerate swapped edges rather than burn a retry on them.
+    top, bottom = sorted((edges["top"], edges["bottom"]))
+    left, right = sorted((edges["left"], edges["right"]))
+    # No calibrated confidence from an LLM — None, as the wire allows.
+    return BoxDecision(top=top, left=left, bottom=bottom, right=right)
 
 
 def _add_usage(a: Usage, b: Usage) -> Usage:

@@ -7,6 +7,8 @@ usage accounting, and ``LLMDecisionModel`` runs over ``ScriptedModel``.
 
 from __future__ import annotations
 
+import importlib.util
+import json
 from typing import Any
 
 import pytest
@@ -14,8 +16,10 @@ import pytest
 from loomflow import Agent, EchoModel, ScriptedModel, ScriptedTurn, Usage
 from loomflow.architecture import TreeOfThoughts
 from loomflow.architecture.router import RouterRoute
-from loomflow.core.types import ToolCall
+from loomflow.core.types import Image, Message, ToolCall
 from loomflow.decisions import (
+    Box,
+    BoxDecision,
     Choice,
     ChoiceDecision,
     DecisionApprovalPolicy,
@@ -173,6 +177,8 @@ async def test_jev_model_missing_answer_raises() -> None:
 
 
 def test_jev_model_without_sdk_or_client_raises_import_error() -> None:
+    if importlib.util.find_spec("typesafe_sdk") is not None:
+        pytest.skip("typesafe-sdk installed; nothing to fail on")
     with pytest.raises(ImportError, match="loomflow\\[typesafe\\]"):
         JevModel()
 
@@ -611,3 +617,341 @@ async def test_tot_evaluator_decider_scores_thoughts() -> None:
     # The decider saw the rendered evaluator context.
     state = str(decider.calls[0][0])
     assert "problem" in state
+
+
+# ---------------------------------------------------------------------------
+# Images, Box, Noul outcome keys, client options (Jev 1.13 / 1.14)
+# ---------------------------------------------------------------------------
+
+_PNG = Image.from_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32)
+_JPEG = Image.from_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 32)
+_GIF = Image.from_bytes(b"GIF89a" + b"\x00" * 32)
+
+
+def _raw(sent: Any) -> bytes:
+    """Bytes of an image as handed to the client: ours, or the SDK's."""
+    return sent.to_bytes() if isinstance(sent, Image) else bytes(sent.data)
+
+
+class _KwargsJevClient:
+    """Accepts the full ``system_one`` signature and records kwargs."""
+
+    def __init__(
+        self, answers: dict[str, Any], *, model: str | None = None,
+        request_id: str | None = None,
+    ) -> None:
+        self._answers = answers
+        self._model = model
+        self._request_id = request_id
+        self.calls: list[dict[str, Any]] = []
+        self.closed = False
+
+    async def system_one(self, **kwargs: Any) -> Any:
+        self.calls.append(kwargs)
+        response = _FakeJevResponse(self._answers)
+        response.model = self._model  # type: ignore[attr-defined]
+        response.request_id = self._request_id  # type: ignore[attr-defined]
+        return response
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+def test_image_from_bytes_sniffs_media_type() -> None:
+    assert _PNG.media_type == "image/png"
+    assert _JPEG.media_type == "image/jpeg"
+    assert _GIF.media_type == "image/gif"
+    assert _PNG.to_bytes().startswith(b"\x89PNG")
+
+
+def test_noul_outcome_keys_normalise_to_wire_true_false() -> None:
+    q = Noul("spam?", criteria={"yes": "unsolicited ads", "no": "anything else"})
+    assert q.wire_criteria() == {"true": "unsolicited ads", "false": "anything else"}
+    # criteria alone (no instructions) is a valid Noul on the wire.
+    assert Noul(None, criteria={"true": "an ad"}).instructions is None
+    with pytest.raises(ValueError, match="true"):
+        Noul("?", criteria={"maybe": "x"})
+    with pytest.raises(ValueError, match="instructions or"):
+        Noul(None)
+
+
+def test_choice_and_score_need_criteria() -> None:
+    with pytest.raises(ValueError, match="Choice"):
+        Choice("?", criteria={})
+    with pytest.raises(ValueError, match="Score"):
+        Score("?", criteria=[])
+
+
+async def test_jev_sends_noul_outcomes_as_true_false() -> None:
+    client = _KwargsJevClient({"spam": _FakeJevAnswer(noul=0.1)})
+    await JevModel(client=client).decide(
+        "hi", questions={"spam": Noul("spam?", criteria={"yes": "ad"})}
+    )
+    sent = client.calls[0]["questions"]["spam"]
+    assert sent.criteria == {"true": "ad"}
+
+
+async def test_jev_images_opt_in_header_and_box_parsing() -> None:
+    client = _KwargsJevClient(
+        {
+            "dog": _FakeJevAnswer(noul=0.97),
+            "where": _FakeJevAnswer(
+                box={"top": 0.2, "left": 0.19, "bottom": 0.66, "right": 0.68},
+                confidence=0.9,
+            ),
+            "breed": _FakeJevAnswer(
+                choice="lab", probabilities={"lab": 0.8, "pug": 0.2},
+                confidence=0.8,
+            ),
+        },
+        model="jev-1.14.0",
+        request_id="req_123",
+    )
+    jev = JevModel("jev-preview", client=client)
+    d = await jev.decide(
+        {"photo": _PNG, "frames": [_JPEG, _PNG]},
+        questions={
+            "dog": Noul("Is there a dog in `photo`?"),
+            "where": Box("the dog in `photo`"),
+            # Choice options described by example images.
+            "breed": Choice(
+                "Which breed is in `photo`?",
+                criteria={"lab": {"examples": [_JPEG]}, "pug": None},
+            ),
+        },
+    )
+    call = client.calls[0]
+    assert call["extra_headers"] == {"TypeSafe-Danger-Zone-Images": "true"}
+    assert call["model"] == "jev-preview"
+    # Images reach the client in place (SDK-less path passes ours
+    # through; with the SDK installed they become typesafe_sdk.Image).
+    assert _raw(call["state"]["photo"]) == _PNG.to_bytes()
+    assert [_raw(f) for f in call["state"]["frames"]] == [
+        _JPEG.to_bytes(), _PNG.to_bytes()
+    ]
+    # One distinct image → one object, so the SDK uploads it once.
+    assert call["state"]["photo"] is call["state"]["frames"][1]
+    lab = call["questions"]["breed"].criteria["lab"]
+    assert [_raw(x) for x in lab["examples"]] == [_JPEG.to_bytes()]
+
+    where = d.boxes["where"]
+    assert (where.top, where.left, where.bottom, where.right) == (
+        0.2, 0.19, 0.66, 0.68
+    )
+    assert where.confidence == pytest.approx(0.9)
+    assert d.nouls["dog"].noul == pytest.approx(0.97)
+    assert d.choices["breed"].choice == "lab"
+    assert d.scores == {}
+    # The versioned model that answered + support request id.
+    assert d.model == "jev-1.14.0"
+    assert d.request_id == "req_123"
+
+
+async def test_jev_text_only_request_sends_no_opt_in_header() -> None:
+    client = _KwargsJevClient({"q": _FakeJevAnswer(noul=0.5)})
+    await JevModel(client=client).decide("text", questions={"q": Noul("?")})
+    assert "extra_headers" not in client.calls[0]
+
+
+async def test_jev_box_alone_turns_on_images_header() -> None:
+    client = _KwargsJevClient(
+        {"b": _FakeJevAnswer(box={"top": 0, "left": 0, "bottom": 1, "right": 1},
+                             confidence=None)}
+    )
+    d = await JevModel("jev-preview", client=client).decide(
+        "describe", questions={"b": Box("the logo")}
+    )
+    assert client.calls[0]["extra_headers"]["TypeSafe-Danger-Zone-Images"] == "true"
+    assert d.boxes["b"].confidence is None
+
+
+async def test_jev_long_context_header() -> None:
+    client = _KwargsJevClient({"q": _FakeJevAnswer(noul=0.5)})
+    await JevModel(client=client, long_context=True).decide(
+        "long doc", questions={"q": Noul("?")}
+    )
+    assert client.calls[0]["extra_headers"] == {
+        "TypeSafe-Danger-Zone-Long-Context": "true"
+    }
+
+
+async def test_jev_rejects_formats_the_api_refuses_before_calling() -> None:
+    client = _KwargsJevClient({"q": _FakeJevAnswer(noul=0.5)})
+    with pytest.raises(DecisionError, match="PNG or JPEG"):
+        await JevModel(client=client).decide(
+            {"photo": _GIF}, questions={"q": Noul("?")}
+        )
+    assert client.calls == []
+
+
+async def test_jev_box_on_pinned_pre_1_14_fails_fast() -> None:
+    client = _KwargsJevClient({})
+    with pytest.raises(DecisionError, match="jev-preview"):
+        await JevModel("jev-1.13.0", client=client).decide(
+            _PNG, questions={"b": Box("the dog")}
+        )
+    assert client.calls == []
+
+
+async def test_jev_wraps_sdk_errors_with_actionable_hint() -> None:
+    class TypeSafeBadRequestError(Exception):
+        status = 400
+
+    # Pretend the class came from the SDK (detection is by module).
+    TypeSafeBadRequestError.__module__ = "typesafe_sdk._core.errors"
+
+    class _FailingClient:
+        async def system_one(self, **kwargs: Any) -> Any:
+            raise TypeSafeBadRequestError("400 unsupported question type")
+
+    with pytest.raises(DecisionError, match="Jev 1.14") as info:
+        await JevModel(client=_FailingClient()).decide(
+            _PNG, questions={"b": Box("the dog")}
+        )
+    assert isinstance(info.value.__cause__, TypeSafeBadRequestError)
+
+
+async def test_jev_prices_every_version_and_gateway_ids() -> None:
+    for name in ("jev-1.14.0", "jev-preview", "~typesafe/jev-latest", "typesafe-ai/jev"):
+        client = _KwargsJevClient({"q": _FakeJevAnswer(noul=0.5)})
+        d = await JevModel(name, client=client).decide("s", questions={"q": Noul("?")})
+        assert d.usage.cost_usd == pytest.approx(1000 * 0.042 / 1_000_000), name
+
+
+def test_jev_default_model_honours_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TYPESAFE_DEFAULT_MODEL", "jev-preview")
+    assert JevModel(client=object()).name == "jev-preview"
+    assert JevModel("jev-1.13.0", client=object()).name == "jev-1.13.0"
+    monkeypatch.delenv("TYPESAFE_DEFAULT_MODEL")
+    assert JevModel(client=object()).name == "jev-latest"
+
+
+async def test_jev_aclose_leaves_injected_client_open() -> None:
+    client = _KwargsJevClient({})
+    async with JevModel(client=client):
+        pass
+    assert client.closed is False
+
+
+def test_box_decision_helpers() -> None:
+    b = BoxDecision(top=0.25, left=0.1, bottom=0.75, right=0.5, confidence=0.4)
+    assert b.to_pixels(200, 100) == (20, 25, 100, 75)
+    assert b.width == pytest.approx(0.4) and b.height == pytest.approx(0.5)
+    p = b.padded(0.2)
+    assert (p.top, p.left, p.bottom, p.right) == pytest.approx((0.05, 0.0, 0.95, 0.7))
+    # A box found in the right half's crop maps back to full-image fractions.
+    crop = BoxDecision(top=0.0, left=0.5, bottom=1.0, right=1.0)
+    inner = BoxDecision(top=0.5, left=0.5, bottom=1.0, right=1.0)
+    full = inner.to_full_image(crop)
+    assert (full.top, full.left, full.bottom, full.right) == pytest.approx(
+        (0.5, 0.75, 1.0, 1.0)
+    )
+
+
+class _CapturingModel:
+    """Minimal Model exposing ``complete`` — records what it was sent."""
+
+    name = "capture"
+
+    def __init__(self, *texts: str) -> None:
+        self._texts = list(texts)
+        self.sent: list[list[Message]] = []
+
+    async def complete(self, messages: list[Message]) -> Any:
+        self.sent.append(messages)
+        return self._texts.pop(0), [], Usage(), "stop"
+
+
+async def test_llm_decisions_attach_images_with_placeholders_and_box() -> None:
+    model = _CapturingModel(json.dumps({"answers": {
+        "where": {"box": {"top": 0.7, "left": 1.4, "bottom": 0.1, "right": 0.2}},
+        "same": {"yes_probability": 0.8},
+        "level": {"level_probabilities": [0.0, 1.0]},
+    }}))
+    d = await LLMDecisionModel(model).decide(  # type: ignore[arg-type]
+        {"photo": _PNG},
+        questions={
+            "where": Box("the dog in `photo`"),
+            "same": Noul(["Is `photo` the same dog as", _JPEG]),
+            "level": Score("How sharp?", criteria=["blurry", _PNG]),
+        },
+    )
+    system, user = model.sent[0]
+    # _PNG is reused (state + Score level) → one image, one placeholder.
+    assert user.images == (_PNG, _JPEG)
+    assert "<image 1>" in user.content and "2 attached" in user.content
+    assert "<image 2>" in system.content and "(box)" in system.content
+    # Edges clamped to [0, 1] and swapped back into order.
+    where = d.boxes["where"]
+    assert (where.top, where.left, where.bottom, where.right) == (0.1, 0.2, 0.7, 1.0)
+    assert where.confidence is None
+    assert d.scores["level"].legend == ["blurry", "<image>"]
+
+
+async def test_jev_with_real_sdk_builds_multipart_request() -> None:
+    """End-to-end through the REAL typesafe-sdk (skipped when the
+    extra isn't installed): our Image → SDK Image → multipart upload
+    with the opt-in header; the SDK's dict-keyed Score/Box answers
+    parse into our types."""
+    sdk = pytest.importorskip("typesafe_sdk")
+    httpx2 = pytest.importorskip("httpx2")
+    seen: dict[str, Any] = {}
+
+    def handler(request: Any) -> Any:
+        seen["headers"] = dict(request.headers)
+        seen["body"] = request.read()
+        return httpx2.Response(
+            200,
+            headers={"x-typesafe-request-id": "req_e2e"},
+            json={
+                "model": "jev-1.14.0",
+                "usage": {"input_tokens": 2000, "output_tokens": 0},
+                "answers": {
+                    "dog": {"type": "noul", "noul": 0.9},
+                    "where": {
+                        "type": "box",
+                        "box": {"top": 0.1, "left": 0.2, "bottom": 0.8, "right": 0.9},
+                        "confidence": 0.7,
+                    },
+                    "sharp": {
+                        "type": "score", "score": 1.6,
+                        "legend": {"0": "blurry", "1": "ok", "2": "sharp"},
+                        "probabilities": {"0": 0.1, "1": 0.2, "2": 0.7},
+                        "confidence": 0.7,
+                    },
+                },
+            },
+        )
+
+    client = sdk.AsyncTypeSafeClient(
+        api_key="test-key", transport=httpx2.MockTransport(handler),
+        compression=False,
+    )
+    async with JevModel("jev-preview", client=client) as jev:
+        d = await jev.decide(
+            {"photo": _PNG},
+            questions={
+                "dog": Noul("Is there a dog in `photo`?", criteria={"no": "no dog"}),
+                "where": Box("the dog in `photo`"),
+                "sharp": Score("How sharp is `photo`?", criteria=["blurry", "ok", "sharp"]),
+            },
+        )
+    await client.aclose()
+    headers = {k.lower(): v for k, v in seen["headers"].items()}
+    assert headers["typesafe-danger-zone-images"] == "true"
+    assert headers["content-type"].startswith("multipart/form-data")
+    body: bytes = seen["body"]
+    assert _PNG.to_bytes() in body  # raw bytes uploaded, not base64
+    start = body.index(b"{")
+    sent = json.loads(body[start : body.index(b"\r\n--", start)])
+    ref = sent["state"]["photo"]  # the image became an asset reference
+    assert sent["assets"] == {ref: {"type": "image", "part": "asset-0"}}
+    assert sent["questions"]["dog"]["criteria"] == {"false": "no dog"}
+    assert sent["questions"]["where"] == {
+        "type": "box", "instructions": "the dog in `photo`"
+    }
+    assert sent["model"] == "jev-preview"
+    assert d.boxes["where"].right == pytest.approx(0.9)
+    assert d.scores["sharp"].probabilities == pytest.approx([0.1, 0.2, 0.7])
+    assert d.nouls["dog"].noul == pytest.approx(0.9)
+    assert d.model == "jev-1.14.0" and d.request_id == "req_e2e"

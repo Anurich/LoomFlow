@@ -5,6 +5,7 @@ immutable where possible, validated on construction, and free of behavior
 that requires I/O.
 """
 
+import os
 import re
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -106,6 +107,48 @@ class Image(BaseModel):
 
     data: str  # base64-encoded image bytes
     media_type: str = "image/png"
+
+    @classmethod
+    def from_bytes(cls, data: bytes, media_type: str | None = None) -> "Image":
+        """Wrap raw image bytes; ``media_type`` is sniffed when omitted."""
+        import base64
+
+        return cls(
+            data=base64.b64encode(data).decode("ascii"),
+            media_type=media_type or sniff_image_type(data) or "image/png",
+        )
+
+    @classmethod
+    def from_path(cls, path: "str | os.PathLike[str]") -> "Image":
+        """Read an image file (blocking I/O — load once, reuse the object)."""
+        from pathlib import Path
+
+        raw = Path(path).read_bytes()
+        return cls.from_bytes(raw, media_type=sniff_image_type(raw))
+
+    def to_bytes(self) -> bytes:
+        """The decoded image bytes."""
+        import base64
+
+        return base64.b64decode(self.data)
+
+
+_IMAGE_SIGNATURES: tuple[tuple[bytes, str], ...] = (
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+    (b"\xff\xd8\xff", "image/jpeg"),
+    (b"GIF87a", "image/gif"),
+    (b"GIF89a", "image/gif"),
+)
+
+
+def sniff_image_type(data: bytes) -> str | None:
+    """MIME type from an image's file signature, or ``None`` if unknown."""
+    for signature, media_type in _IMAGE_SIGNATURES:
+        if data.startswith(signature):
+            return media_type
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
 
 
 class Message(BaseModel):

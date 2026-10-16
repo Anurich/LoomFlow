@@ -115,7 +115,8 @@ multi-tenancy / structured outputs / retries by hand.
   `Team` seat already carries its own `model=`. Right model for the
   right task — 60–90% cheaper architecture runs.
 * **System One decisions** (`loomflow.decisions`) — typed
-  probabilistic judgments (`Choice`/`Score`/`Noul`) instead of
+  probabilistic judgments (`Choice`/`Score`/`Noul`, plus `Box` to
+  locate things in images) over text **and images**, instead of
   generated text, backed by TypeSafe's Jev (`JevModel`) or any LLM
   (`LLMDecisionModel`). One `decider=` kwarg swaps the router's
   classifier, `run_until` goal checks, and ToT thought scoring onto

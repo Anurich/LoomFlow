@@ -13,6 +13,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any, Protocol, runtime_checkable
 
 from ..core.errors import ConfigError, LoomError
+from ..core.types import Image
 from .types import Decisions, Question
 
 __all__ = [
@@ -23,9 +24,11 @@ __all__ = [
 ]
 
 
-# State accepted by ``decide()`` — free text, a JSON-able mapping, or
-# a list of text parts. Text-only (the wire API takes no media).
-DecisionState = str | Mapping[str, Any] | Sequence[str]
+# State accepted by ``decide()`` — free text, an image, a JSON-able
+# mapping, or a list. Mappings and lists may nest :class:`Image`
+# values anywhere (``{"photo": img, "frames": [f0, f1]}``); questions
+# then name them by path ("the product in `photo`").
+DecisionState = str | Image | Mapping[str, Any] | Sequence[Any]
 
 
 class DecisionError(LoomError):
@@ -64,7 +67,8 @@ def resolve_decision_model(
     * ``None`` → ``None`` (seam keeps its current LLM behaviour)
     * a :class:`DecisionModel` instance → itself
     * ``"jev"`` / ``"jev-*"`` → :class:`JevModel` (needs
-      ``TYPESAFE_API_KEY`` via the Secrets backend or env)
+      ``TYPESAFE_API_KEY`` via the Secrets backend or env);
+      ``"jev-preview"`` for Box questions
     * a loomflow ``Model`` instance → :class:`LLMDecisionModel`
       wrapping it (works today, swap to ``"jev"`` later)
     * any other model-spec string (``"claude-haiku-4-5"``, ``"echo"``,
@@ -82,7 +86,7 @@ def resolve_decision_model(
             from .jev import JevModel
 
             return JevModel(
-                "jev-latest" if spec == "jev" else spec,
+                None if spec == "jev" else spec,
                 secrets=secrets,
             )
         # Any other string is a normal model spec → LLM fallback.

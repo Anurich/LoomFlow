@@ -9,6 +9,52 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 
 ## [Unreleased]
 
+### Added — Jev images + Box (Jev 1.13 / 1.14), full TypeSafe API coverage
+
+* **Images in decisions.** A ``loomflow.Image`` (the same type vision
+  agents take) may sit anywhere in the state, a question's
+  ``instructions``, or its ``criteria`` — e.g. Choice options described
+  by example photos. ``JevModel`` converts each to a
+  ``typesafe_sdk.Image`` (multipart upload, one per distinct image),
+  adds the ``TypeSafe-Danger-Zone-Images`` opt-in header automatically,
+  and rejects non-PNG/JPEG before sending. ``LLMDecisionModel`` attaches
+  them to a vision model's prompt as ``<image N>`` placeholders.
+* **``Box`` question → ``BoxDecision``** (Jev 1.14+): a bounding box as
+  top/left/bottom/right fractions + confidence, with ``to_pixels()``,
+  ``padded()``, and ``to_full_image(crop)`` for coarse-to-fine search.
+  ``Box`` against a pinned pre-1.14 model fails fast with the fix.
+* ``Image.from_path()`` / ``Image.from_bytes()`` (media type sniffed)
+  and ``Image.to_bytes()``.
+* ``JevModel`` options: ``base_url`` (gateways — OpenRouter, Vercel,
+  Pydantic AI), ``timeout``, ``max_retries``, ``headers``,
+  ``long_context=True`` (262k context header); default model from
+  ``TYPESAFE_DEFAULT_MODEL``; ``async with`` / ``aclose()``;
+  ``list_models()``.
+* ``Decisions.model`` (the exact version that answered) and
+  ``Decisions.request_id``; typed views ``.nouls`` / ``.choices`` /
+  ``.scores`` / ``.boxes``.
+* Question content may be text, an image, or a JSON-like dict/list;
+  Choice/Score ``instructions`` and Choice option descriptions may be
+  ``None``; ``Noul(None, criteria={"true": ...})`` is valid.
+* ``examples/33_decisions_images.py`` — offline, or live with
+  ``TYPESAFE_API_KEY``.
+
+### Fixed
+
+* ``Noul`` outcome criteria were documented as ``"yes"`` / ``"no"``
+  keys, which the TypeSafe SDK rejects (it accepts only ``true`` /
+  ``false``). Both spellings are now accepted and sent as
+  ``true`` / ``false``; any other key raises at construction.
+* Only ``jev-latest`` was priced — ``jev-preview``, pinned versions,
+  and gateway ids (``~typesafe/jev-latest``) cost $0. All now price at
+  $0.042/M input.
+* TypeSafe SDK exceptions now surface as ``DecisionError`` (HTTP
+  status, request id, and a fix hint for Box-version and size errors;
+  the original stays on ``__cause__``).
+* ``typesafe`` extra now requires ``typesafe-sdk>=0.7`` (Box/Image).
+
+## [0.14.1] — 2026-09-18
+
 ### Fixed — Jev adapter: Score mapping coercion + model forwarding
 
 * Score answers whose ``legend`` / ``probabilities`` arrive in the
