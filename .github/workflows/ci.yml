@@ -38,7 +38,9 @@ jobs:
           # ``JEEVES_TEST_PG_DSN`` / ``JEEVES_TEST_REDIS_URL``.
           # ``litellm`` / ``voyage`` / ``cohere`` extras let mypy
           # resolve the SDK type hints in the lazy-import paths.
-          pip install -e '.[dev,anthropic,openai,otel,chroma,redis,postgres,mcp,litellm,voyage,cohere]'
+          # ``typesafe`` runs the real-SDK JevModel test (mock transport,
+          # no key, no network) instead of skipping it.
+          pip install -e '.[dev,anthropic,openai,otel,chroma,redis,postgres,mcp,litellm,voyage,cohere,typesafe]'
 
       - name: Ruff
         run: ruff check loomflow tests

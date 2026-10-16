@@ -110,21 +110,35 @@ class Image(BaseModel):
 
     @classmethod
     def from_bytes(cls, data: bytes, media_type: str | None = None) -> "Image":
-        """Wrap raw image bytes; ``media_type`` is sniffed when omitted."""
+        """Wrap raw image bytes; ``media_type`` is sniffed when omitted.
+
+        Sniffing recognises PNG, JPEG, GIF, and WebP. Any other format
+        raises ``ValueError`` rather than being mislabelled — convert
+        it, or pass ``media_type`` explicitly.
+        """
         import base64
 
+        media_type = media_type or sniff_image_type(data)
+        if media_type is None:
+            raise ValueError(
+                "unrecognised image format (not PNG, JPEG, GIF, or WebP); "
+                "convert it, or pass media_type= explicitly"
+            )
         return cls(
-            data=base64.b64encode(data).decode("ascii"),
-            media_type=media_type or sniff_image_type(data) or "image/png",
+            data=base64.b64encode(data).decode("ascii"), media_type=media_type
         )
 
     @classmethod
-    def from_path(cls, path: "str | os.PathLike[str]") -> "Image":
+    def from_path(
+        cls, path: "str | os.PathLike[str]", media_type: str | None = None
+    ) -> "Image":
         """Read an image file (blocking I/O — load once, reuse the object)."""
         from pathlib import Path
 
-        raw = Path(path).read_bytes()
-        return cls.from_bytes(raw, media_type=sniff_image_type(raw))
+        try:
+            return cls.from_bytes(Path(path).read_bytes(), media_type)
+        except ValueError as exc:
+            raise ValueError(f"{os.fspath(path)}: {exc}") from None
 
     def to_bytes(self) -> bytes:
         """The decoded image bytes."""

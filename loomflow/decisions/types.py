@@ -25,7 +25,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TypeVar
 
 from ..core.types import Image, Usage
 
@@ -119,6 +119,13 @@ class Noul:
                 raise ValueError(
                     f"Noul criteria keys must be 'true'/'false' (or "
                     f"'yes'/'no'); got {unknown}"
+                )
+            outcomes = {_NOUL_KEYS[k.lower()] for k in self.criteria}
+            if len(outcomes) < len(self.criteria):
+                raise ValueError(
+                    f"Noul criteria keys {list(self.criteria)} describe the "
+                    "same outcome twice ('yes' is 'true', 'no' is 'false'); "
+                    "keep one key per outcome"
                 )
         described = self.criteria is not None and any(
             v is not None for v in self.criteria.values()
@@ -260,6 +267,7 @@ class BoxDecision:
 
 
 DecisionAnswer = ChoiceDecision | ScoreDecision | NoulDecision | BoxDecision
+_A = TypeVar("_A", ChoiceDecision, ScoreDecision, NoulDecision, BoxDecision)
 
 
 @dataclass(frozen=True)
@@ -285,21 +293,24 @@ class Decisions:
     def __getitem__(self, name: str) -> DecisionAnswer:
         return self.answers[name]
 
+    def _of_type(self, kind: type[_A]) -> dict[str, _A]:
+        return {k: a for k, a in self.answers.items() if isinstance(a, kind)}
+
     @property
     def nouls(self) -> dict[str, NoulDecision]:
-        return {k: a for k, a in self.answers.items() if isinstance(a, NoulDecision)}
+        return self._of_type(NoulDecision)
 
     @property
     def choices(self) -> dict[str, ChoiceDecision]:
-        return {k: a for k, a in self.answers.items() if isinstance(a, ChoiceDecision)}
+        return self._of_type(ChoiceDecision)
 
     @property
     def scores(self) -> dict[str, ScoreDecision]:
-        return {k: a for k, a in self.answers.items() if isinstance(a, ScoreDecision)}
+        return self._of_type(ScoreDecision)
 
     @property
     def boxes(self) -> dict[str, BoxDecision]:
-        return {k: a for k, a in self.answers.items() if isinstance(a, BoxDecision)}
+        return self._of_type(BoxDecision)
 
 
 def describe_content(value: Any) -> str:

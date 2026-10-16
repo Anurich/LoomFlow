@@ -180,8 +180,6 @@ class _Renderer:
         return f"<image {n}>"
 
     def text(self, value: Any, *, indent: int | None = None) -> str:
-        if value is None:
-            return "(no description)"
         if isinstance(value, str):
             return value
         if isinstance(value, Image):
@@ -201,12 +199,17 @@ def _render_questions(
     render = render or _Renderer()
     lines: list[str] = []
     for name, q in questions.items():
+        # Same rejection JevModel gives, before any model call — not an
+        # AttributeError, and never rendered as one type, parsed as another.
+        if not isinstance(q, Choice | Score | Noul | Box):
+            raise DecisionError(f"unknown question type: {type(q).__name__}")
         instructions = (
             "" if q.instructions is None else render.text(q.instructions)
         )
         if isinstance(q, Choice):
             opts = "; ".join(
-                f"{key}: {render.text(desc)}"
+                f"{key}: "
+                + ("(no description)" if desc is None else render.text(desc))
                 for key, desc in q.criteria.items()
             )
             lines.append(
@@ -223,15 +226,12 @@ def _render_questions(
         elif isinstance(q, Box):
             lines.append(f"- {name} (box): locate {instructions}")
         else:
-            clar = ""
-            outcomes = q.wire_criteria()
-            if outcomes:
-                clar = " (" + "; ".join(
-                    f"{'yes' if k == 'true' else 'no'} means: "
-                    f"{render.text(v)}"
-                    for k, v in outcomes.items()
-                    if v is not None
-                ) + ")"
+            described = [
+                f"{'yes' if k == 'true' else 'no'} means: {render.text(v)}"
+                for k, v in (q.wire_criteria() or {}).items()
+                if v is not None
+            ]
+            clar = f" ({'; '.join(described)})" if described else ""
             lines.append(f"- {name} (noul): {instructions}{clar}")
     return "\n".join(lines)
 

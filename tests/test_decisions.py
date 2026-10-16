@@ -7,12 +7,17 @@ usage accounting, and ``LLMDecisionModel`` runs over ``ScriptedModel``.
 
 from __future__ import annotations
 
+import base64
 import importlib.util
 import json
+import types
+from collections.abc import Iterator, Mapping
 from typing import Any
 
 import pytest
+from pydantic import BaseModel, ConfigDict, ValidationError
 
+import loomflow.decisions.jev as jev_module
 from loomflow import Agent, EchoModel, ScriptedModel, ScriptedTurn, Usage
 from loomflow.architecture import TreeOfThoughts
 from loomflow.architecture.router import RouterRoute
@@ -43,6 +48,13 @@ pytestmark = pytest.mark.anyio
 @pytest.fixture
 def anyio_backend() -> str:
     return "asyncio"
+
+
+@pytest.fixture(autouse=True)
+def _no_default_model_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``JevModel()`` reads TYPESAFE_DEFAULT_MODEL; a developer's shell
+    value must not change which model (and Box gate) tests run with."""
+    monkeypatch.delenv("TYPESAFE_DEFAULT_MODEL", raising=False)
 
 
 # ---------------------------------------------------------------------------
@@ -229,26 +241,32 @@ async def test_jev_model_forwards_model_version() -> None:
     assert client.calls[0]["model"] == "jev-1.13.0"
 
 
-async def test_jev_model_falls_back_when_client_lacks_model_param() -> None:
-    """Clients predating per-call model selection (or old fakes) get
-    one precise retry without the kwarg; unrelated TypeErrors are
-    not swallowed."""
+async def test_jev_model_never_resends_without_the_pinned_model() -> None:
+    """A TypeError mentioning "model" (``response_model``, a pydantic
+    BaseModel error, …) must propagate — not trigger a silent second
+    request that drops the pinned version."""
 
-    class _LegacyClient:
+    class _Client:
         def __init__(self) -> None:
-            self.calls: list[Any] = []
+            self.calls: list[dict[str, Any]] = []
 
-        async def system_one(self, *, state: Any, questions: Any) -> Any:
-            self.calls.append(state)
-            return _FakeJevResponse({"q": _FakeJevAnswer(noul=0.7)})
+        async def system_one(self, **kwargs: Any) -> Any:
+            self.calls.append(kwargs)
+            raise TypeError("response_model must be a BaseModel subclass")
 
-    legacy = _LegacyClient()
-    jev = JevModel("jev-1.13.0", client=legacy)
-    d = await jev.decide("s", questions={"q": Noul("?")})
-    q = d["q"]
-    assert isinstance(q, NoulDecision)
-    assert q.noul == pytest.approx(0.7)
-    assert legacy.calls == ["s"]
+    client = _Client()
+    with pytest.raises(TypeError, match="response_model"):
+        await JevModel("jev-1.13.0", client=client).decide(
+            "s", questions={"q": Noul("?")}
+        )
+    assert [c["model"] for c in client.calls] == ["jev-1.13.0"]
+
+
+def test_jev_model_rejects_client_options_with_injected_client() -> None:
+    with pytest.raises(ValueError, match="timeout, max_retries"):
+        JevModel(client=object(), timeout=2, max_retries=0)
+    # long_context is per request, so it still applies to any client.
+    assert JevModel(client=object(), long_context=True).long_context
 
 
 # ---------------------------------------------------------------------------
@@ -657,11 +675,21 @@ class _KwargsJevClient:
         self.closed = True
 
 
-def test_image_from_bytes_sniffs_media_type() -> None:
+def test_image_from_bytes_sniffs_media_type(tmp_path: Any) -> None:
     assert _PNG.media_type == "image/png"
     assert _JPEG.media_type == "image/jpeg"
     assert _GIF.media_type == "image/gif"
     assert _PNG.to_bytes().startswith(b"\x89PNG")
+    # Unrecognised formats are not mislabelled as PNG.
+    heic = b"\x00\x00\x00\x18ftypheic" + b"\x00" * 16
+    with pytest.raises(ValueError, match="unrecognised image format"):
+        Image.from_bytes(heic)
+    assert Image.from_bytes(heic, "image/heic").media_type == "image/heic"
+    photo = tmp_path / "photo.heic"
+    photo.write_bytes(heic)
+    with pytest.raises(ValueError, match="photo.heic: unrecognised"):
+        Image.from_path(photo)
+    assert Image.from_path(photo, "image/heic").to_bytes() == heic
 
 
 def test_noul_outcome_keys_normalise_to_wire_true_false() -> None:
@@ -673,6 +701,11 @@ def test_noul_outcome_keys_normalise_to_wire_true_false() -> None:
         Noul("?", criteria={"maybe": "x"})
     with pytest.raises(ValueError, match="instructions or"):
         Noul(None)
+    # An alias and its wire key for one outcome would drop a description.
+    with pytest.raises(ValueError, match="same outcome twice"):
+        Noul("?", criteria={"yes": "a", "true": "b"})
+    with pytest.raises(ValueError, match="same outcome twice"):
+        Noul("?", criteria={"no": "a", "False": "b"})
 
 
 def test_choice_and_score_need_criteria() -> None:
@@ -781,7 +814,23 @@ async def test_jev_rejects_formats_the_api_refuses_before_calling() -> None:
         await JevModel(client=client).decide(
             {"photo": _GIF}, questions={"q": Noul("?")}
         )
+    # A mislabelled unknown format is reported as unknown, not as the
+    # (accepted) PNG its media_type claims.
+    heic = Image(data=base64.b64encode(b"\x00\x00\x00\x18ftypheic").decode())
+    with pytest.raises(DecisionError, match="unrecognised format labelled image/png"):
+        await JevModel(client=client).decide(heic, questions={"q": Noul("?")})
     assert client.calls == []
+
+
+async def test_jev_accepts_line_wrapped_base64() -> None:
+    raw = _PNG.to_bytes() * 4
+    wrapped = Image(data=base64.encodebytes(raw).decode())
+    assert "\n" in wrapped.data.strip()
+    client = _KwargsJevClient({"q": _FakeJevAnswer(noul=0.5)})
+    await JevModel(client=client).decide(
+        {"photo": wrapped}, questions={"q": Noul("?")}
+    )
+    assert _raw(client.calls[0]["state"]["photo"]) == raw
 
 
 async def test_jev_box_on_pinned_pre_1_14_fails_fast() -> None:
@@ -809,6 +858,99 @@ async def test_jev_wraps_sdk_errors_with_actionable_hint() -> None:
             _PNG, questions={"b": Box("the dog")}
         )
     assert isinstance(info.value.__cause__, TypeSafeBadRequestError)
+    # Models known to serve Box get the server's reason, not a hint to
+    # switch to the model they already use.
+    for model in ("jev-preview", "jev-1.14.0", "~typesafe/jev-preview"):
+        with pytest.raises(DecisionError) as info:
+            await JevModel(model, client=_FailingClient()).decide(
+                _PNG, questions={"b": Box("the dog")}
+            )
+        assert "unsupported question type" in str(info.value)
+        assert "Jev 1.14+" not in str(info.value), model
+
+
+class _StubSdkImage:
+    def __init__(self, data: bytes) -> None:
+        self.data = data
+
+
+def _stub_sdk(**overrides: Any) -> Any:
+    """A ``typesafe_sdk`` stand-in: question classes return their kwargs."""
+    attrs: dict[str, Any] = {
+        "Noul": lambda **kw: kw,
+        "Choice": lambda **kw: kw,
+        "Score": lambda **kw: kw,
+        **overrides,
+    }
+    return types.SimpleNamespace(**attrs)
+
+
+async def test_jev_on_an_sdk_without_images_or_box_says_upgrade(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(jev_module, "_load_sdk", lambda: _stub_sdk())
+    client = _KwargsJevClient({})
+    with pytest.raises(DecisionError, match=r"Images need typesafe-sdk>=0\.7\.5"):
+        await JevModel(client=client).decide(
+            {"photo": _PNG}, questions={"q": Noul("?")}
+        )
+    with pytest.raises(DecisionError, match=r"Box questions need typesafe-sdk>=0\.7\.5"):
+        await JevModel("jev-preview", client=client).decide(
+            "s", questions={"b": Box("the logo")}
+        )
+    assert client.calls == []
+
+
+async def test_jev_wraps_sdk_question_validation_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _StrictChoice(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        instructions: str
+        criteria: dict[str, str]
+
+    monkeypatch.setattr(
+        jev_module, "_load_sdk", lambda: _stub_sdk(Choice=_StrictChoice)
+    )
+    client = _KwargsJevClient({})
+    with pytest.raises(DecisionError, match="question 'pick' is not valid") as info:
+        await JevModel(client=client).decide(
+            "s", questions={"pick": Choice("which?", {"a": {"nested": 1}})}
+        )
+    assert isinstance(info.value.__cause__, ValidationError)
+    assert client.calls == []
+
+
+async def test_jev_image_uploads_keyed_by_value_not_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A state that builds Images on access frees each one mid-walk;
+    an id()-keyed cache then handed later frames an earlier frame's
+    upload. Equal images still share one upload."""
+    monkeypatch.setattr(
+        jev_module, "_load_sdk", lambda: _stub_sdk(Image=_StubSdkImage)
+    )
+    blobs = {f"f{i}": b"\x89PNG\r\n\x1a\n" + bytes([i]) * 32 for i in range(20)}
+
+    class _LazyFrames(Mapping[str, Image]):
+        def __getitem__(self, key: str) -> Image:
+            return Image.from_bytes(blobs[key])
+
+        def __iter__(self) -> Iterator[str]:
+            return iter(blobs)
+
+        def __len__(self) -> int:
+            return len(blobs)
+
+    client = _KwargsJevClient({"q": _FakeJevAnswer(noul=0.5)})
+    await JevModel(client=client).decide(_LazyFrames(), questions={"q": Noul("?")})
+    sent = client.calls[0]["state"]
+    assert {k: _raw(v) for k, v in sent.items()} == blobs
+
+    twins = [Image.from_bytes(blobs["f0"]), Image.from_bytes(blobs["f0"])]
+    await JevModel(client=client).decide(twins, questions={"q": Noul("?")})
+    first, second = client.calls[1]["state"]
+    assert first is second
 
 
 async def test_jev_prices_every_version_and_gateway_ids() -> None:
@@ -888,6 +1030,38 @@ async def test_llm_decisions_attach_images_with_placeholders_and_box() -> None:
     assert d.scores["level"].legend == ["blurry", "<image>"]
 
 
+async def test_llm_decisions_render_null_state_and_undescribed_outcomes() -> None:
+    model = _CapturingModel(json.dumps({"answers": {
+        "q": {"yes_probability": 0.5},
+        "c": {"probabilities": {"x": 1.0}},
+    }}))
+    await LLMDecisionModel(model).decide(  # type: ignore[arg-type]
+        ["a", None, 3],
+        questions={
+            "q": Noul("Is it?", criteria={"true": None, "false": None}),
+            "c": Choice("Which?", criteria={"x": None}),
+        },
+    )
+    system, user = model.sent[0]
+    # A missing state value reads as null, not as a placeholder label.
+    assert user.content == "STATE:\na\nnull\n3"
+    # No empty "()" when no outcome is described.
+    assert "- q (noul): Is it?\n" in system.content
+    assert "x: (no description)" in system.content
+
+
+async def test_llm_decisions_reject_unknown_question_types() -> None:
+    class _Alien:
+        instructions = "?"
+
+    model = _CapturingModel()
+    with pytest.raises(DecisionError, match="unknown question type: _Alien"):
+        await LLMDecisionModel(model).decide(  # type: ignore[arg-type]
+            "s", questions={"q": _Alien()}  # type: ignore[dict-item]
+        )
+    assert model.sent == []
+
+
 async def test_jev_with_real_sdk_builds_multipart_request() -> None:
     """End-to-end through the REAL typesafe-sdk (skipped when the
     extra isn't installed): our Image → SDK Image → multipart upload
@@ -955,3 +1129,15 @@ async def test_jev_with_real_sdk_builds_multipart_request() -> None:
     assert d.scores["sharp"].probabilities == pytest.approx([0.1, 0.2, 0.7])
     assert d.nouls["dog"].noul == pytest.approx(0.9)
     assert d.model == "jev-1.14.0" and d.request_id == "req_e2e"
+
+
+async def test_jev_with_real_sdk_wraps_invalid_question_content() -> None:
+    """The real SDK's pydantic question models reject non-JSON content
+    at construction — that must surface as DecisionError, pre-send."""
+    pytest.importorskip("typesafe_sdk")
+    client = _KwargsJevClient({})
+    with pytest.raises(DecisionError, match="question 'pick' is not valid"):
+        await JevModel(client=client).decide(
+            "s", questions={"pick": Choice("which?", {"a": object()})}  # type: ignore[dict-item]
+        )
+    assert client.calls == []

@@ -9,6 +9,43 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 
 ## [Unreleased]
 
+### Fixed — Jev images + Box follow-ups
+
+* ``typesafe`` extra now requires ``typesafe-sdk>=0.7.5`` — the first
+  release with ``Image`` and ``Box`` (0.15.0's ``>=0.7`` admitted
+  0.7.0–0.7.4, where images crashed and Box answers were dropped).
+  An SDK without ``Image`` / ``Box`` now raises ``DecisionError`` with
+  the upgrade command instead of ``AttributeError``.
+* Images in a state that builds values on access (a lazy mapping)
+  could be sent with ANOTHER image's bytes: the upload cache was keyed
+  by ``id()``, which a freed image hands on. Now keyed by the image
+  data, so equal images also share one upload.
+* A ``TypeError`` mentioning "model" no longer triggers a silent resend
+  without the pinned model; ``model=`` is always forwarded.
+* SDK question validation errors (non-JSON criteria) surface as
+  ``DecisionError`` before anything is sent.
+* Line-wrapped base64 in ``Image.data`` is accepted, as
+  ``Image.to_bytes()`` and the SDK accept it.
+* The "Box questions need Jev 1.14+" hint is only added when the model
+  may predate Box — not for ``jev-preview`` / 1.14+, where it hid the
+  real error.
+* ``Image.from_bytes()`` / ``from_path()`` raise ``ValueError`` for an
+  unrecognised format instead of labelling it ``image/png`` (both take
+  an explicit ``media_type``); Jev's format error names it unrecognised.
+* ``Noul`` criteria naming one outcome twice (``yes`` and ``true``)
+  raise instead of silently dropping a description.
+* ``JevModel(client=...)`` raises if ``base_url`` / ``timeout`` /
+  ``max_retries`` / ``headers`` are also passed (they configure only
+  the client JevModel creates, and were silently ignored).
+* ``LLMDecisionModel``: a ``None`` in a list state renders as ``null``
+  (not "(no description)"); a Noul with no described outcome gets no
+  empty ``()``; an unknown question type raises ``DecisionError``
+  instead of ``AttributeError`` or being parsed as a Box.
+* Tests no longer depend on the developer's ``TYPESAFE_DEFAULT_MODEL``;
+  CI installs the ``typesafe`` extra so the real-SDK test runs.
+
+## [0.15.0] — 2026-10-16
+
 ### Added — Jev images + Box (Jev 1.13 / 1.14), full TypeSafe API coverage
 
 * **Images in decisions.** A ``loomflow.Image`` (the same type vision

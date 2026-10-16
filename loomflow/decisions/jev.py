@@ -26,6 +26,8 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from pydantic import ValidationError
+
 from ..core.types import Image, Usage, sniff_image_type
 from ..model._pricing import estimate_cost
 from .base import DecisionError, DecisionState
@@ -50,6 +52,8 @@ _IMAGES_HEADER = "TypeSafe-Danger-Zone-Images"
 _LONG_CONTEXT_HEADER = "TypeSafe-Danger-Zone-Long-Context"
 _JEV_ACCEPTS = ("image/png", "image/jpeg")
 _VERSION = re.compile(r"jev-(\d+)\.(\d+)")
+# First SDK release with Image / Box (keep in step with the extra's pin).
+_NEEDS_NEWER_SDK = "need typesafe-sdk>=0.7.5: pip install -U 'loomflow[typesafe]'"
 
 
 class JevModel:
@@ -67,7 +71,9 @@ class JevModel:
     * ``long_context=True`` — 262k-token requests via the
       ``TypeSafe-Danger-Zone-Long-Context`` header (same price,
       slower, less accurate).
-    * ``client=`` — inject a ready client (tests, custom transports).
+    * ``client=`` — inject a ready client (tests, custom transports);
+      configure ``base_url`` / ``timeout`` / ``max_retries`` /
+      ``headers`` on that client, not here.
 
     Use ``async with JevModel() as jev:`` (or ``await jev.aclose()``)
     to release the HTTP connection pool when done.
@@ -94,6 +100,21 @@ class JevModel:
         self.long_context = long_context
         self._owns_client = client is None
         if client is not None:
+            ignored = [
+                name
+                for name, value in (
+                    ("base_url", base_url),
+                    ("timeout", timeout),
+                    ("max_retries", max_retries),
+                    ("headers", headers),
+                )
+                if value is not None
+            ]
+            if ignored:
+                raise ValueError(
+                    f"{', '.join(ignored)} configure the client JevModel "
+                    "creates; with client= set them on that client instead"
+                )
             self._client = client
             return
         try:
@@ -159,18 +180,25 @@ class JevModel:
         if not questions:
             raise DecisionError("decide() requires at least one question")
         has_box = any(isinstance(q, Box) for q in questions.values())
-        if has_box and _predates_box(self.name):
+        box_support = _box_support(self.name)
+        if has_box and box_support is False:
             raise DecisionError(
                 f"Box questions need Jev 1.14+, but this JevModel is "
                 f"pinned to {self.name!r} — use JevModel('jev-preview') "
                 "or JevModel('jev-1.14.0')"
             )
         wire = _Wire(_load_sdk())
+        wire_questions: dict[str, Any] = {}
+        for name, q in questions.items():
+            try:
+                wire_questions[name] = wire.question(q)
+            except ValidationError as exc:  # the SDK's pydantic question models
+                raise DecisionError(
+                    f"question {name!r} is not valid Jev content: {exc}"
+                ) from exc
         call_kwargs: dict[str, Any] = {
             "state": wire.content(state),
-            "questions": {
-                name: wire.question(q) for name, q in questions.items()
-            },
+            "questions": wire_questions,
             # Forward the requested model version — ``JevModel(
             # "jev-1.13.0")`` must pin that version on the wire, not
             # silently use the client's configured default.
@@ -184,11 +212,13 @@ class JevModel:
         if headers:
             call_kwargs["extra_headers"] = headers
         try:
-            response = await self._call(call_kwargs)
+            response = await self._client.system_one(**call_kwargs)
         except Exception as exc:
             if _is_sdk_error(exc):
                 raise DecisionError(
-                    _failure_message(exc, has_box=has_box)
+                    _failure_message(
+                        exc, box_hint=has_box and box_support is not True
+                    )
                 ) from exc
             raise
 
@@ -212,7 +242,7 @@ class JevModel:
         usage = Usage(
             input_tokens=in_tok,
             output_tokens=out_tok,
-            cost_usd=estimate_cost(_pricing_name(self.name), in_tok, out_tok),
+            cost_usd=estimate_cost(_base_model(self.name), in_tok, out_tok),
         )
         answered_by = getattr(response, "model", None)
         return Decisions(
@@ -221,17 +251,6 @@ class JevModel:
             model=str(answered_by) if answered_by else None,
             request_id=_request_id(response),
         )
-
-    async def _call(self, call_kwargs: dict[str, Any]) -> Any:
-        """One ``system_one`` call. Clients/SDKs predating per-call
-        model selection get one precise retry without the kwarg."""
-        try:
-            return await self._client.system_one(**call_kwargs)
-        except TypeError as exc:
-            if "model" not in str(exc):
-                raise
-            call_kwargs = {k: v for k, v in call_kwargs.items() if k != "model"}
-            return await self._client.system_one(**call_kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -252,14 +271,18 @@ class _Wire:
 
     With the SDK installed, questions become SDK question objects and
     each :class:`Image` a ``typesafe_sdk.Image`` (one per distinct
-    image object, so an image used twice uploads once). Without it (an
+    image, so an image used twice uploads once). Without it (an
     injected fake ``client=`` in tests), our frozen dataclasses pass
     through with the same field names, so a fake sees identical shapes.
     """
 
     def __init__(self, sdk: Any | None) -> None:
         self._sdk = sdk
-        self._images: dict[int, Any] = {}
+        # Keyed by the image's data, not id(): equal images share one
+        # upload, and an Image freed mid-traversal (a state that builds
+        # values on access) can't pass its id — and cached upload — on
+        # to a different image.
+        self._images: dict[str, Any] = {}
         self.saw_image = False
 
     def content(self, value: Any) -> Any:
@@ -275,22 +298,30 @@ class _Wire:
         return value
 
     def _image(self, image: Image) -> Any:
-        cached = self._images.get(id(image))
+        cached = self._images.get(image.data)
         if cached is not None:
             return cached
         try:
-            raw = base64.b64decode(image.data, validate=True)
+            # Whitespace (line-wrapped base64) is ignored, as
+            # ``Image.to_bytes()`` and the SDK's ``from_base64`` do.
+            raw = base64.b64decode("".join(image.data.split()), validate=True)
         except (binascii.Error, ValueError) as exc:
             raise DecisionError("Image.data is not valid base64") from exc
         kind = sniff_image_type(raw)
         if kind not in _JEV_ACCEPTS:
+            got = kind or f"an unrecognised format labelled {image.media_type}"
             raise DecisionError(
-                f"Jev accepts PNG or JPEG images only (got "
-                f"{kind or image.media_type}); convert GIF/WebP/HEIC "
-                "to PNG or JPEG first"
+                f"Jev accepts PNG or JPEG images only (got {got}); "
+                "convert GIF/WebP/HEIC to PNG or JPEG first"
             )
-        converted = image if self._sdk is None else self._sdk.Image(raw)
-        self._images[id(image)] = converted
+        if self._sdk is None:
+            converted: Any = image
+        else:
+            sdk_image = getattr(self._sdk, "Image", None)
+            if sdk_image is None:
+                raise DecisionError(f"Images {_NEEDS_NEWER_SDK}")
+            converted = sdk_image(raw)
+        self._images[image.data] = converted
         return converted
 
     def question(self, q: Question) -> Any:
@@ -321,24 +352,25 @@ class _Wire:
                 return Box(instructions)
             sdk_box = getattr(self._sdk, "Box", None)
             if sdk_box is None:
-                raise DecisionError(
-                    "Box questions need typesafe-sdk>=0.7: "
-                    "pip install -U 'loomflow[typesafe]'"
-                )
+                raise DecisionError(f"Box questions {_NEEDS_NEWER_SDK}")
             return sdk_box(instructions=instructions)
         raise DecisionError(f"unknown question type: {type(q).__name__}")
 
 
-def _predates_box(model: str) -> bool:
-    """True only for an explicitly pinned pre-1.14 version — aliases
-    (``jev-latest``) move, so those are left to the server."""
+def _box_support(model: str) -> bool | None:
+    """Whether ``model`` serves Box questions: ``True`` for
+    ``jev-preview`` or a pinned 1.14+, ``False`` for a pinned pre-1.14,
+    ``None`` for other aliases (``jev-latest`` moves, so it's left to
+    the server)."""
     m = _VERSION.search(model)
-    return m is not None and (int(m[1]), int(m[2])) < (1, 14)
+    if m is not None:
+        return (int(m[1]), int(m[2])) >= (1, 14)
+    return True if _base_model(model) == "jev-preview" else None
 
 
-def _pricing_name(model: str) -> str:
+def _base_model(model: str) -> str:
     """Gateway ids (``~typesafe/jev-latest``, ``typesafe-ai/jev``)
-    price as the underlying Jev model."""
+    name the underlying Jev model — for pricing and Box support."""
     return model.rsplit("/", 1)[-1].lstrip("~")
 
 
@@ -351,12 +383,13 @@ def _is_sdk_error(exc: BaseException) -> bool:
     return type(exc).__module__.split(".", 1)[0] == "typesafe_sdk"
 
 
-def _failure_message(exc: BaseException, *, has_box: bool) -> str:
+def _failure_message(exc: BaseException, *, box_hint: bool) -> str:
     # str(TypeSafeAPIError) already carries status, endpoint, and
     # request_id; add the fix for the failures we can predict.
+    # ``box_hint``: the request has a Box and the model may predate it.
     msg = f"Jev request failed: {exc}"
     status = getattr(exc, "status", None)
-    if status in (400, 422) and has_box:
+    if status in (400, 422) and box_hint:
         msg += (
             " — Box questions need Jev 1.14+ (JevModel('jev-preview') "
             "or 'jev-1.14.0')"
@@ -454,18 +487,14 @@ def _level_texts(
     int or numeric-string keys), a plain sequence, or ``None`` (falls
     back to the question's own criteria).
     """
-    if value is None:
-        return [describe_content(level) for level in fallback]
     if isinstance(value, Mapping):
-        if not value:
-            return [describe_content(level) for level in fallback]
         try:
             items = sorted(value.items(), key=lambda kv: int(kv[0]))
         except (TypeError, ValueError):
             items = list(value.items())
-        return [describe_content(text) for _, text in items]
-    texts = [describe_content(level) for level in value]
-    return texts if texts else [describe_content(level) for level in fallback]
+        value = [text for _, text in items]
+    texts = [describe_content(level) for level in value or ()]
+    return texts or [describe_content(level) for level in fallback]
 
 
 def _level_probs(value: Any, legend: list[str]) -> list[float]:
