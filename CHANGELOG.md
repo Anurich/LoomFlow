@@ -44,6 +44,25 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 * Tests no longer depend on the developer's ``TYPESAFE_DEFAULT_MODEL``;
   CI installs the ``typesafe`` extra so the real-SDK test runs.
 
+### Fixed — found while checking the docs against the code
+
+* ``memory="sqlite"`` (and ``SqliteMemory(":memory:")`` /
+  ``SqliteFactStore(":memory:")``) failed on first use with "no such
+  table": each operation opens a new connection, and every plain
+  ``:memory:`` connection is a separate empty database. In-memory
+  stores now use a named shared-cache database kept open for the
+  store's lifetime, and a ``SqliteMemory``'s episodes and facts share
+  it. Separate stores stay separate.
+* ``SubprocessSandbox`` could not run ``@tool``-decorated functions,
+  the normal way to define tools: ``@tool`` rebinds the module name to
+  the ``Tool`` wrapper, so pickling the function by reference failed
+  ("not the same object as …"). Such functions are now sent by name
+  and unwrapped in the child. The docstring also notes the
+  ``if __name__ == "__main__":`` guard the ``spawn`` start method needs.
+* ``loom run --help`` and the module docstring suggested
+  ``--model openai:gpt-4o``, a spec the resolver rejects ("unknown
+  model spec"). The examples now use ``gpt-4o`` / ``claude-opus-4-7``.
+
 ## [0.15.0] — 2026-10-16
 
 ### Added — Jev images + Box (Jev 1.13 / 1.14), full TypeSafe API coverage

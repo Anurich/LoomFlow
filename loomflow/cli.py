@@ -3,7 +3,7 @@
 Stdlib ``argparse`` only; no click/typer dependency. Wired up via
 ``[project.scripts]`` in ``pyproject.toml``::
 
-    loom run "summarise this" --model openai:gpt-4o
+    loom run "summarise this" --model gpt-4o
     loom serve my_service:agent --host 0.0.0.0 --port 8000
     loom eval cases.jsonl --agent my_service:agent --threshold exact_match=0.9
     loom version
@@ -172,7 +172,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_run = sub.add_parser("run", help="run a single prompt through an Agent")
     p_run.add_argument("prompt", help="the user prompt")
     p_run.add_argument(
-        "--model", default="echo", help="model spec (e.g. openai:gpt-4o; default: echo)"
+        "--model", default="echo", help="model spec (e.g. gpt-4o or claude-opus-4-7; default: echo)"
     )
     p_run.add_argument(
         "--instructions",

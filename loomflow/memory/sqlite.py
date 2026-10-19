@@ -61,7 +61,7 @@ from ..core.types import (
 from ._embedding_util import cosine, pack_float32, unpack_float32
 from .embedder import HashEmbedder, warn_hash_embedder_fallback
 from .facts import FactStore, count_facts, delete_facts
-from .sqlite_facts import SqliteFactStore
+from .sqlite_facts import SqliteFactStore, open_target
 
 __all__ = ["SqliteMemory"]
 
@@ -184,7 +184,8 @@ class SqliteMemory:
         fact_store: FactStore | None = None,
     ) -> None:
         self._path = Path(path) if str(path) != ":memory:" else Path(":memory:")
-        if str(self._path) != ":memory:":
+        self._db, self._uri, self._keepalive = open_target(path)
+        if not self._uri:
             self._path.parent.mkdir(parents=True, exist_ok=True)
         # Hash embedder is the zero-key default — same convention as
         # the other persistent backends. Real production runs pass an
@@ -207,7 +208,11 @@ class SqliteMemory:
         if fact_store is not None:
             self.facts: FactStore | None = fact_store
         elif with_facts:
-            self.facts = SqliteFactStore(self._path, embedder=self._embedder)
+            # In memory, hand over the database name (not ":memory:",
+            # which would open a second, separate database).
+            self.facts = SqliteFactStore(
+                self._db if self._uri else self._path, embedder=self._embedder
+            )
         else:
             self.facts = None
 
@@ -226,7 +231,7 @@ class SqliteMemory:
         """One connection per call. SQLite connections aren't safe to
         share across the worker threads we hop into via
         ``anyio.to_thread.run_sync``."""
-        conn = sqlite3.connect(self._path)
+        conn = sqlite3.connect(self._db, uri=self._uri)
         # Foreign keys are OFF by default in SQLite; enable per-
         # connection so the ``episode_tool_transcripts`` ON DELETE
         # CASCADE actually fires when an episode is deleted via

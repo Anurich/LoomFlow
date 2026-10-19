@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -60,6 +61,26 @@ _FACTS_USER_SUBJECT_PRED_INDEX = (
 )
 
 
+def open_target(path: str | Path) -> tuple[str | Path, bool, sqlite3.Connection | None]:
+    """What to pass ``sqlite3.connect`` for ``path``: (target, uri, keepalive).
+
+    The SQLite stores open a fresh connection per call, and every plain
+    ``":memory:"`` connection is a new, empty database, so the schema
+    built in ``__init__`` was gone by the first query ("no such table").
+    ``":memory:"`` therefore becomes a uniquely named shared-cache
+    in-memory database, held open by the returned keep-alive connection
+    for as long as the store lives. Pass the returned target to another
+    store to share the same in-memory database.
+    """
+    target = str(path)
+    if target == ":memory:":
+        target = f"file:loomflow-{uuid.uuid4().hex}?mode=memory&cache=shared"
+    if target.startswith("file:") and "mode=memory" in target:
+        keepalive = sqlite3.connect(target, uri=True, check_same_thread=False)
+        return target, True, keepalive
+    return Path(target), False, None
+
+
 class SqliteFactStore:
     """Durable bi-temporal fact store rooted at a sqlite file."""
 
@@ -70,7 +91,9 @@ class SqliteFactStore:
         embedder: Embedder | None = None,
     ) -> None:
         self._path = Path(path)
-        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._db, self._uri, self._keepalive = open_target(path)
+        if not self._uri:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
         self._embedder = embedder
         self._init_schema()
 
@@ -88,7 +111,7 @@ class SqliteFactStore:
     def _connect(self) -> Iterator[sqlite3.Connection]:
         # New connection per call; SQLite connections aren't safe to
         # share across the worker threads we hop into.
-        conn = sqlite3.connect(self._path)
+        conn = sqlite3.connect(self._db, uri=self._uri)
         # Concurrency pragmas: WAL lets readers proceed during a
         # write (persisted in the DB file once set); synchronous
         # NORMAL is the recommended pairing; busy_timeout makes a

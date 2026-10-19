@@ -95,6 +95,16 @@ async def test_async_tool_runs_via_asyncio_run_in_subprocess() -> None:
     assert result.output == 10
 
 
+async def test_tool_decorated_function_runs_in_subprocess() -> None:
+    # Pickling Tool.fn by reference fails ("not the same object as
+    # _subprocess_tools.tool_triple") because @tool rebound the name.
+    host = InProcessToolHost([tools.tool_triple])
+    sandbox = SubprocessSandbox(host, timeout_seconds=30.0)
+    result = await sandbox.call("tool_triple", {"x": 7}, call_id="c1")
+    assert result.ok, result.error
+    assert result.output == 21
+
+
 async def test_subprocess_pid_differs_from_parent() -> None:
     """Sanity check: the tool really did execute in a different process."""
     host = _make_host(("get_pid", tools.get_pid, "return pid"))

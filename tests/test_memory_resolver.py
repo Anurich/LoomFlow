@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from loomflow import Agent, ConfigError, Episode, InMemoryMemory, resolve_memory
+from loomflow import Agent, ConfigError, Episode, Fact, InMemoryMemory, resolve_memory
 from loomflow.memory import LazyMemory, SqliteMemory
 from loomflow.memory.embedder import HashEmbedder
 from loomflow.memory.resolver import _default_embedder
@@ -46,6 +46,33 @@ def test_resolver_sqlite_bare_returns_ephemeral() -> None:
     m = resolve_memory("sqlite")
     assert isinstance(m, SqliteMemory)
     assert str(m.path) == ":memory:"
+
+
+async def test_bare_sqlite_memory_is_usable() -> None:
+    # Each operation opens its own connection; with a plain ":memory:"
+    # every connection was a fresh empty database, so the first run
+    # failed with "no such table". Episodes and facts must share one
+    # in-memory database for the store's lifetime.
+    agent = Agent("hi", model="echo", memory="sqlite")
+    result = await agent.run("hello", user_id="alice")
+    assert result.output
+    profile = await agent.memory.profile(user_id="alice")
+    assert profile.episode_count == 1
+
+    memory = agent.memory
+    assert isinstance(memory, SqliteMemory) and memory.facts is not None
+    await memory.facts.append(
+        Fact(user_id="alice", subject="alice", predicate="lives_in", object="Tokyo")
+    )
+    found = await memory.facts.query(user_id="alice", subject="alice")
+    assert [f.object for f in found] == ["Tokyo"]
+
+
+async def test_separate_in_memory_sqlite_stores_do_not_share_data() -> None:
+    a, b = SqliteMemory(":memory:"), SqliteMemory(":memory:")
+    await Agent("hi", model="echo", memory=a).run("only in a", user_id="u")
+    assert (await a.profile(user_id="u")).episode_count == 1
+    assert (await b.profile(user_id="u")).episode_count == 0
 
 
 def test_resolver_sqlite_with_path(tmp_path: Path) -> None:

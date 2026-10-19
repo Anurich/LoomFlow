@@ -12,6 +12,8 @@ from __future__ import annotations
 import os
 import time
 
+from loomflow import tool
+
 
 def double(x: int) -> int:
     """Return ``x * 2``."""
@@ -59,3 +61,10 @@ def reach_network() -> str:
     s = socket.create_connection(("1.1.1.1", 53), timeout=3)
     s.close()
     return "connected"
+
+
+@tool
+def tool_triple(x: int) -> int:
+    """Return ``x * 3``. ``@tool`` rebinds this module name to the Tool
+    wrapper, so the sandbox has to send it by name, not by pickle."""
+    return x * 3

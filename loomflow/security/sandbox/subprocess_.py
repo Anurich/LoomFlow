@@ -25,10 +25,14 @@ Constraints:
   this way (they're already a process boundary themselves —
   re-process-isolating them adds nothing).
 * The tool function and its arguments must be **picklable**. That
-  means module-level functions (top-level ``def`` in a module);
-  closures and locally-defined functions can't cross the process
-  boundary. The ``@tool``-decorated functions in your application
-  modules are usually fine.
+  means module-level functions (top-level ``def`` in a module, with
+  or without ``@tool``); closures and locally-defined functions can't
+  cross the process boundary. ``@tool`` rebinds the module name to the
+  ``Tool`` wrapper, so such functions are sent by name and unwrapped
+  in the child.
+* With the ``spawn`` start method (the macOS and Windows default) the
+  child re-imports your entry script, so guard it with
+  ``if __name__ == "__main__":``.
 
 Cost:
 
@@ -41,6 +45,7 @@ Cost:
 
 from __future__ import annotations
 
+import importlib
 import multiprocessing
 import os
 import pickle
@@ -146,6 +151,36 @@ class _SubprocessExecutionError(Exception):
     """Raised when a subprocess tool call ran but raised an exception."""
 
 
+def _dump_function(fn: Any) -> bytes:
+    """Pickle ``fn`` for the child, by name if ``@tool`` shadowed it.
+
+    Pickle sends functions by reference (module + qualified name) and
+    refuses when that name no longer points at the function. ``@tool``
+    does exactly that: the module attribute becomes the ``Tool``
+    wrapper. So fall back to sending the name and let the child look it
+    up and unwrap the Tool.
+    """
+    try:
+        return pickle.dumps(("fn", fn))
+    except pickle.PicklingError:
+        module = getattr(fn, "__module__", None)
+        qualname = getattr(fn, "__qualname__", "")
+        if not module or "<locals>" in qualname:
+            raise
+        return pickle.dumps(("ref", module, qualname))
+
+
+def _load_function(payload: bytes) -> Any:
+    kind, *rest = pickle.loads(payload)
+    if kind == "fn":
+        return rest[0]
+    module, qualname = rest
+    obj: Any = importlib.import_module(module)
+    for part in qualname.split("."):
+        obj = getattr(obj, part)
+    return obj.fn if isinstance(obj, Tool) else obj
+
+
 def _worker(
     fn_pickled: bytes,
     args: dict[str, Any],
@@ -153,7 +188,7 @@ def _worker(
 ) -> None:
     """Child-process entry point. Module-level so it pickles."""
     try:
-        fn = pickle.loads(fn_pickled)
+        fn = _load_function(fn_pickled)
         import asyncio
         import inspect
 
@@ -181,7 +216,7 @@ async def _run_in_subprocess(
         ``pickle.PickleError``/``TypeError``: ``fn`` or ``args`` weren't
             picklable (caught at the parent before spawn).
     """
-    fn_pickled = pickle.dumps(fn)
+    fn_pickled = _dump_function(fn)
     ctx = multiprocessing.get_context("spawn")
     queue: multiprocessing.Queue[tuple[str, Any]] = ctx.Queue()
     proc = ctx.Process(target=_worker, args=(fn_pickled, args, queue))
