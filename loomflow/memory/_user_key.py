@@ -46,14 +46,24 @@ def encode_user_id(user_id: str | None) -> str:
 
     Rejects callers who try to use the sentinel value as a real
     user_id — that would let one user silently impersonate the
-    anonymous bucket.
+    anonymous bucket — and anything that isn't a string: a dict like
+    ``{"$ne": "mallory"}`` would otherwise reach a backend's filter
+    as an operator and match every other user's rows.
     """
+    _check_user_id(user_id)
     if user_id == ANON_USER_ID:
         raise ValueError(
             f"user_id {ANON_USER_ID!r} is reserved by Loom for "
             "the anonymous bucket; choose a different identifier."
         )
     return user_id if user_id is not None else ANON_USER_ID
+
+
+def _check_user_id(user_id: object) -> None:
+    if user_id is not None and not isinstance(user_id, str):
+        raise TypeError(
+            f"user_id must be a string or None, not {type(user_id).__name__}"
+        )
 
 
 def decode_user_id(wire_value: str) -> str | None:

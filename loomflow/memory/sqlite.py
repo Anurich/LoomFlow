@@ -237,6 +237,10 @@ class SqliteMemory:
         # CASCADE actually fires when an episode is deleted via
         # ``forget()``. Cheap pragma; safe on tables without FKs.
         conn.execute("PRAGMA foreign_keys = ON")
+        # Overwrite deleted content with zeros, so a forgotten user's
+        # data doesn't linger in free pages of the file (the default
+        # depends on how SQLite was compiled).
+        conn.execute("PRAGMA secure_delete = ON")
         # Concurrency pragmas: WAL lets readers proceed during a
         # write (WAL mode persists in the DB file once set);
         # synchronous NORMAL is the recommended WAL pairing;
@@ -599,7 +603,10 @@ class SqliteMemory:
             self._scan_episodes_sync, user_id, time_range
         )
         # ``_scan_episodes_sync`` sorts oldest-first; recency-recall
-        # wants newest-first, so reverse here.
+        # wants newest-first, so reverse here. (``rows[-0:]`` is every
+        # row, so ``limit=0`` needs its own case.)
+        if limit <= 0:
+            return []
         return [_row_to_episode(r) for r in rows[-limit:][::-1]]
 
     def _scan_episodes_sync(

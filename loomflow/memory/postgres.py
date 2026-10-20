@@ -33,6 +33,7 @@ from ..core.types import (
     Message,
     Role,
 )
+from ..vectorstore._pgvector import hnsw_scan
 from ._embedding_util import vector_to_list
 from ._user_key import ANON_USER_ID, decode_user_id, encode_user_id
 from .embedder import HashEmbedder, warn_hash_embedder_fallback
@@ -93,12 +94,17 @@ class PostgresMemory:
         min_size: int = 1,
         max_size: int = 10,
         with_facts: bool = False,
+        init_schema: bool = False,
     ) -> PostgresMemory:
         """Open an asyncpg pool and register the pgvector codec.
 
         When ``with_facts=True`` a :class:`PostgresFactStore` rooted at
         the same pool is attached as ``self.facts`` so the agent loop's
         memory.facts integration just works.
+
+        ``init_schema=True`` creates the ``vector`` extension and the
+        tables if they don't exist (idempotent): the default when the
+        store comes from a ``memory="postgres://..."`` URL.
         """
         try:
             import asyncpg  # type: ignore[import-not-found, import-untyped]
@@ -120,6 +126,13 @@ class PostgresMemory:
         async def _setup(conn: Any) -> None:
             await register_vector(conn)
 
+        if init_schema:
+            # The pool's codec setup needs the ``vector`` type to exist.
+            bootstrap = await asyncpg.connect(dsn=dsn)
+            try:
+                await bootstrap.execute("CREATE EXTENSION IF NOT EXISTS vector")
+            finally:
+                await bootstrap.close()
         pool = await asyncpg.create_pool(
             dsn=dsn,
             min_size=min_size,
@@ -131,6 +144,8 @@ class PostgresMemory:
             from .postgres_facts import PostgresFactStore
 
             instance.facts = PostgresFactStore(pool, embedder=embedder)
+        if init_schema:
+            await instance.init_schema()
         return instance
 
     async def aclose(self) -> None:
@@ -409,7 +424,9 @@ class PostgresMemory:
         # Hard namespace partition by ``user_id``: NULL filter matches
         # only NULL rows; a string filter matches exactly. ``IS NOT
         # DISTINCT FROM`` makes ``NULL = NULL`` work correctly.
-        async with self._pool.acquire() as conn:
+        # The namespace / user / time filter applies to an HNSW scan:
+        # ``hnsw_scan`` keeps it from returning fewer rows than exist.
+        async with self._pool.acquire() as conn, hnsw_scan(conn, fetch=limit, filtered=True):
             rows = await conn.fetch(
                 "SELECT id, session_id, user_id, occurred_at, input, output, embedding "
                 "FROM episodes "
@@ -463,7 +480,9 @@ class PostgresMemory:
         hi = time_range[1] if time_range is not None else None
         fetch_limit = max(limit * 8, 40)
 
-        async with self._pool.acquire() as conn:
+        async with self._pool.acquire() as conn, hnsw_scan(
+            conn, fetch=fetch_limit, filtered=True
+        ):
             rows = await conn.fetch(
                 "SELECT id, session_id, user_id, occurred_at, input, output, embedding "
                 "FROM episodes "

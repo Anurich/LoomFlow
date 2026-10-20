@@ -9,6 +9,7 @@ pool so we don't need a live database. Live integration is gated on
 from __future__ import annotations
 
 import os
+import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -289,6 +290,7 @@ async def test_postgres_memory_init_schema_runs_fact_store_schema_too() -> None:
     reason="JEEVES_TEST_PG_DSN env var not set",
 )
 async def test_live_postgres_fact_store_roundtrip() -> None:  # pragma: no cover
+    pytest.importorskip("asyncpg")
     dsn = os.environ["JEEVES_TEST_PG_DSN"]
     store = await PostgresFactStore.connect(
         dsn, embedder=HashEmbedder(dimensions=16)
@@ -296,17 +298,19 @@ async def test_live_postgres_fact_store_roundtrip() -> None:  # pragma: no cover
     try:
         await store.init_schema()
         base = datetime(2026, 1, 1, tzinfo=UTC)
-        await store.append(_fact(predicate="lives_in", object_="Tokyo", valid_from=base))
+        # A predicate per run, so earlier runs' rows don't interfere.
+        predicate = f"lives_in_{uuid.uuid4().hex[:8]}"
+        await store.append(_fact(predicate=predicate, object_="Tokyo", valid_from=base))
         await store.append(
             _fact(
-                predicate="lives_in",
+                predicate=predicate,
                 object_="Paris",
                 valid_from=base + timedelta(days=30),
             )
         )
         # supersession applied
         on_feb = base + timedelta(days=45)
-        facts = await store.query(predicate="lives_in", valid_at=on_feb)
+        facts = await store.query(predicate=predicate, valid_at=on_feb)
         assert {f.object for f in facts} == {"Paris"}
     finally:
         await store.aclose()

@@ -44,6 +44,7 @@ from ..loader.base import Chunk
 from ._bm25 import fuse_weighted
 from ._filter import COMPARISON_OPERATORS, LOGICAL_OPERATORS, FilterError
 from ._mmr import rerank_tail
+from ._pgvector import hnsw_scan
 from ._util import embed_all, resolve_ids
 from .base import SearchResult, _chunks_from_texts
 
@@ -390,7 +391,9 @@ class PostgresVectorStore:
             LIMIT ${len(params)}
         """
 
-        async with self._acquire() as conn:
+        async with self._acquire() as conn, hnsw_scan(
+            conn, fetch=n_fetch, filtered=bool(filter)
+        ):
             rows = await conn.fetch(sql, *params)
 
         candidates: list[SearchResult] = []
@@ -502,7 +505,8 @@ class PostgresVectorStore:
         l_rows: list[Any] = []
         async with self._acquire() as conn:
             if v_sql:
-                v_rows = await conn.fetch(v_sql, *v_params)
+                async with hnsw_scan(conn, fetch=n_fetch, filtered=bool(filter)):
+                    v_rows = await conn.fetch(v_sql, *v_params)
             if l_sql:
                 try:
                     l_rows = await conn.fetch(l_sql, *l_params)
@@ -586,7 +590,10 @@ def _xlate_node(
         elif key == "$not":
             assert isinstance(value, Mapping)
             expr, params = _xlate_node(value, params)
-            parts.append(f"NOT ({expr})")
+            # A comparison on a missing key is NULL, and NOT NULL is
+            # NULL: COALESCE so "not matching" includes those rows, as
+            # in every other store.
+            parts.append(f"NOT COALESCE(({expr}), false)")
         elif key in LOGICAL_OPERATORS:
             raise FilterError(f"Unhandled logical operator: {key}")
         elif key.startswith("$"):
@@ -634,7 +641,21 @@ def _xlate_field(
     ):
         sub_exprs: list[str] = []
         for op, expected in condition.items():
-            if op in _SQL_BIN_OPS:
+            if op == "$ne":
+                # A missing key is "not equal to anything" (the shared
+                # contract); ``<>`` on it is NULL and drops the row.
+                if _is_numeric_operand(expected):
+                    params.append(expected)
+                    sub_exprs.append(
+                        f"NOT COALESCE((metadata->>'{key}') ~ {_NUMERIC_GUARD_SQL} "
+                        f"AND ((metadata->>'{key}'))::numeric = ${len(params)}, false)"
+                    )
+                else:
+                    params.append(_pg_field_value(expected))
+                    sub_exprs.append(
+                        f"(metadata->>'{key}') IS DISTINCT FROM ${len(params)}"
+                    )
+            elif op in _SQL_BIN_OPS:
                 params.append(
                     expected
                     if _is_numeric_operand(expected)

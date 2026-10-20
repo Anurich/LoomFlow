@@ -23,6 +23,7 @@ from typing import Any
 
 from ..core.protocols import Embedder
 from ..core.types import Fact, _normalize_predicate
+from ..vectorstore._pgvector import hnsw_scan
 from .facts import plan_supersession
 
 
@@ -332,7 +333,7 @@ class PostgresFactStore:
             f"LIMIT ${idx}"
         )
 
-        async with self._pool.acquire() as conn:
+        async with self._pool.acquire() as conn, hnsw_scan(conn, fetch=limit, filtered=True):
             rows = await conn.fetch(sql, *params)
         return [_row_to_fact(r) for r in rows]
 

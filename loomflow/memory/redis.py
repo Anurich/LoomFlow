@@ -420,7 +420,7 @@ class RedisMemory:
             result = await self._client.execute_command(*params)
         except Exception as exc:  # noqa: BLE001
             raise MemoryStoreError(f"RediSearch KNN query failed: {exc}") from exc
-        return _decode_ft_search_pairs(result)
+        return _decode_ft_search_pairs(result, self._key_prefix)
 
     async def recall_scored(
         self,
@@ -768,6 +768,7 @@ def _decode_hash(data: dict[Any, Any]) -> Episode | None:
 
 def _decode_ft_search_pairs(
     result: Any,
+    key_prefix: str = DEFAULT_KEY_PREFIX,
 ) -> list[tuple[Episode, float | None]]:
     """Translate a ``FT.SEARCH`` reply into ``(episode, similarity)``
     pairs. The KNN clause returns the cosine *distance* under the
@@ -798,9 +799,9 @@ def _decode_ft_search_pairs(
         # Use the doc id as our episode id.
         doc_id = body[i]
         eid = doc_id.decode("utf-8") if isinstance(doc_id, bytes) else str(doc_id)
-        # Strip the prefix if present.
-        if ":" in eid:
-            eid = eid.split(":", 1)[-1]
+        # The doc id is the hash key: drop the configured key prefix
+        # (``jeeves:episode:``), not just up to the first ``:``.
+        eid = eid.removeprefix(key_prefix)
         occurred_raw = _decode_field(decoded.get("occurred_at", "0"))
         try:
             occurred_at = datetime.fromtimestamp(float(occurred_raw), tz=UTC)
@@ -832,9 +833,9 @@ def _decode_ft_search_pairs(
     return out
 
 
-def _decode_ft_search(result: Any) -> list[Episode]:
+def _decode_ft_search(result: Any, key_prefix: str = DEFAULT_KEY_PREFIX) -> list[Episode]:
     """Back-compat wrapper: Episodes only, scores dropped."""
-    return [ep for ep, _ in _decode_ft_search_pairs(result)]
+    return [ep for ep, _ in _decode_ft_search_pairs(result, key_prefix)]
 
 
 __all__ = [

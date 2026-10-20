@@ -7,6 +7,7 @@ test is gated on ``JEEVES_TEST_PG_DSN``.
 from __future__ import annotations
 
 import os
+import uuid
 from typing import Any
 
 import pytest
@@ -179,6 +180,7 @@ async def test_postgres_runtime_init_schema_delegates_to_store() -> None:
     reason="JEEVES_TEST_PG_DSN env var not set",
 )
 async def test_live_postgres_runtime_replay() -> None:  # pragma: no cover
+    pytest.importorskip("asyncpg")
     dsn = os.environ["JEEVES_TEST_PG_DSN"]
     runtime = await PostgresRuntime.connect(dsn)
     try:
@@ -189,7 +191,8 @@ async def test_live_postgres_runtime_replay() -> None:  # pragma: no cover
             counter["runs"] += 1
             return f"v{counter['runs']}"
 
-        async with runtime.session("live-replay-test"):
+        # A session per run: a fixed id replays the previous run's journal.
+        async with runtime.session(f"live-replay-{uuid.uuid4().hex[:8]}"):
             v1 = await runtime.step("step_a", expensive)
             v2 = await runtime.step("step_a", expensive)
 

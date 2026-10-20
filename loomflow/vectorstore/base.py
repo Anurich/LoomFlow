@@ -104,12 +104,18 @@ class VectorStore(Protocol):
           InMemory, so a rerank/fusion pipeline can mix backends.
         * **filter** uses the same Mongo-style language everywhere
           (``$eq`` / ``$in`` / ``$gt`` / ``$and`` / ``$exists`` …).
-          Chroma and Postgres push it into the engine (always returns
-          ``k`` if ``k`` match). FAISS and InMemory POST-filter an
+          Postgres pushes it into the query and scans until ``k`` rows
+          match (pgvector 0.8+ iterative index scans; older pgvector
+          filters after the index scan, so a tight filter can return
+          fewer). Chroma pushes it into the engine too, except
+          ``$exists`` / ``$not``, which it re-checks over an
+          over-fetched pool. FAISS and InMemory POST-filter an
           over-fetched candidate pool, so a very tight filter on a
           large store may return FEWER than ``k`` even when more
           matches exist — best-effort, not guaranteed-``k``. Prefer
-          Chroma/Postgres when an exact-``k`` filtered result matters.
+          Postgres when an exact-``k`` filtered result matters.
+          A missing key counts as "not equal" for ``$ne`` / ``$nin``
+          / ``$not`` everywhere.
         """
         ...
 

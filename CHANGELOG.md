@@ -136,6 +136,42 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 * SQLite fact queries name their columns. A database migrated from
   before ``user_id`` existed has that column last, which shifted every
   field on read.
+* **Redis recall** returned ids like ``episode:ep_...`` (the key prefix
+  cut at the first ``:``), so anonymous recall listed every hit twice.
+* **Hybrid recall** with ``alpha=0.0`` is pure BM25 and ``1.0`` pure
+  vector, as with the vector stores (the other ranking used to keep a
+  vote).
+* **Chroma:**
+  * ``ChromaMemory.recall(time_range=...)`` filters inside the query.
+    Matching older episodes were lost when the range was applied after
+    a top-``limit`` query.
+  * ``ChromaFactStore.query(limit=...)`` returns the newest facts, not
+    the first inserted.
+  * New memory and fact collections use cosine space, like every other
+    backend; existing ones warn.
+  * Vector-store filters support ``$exists`` and ``$not``.
+* **Postgres:**
+  * Filtered and large-``k`` searches return every match. HNSW scans
+    stopped at ``ef_search`` (40) rows and filtered afterwards, so a
+    rare tenant's rows or ``k > 40`` came back short. Now
+    ``ef_search`` is sized to the request, with iterative index scans
+    on pgvector 0.8+.
+  * ``$ne`` / ``$not`` treat a missing key as "not equal" (they
+    dropped those rows).
+  * ``memory="postgres://..."`` creates its tables on first connect
+    (it never did).
+* **Seed injection** keeps cross-session memories. It recalled three
+  episodes and then dropped this session's own, so the answer from
+  another session was lost; it now over-fetches. With
+  ``memory_token_budget``, facts and episodes are ranked on the same
+  (reciprocal-rank) scale; a fixed 1.0 for facts beat every episode.
+* **Erasure on disk:** SQLite memory and journal databases set
+  ``PRAGMA secure_delete``, so forgotten data is overwritten, not left
+  in free pages.
+* ``recall(..., limit=0)`` on SQLite returns nothing (it returned
+  everything). A ``user_id`` that isn't a string or ``None`` is
+  rejected. A dict like ``{"$ne": "mallory"}`` used to reach Chroma's
+  filter as an operator and match other users' rows.
 
 ### Fixed — right to erasure
 

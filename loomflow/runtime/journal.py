@@ -456,6 +456,9 @@ class SqliteJournalStore:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA synchronous=NORMAL")
             self._conn.execute("PRAGMA busy_timeout=5000")
+            # Pruned steps (tool results, transcripts) are zeroed on
+            # disk rather than left in free pages.
+            self._conn.execute("PRAGMA secure_delete = ON")
             self._conn.execute(_STEP_DDL)
             self._conn.execute(_STREAM_DDL)
             self._conn.execute(_CHECKPOINT_DDL)

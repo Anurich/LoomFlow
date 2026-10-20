@@ -28,6 +28,7 @@ import anyio
 
 from ..core.protocols import Embedder
 from ..core.types import Fact, _normalize_predicate
+from ..vectorstore.chroma import get_or_create_cosine_collection
 from ._user_key import (
     decode_legacy_user_id,
     encode_user_id,
@@ -98,8 +99,8 @@ class ChromaFactStore:
         if self._collection is not None:
             return self._collection
         coll = await anyio.to_thread.run_sync(
-            lambda: self._client.get_or_create_collection(
-                name=self._collection_name
+            lambda: get_or_create_cosine_collection(
+                self._client, self._collection_name
             )
         )
         self._collection = coll
@@ -184,19 +185,12 @@ class ChromaFactStore:
         coll = await self._get_collection()
         where = _build_where(subject, predicate, object_, valid_at, user_id)
 
-        # Chroma's ``get`` accepts ``limit`` only in newer releases;
-        # fall back to slicing in Python if it raises.
-        def _do_get() -> Any:
-            try:
-                return coll.get(
-                    where=where,
-                    limit=limit,
-                    include=["metadatas"],
-                )
-            except TypeError:
-                return coll.get(where=where, include=["metadatas"])
-
-        result = await anyio.to_thread.run_sync(_do_get)
+        # Chroma's ``get`` can't order its results, and with ``limit``
+        # it returns the *first inserted* rows: fetch every match, sort
+        # newest-first, then slice.
+        result = await anyio.to_thread.run_sync(
+            lambda: coll.get(where=where, include=["metadatas"])
+        )
         facts = _decode_get(result)
         # Sort by recorded_at desc; tie-break by valid_from desc.
         facts.sort(

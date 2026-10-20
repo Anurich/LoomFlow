@@ -2108,6 +2108,11 @@ class Agent:
         from ..model._effort import validate_effort
 
         validate_effort(kwargs.get("effort"))
+        user_id = kwargs.get("user_id")
+        if user_id is not None and not isinstance(user_id, str):
+            # It partitions memory, journals and workers: a dict here
+            # could reach a backend filter as an operator.
+            raise TypeError(f"user_id must be a string or None, not {type(user_id).__name__}")
         if self._timeout is None:
             return await self._loop(prompt, **kwargs)
         try:

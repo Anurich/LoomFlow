@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import contextlib
 from collections.abc import AsyncIterator
+from itertools import zip_longest
 from typing import TYPE_CHECKING, Any
 
 import anyio
@@ -573,6 +574,11 @@ class ReAct:
 # ---------------------------------------------------------------------------
 
 
+def _rank_relevance(rank: int, k: int = 60) -> float:
+    """Reciprocal-rank relevance (Cormack et al.'s RRF term)."""
+    return 1.0 / (k + rank + 1)
+
+
 async def _build_seed_messages(
     deps: Dependencies, instructions: str, prompt: str
 ) -> list[Message]:
@@ -633,31 +639,37 @@ async def _build_seed_messages(
     # legacy plain-recall path below runs unchanged (byte-identical
     # seed messages).
     episode_scores: dict[str, float] = {}
+    # Same-session hits are dropped below (that conversation is
+    # rehydrated as real turns), so over-fetch: recalling exactly 3
+    # lost the cross-session answer whenever this session's own turns
+    # ranked first.
+    episode_limit = 3
+    fetch = episode_limit * 4 if session_id is not None else episode_limit
     if deps.memory_token_budget is not None:
         try:
             matches = await deps.memory.recall_scored(
-                prompt, kind="episodic", limit=3, user_id=user_id
+                prompt, kind="episodic", limit=fetch, user_id=user_id
             )
             episodes = [m.episode for m in matches]
             episode_scores = {m.episode.id: m.score for m in matches}
         except (AttributeError, TypeError):
             try:
                 episodes = await deps.memory.recall(
-                    prompt, kind="episodic", limit=3, user_id=user_id
+                    prompt, kind="episodic", limit=fetch, user_id=user_id
                 )
             except TypeError:
                 episodes = await deps.memory.recall(
-                    prompt, kind="episodic", limit=3
+                    prompt, kind="episodic", limit=fetch
                 )
     else:
         try:
             episodes = await deps.memory.recall(
-                prompt, kind="episodic", limit=3, user_id=user_id
+                prompt, kind="episodic", limit=fetch, user_id=user_id
             )
         except TypeError:
             # Backends that haven't picked up the user_id kwarg yet.
             episodes = await deps.memory.recall(
-                prompt, kind="episodic", limit=3
+                prompt, kind="episodic", limit=fetch
             )
 
     # Cross-session recall only — drop any episode that belongs to
@@ -665,6 +677,7 @@ async def _build_seed_messages(
     # real chat turn below).
     if session_id is not None:
         episodes = [e for e in episodes if e.session_id != session_id]
+    episodes = episodes[:episode_limit]
 
     recall_parts: list[str] = []
     if deps.memory_token_budget is None:
@@ -688,24 +701,33 @@ async def _build_seed_messages(
         # (uniform treatment; the partitioned "Known facts /
         # Relevant past episodes" headers only apply to the legacy
         # path). Facts decay on ``recorded_at``, episodes on
-        # ``occurred_at``; plain-recall items carry relevance 1.0.
+        # ``occurred_at``. Facts and episodes are ranked by different
+        # scorers (a fixed 1.0 for facts beat every episode's RRF
+        # score), so each list's relevance is its reciprocal rank, as
+        # in RRF: the best fact and the best episode count the same.
         from datetime import UTC, datetime
 
         from ..memory._injection import budget_items, estimate_tokens
 
         block_cost = sum(estimate_tokens(b.format()) for b in blocks)
         remaining = deps.memory_token_budget - block_cost
-        items: list[tuple[str, float, datetime | None]] = [
-            (f"- {f.format()}", 1.0, getattr(f, "recorded_at", None))
-            for f in facts
+        ranked_episodes = sorted(
+            episodes, key=lambda e: episode_scores.get(e.id, 0.0), reverse=True
+        ) if episode_scores else episodes
+        fact_items = [
+            (f"- {f.format()}", _rank_relevance(rank), getattr(f, "recorded_at", None))
+            for rank, f in enumerate(facts)
         ]
-        items += [
-            (
-                f"- {e.format()}",
-                episode_scores.get(e.id, 1.0),
-                getattr(e, "occurred_at", None),
-            )
-            for e in episodes
+        episode_items = [
+            (f"- {e.format()}", _rank_relevance(rank), getattr(e, "occurred_at", None))
+            for rank, e in enumerate(ranked_episodes)
+        ]
+        # Interleaved, so equal relevance alternates fact / episode.
+        items: list[tuple[str, float, datetime | None]] = [
+            item
+            for pair in zip_longest(fact_items, episode_items)
+            for item in pair
+            if item is not None
         ]
         if items and remaining > 0:
             selected = budget_items(

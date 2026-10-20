@@ -130,6 +130,10 @@ class SqliteFactStore:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA busy_timeout=5000")
+        # Overwrite deleted content with zeros, so a forgotten user's
+        # data doesn't linger in free pages of the file (the default
+        # depends on how SQLite was compiled).
+        conn.execute("PRAGMA secure_delete = ON")
         try:
             yield conn
         finally:
