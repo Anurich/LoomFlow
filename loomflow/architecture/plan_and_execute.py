@@ -159,6 +159,11 @@ class PlanAndExecute:
         prompt: str,
     ) -> AsyncIterator[Event]:
         # === 1. Plan ===
+        blocked, gate_events = await budget_gate(deps, session)
+        for gate_event in gate_events:
+            yield gate_event
+        if blocked:
+            return
         yield Event.architecture_event(
             session.id, "plan.planner_started"
         )
@@ -218,6 +223,11 @@ class PlanAndExecute:
             )
 
         # === 3. Synthesize ===
+        blocked, gate_events = await budget_gate(deps, session)
+        for gate_event in gate_events:
+            yield gate_event
+        if blocked:
+            return
         yield Event.architecture_event(
             session.id, "plan.synthesizer_started"
         )
@@ -342,17 +352,23 @@ class PlanAndExecute:
 def _parse_plan(text: str) -> Plan:
     """Parse the planner's JSON-list output into a :class:`Plan`.
 
-    Tolerant: strips markdown code fences, accepts JSON arrays of
-    strings or arrays of ``{description: ...}`` objects, falls back
-    to splitting on newlines if no JSON found. Step ids are
-    auto-assigned (``step_1``, ``step_2``, ...).
+    Tolerant: finds the JSON in the reply (fenced, or inside prose),
+    accepts arrays of strings or of ``{description: ...}`` objects,
+    and ``{"steps": [...]}`` / ``{"plan": [...]}``. Without JSON it
+    takes the numbered or bulleted lines (or, if there are none,
+    every line). Blank steps are dropped; step ids are assigned in
+    order (``step_1``, ``step_2``, ...).
     """
     cleaned = strip_markdown_fences(text)
 
     descriptions: list[str] = []
 
-    # Try a strict JSON parse first.
     parsed: object = parse_fenced_json(cleaned)
+    if isinstance(parsed, dict):
+        parsed = next(
+            (v for k in ("steps", "plan") if isinstance(v := parsed.get(k), list)),
+            parsed,
+        )
 
     if isinstance(parsed, list):
         for item in parsed:
@@ -368,20 +384,22 @@ def _parse_plan(text: str) -> Plan:
         # the line-splitter fallback (it would otherwise interpret
         # the literal string ``"[]"`` as a single step).
     else:
-        # Fallback: split on numbered or bulleted lines.
-        for line in cleaned.split("\n"):
-            stripped = line.strip()
-            if not stripped:
-                continue
-            cleaned_line = re.sub(
-                r"^\s*(?:[\-\*]|\d+[\.\)])\s*", "", stripped
-            )
-            if cleaned_line:
-                descriptions.append(cleaned_line)
+        # Fallback: the numbered / bulleted lines — so a lead-in like
+        # "Here is the plan:" isn't a step — or every line if none
+        # are marked.
+        lines = [line.strip() for line in cleaned.split("\n") if line.strip()]
+        marked = [
+            m.group(1).strip()
+            for line in lines
+            if (m := _LIST_ITEM_RE.match(line)) is not None
+        ]
+        descriptions = marked if marked else lines
 
     steps = [
         PlanStep(id=f"step_{i + 1}", description=d)
-        for i, d in enumerate(descriptions)
-        if d
+        for i, d in enumerate(d for d in descriptions if d)
     ]
     return Plan(steps=steps)
+
+
+_LIST_ITEM_RE = re.compile(r"^(?:[\-\*\u2022]|\d+[\.\)]|step\s+\d+\s*[:.\)])\s+(.+)$", re.IGNORECASE)

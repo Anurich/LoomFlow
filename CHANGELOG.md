@@ -379,6 +379,40 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
   Debater and judge spend is charged to the coordinator's budget.
   ``rounds`` is documented as debate rounds after the independent one
   (Du et al.'s ``rounds=2`` is ``rounds=1``).
+* **Scores and JSON from model replies.** ``parse_score`` (Reflexion,
+  Tree of Thoughts, ActorCritic) reads scales: "7/10" is 0.7, "40%"
+  0.4, "2 out of 10" 0.2, "score: 7" 0.7, and a negative score 0;
+  "3/10" and "40%" used to read as 1.0, a false success. JSON wrapped
+  in prose or a fence, or followed by prose, is found (ActorCritic
+  scored such critiques 0.0 and never approved; ReWOO and
+  Plan-and-Execute saw no plan).
+* **ActorCritic** charges actor and critic spend to the coordinator's
+  budget and gates the first actor call.
+* **Tree of Thoughts** picks the winner from the deepest level reached
+  (Yao et al., Alg. 1), so an interior step no longer beats the steps
+  built on it; node ids are tree paths, so a resumed search replays
+  instead of calling the model again.
+* **ReWOO** skips a step whose input step failed or that references a
+  step the plan lacks (instead of running it on an error message or a
+  literal ``{{E9}}``), renames repeated step ids, accepts the paper's
+  ``#E1`` references and ``{"steps": [...]}`` plans, emits
+  ``tool_call`` / ``tool_result`` events, caps tool output in the
+  solver prompt at ``tool_result_max_chars`` and shows the solver each
+  step's inputs. Custom prompts containing JSON braces work
+  (ActorCritic's too). Planner and solver calls are budget-gated, as
+  are Plan-and-Execute's planner and synthesizer.
+* **Plan-and-Execute** plan parsing drops lead-in prose ("Here is the
+  plan:") and blank steps, and accepts ``{"steps": [...]}``.
+* **Self-Refine** stops only when the critique *is* the stop phrase
+  (the whole reply or its first line), not when it mentions it
+  ("Grammar: no issues. Fact: wrong date."), and the refiner sees
+  every earlier output and critique (Madaan et al., Eq. 4).
+* **Reflexion** treats an attempt that runs out of turns as a failed
+  trial — it reflects and retries — instead of ending the run; the
+  reflector sees the attempt's actions and observations; the legacy
+  lesson block keeps the last ``max_lessons`` (default 10).
+* Role models given as strings (``evaluator_model="..."``) use the
+  Agent's ``secrets=`` backend, like the main model.
 
 ### Packaging
 

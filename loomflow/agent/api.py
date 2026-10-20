@@ -47,6 +47,7 @@ from ..architecture import (
     Dependencies,
     resolve_architecture,
 )
+from ..architecture.helpers import bind_role_model_secrets
 from ..architecture.tool_host_wrappers import ExtendedToolHost
 from ..core.context import RunContext, get_run_context, set_run_context
 from ..core.errors import OutputValidationError, RunTimeout
@@ -640,6 +641,9 @@ class Agent:
             prompt_caching
         )
         self._architecture: Architecture = resolve_architecture(architecture)
+        # Role models given as spec strings (``evaluator_model="..."``)
+        # authenticate with this agent's secrets, like the main model.
+        bind_role_model_secrets(self._architecture, self._secrets)
 
         # Stop hooks — framework-level Ralph loop. Auto-hooks
         # (today: living_plan in-progress checker) prepend; user-

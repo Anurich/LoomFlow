@@ -96,14 +96,50 @@ def resolve_role_model(spec: str | Model | None) -> Model | None:
     convention as the ``run_until`` checker), or ``None`` meaning
     "use the agent's main model".
 
-    The import is lazy to avoid the agent<->architecture module
-    cycle (same pattern as the worker_registry imports below).
+    A spec string is resolved here (so a bad spec fails at
+    construction) and remembered: the Agent that owns the architecture
+    rebuilds it with its ``secrets=`` backend (see
+    :func:`bind_role_model_secrets`), so the role model authenticates
+    like the main model instead of falling back to the environment.
+    The import is lazy to avoid the agent<->architecture module cycle.
     """
     if spec is None or not isinstance(spec, str):
         return spec
     from ..agent.api import _resolve_model  # lazy, cycle-safe
 
-    return _resolve_model(spec)
+    model = _resolve_model(spec)
+    try:
+        model._loom_role_spec = spec  # type: ignore[attr-defined]
+    except (AttributeError, TypeError):  # slotted / frozen model classes
+        pass
+    return model
+
+
+def bind_role_model_secrets(architecture: Any, secrets: Any) -> None:
+    """Rebuild the role models ``architecture`` resolved from spec
+    strings (and those of architectures it wraps, such as
+    ``SelfRefine(base=...)``) with the owning Agent's secrets."""
+    from ..agent.api import _resolve_model  # lazy, cycle-safe
+
+    seen: set[int] = set()
+
+    def visit(obj: Any) -> None:
+        if id(obj) in seen or not hasattr(obj, "__dict__"):
+            return
+        seen.add(id(obj))
+        for name, value in list(vars(obj).items()):
+            spec = getattr(value, "_loom_role_spec", None)
+            if isinstance(spec, str):
+                rebuilt = _resolve_model(spec, secrets=secrets)
+                try:
+                    rebuilt._loom_role_spec = spec  # type: ignore[attr-defined]
+                except (AttributeError, TypeError):
+                    pass
+                setattr(obj, name, rebuilt)
+            elif hasattr(value, "run") and hasattr(value, "declared_workers"):
+                visit(value)
+
+    visit(architecture)
 
 
 async def text_only_model_call(
@@ -372,17 +408,53 @@ def strip_markdown_fences(text: str) -> str:
     return cleaned
 
 
-def parse_fenced_json(text: str) -> Any | None:
-    """``json.loads`` tolerant of markdown code fences.
+def fill_template(template: str, **values: Any) -> str:
+    """``template.format(**values)``, or — when the template has other
+    braces, such as a JSON example a user put in a custom prompt —
+    just its ``{name}`` placeholders replaced, other text untouched."""
+    try:
+        return template.format(**values)
+    except (KeyError, IndexError, ValueError):
+        out = template
+        for name, value in values.items():
+            out = out.replace("{" + name + "}", str(value))
+        return out
 
-    Returns the parsed object, or ``None`` on parse failure —
-    callers decide what a failed parse means (empty plan, no-op
+
+_FENCE_RE = re.compile(r"```[\w+-]*[ \t]*\n(.*?)```", re.DOTALL)
+# Candidate start positions tried when JSON sits inside prose; bounds
+# the work on long replies full of braces.
+_MAX_JSON_STARTS = 64
+
+
+def parse_fenced_json(text: str) -> Any | None:
+    """The JSON value a model reply carries, or ``None``.
+
+    Tries the whole reply (with a wrapping code fence stripped), then
+    each fenced code block, then the first ``{`` / ``[`` in the prose
+    that starts a complete JSON value — so "Here is my review:
+    ```json {...}```" and "{...} Let me know if ..." both parse.
+    Callers decide what a failed parse means (empty plan, no-op
     coordinator decision, zero-score critique, ...).
     """
     try:
         return json.loads(strip_markdown_fences(text))
     except (json.JSONDecodeError, ValueError):
-        return None
+        pass
+    for block in _FENCE_RE.findall(text):
+        try:
+            return json.loads(block)
+        except (json.JSONDecodeError, ValueError):
+            continue
+    decoder = json.JSONDecoder()
+    starts = (i for i, ch in enumerate(text) if ch in "{[")
+    for _, i in zip(range(_MAX_JSON_STARTS), starts, strict=False):
+        try:
+            value, _end = decoder.raw_decode(text, i)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        return value
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1076,8 +1148,18 @@ def add_usage(a: Usage, b: Usage) -> Usage:
     )
 
 
+# "score: 0.7", "**Score:** 7/10", "Score (0-1): 0.3", "rating = 40%",
+# "Score: 2 out of 10". Group 1 is the number, then an optional
+# percent sign or denominator (groups 2 / 3).
 _SCORE_LINE_RE = re.compile(
-    r"score\s*[:=]\s*([0-9]*\.?[0-9]+)", re.IGNORECASE
+    r"\b(?:score|rating)\b[*_\s]*(?:\([^)\n]{0,20}\))?[*_\s]*[:=][*_\s]*"
+    r"(-?\d*\.?\d+)\s*(?:(%)|(?:/|\bout\s+of\b)\s*(\d+(?:\.\d+)?))?",
+    re.IGNORECASE,
+)
+# An unlabelled "8/10" or "2 out of 10".
+_FRACTION_RE = re.compile(
+    r"(?<![\d/.])(\d*\.?\d+)\s*(?:/|\bout\s+of\b)\s*(\d+(?:\.\d+)?)(?![\d/])",
+    re.IGNORECASE,
 )
 # Prose fallback: DECIMAL forms only (``0.85``, ``1.0``). Bare
 # integers are deliberately excluded — "0 errors found" or "1 issue
@@ -1235,34 +1317,67 @@ class SubagentInvocation:
                 yield ev
 
 
+def _scaled(value: float, denominator: float | None = None, percent: bool = False) -> float:
+    """``value`` on a 0-1 scale: ``7/10`` → 0.7, ``40%`` → 0.4, and a
+    bare value from 2 up read as out of 10 (``8`` → 0.8) or, above 10,
+    out of 100. A slight overshoot (``1.5``) clamps to 1.0."""
+    if percent:
+        value /= 100
+    elif denominator is not None:
+        value = value / denominator if denominator > 0 else 0.0
+    elif value >= 2:
+        value = value / 10 if value <= 10 else value / 100
+    return max(0.0, min(1.0, value))
+
+
 def parse_score(text: str) -> float:
     """Extract a 0-1 score from free-form evaluator output.
 
     Parsing order:
 
-    1. The ``score: X`` (or ``score=X``) pattern anywhere in the
-       text — the documented evaluator format.
-    2. A line that consists of NOTHING but a 0-1 number (``"0.7"``,
+    1. A ``"score"`` field of a JSON object in the reply.
+    2. The ``score: X`` (or ``score=X``, ``rating: X``) pattern
+       anywhere in the text — the documented evaluator format —
+       including markdown (``**Score:** 0.3``), a parenthetical
+       (``Score (0-1): 0.3``), and a scale: ``7/10``, ``2 out of
+       10``, ``40%``.
+    3. An unlabelled fraction (``"8/10"``, ``"2 out of 10"``).
+    4. A line that consists of NOTHING but a 0-1 number (``"0.7"``,
        ``"1"``) — unambiguous even for bare integers.
-    3. A decimal-form number in prose (``"scored 0.6 overall"``).
+    5. A decimal-form number in prose (``"scored 0.6 overall"``).
        Bare integers in prose are deliberately NOT matched — a
        critique like ``"0 errors found"`` or ``"1 issue remains"``
        is not a score and previously parsed as 0.0 / 1.0.
 
-    Clamps to ``[0.0, 1.0]``. Returns 0.0 on parse failure (treated
+    A value of 2 or more with no scale is read as out of 10 (or 100),
+    so "score: 7" is 0.7, not a perfect score. Clamps to ``[0.0, 1.0]``
+    (negative values are 0.0). Returns 0.0 on parse failure (treated
     as a failed evaluation — let the caller decide what that means).
 
     Used by :class:`~loomflow.architecture.Reflexion` (attempt
-    score) and :class:`~loomflow.architecture.TreeOfThoughts`
-    (per-thought evaluation).
+    score), :class:`~loomflow.architecture.TreeOfThoughts`
+    (per-thought evaluation) and the ActorCritic fallback.
     """
+    if "{" in text:
+        parsed = parse_fenced_json(text)
+        if isinstance(parsed, dict) and isinstance(
+            parsed.get("score"), int | float | str
+        ) and not isinstance(parsed.get("score"), bool):
+            try:
+                return _scaled(float(parsed["score"]))
+            except ValueError:
+                pass
     match = _SCORE_LINE_RE.search(text)
     if match is not None:
         try:
             value = float(match.group(1))
+            denominator = float(match.group(3)) if match.group(3) else None
         except ValueError:
             return 0.0
-        return max(0.0, min(1.0, value))
+        return _scaled(value, denominator, percent=match.group(2) is not None)
+    fraction = _FRACTION_RE.search(text)
+    if fraction is not None:
+        return _scaled(float(fraction.group(1)), float(fraction.group(2)))
     for line in text.strip().splitlines():
         if _WHOLE_LINE_NUMBER_RE.fullmatch(line.strip()):
             return max(0.0, min(1.0, float(line.strip())))

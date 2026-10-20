@@ -61,7 +61,7 @@ Composition
 
 from __future__ import annotations
 
-import re
+import json
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any
 
@@ -70,7 +70,15 @@ from pydantic import BaseModel, Field
 from ..core.context import inherit_ambient_memory
 from ..core.types import Event
 from .base import AgentSession, Dependencies
-from .helpers import SubagentInvocation, budget_gate, parse_fenced_json
+from .helpers import (
+    SubagentInvocation,
+    budget_gate,
+    consume_worker_usage,
+    fill_template,
+    parse_fenced_json,
+    parse_score,
+    usage_from_result_dict,
+)
 
 if TYPE_CHECKING:
     from ..agent.api import Agent
@@ -258,6 +266,11 @@ class ActorCritic:
         prompt: str,
     ) -> AsyncIterator[Event]:
         # === Round 0: initial generation by actor ===
+        blocked, gate_events = await budget_gate(deps, session)
+        for gate_event in gate_events:
+            yield gate_event
+        if blocked:
+            return
         yield Event.architecture_event(
             session.id,
             "actor_critic.actor_started",
@@ -286,6 +299,7 @@ class ActorCritic:
         if rejection:
             return
         actor_result = actor_inv.result
+        await consume_worker_usage(deps, self._actor, usage_from_result_dict(actor_result))
         current_output = str(actor_result.get("output", ""))
         session.output = current_output
         session.turns += int(actor_result.get("turns", 0) or 0)
@@ -319,7 +333,8 @@ class ActorCritic:
                 "actor_critic.critic_started",
                 round=round_num,
             )
-            critique_prompt = self._critique_template.format(
+            critique_prompt = fill_template(
+                self._critique_template,
                 prompt=prompt,
                 output=current_output,
             )
@@ -344,6 +359,7 @@ class ActorCritic:
             if rejection:
                 return
             critic_result = critic_inv.result
+            await consume_worker_usage(deps, self._critic, usage_from_result_dict(critic_result))
             session.turns += int(critic_result.get("turns", 0) or 0)
 
             if bool(critic_result.get("interrupted", False)):
@@ -396,7 +412,8 @@ class ActorCritic:
             issues_bulleted = "\n".join(
                 f"- {issue}" for issue in critique.issues
             ) or "(no specific issues listed; general improvement)"
-            refine_prompt = self._refine_template.format(
+            refine_prompt = fill_template(
+                self._refine_template,
                 prompt=prompt,
                 output=current_output,
                 critique=critique.summary or "",
@@ -423,6 +440,7 @@ class ActorCritic:
             if rejection:
                 return
             refine_result = refine_inv.result
+            await consume_worker_usage(deps, self._actor, usage_from_result_dict(refine_result))
             session.turns += int(refine_result.get("turns", 0) or 0)
 
             if bool(refine_result.get("interrupted", False)):
@@ -449,11 +467,6 @@ class ActorCritic:
 # ---------------------------------------------------------------------------
 
 
-_SCORE_RE = re.compile(
-    r"score\s*[:=]\s*([0-9]*\.?[0-9]+)", re.IGNORECASE
-)
-
-
 def _parse_critique(text: str) -> CriticOutput:
     """Best-effort parse of critic output.
 
@@ -471,9 +484,10 @@ def _parse_critique(text: str) -> CriticOutput:
     if isinstance(parsed, dict):
         try:
             issues_raw = parsed.get("issues", []) or []
+            if isinstance(issues_raw, str):
+                issues_raw = [issues_raw]
             issues = [str(i) for i in issues_raw if i]
-            score_raw = parsed.get("score", 0.0)
-            score = max(0.0, min(1.0, float(score_raw)))
+            score = parse_score(json.dumps({"score": parsed.get("score", 0.0)}))
             summary = str(parsed.get("summary", ""))
             return CriticOutput(
                 issues=issues, score=score, summary=summary
@@ -481,16 +495,10 @@ def _parse_critique(text: str) -> CriticOutput:
         except (TypeError, ValueError):
             pass
 
-    # (3) Regex fallback for the score; whole text becomes one issue.
-    match = _SCORE_RE.search(text)
-    score = 0.0
-    if match is not None:
-        try:
-            score = max(0.0, min(1.0, float(match.group(1))))
-        except ValueError:
-            score = 0.0
+    # (3) Score from the prose (``Score: 9/10``); whole text becomes
+    # one issue.
     return CriticOutput(
         issues=[text.strip()] if text.strip() else [],
-        score=score,
+        score=parse_score(text),
         summary="",
     )

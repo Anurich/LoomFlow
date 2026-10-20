@@ -12,11 +12,15 @@ Pattern:
 2. **Round 1..max_rounds:**
 
    a. **Critic.** Review the current output. Output a critique. If
-      the critique contains ``stop_phrase`` (default ``"no issues"``)
-      anywhere, terminate — the model considers the output good
-      enough.
+      the critique *is* ``stop_phrase`` (default ``"no issues"``) —
+      the whole reply, or its first line, ignoring case, markdown and
+      punctuation — terminate: the model considers the output good
+      enough. A critique that merely mentions it ("Grammar: no
+      issues. Fact: the date is wrong.") doesn't stop the loop.
    b. **Refiner.** Produce a revised output that addresses the
-      critique. The new output replaces the old.
+      critique, given every earlier output and critique (the paper's
+      Eq. 4 conditions on the whole history). The new output
+      replaces the old.
 
 When the same model plays all three roles, gains are real but
 modest (~5-15% on most tasks). For asymmetric blind-spot coverage,
@@ -40,6 +44,7 @@ Weaknesses
 
 from __future__ import annotations
 
+import re
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
@@ -141,6 +146,8 @@ class SelfRefine:
             return
 
         # === Refinement rounds ===
+        # (output, critique) pairs so far: the refiner sees them all.
+        history: list[tuple[str, str]] = []
         for round_num in range(1, self._max_rounds + 1):
             blocked, gate_events = await budget_gate(deps, session)
             for gate_event in gate_events:
@@ -180,7 +187,7 @@ class SelfRefine:
                 critique=critique,
             )
 
-            if self._stop_phrase.lower() in critique.lower():
+            if _is_stop(critique, self._stop_phrase):
                 yield Event.architecture_event(
                     session.id,
                     "self_refine.converged",
@@ -195,13 +202,19 @@ class SelfRefine:
                 round=round_num,
                 role="refiner",
             )
+            earlier = "".join(
+                f"Output {i}:\n{out}\n\nCritique {i}:\n{fb}\n\n"
+                for i, (out, fb) in enumerate(history, start=1)
+            )
+            history.append((session.output, critique))
             refiner_messages = [
                 Message(role=Role.SYSTEM, content=self._refiner_prompt),
                 Message(
                     role=Role.USER,
                     content=(
                         f"Original task:\n{prompt}\n\n"
-                        f"Previous output:\n{session.output}\n\n"
+                        + (f"Earlier outputs and critiques:\n\n{earlier}" if earlier else "")
+                        + f"Previous output:\n{session.output}\n\n"
                         f"Critique to address:\n{critique}\n\n"
                         f"Produce the revised output."
                     ),
@@ -234,3 +247,17 @@ class SelfRefine:
             "self_refine.max_rounds_reached",
             rounds=self._max_rounds,
         )
+
+
+def _normal(text: str) -> str:
+    return " ".join(re.sub(r"[^\w\s]", " ", text).lower().split())
+
+
+def _is_stop(critique: str, stop_phrase: str) -> bool:
+    """True when the critique is the stop phrase: the whole reply or
+    its first line, ignoring case, markdown and punctuation."""
+    stop = _normal(stop_phrase)
+    if not stop:
+        return False
+    lines = [line for line in critique.splitlines() if line.strip()]
+    return _normal(critique) == stop or (bool(lines) and _normal(lines[0]) == stop)
