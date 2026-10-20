@@ -315,6 +315,21 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 * Payloads are stored and signed in the same JSON form, so an entry
   with a ``datetime``, ``set`` or ``tuple`` in its payload verifies
   after it is read back (it used to fail).
+* **Guardrails on streamed text.** With output-stage guards wired,
+  streamed text chunks go through them before they are sent
+  (``GuardedStream``): text is held back briefly, guarded, and released
+  with a 128-character hold-back so a match still being written is
+  caught. A ``PIIGuard`` used to redact only the final output while
+  the raw text had already been streamed; a blocking guard now stops
+  the text it blocks. Runs without output guards stream as before.
+* Guards match fullwidth letters, zero-width and other invisible
+  characters, soft hyphens and Unicode tag characters (``PIIGuard``,
+  ``RegexGuard``, ``InjectionGuard``), redacting the span of the
+  original text. ``PIIGuard`` also finds dotted card numbers,
+  space-separated SSNs and ``+``-prefixed international phone numbers.
+  ``InjectionGuard`` catches "ignore the previous instructions" and
+  smuggled tag characters, and escapes ``</untrusted-tool-output>``
+  in tool output so a result can't close its own block early.
 
 ### Packaging
 

@@ -76,6 +76,7 @@ from ..governance.budget import NoBudget
 from ..governance.rate_limit import RateLimiter
 from ..governance.retry import RetryPolicy
 from ..guardrails.base import Guardrail, apply_guardrails
+from ..guardrails.streaming import GuardedStream
 from ..model.echo import EchoModel
 from ..observability.tracing import NoTelemetry
 from ..runtime.inproc import InProcRuntime
@@ -2230,6 +2231,13 @@ class Agent:
         # site (input / output here, tool_result in
         # ``run_single_tool``) is skipped entirely.
         fast_guardrails = len(self._guardrails) == 0
+        # Streamed text reaches the caller before the output stage
+        # runs: with output-stage guards wired, it goes through them
+        # first (see :class:`~loomflow.guardrails.streaming.GuardedStream`).
+        if not fast_guardrails and any(
+            "output" in g.stages for g in self._guardrails
+        ):
+            emit = GuardedStream(self._guardrails, emit, context=run_ctx)
 
         run_trace: contextlib.AbstractAsyncContextManager[Any] = (
             _NULL_CTX
