@@ -249,3 +249,62 @@ def test_chunk_factory_unknown_strategy() -> None:
 def test_chunk_factory_propagates_source() -> None:
     out = chunk("hello", strategy="recursive", source="test.md")
     assert out[0].metadata["source"] == "test.md"
+
+
+# ---------------------------------------------------------------------------
+# Validation: size bounds, whole-piece overlap, no lost text (LangChain
+# RecursiveCharacterTextSplitter semantics)
+# ---------------------------------------------------------------------------
+
+
+def _random_text(seed: int) -> str:
+    import random
+
+    rng = random.Random(seed)
+    words = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta"]
+    return "\n\n".join(
+        " ".join(rng.choice(words) for _ in range(rng.randint(5, 160))) for _ in range(12)
+    )
+
+
+@pytest.mark.parametrize("seed", range(5))
+def test_recursive_chunks_never_exceed_size_and_overlap_whole_words(seed: int) -> None:
+    text = _random_text(seed)
+    chunks = [c.content for c in RecursiveChunker(chunk_size=200, chunk_overlap=50).split(text)]
+    assert max(len(c) for c in chunks) <= 200
+    words = set(text.split())
+    for c in chunks:
+        # Every chunk starts and ends on a word, never mid-word.
+        assert c.split()[0] in words and c.split()[-1] in words
+    # Nothing is lost: chunks are slices of the text, in order, that
+    # together cover every non-whitespace character.
+    covered = [False] * len(text)
+    pos = 0
+    for c in chunks:
+        start = text.find(c, max(0, pos - 200))
+        assert start >= 0
+        for i in range(start, start + len(c)):
+            covered[i] = True
+        pos = start + len(c)
+    assert all(covered[i] for i, ch in enumerate(text) if not ch.isspace())
+
+
+def test_sentence_chunker_splits_long_sentences() -> None:
+    text = "Short one. " + ("This sentence is very long " * 20).strip() + ". Another short."
+    chunks = SentenceChunker(chunk_size=100, chunk_overlap=20).split(text)
+    assert max(len(c.content) for c in chunks) <= 100
+
+
+def test_markdown_ignores_hashes_inside_code_fences() -> None:
+    md = "# Guide\n\nRun this:\n\n```bash\n# install deps\npip install x\n```\n\nDone.\n"
+    chunks = MarkdownChunker(chunk_size=800).split(md)
+    assert [c.metadata["headers"] for c in chunks] == [["Guide"]]
+    assert "# install deps" in chunks[0].content
+
+
+@requires_tiktoken
+def test_token_chunks_never_split_a_character() -> None:
+    text = "数据" * 300 + " 🎉" * 200
+    chunks = TokenChunker(chunk_size=7, chunk_overlap=2).split(text)
+    assert not any("�" in c.content for c in chunks)
+    assert all(c.content in text for c in chunks)

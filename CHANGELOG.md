@@ -173,6 +173,20 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
   rejected. A dict like ``{"$ne": "mallory"}`` used to reach Chroma's
   filter as an operator and match other users' rows.
 
+### Fixed — chunking
+
+* **``RecursiveChunker`` follows LangChain's text-splitter semantics:**
+  chunks never exceed ``chunk_size`` (unless a single unsplittable
+  piece is larger), overlap is made of whole pieces (it used to be a raw
+  character tail that started mid-word), no text is lost, and chunks
+  are stripped of surrounding whitespace.
+* ``SentenceChunker`` splits sentences longer than ``chunk_size``
+  (a 551-character chunk came out of a 100-character setting).
+* ``TokenChunker`` cuts on character boundaries; decoding token slices
+  produced U+FFFD replacement characters in CJK text and emoji.
+* ``MarkdownChunker`` ignores ``#`` lines inside fenced code blocks
+  (shell and Python comments became headings).
+
 ### Fixed — right to erasure
 
 * **``forget()`` can't be undone by background extraction.**

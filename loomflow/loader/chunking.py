@@ -122,8 +122,10 @@ class RecursiveChunker:
     def split(self, text: str, *, source: str = "") -> list[Chunk]:
         if not text:
             return []
-        pieces = self._recursive_split(text, self.separators)
-        merged = self._merge_pieces(pieces)
+        # Chunks are stripped of surrounding whitespace (as LangChain
+        # does), and whitespace-only ones dropped.
+        merged = [c.strip() for c in self._recursive_split(text, self.separators)]
+        merged = [c for c in merged if c]
         return [
             Chunk(
                 content=c,
@@ -140,74 +142,64 @@ class RecursiveChunker:
     def _recursive_split(
         self, text: str, separators: Sequence[str]
     ) -> list[str]:
-        """Split ``text`` using the first separator that fits.
+        """Split ``text`` into chunks of at most ``chunk_size``.
 
-        Returns a flat list of strings, each <= ``chunk_size`` (when
-        possible). When even the finest-grained separator can't get
-        a piece under the limit, that piece is hard-cut.
+        LangChain's ``RecursiveCharacterTextSplitter`` algorithm: split
+        on the first separator present, merge consecutive small pieces
+        back up to ``chunk_size`` (with overlap made of whole pieces),
+        and recurse into any piece that is still too long using the
+        finer separators. Pieces keep their trailing separator, so
+        joining a chunk's pieces reproduces the text exactly.
         """
-        if len(text) <= self.chunk_size:
-            return [text]
-
-        # Find the first separator that actually appears in text.
+        separator = separators[-1] if separators else ""
+        finer: Sequence[str] = []
         for i, sep in enumerate(separators):
-            if sep == "":
-                # Hard-cut on character boundaries, last resort.
-                return [
-                    text[j : j + self.chunk_size]
-                    for j in range(0, len(text), self.chunk_size)
-                ]
-            if sep in text:
-                # Split on this separator; recurse on each piece
-                # using the remaining (finer-grained) separators.
-                sub = text.split(sep)
-                results: list[str] = []
-                remaining = separators[i + 1 :]
-                for j, part in enumerate(sub):
-                    # Re-attach the separator to all but the last
-                    # piece so the join is reversible.
-                    fragment = part + (sep if j < len(sub) - 1 else "")
-                    if len(fragment) <= self.chunk_size:
-                        results.append(fragment)
-                    else:
-                        results.extend(
-                            self._recursive_split(fragment, remaining)
-                        )
-                return results
-
-        return [text]  # shouldn't reach here (sep="" fallback exists)
-
-    def _merge_pieces(self, pieces: list[str]) -> list[str]:
-        """Greedily merge adjacent pieces back up to ``chunk_size``,
-        adding ``chunk_overlap`` chars of overlap between chunks."""
-        if not pieces:
-            return []
+            if sep == "" or sep in text:
+                separator, finer = sep, separators[i + 1 :]
+                break
+        if separator:
+            parts = text.split(separator)
+            pieces = [p + separator for p in parts[:-1]] + [parts[-1]]
+        else:
+            pieces = list(text)  # characters, the last resort
         chunks: list[str] = []
-        current = ""
+        small: list[str] = []
         for piece in pieces:
             if not piece:
                 continue
-            if len(current) + len(piece) <= self.chunk_size:
-                current += piece
-            else:
-                if current:
-                    chunks.append(current)
-                # Start the next chunk with the tail of the previous
-                # one (overlap), then add the new piece.
-                if self.chunk_overlap > 0 and chunks:
-                    overlap = chunks[-1][-self.chunk_overlap :]
-                    current = overlap + piece
-                else:
-                    current = piece
-                # If a single piece is already over chunk_size,
-                # just keep it as-is — recursive_split should have
-                # prevented this.
-                if len(current) > self.chunk_size and not chunks:
-                    chunks.append(current)
-                    current = ""
+            if len(piece) <= self.chunk_size:
+                small.append(piece)
+                continue
+            chunks.extend(self._merge_pieces(small))
+            small = []
+            if finer:
+                chunks.extend(self._recursive_split(piece, finer))
+            else:  # nothing finer to split on: keep it whole
+                chunks.append(piece)
+        chunks.extend(self._merge_pieces(small))
+        return chunks
+
+    def _merge_pieces(self, pieces: list[str]) -> list[str]:
+        """Merge pieces into chunks of at most ``chunk_size``; each new
+        chunk starts with the previous one's last pieces, up to
+        ``chunk_overlap`` characters (whole pieces, never mid-word)."""
+        chunks: list[str] = []
+        current: list[str] = []
+        total = 0
+        for piece in pieces:
+            if current and total + len(piece) > self.chunk_size:
+                chunks.append("".join(current))
+                # Drop pieces from the front until what remains fits
+                # as overlap and leaves room for the next piece.
+                while current and (
+                    total > self.chunk_overlap or total + len(piece) > self.chunk_size
+                ):
+                    total -= len(current.pop(0))
+            current.append(piece)
+            total += len(piece)
         if current:
-            chunks.append(current)
-        return [c for c in chunks if c.strip()]
+            chunks.append("".join(current))
+        return chunks
 
 
 # ---------------------------------------------------------------------------
@@ -216,6 +208,26 @@ class RecursiveChunker:
 
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$", re.MULTILINE)
+_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})", re.MULTILINE)
+
+
+def _fenced_ranges(text: str) -> list[tuple[int, int]]:
+    """``(start, end)`` offsets of fenced code blocks (CommonMark: a
+    fence closes on a line of the same character, at least as long;
+    an unclosed fence runs to the end)."""
+    ranges: list[tuple[int, int]] = []
+    open_at: int | None = None
+    fence = ""
+    for m in _FENCE_RE.finditer(text):
+        marker = m.group(1)
+        if open_at is None:
+            open_at, fence = m.start(), marker
+        elif marker[0] == fence[0] and len(marker) >= len(fence):
+            ranges.append((open_at, m.end()))
+            open_at = None
+    if open_at is not None:
+        ranges.append((open_at, len(text)))
+    return ranges
 
 
 class MarkdownChunker:
@@ -300,8 +312,14 @@ class MarkdownChunker:
         ``headers`` is the path of header strings from the root to
         this section.
         """
-        # Find all heading positions
-        heading_matches = list(_HEADING_RE.finditer(text))
+        # Find all heading positions, ignoring ``#`` lines inside
+        # fenced code blocks (shell comments, Python comments, ...).
+        fenced = _fenced_ranges(text)
+        heading_matches = [
+            m
+            for m in _HEADING_RE.finditer(text)
+            if not any(lo <= m.start() < hi for lo, hi in fenced)
+        ]
         if not heading_matches:
             return [([], text)]
 
@@ -376,13 +394,25 @@ class SentenceChunker:
         ]
         if not sentences:
             return []
+        # A sentence longer than a chunk is split at word (then
+        # character) boundaries instead of becoming an oversized chunk.
+        splitter = RecursiveChunker(self.chunk_size, 0, (" ", ""))
+        sentences = [
+            piece
+            for sentence in sentences
+            for piece in (
+                [sentence]
+                if len(sentence) <= self.chunk_size
+                else [c.content for c in splitter.split(sentence)]
+            )
+        ]
 
         chunks: list[Chunk] = []
         current: list[str] = []
         current_len = 0
         for sentence in sentences:
             sentence_len = len(sentence) + 1  # +1 for joining space
-            if current_len + sentence_len > self.chunk_size and current:
+            if current_len + len(sentence) > self.chunk_size and current:
                 content = " ".join(current).strip()
                 chunks.append(
                     Chunk(
@@ -400,7 +430,10 @@ class SentenceChunker:
                 overlap_sentences: list[str] = []
                 overlap_len = 0
                 for s in reversed(current):
-                    if overlap_len + len(s) + 1 > self.chunk_overlap:
+                    if (
+                        overlap_len + len(s) + 1 > self.chunk_overlap
+                        or overlap_len + len(s) + 1 + len(sentence) > self.chunk_size
+                    ):
                         break
                     overlap_sentences.insert(0, s)
                     overlap_len += len(s) + 1
@@ -473,11 +506,18 @@ class TokenChunker:
         if not token_ids:
             return []
 
+        # Cut on character boundaries: decoding a token slice that
+        # splits a multi-byte character produced U+FFFD. Each token's
+        # character offset maps a token window to a slice of the text
+        # (a character shared by two tokens goes to the later chunk
+        # too, never half of it).
+        decoded, offsets = enc.decode_with_offsets(token_ids)
         chunks: list[Chunk] = []
         step = self.chunk_size - self.chunk_overlap
         for i in range(0, len(token_ids), step):
             piece_ids = token_ids[i : i + self.chunk_size]
-            content = enc.decode(piece_ids)
+            end = i + self.chunk_size
+            content = decoded[offsets[i] : offsets[end] if end < len(offsets) else len(decoded)]
             chunks.append(
                 Chunk(
                     content=content,
