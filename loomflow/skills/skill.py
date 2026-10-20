@@ -33,6 +33,7 @@ import re
 import shlex
 import subprocess
 import sys
+import warnings
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -42,10 +43,16 @@ import anyio
 from ..tools.registry import Tool
 from ._frontmatter import FrontmatterError, parse_frontmatter
 
-_NAME_RE = re.compile(r"^[a-z0-9-]+$")
+# Agent Skills spec (agentskills.io/specification): lowercase letters,
+# digits and hyphens; no leading, trailing or doubled hyphen.
+_NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _RESERVED_WORDS = ("anthropic", "claude")
 _MAX_NAME_LEN = 64
 _MAX_DESC_LEN = 1024
+_MAX_COMPATIBILITY_LEN = 500
+# Claude's skill rules forbid XML tags in name and description; they'd
+# also open or close tags in the prompt the catalog is rendered into.
+_XML_TAG_RE = re.compile(r"</?[A-Za-z!?][^<>]*>")
 #: Wall-clock cap for one Mode C subprocess-tool invocation. Generous —
 #: it exists to stop a wedged script from hanging the agent loop forever,
 #: not to police normal runtimes.
@@ -132,6 +139,13 @@ class Skill:
         meta, body, tool_specs = _parse_skill(
             text, source_label=source_label
         )
+        if meta.name != self.path.name:
+            warnings.warn(
+                f"Skill {meta.name!r} lives in directory {self.path.name!r}; the "
+                "Agent Skills spec requires the name to match its directory.",
+                UserWarning,
+                stacklevel=2,
+            )
         self.metadata = meta
         self._body = body
         self._tool_specs = tool_specs
@@ -323,8 +337,9 @@ def _parse_skill(
         )
     if not _NAME_RE.fullmatch(name):
         raise SkillError(
-            f"Skill name {name!r} must match {_NAME_RE.pattern} "
-            "(lowercase letters, digits, hyphens)."
+            f"Skill name {name!r} must match the Agent Skills format: "
+            "lowercase letters, digits and hyphens, not starting or ending "
+            "with a hyphen or containing '--'."
         )
     lower = name.lower()
     for reserved in _RESERVED_WORDS:
@@ -345,13 +360,28 @@ def _parse_skill(
             f"Skill description exceeds {_MAX_DESC_LEN} chars "
             f"(got {len(description)})."
         )
+    if _XML_TAG_RE.search(description):
+        raise SkillError("Skill description must not contain XML tags.")
+    compatibility = _optional_str(meta, "compatibility")
+    if compatibility is not None and len(compatibility) > _MAX_COMPATIBILITY_LEN:
+        raise SkillError(
+            f"Skill compatibility exceeds {_MAX_COMPATIBILITY_LEN} chars "
+            f"(got {len(compatibility)})."
+        )
 
-    allowed_tools = meta.get("allowed_tools")
+    # The spec's ``allowed-tools`` is a space-separated string;
+    # ``allowed_tools`` (a list) is the older loomflow spelling.
+    allowed_tools = meta.get("allowed-tools", meta.get("allowed_tools"))
+    if isinstance(allowed_tools, str):
+        allowed_tools = allowed_tools.split()
     if allowed_tools is not None and (
         not isinstance(allowed_tools, list)
         or not all(isinstance(t, str) for t in allowed_tools)
     ):
-        raise SkillError("'allowed_tools' must be a list of strings.")
+        raise SkillError(
+            "'allowed-tools' must be a space-separated string (or "
+            "'allowed_tools' a list of strings)."
+        )
 
     requires = meta.get("requires") or []
     if not isinstance(requires, list) or not all(
@@ -381,7 +411,7 @@ def _parse_skill(
         name=name,
         description=description.strip(),
         license=_optional_str(meta, "license"),
-        compatibility=_optional_str(meta, "compatibility"),
+        compatibility=compatibility,
         extra=dict(extra),
         allowed_tools=list(allowed_tools) if allowed_tools else None,
         requires=deduped,

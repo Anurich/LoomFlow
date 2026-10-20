@@ -638,3 +638,43 @@ async def test_signals_expire() -> None:
     await rt.signal("s", "approval", "late")
     await anyio.sleep(0.1)
     assert rt.poll_signal("s", "approval") is None
+
+
+# ---------------------------------------------------------------------------
+# Skills follow the Agent Skills spec
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("name", ["-bad", "bad-", "bad--name", "Bad", "a_b"])
+def test_skill_names_follow_the_spec(name: str) -> None:
+    from loomflow.skills import Skill
+    from loomflow.skills.skill import SkillError
+
+    with pytest.raises(SkillError, match="must match"):
+        Skill.from_text(f"---\nname: {name}\ndescription: ok\n---\nbody")
+
+
+def test_skill_description_rejects_xml_tags() -> None:
+    from loomflow.skills import Skill
+    from loomflow.skills.skill import SkillError
+
+    with pytest.raises(SkillError, match="XML"):
+        Skill.from_text("---\nname: good\ndescription: has <xml>tag</xml>\n---\nbody")
+    Skill.from_text("---\nname: good\ndescription: compares a < b and c > d\n---\nbody")
+
+
+def test_skill_reads_the_spec_allowed_tools_string() -> None:
+    from loomflow.skills import Skill
+
+    skill = Skill.from_text("---\nname: good\ndescription: ok\nallowed-tools: Bash(git:*) Read\n---\nbody")
+    assert skill.metadata.allowed_tools == ["Bash(git:*)", "Read"]
+
+
+def test_skill_name_should_match_its_directory(tmp_path: Path) -> None:
+    from loomflow.skills import Skill
+
+    folder = tmp_path / "other-name"
+    folder.mkdir()
+    (folder / "SKILL.md").write_text("---\nname: good\ndescription: ok\n---\nbody")
+    with pytest.warns(UserWarning, match="directory"):
+        Skill(folder)

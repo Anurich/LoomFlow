@@ -363,6 +363,13 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
   ``JournaledRuntime``; they used to accumulate forever, one entry
   per session ever signalled. ``wait_for_signal(..., timeout_s=)``
   raises ``TimeoutError`` instead of waiting forever.
+* **Skills follow the Agent Skills spec** (agentskills.io): names may
+  not start or end with a hyphen or contain ``--``; a description may
+  not contain XML tags (Claude's skill rule — they would also open or
+  close tags in the prompt the catalog is rendered into);
+  ``compatibility`` is at most 500 characters; the spec's
+  space-separated ``allowed-tools`` is read (``allowed_tools`` lists
+  still work); a name that differs from its directory warns.
 * **Budget wall clock.** ``max_wall_clock`` and
   ``per_user_max_wall_clock`` count time spent running (the agent
   wraps each run in ``StandardBudget.running()``), not time since the
