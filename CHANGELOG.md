@@ -209,6 +209,12 @@ reproduced, fixed and given a regression test.
   rejected. A dict like ``{"$ne": "mallory"}`` used to reach Chroma's
   filter as an operator and match other users' rows.
 
+* **Redis vector recall works on redis-py 8.** redis-py 8 talks RESP3,
+  so ``FT.SEARCH`` replies arrive as a map; the decoder only read the
+  RESP2 list and returned no hits, so ``RedisMemory.recall`` found
+  nothing. Both reply shapes are read (verified against Redis Stack
+  7.4 over RESP2 and RESP3).
+
 ### Fixed — chunking
 
 * **``RecursiveChunker`` follows LangChain's text-splitter semantics:**

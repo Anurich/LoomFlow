@@ -423,3 +423,31 @@ async def test_chroma_supports_exists_and_not_like_the_other_stores() -> None:
         got = sorted(r.chunk.content for r in await chroma.search("doc", k=5, filter=flt))
         want = sorted(r.chunk.content for r in await reference.search("doc", k=5, filter=flt))
         assert got == want, flt
+
+
+def test_redis_knn_reply_decodes_in_resp3_shape() -> None:
+    """redis-py 8 speaks RESP3 by default: FT.SEARCH comes back as a map,
+    which the RESP2-only decoder read as "no hits" — vector recall from
+    Redis returned nothing."""
+    from loomflow.memory.redis import _decode_ft_search_pairs
+
+    attrs = {
+        b"score": b"0.25",
+        b"session_id": b"s",
+        b"user_id": b"alice",
+        b"occurred_at": b"1792495918",
+        b"input": b"q",
+        b"output": b"alice 4711",
+    }
+    resp3 = {
+        b"attributes": [],
+        b"format": b"STRING",
+        b"results": [{b"id": b"jeeves:episode:ep_1", b"extra_attributes": attrs, b"values": []}],
+        b"total_results": 1,
+        b"warning": [],
+    }
+    resp2 = [1, b"jeeves:episode:ep_1", [x for kv in attrs.items() for x in kv]]
+    for reply in (resp3, resp2):
+        ((episode, similarity),) = _decode_ft_search_pairs(reply, "jeeves:episode:")
+        assert episode.id == "ep_1" and episode.output == "alice 4711" and episode.user_id == "alice"
+        assert similarity == pytest.approx(0.75)
