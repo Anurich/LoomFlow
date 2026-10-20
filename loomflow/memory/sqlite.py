@@ -776,6 +776,11 @@ class SqliteMemory:
                 session_id,
                 before,
             )
+            if session_id is None:
+                # Working blocks are per user too (no session).
+                deleted += await anyio.to_thread.run_sync(
+                    self._forget_blocks_sync, user_id, before
+                )
 
         # Facts: erase only when not narrowed by session_id (facts
         # have no session). Delegates to the FactStore's own
@@ -786,6 +791,19 @@ class SqliteMemory:
                 self.facts, user_id=user_id, before=before
             )
         return deleted
+
+    def _forget_blocks_sync(
+        self, user_id: str | None, before: datetime | None
+    ) -> int:
+        with self._connect() as conn:
+            sql = "DELETE FROM working_blocks WHERE user_id IS ?"
+            params: list[Any] = [user_id]
+            if before is not None:
+                sql += " AND updated_at < ?"
+                params.append(_to_epoch(before))
+            cursor = conn.execute(sql, params)
+            conn.commit()
+            return int(cursor.rowcount or 0)
 
     def _forget_episodes_sync(
         self,
@@ -822,6 +840,7 @@ class SqliteMemory:
             user_id=user_id,
             episodes=sorted(episodes, key=lambda e: e.occurred_at),
             facts=sorted(facts, key=lambda f: f.recorded_at),
+            blocks=await self.working(user_id=user_id),
         )
 
     async def consolidate(self) -> None:

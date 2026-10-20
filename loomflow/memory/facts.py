@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Iterable
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Protocol, runtime_checkable
 
 import anyio
@@ -376,6 +376,30 @@ async def count_facts(store: Any, *, user_id: str | None) -> int:
     if callable(counter):
         return int(await counter(user_id=user_id))
     return len(await store.query(user_id=user_id, limit=100_000))
+
+
+def delete_blocks(
+    blocks: Any,
+    *,
+    user_id: str | None,
+    before: datetime | None = None,
+) -> int:
+    """Erase ``user_id``'s working blocks from an in-process
+    ``{user_id: {name: MemoryBlock}}`` map (a dict or ``BoundedDict``):
+    all of them, or only those last updated before ``before``. Returns
+    how many were removed."""
+    user_blocks: dict[str, Any] | None = blocks.get(user_id)
+    if not user_blocks:
+        return 0
+    if before is None:
+        blocks.pop(user_id, None)
+        return len(user_blocks)
+    if before.tzinfo is None:
+        before = before.replace(tzinfo=UTC)
+    stale = [name for name, b in user_blocks.items() if b.updated_at < before]
+    for name in stale:
+        del user_blocks[name]
+    return len(stale)
 
 
 async def delete_facts(

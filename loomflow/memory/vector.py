@@ -32,7 +32,13 @@ from ..core.types import (
 from ._embedding_util import cosine as _cosine
 from .consolidator import Consolidator
 from .embedder import HashEmbedder
-from .facts import FactStore, InMemoryFactStore, count_facts, delete_facts
+from .facts import (
+    FactStore,
+    InMemoryFactStore,
+    count_facts,
+    delete_blocks,
+    delete_facts,
+)
 from .inmemory import _DEFAULT_MAX_USERS, _DEFAULT_USER_TTL_SECONDS
 
 
@@ -382,6 +388,12 @@ class VectorMemory:
             deleted += await delete_facts(
                 self.facts, user_id=user_id, before=before
             )
+        if session_id is None:
+            # Working blocks are per user too (no session).
+            async with self._lock:
+                deleted += delete_blocks(
+                    self._blocks, user_id=user_id, before=before
+                )
         return deleted
 
     async def export(
@@ -400,6 +412,7 @@ class VectorMemory:
             user_id=user_id,
             episodes=sorted(episodes, key=lambda e: e.occurred_at),
             facts=sorted(facts, key=lambda f: f.recorded_at),
+            blocks=await self.working(user_id=user_id),
         )
 
     async def consolidate(self) -> None:

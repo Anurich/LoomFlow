@@ -798,12 +798,21 @@ async def test_postgres_memory_forget_delegates_to_fact_store() -> None:
         fact_store=stub,
     )
     deleted = await mem.forget(user_id="alice")
-    assert deleted == 5  # 2 episodes (parsed) + 3 facts (delegated)
+    # 2 episodes + 2 working blocks (the fake reports "DELETE 2" for
+    # every statement) + 3 facts (delegated).
+    assert deleted == 7
     assert stub.delete_calls == [{"user_id": "alice", "before": None}]
     # No raw DELETE FROM facts issued by the memory backend itself.
     assert not any(
         "DELETE FROM facts" in sql for sql, _ in state.executed
     )
+    [(block_sql, block_args)] = [
+        (sql, args)
+        for sql, args in state.executed
+        if sql.startswith("DELETE FROM memory_blocks")
+    ]
+    assert "user_id = $2" in block_sql
+    assert block_args[1] == "alice"
 
 
 async def test_sqlite_memory_forget_delegates_to_custom_fact_store(

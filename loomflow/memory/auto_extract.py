@@ -137,6 +137,9 @@ class AutoExtractMemory:
         # at the *loop* lifetime, not the caller's scope — which
         # is exactly what we want here.
         self._pending: set[asyncio.Task[None]] = set()
+        # Which episode each pending task is extracting, so ``forget``
+        # can stop the ones it erases before they write facts back.
+        self._pending_episodes: dict[asyncio.Task[None], Episode] = {}
         if auto_picked:
             _maybe_emit_default_on_notice()
 
@@ -193,11 +196,15 @@ class AutoExtractMemory:
                     self._maybe_extract(episode)
                 )
                 self._pending.add(task)
+                self._pending_episodes[task] = episode
                 # Auto-discard the task from the tracking set when
                 # it finishes — keeps the set bounded across long-
                 # lived processes (REPL sessions accumulate
                 # hundreds of episodes).
                 task.add_done_callback(self._pending.discard)
+                task.add_done_callback(
+                    lambda t: self._pending_episodes.pop(t, None)
+                )
             except RuntimeError:
                 # No running loop (defensive — we're inside an
                 # async method so this shouldn't happen, but if
@@ -399,6 +406,20 @@ class AutoExtractMemory:
         session_id: str | None = None,
         before: datetime | None = None,
     ) -> int:
+        """Erase from the wrapped memory, after stopping any background
+        extraction of an erased episode: otherwise it would write the
+        erased facts back once ``forget`` returned."""
+        doomed = [
+            task
+            for task, ep in list(self._pending_episodes.items())
+            if ep.user_id == user_id
+            and (session_id is None or ep.session_id == session_id)
+            and (before is None or ep.occurred_at < before)
+        ]
+        for task in doomed:
+            task.cancel()
+        if doomed:
+            await asyncio.wait(doomed)
         result: int = await self._inner.forget(
             user_id=user_id, session_id=session_id, before=before
         )

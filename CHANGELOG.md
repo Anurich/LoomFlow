@@ -94,6 +94,21 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
   built the worker with the template's tools but none of its
   permissions, hooks, approval handler, guardrails, rate limiter, audit
   log or limits.
+
+### Fixed — right to erasure
+
+* **``forget()`` can't be undone by background extraction.**
+  ``AutoExtractMemory`` (on by default with a real model) extracts facts
+  in the background. An extraction still running when ``forget()`` was
+  called wrote the erased facts back (an erased SSN reappeared). It now
+  stops the extractions of the episodes it erases before erasing.
+* **``forget(user_id=...)`` erases the user's working blocks** in every
+  backend (they were left behind), honouring ``before=``. A
+  session-scoped forget still leaves them, since blocks aren't per
+  session. ``MemoryExport`` now includes the user's ``blocks``.
+
+### Fixed — tool dispatch
+
 * **Tool dispatch.** Objects with an ``async def __call__`` (and
   ``functools.partial`` of an async function) are awaited instead of
   returning a coroutine. A timeout on a blocking sync tool now returns

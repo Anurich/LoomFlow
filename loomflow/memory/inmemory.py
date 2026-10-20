@@ -28,7 +28,13 @@ from ..core.types import (
 )
 from ._hybrid import hybrid_rank_episodes
 from .consolidator import Consolidator
-from .facts import FactStore, InMemoryFactStore, count_facts, delete_facts
+from .facts import (
+    FactStore,
+    InMemoryFactStore,
+    count_facts,
+    delete_blocks,
+    delete_facts,
+)
 
 _DEFAULT_MAX_USERS = 100_000
 _DEFAULT_USER_TTL_SECONDS = 24 * 3600  # 24h idle
@@ -405,9 +411,11 @@ class InMemoryMemory:
             deleted += await delete_facts(
                 self.facts, user_id=user_id, before=before
             )
-
-        # Working blocks aren't user-scoped today (one set per
-        # Memory instance); don't touch them.
+            # Working blocks are per user too (no session).
+            async with self._lock:
+                deleted += delete_blocks(
+                    self._blocks, user_id=user_id, before=before
+                )
         return deleted
 
     async def export(
@@ -422,6 +430,7 @@ class InMemoryMemory:
             user_id=user_id,
             episodes=sorted(episodes, key=lambda e: e.occurred_at),
             facts=sorted(facts, key=lambda f: f.recorded_at),
+            blocks=await self.working(user_id=user_id),
         )
 
     async def consolidate(self) -> None:

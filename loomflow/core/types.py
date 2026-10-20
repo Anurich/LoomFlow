@@ -525,6 +525,7 @@ class MemoryExport(BaseModel):
     user_id: str | None
     episodes: list[Episode] = Field(default_factory=list)
     facts: list[Fact] = Field(default_factory=list)
+    blocks: list[MemoryBlock] = Field(default_factory=list)
     exported_at: datetime = Field(default_factory=_utcnow)
 
 

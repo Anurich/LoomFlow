@@ -661,8 +661,24 @@ class PostgresMemory:
         sql = "DELETE FROM episodes WHERE " + " AND ".join(clauses)
         async with self._pool.acquire() as conn:
             result = await conn.execute(sql, *params)
-        # asyncpg returns "DELETE <n>" — parse the count.
-        deleted = _parse_delete_count(result)
+            # asyncpg returns "DELETE <n>" — parse the count.
+            deleted = _parse_delete_count(result)
+            if session_id is None:
+                # Working blocks are per user too (no session).
+                block_sql = (
+                    "DELETE FROM memory_blocks "
+                    "WHERE namespace = $1 AND user_id = $2"
+                )
+                block_params: list[Any] = [
+                    self._namespace,
+                    _encode_user_id(user_id),
+                ]
+                if before is not None:
+                    block_sql += " AND updated_at < $3"
+                    block_params.append(before)
+                deleted += _parse_delete_count(
+                    await conn.execute(block_sql, *block_params)
+                )
 
         # Facts are user-scoped, not session-scoped — erase them via
         # the FactStore's own delete surface (not raw SQL against its
@@ -695,6 +711,7 @@ class PostgresMemory:
             user_id=user_id,
             episodes=episodes,
             facts=sorted(facts, key=lambda f: f.recorded_at),
+            blocks=await self.working(user_id=user_id),
         )
 
     async def consolidate(self) -> None:
