@@ -353,6 +353,13 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
   re-execute) unless you pass ``serializer="pickle"``, which also lets
   steps return arbitrary objects; only use it for a store no untrusted
   party can write.
+* **Budget wall clock.** ``max_wall_clock`` and
+  ``per_user_max_wall_clock`` count time spent running (the agent
+  wraps each run in ``StandardBudget.running()``), not time since the
+  budget was created. A long-lived agent used to be blocked for good
+  once that much time had passed, even while idle. Concurrent or
+  nested runs count once. Code that drives ``allows_step`` /
+  ``consume`` itself wraps its work in ``budget.running()``.
 
 ### Packaging
 

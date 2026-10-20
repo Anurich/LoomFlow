@@ -6,7 +6,7 @@ the code before its fix.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +15,7 @@ import pytest
 
 from loomflow import Agent
 from loomflow.core.types import EventKind, ToolCall
+from loomflow.governance.budget import BudgetConfig, StandardBudget
 from loomflow.guardrails.builtin import InjectionGuard, PIIGuard, RegexGuard
 from loomflow.model.scripted import ScriptedModel, ScriptedTurn
 from loomflow.runtime import SqliteRuntime
@@ -531,3 +532,66 @@ async def test_step_results_round_trip_through_json(tmp_path: Path) -> None:
         got = await replay.step("a", produce)
     assert got == value and isinstance(got[1][0], ToolCall)
     assert ToolResult.success("c", got).ok
+
+
+# ---------------------------------------------------------------------------
+# Budget wall clock: time spent running, not time since construction
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "cfg",
+    [
+        BudgetConfig(max_wall_clock=timedelta(seconds=0.2)),
+        BudgetConfig(per_user_max_wall_clock=timedelta(seconds=0.2)),
+    ],
+)
+async def test_idle_time_between_runs_does_not_count(cfg: BudgetConfig) -> None:
+    agent = Agent(
+        "x",
+        model=ScriptedModel([ScriptedTurn(text="r1"), ScriptedTurn(text="r2")]),
+        budget=StandardBudget(cfg),
+    )
+    assert not (await agent.run("q1", user_id="alice")).interrupted
+    await anyio.sleep(0.3)
+    assert not (await agent.run("q2", user_id="alice")).interrupted
+
+
+@pytest.mark.parametrize(
+    ("cfg", "reason"),
+    [
+        (BudgetConfig(max_wall_clock=timedelta(seconds=0.1)), "budget:max_wall_clock"),
+        (BudgetConfig(per_user_max_wall_clock=timedelta(seconds=0.1)), "budget:per_user_max_wall_clock"),
+    ],
+)
+async def test_time_spent_running_is_capped(cfg: BudgetConfig, reason: str) -> None:
+    @tool
+    async def slow() -> str:
+        """Slow."""
+        await anyio.sleep(0.15)
+        return "ok"
+
+    agent = Agent(
+        "x",
+        model=ScriptedModel(
+            [ScriptedTurn(tool_calls=[ToolCall(tool="slow", args={})]), ScriptedTurn(text="done")]
+        ),
+        tools=[slow],
+        budget=StandardBudget(cfg),
+    )
+    result = await agent.run("go", user_id="alice")
+    assert result.interrupted and result.interruption_reason == reason
+
+
+async def test_concurrent_runs_count_wall_clock_once() -> None:
+    budget = StandardBudget(BudgetConfig())
+
+    async def run() -> None:
+        async with budget.running(user_id="u"):
+            await anyio.sleep(0.1)
+
+    async with anyio.create_task_group() as tg:
+        for _ in range(3):
+            tg.start_soon(run)
+    assert budget._elapsed() < timedelta(seconds=0.2)
+    assert budget._user_elapsed("u") is not None

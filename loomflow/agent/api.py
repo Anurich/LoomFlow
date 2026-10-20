@@ -72,7 +72,7 @@ from ..core.types import (
     ToolDef,
     Usage,
 )
-from ..governance.budget import NoBudget
+from ..governance.budget import NoBudget, run_clock
 from ..governance.rate_limit import RateLimiter
 from ..governance.retry import RetryPolicy
 from ..guardrails.base import Guardrail, apply_guardrails
@@ -2335,6 +2335,7 @@ class Agent:
             set_run_context(run_ctx),
             self._runtime.session(session_id),
             run_trace,
+            _NULL_CTX if fast_budget else run_clock(self._budget, user_id=run_ctx.user_id),
         ):
             if not fast_audit:
                 # ``FullTranscriptAuditLog`` opts into verbatim
