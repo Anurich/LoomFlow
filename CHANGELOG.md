@@ -9,6 +9,42 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 
 ## [Unreleased]
 
+Every subsystem was checked against its reference — provider SDKs and
+docs, the MCP / A2A / OpenTelemetry specs, the papers behind the
+architectures, the Agent Skills spec — and each defect found was
+reproduced, fixed and given a regression test.
+
+### Upgrading — behaviour changes
+
+* MCP tools are named ``server__tool`` (was ``server.tool``); the
+  dotted name still resolves.
+* ``Mode.ACCEPT_EDITS`` auto-approves only the ``write`` / ``edit``
+  tools; an approval handler result that isn't ``True``, an action name
+  or an ``ApprovalDecision`` denies; a pre-tool hook that times out or
+  raises denies.
+* Durable runtimes: a finished run's steps never replay into a later
+  run on the same session (``Agent.resume`` still replays the last
+  run); journal values are JSON, and pickled rows from earlier
+  releases are skipped unless ``serializer="pickle"``.
+* ``FilesystemSandbox`` resolves relative paths against its first root
+  (``base=``), not the process's working directory.
+* ``RetryPolicy`` uses full jitter by default; OpenTelemetry spans and
+  metrics follow the GenAI conventions (``chat {model}``,
+  ``execute_tool {tool}``, ``gen_ai.client.*`` metrics); the serve
+  ``/stream`` fatal frame is ``stream_error``.
+* ``A2AClient`` speaks A2A v1.0 by default (falling back to v0.3).
+* Budget wall-clock caps count time spent running.
+* Debates vote on ``Final answer:`` lines; ``parse_score`` reads
+  "7/10" as 0.7 (and "score: 7" as 0.7); the Supervisor's
+  ``forward_message`` ends the turn.
+* Workflows reject edges to unregistered nodes and stop at an
+  interrupted Agent node (``WorkflowResult.interrupted``).
+* ``Agent.from_config`` rejects unknown keys; skill names and
+  descriptions are validated against the Agent Skills spec; eval gates
+  fail when a metric raises.
+* ``wait_for_signal(timeout_s=)``; undelivered signals are bounded.
+* Removed the unused ``dbos`` / ``temporal`` extras.
+
 ### Fixed — validated against current SDKs, specs and reference implementations
 
 * **Claude models work on anthropic SDK 1.x.** SDK 1.0 removed
