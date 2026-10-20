@@ -386,3 +386,34 @@ def test_context_windows_follow_the_official_tables() -> None:
     assert context_window_for("claude-haiku-4-5") == 200_000
     assert context_window_for("gpt-6-sol") == 1_050_000
     assert context_window_for("deepseek-flash") == 1_000_000
+
+
+async def test_token_estimates_count_tool_calls_images_and_use_o200k() -> None:
+    pytest.importorskip("tiktoken")
+    from loomflow.core.types import Image, ToolCall
+    from loomflow.model.count_tokens import (
+        IMAGE_TOKEN_ESTIMATE,
+        _encoding_name,
+        count_tokens,
+    )
+
+    class Named:
+        name = "gpt-6-sol"
+
+    assert _encoding_name("gpt-6-sol") == "o200k_base"
+    assert _encoding_name("openai/gpt-4o-mini") == "o200k_base"
+    assert _encoding_name("claude-opus-5-5") == "cl100k_base"
+    plain = [Message(role="assistant", content="ok")]
+    with_call = [
+        Message(
+            role="assistant",
+            content="ok",
+            tool_calls=(ToolCall(id="c", tool="search", args={"q": "a long query " * 20}),),
+        )
+    ]
+    with_image = [
+        Message(role="user", content="ok", images=(Image(data="aGk=", media_type="image/png"),))
+    ]
+    base = await count_tokens(Named(), plain)
+    assert await count_tokens(Named(), with_call) > base + 20
+    assert await count_tokens(Named(), with_image) >= base + IMAGE_TOKEN_ESTIMATE

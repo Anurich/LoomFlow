@@ -164,6 +164,8 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
   system parts get no cache marker. OpenAI strict schemas inline
   ``$ref`` with sibling keys, and schemas with ``dict`` fields go out
   non-strict instead of forcing ``{}``.
+* Token estimates (when a model has no native counter) use ``o200k``
+  for current OpenAI models and count tool-call arguments and images.
 
 ### Packaging
 
