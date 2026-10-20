@@ -7,7 +7,7 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 For development-history detail (per-slice notes, file maps, gate
 counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 
-## [Unreleased]
+## [0.17.0] — 2026-10-20
 
 Every subsystem was checked against its reference — provider SDKs and
 docs, the MCP / A2A / OpenTelemetry specs, the papers behind the
