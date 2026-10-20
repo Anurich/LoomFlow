@@ -265,8 +265,8 @@ class AutoExtractMemory:
 
         * ``jeeves.auto_extract.duration_ms`` (histogram) — wall time
           spent inside the consolidator, in milliseconds. Tagged with
-          ``user_id`` and ``status`` (ok / error) so dashboards can
-          slice by tenant or by failure rate.
+          ``status`` (ok / error). (Not ``user_id``: per-user metric
+          series would be unbounded cardinality.)
         * ``jeeves.auto_extract.invocations`` (counter) — incremented
           once per extraction attempt, with the same tags.
         """
@@ -302,13 +302,11 @@ class AutoExtractMemory:
                     await self._telemetry.emit_metric(
                         "loom.auto_extract.duration_ms",
                         duration_ms,
-                        user_id=episode.user_id,
                         status=status,
                     )
                     await self._telemetry.emit_metric(
                         "loom.auto_extract.invocations",
                         1,
-                        user_id=episode.user_id,
                         status=status,
                     )
                 except Exception:  # noqa: BLE001

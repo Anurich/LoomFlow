@@ -2235,6 +2235,11 @@ class Agent:
                 max_turns=self._max_turns,
                 model=self._model.name,
                 architecture=self._architecture.name,
+                **{
+                    "gen_ai.operation.name": "invoke_agent",
+                    "gen_ai.conversation.id": session_id,
+                    "gen_ai.request.model": self._model.name,
+                },
             )
         )
 
@@ -2830,12 +2835,11 @@ class Agent:
 
             elapsed_ms = (anyio.current_time() - loop_started) * 1000
             if not fast_telemetry:
+                # No session id / turn count: unbounded cardinality.
                 await self._telemetry.emit_metric(
                     "loom.session.duration_ms",
                     elapsed_ms,
-                    session_id=session_id,
                     interrupted=session.interrupted,
-                    turns=session.turns,
                 )
 
             # Auto-consolidate runs after the response is finalized but

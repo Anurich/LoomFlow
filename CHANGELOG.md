@@ -153,6 +153,33 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
   doesn't know the v1.0 method (``protocol_version="auto"``, the
   default). Pass ``"1.0"`` or ``"0.3"`` to pin one.
 
+### Changed — telemetry follows the OpenTelemetry GenAI conventions
+
+* **OTel span names and kinds.** Exported model-call spans are named
+  ``chat {model}`` with kind ``CLIENT``, tool spans ``execute_tool
+  {tool}``, and the run span ``invoke_agent``. The loomflow name
+  (``loom.model.complete`` etc.) moves to the ``loom.span.name``
+  attribute. **Behaviour change** for dashboards keyed on OTel span
+  names; the in-memory, console and JSONL sinks keep the ``loom.*``
+  names.
+* ``gen_ai.usage.input_tokens`` now includes cached tokens, with
+  ``gen_ai.usage.cache_read.input_tokens`` /
+  ``cache_write.input_tokens`` alongside.
+* A failed or refused tool call sets ``error.type`` and ERROR status.
+  An exception is recorded once (it used to be recorded twice) and
+  carries ``error.type``.
+* **Metrics:** new ``gen_ai.client.inference.duration`` (seconds),
+  ``gen_ai.client.inference.usage.*`` token counters,
+  ``gen_ai.client.inference.operation.*_tokens`` histograms and
+  ``gen_ai.execute_tool.duration``, with the spec's units and bucket
+  boundaries. ``loom.*`` metrics get units. **Behaviour change:**
+  metrics no longer carry ``session_id``, ``turns`` or ``user_id``
+  attributes, since per-session or per-user series are unbounded
+  cardinality. Those ids stay on the spans.
+* **``/stream``:** a failure after the stream started is sent as
+  ``event: stream_error`` (it reused ``error``, the name of agent
+  error events, with a different payload).
+
 ### Fixed — models (checked against the provider docs, October 2026)
 
 * **Pricing** updated to the official tables: Opus 5.5 $4/$20, Sonnet

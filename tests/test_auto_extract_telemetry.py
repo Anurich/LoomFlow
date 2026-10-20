@@ -98,7 +98,7 @@ def _wrap(*args: Any, **kwargs: Any) -> AutoExtractMemory:
 # ---------------------------------------------------------------------------
 
 
-async def test_emits_duration_metric_with_user_id_and_ok_status() -> None:
+async def test_emits_duration_metric_with_ok_status_and_no_user_id() -> None:
     tel = _RecordingTelemetry()
     mem = _wrap(
         _make_inner(),
@@ -120,7 +120,8 @@ async def test_emits_duration_metric_with_user_id_and_ok_status() -> None:
         m for m in tel.metrics if m[0] == "loom.auto_extract.invocations"
     )
     assert duration[1] >= 0.0  # wall time in ms, non-negative
-    assert duration[2]["user_id"] == "alice"
+    # Per-user metric series would be unbounded cardinality.
+    assert "user_id" not in duration[2]
     assert duration[2]["status"] == "ok"
     assert invocation[1] == 1
     assert invocation[2]["status"] == "ok"

@@ -65,7 +65,7 @@ from ..core.types import (
     Usage,
 )
 from ..guardrails.base import apply_guardrails
-from ..observability.semconv import tool_attrs
+from ..observability.semconv import set_span_attributes, tool_attrs
 from ..security.audit import AuditLog, wants_full_transcripts
 from .base import ApprovalDecision, Dependencies
 
@@ -239,7 +239,6 @@ async def budget_gate(
             await deps.telemetry.emit_metric(
                 "loom.budget.exceeded",
                 1,
-                session_id=session.id,
                 reason=status.reason,
             )
         return True, [Event.budget_exceeded(session.id, status)]
@@ -613,7 +612,7 @@ async def run_single_tool(
         )
     )
 
-    async with tool_trace:
+    async with tool_trace as tool_span:
         run_user_id = deps.context.user_id
         # Stamp ``call.destructive`` from the tool host BEFORE any
         # permission check. Background: ``ToolCall.destructive``
@@ -815,14 +814,28 @@ async def run_single_tool(
                         warn_legacy_protocol("HookHost", "post_tool")
                         await deps.hooks.post_tool(call, result)
 
+        # A failed or refused call marks its span as an error.
+        error_type = _tool_error_type(result)
+        if error_type is not None and tool_span is not None:
+            set_span_attributes(tool_span, {"error.type": error_type})
+
     if not deps.fast_telemetry:
-        elapsed_ms = (anyio.current_time() - started) * 1000
+        elapsed = anyio.current_time() - started
         await deps.telemetry.emit_metric(
             "loom.tool.duration_ms",
-            elapsed_ms,
+            elapsed * 1000,
             tool=call.tool,
             ok=result.ok,
             denied=result.denied,
+        )
+        await deps.telemetry.emit_metric(
+            "gen_ai.execute_tool.duration",
+            elapsed,
+            **{
+                "gen_ai.operation.name": "execute_tool",
+                "gen_ai.tool.name": call.tool,
+                "error.type": _tool_error_type(result),
+            },
         )
     # G13 — tool_result-stage guardrails. Applied HERE (at the shared
     # gated executor, where the ToolResult is finalised) so every
@@ -834,6 +847,17 @@ async def run_single_tool(
     if not deps.fast_guardrails and result.ok and result.output is not None:
         result = await _guard_tool_result(deps, result)
     return result
+
+
+def _tool_error_type(result: ToolResult) -> str | None:
+    """``error.type`` for a tool call that didn't succeed."""
+    if result.ok:
+        return None
+    if result.denied:
+        return "permission_denied"
+    if result.error and "timed out" in result.error:
+        return "timeout"
+    return "tool_error"
 
 
 async def _guard_tool_result(

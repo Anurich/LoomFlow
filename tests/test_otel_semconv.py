@@ -308,10 +308,15 @@ async def test_otel_spans_carry_gen_ai_attributes_and_usage() -> None:
     await agent.run("ping please")
 
     finished = exporter.get_finished_spans()
+    # The exporter uses the semconv name and kind, keeping the loomflow
+    # name as ``loom.span.name``.
     model_spans = [
-        s for s in finished if s.name == "loom.model.complete"
+        s for s in finished
+        if (s.attributes or {}).get("loom.span.name") == "loom.model.complete"
     ]
     assert len(model_spans) == 2
+    assert all(s.name == "chat scripted" for s in model_spans)
+    assert all(s.kind.name == "CLIENT" for s in model_spans)
     for s in model_spans:
         assert s.attributes is not None
         assert s.attributes["gen_ai.operation.name"] == "chat"
@@ -322,7 +327,7 @@ async def test_otel_spans_carry_gen_ai_attributes_and_usage() -> None:
         assert "gen_ai.usage.output_tokens" in s.attributes
         assert "gen_ai.response.finish_reasons" in s.attributes
 
-    tool_spans = [s for s in finished if s.name == "loom.tool"]
+    tool_spans = [s for s in finished if s.name == "execute_tool ping"]
     assert len(tool_spans) == 1
     t = tool_spans[0]
     assert t.attributes is not None

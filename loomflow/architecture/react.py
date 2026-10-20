@@ -36,6 +36,7 @@ from ..core.types import (
 )
 from ..observability.semconv import (
     chat_attrs,
+    inference_metrics,
     set_span_attributes,
     usage_attrs,
 )
@@ -240,6 +241,7 @@ class ReAct:
                 }
                 tool_calls: list[ToolCall] = []
                 usage = Usage()
+                model_started = anyio.current_time()
 
                 if not deps.streaming and hasattr(deps.model, "complete"):
                     model_trace: contextlib.AbstractAsyncContextManager[Any] = (
@@ -294,6 +296,8 @@ class ReAct:
                                     usage.input_tokens,
                                     usage.output_tokens,
                                     finish_reason,
+                                    cache_read_tokens=usage.cached_input_tokens,
+                                    cache_write_tokens=usage.cache_write_tokens,
                                 ),
                             )
                 else:
@@ -357,6 +361,8 @@ class ReAct:
                                     usage.input_tokens,
                                     usage.output_tokens,
                                     stream_finish_reason,
+                                    cache_read_tokens=usage.cached_input_tokens,
+                                    cache_write_tokens=usage.cache_write_tokens,
                                 ),
                             )
                     text = "".join(text_parts)
@@ -368,25 +374,28 @@ class ReAct:
                     deps, session, usage, count_turn=False
                 )
                 if not deps.fast_telemetry:
+                    # No session id on metrics: it's unbounded
+                    # cardinality (it lives on the spans instead).
                     await deps.telemetry.emit_metric(
                         "loom.tokens.input",
                         usage.input_tokens,
-                        session_id=session.id,
                         model=deps.model.name,
                     )
                     await deps.telemetry.emit_metric(
                         "loom.tokens.output",
                         usage.output_tokens,
-                        session_id=session.id,
                         model=deps.model.name,
                     )
                     if usage.cost_usd:
                         await deps.telemetry.emit_metric(
                             "loom.cost.usd",
                             usage.cost_usd,
-                            session_id=session.id,
                             model=deps.model.name,
                         )
+                    for name, value, attrs in inference_metrics(
+                        deps.model, usage, anyio.current_time() - model_started
+                    ):
+                        await deps.telemetry.emit_metric(name, value, **attrs)
                 session.output = text
 
                 session.messages.append(
