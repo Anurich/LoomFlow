@@ -9,6 +9,8 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 
 ## [Unreleased]
 
+## [0.16.0] — 2026-10-20
+
 ### Changed — `Swarm` handoffs now behave like the reference swarms
 
 Checked against OpenAI Swarm, the OpenAI Agents SDK's handoffs and
