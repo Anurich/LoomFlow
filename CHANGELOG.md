@@ -63,6 +63,42 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
   longer recalled. Legacy-mode lessons go to the run's own memory
   block, one per line (they used to run together).
 
+### Fixed — permission gates
+
+* **Code mode can't reach tools around the gates.** Tools called from
+  ``run_code`` went straight to the tool host, past the deny-list,
+  hooks, approval handler and audit log, so approving "run some code"
+  approved whatever it called. Each call it makes now gets the same
+  checks as a call the model made directly.
+* **Skill tools are gated and sandboxed.** A skill's bundled script
+  tools were registered outside a sandboxed tool host and weren't
+  marked destructive, so they read files the sandbox blocks without
+  asking. They are now destructive (they run arbitrary scripts) and are
+  registered under the sandbox you passed as ``tools=``. Sandbox
+  wrappers gained ``register()`` for this.
+* **``ACCEPT_EDITS`` approves file edits only**, as the Agent SDK's
+  ``acceptEdits`` does. It used to auto-approve every destructive tool,
+  ``bash`` included. **Behaviour change:** only the built-in ``write``
+  and ``edit`` tools are auto-approved; every other destructive tool
+  asks. Pass ``StandardPermissions(edit_tools=[...])`` to name your own
+  editors.
+* **An approval handler's "no" is a no.** The result was read with
+  ``bool()``, so ``"deny"`` or ``{"approved": False}`` approved the
+  call. Now only ``True``, an action name (``"allow"``, ``"deny"``,
+  ...) or an ``ApprovalDecision`` count; anything else denies.
+* **A pre-tool hook that times out or raises denies the call.** A timed
+  out hook used to count as allow, and a raising hook crashed the run.
+  ``HookRegistry(timeout_denies=False)`` restores the old timeout
+  behaviour.
+* **Spawned workers keep their template's guards.** ``spawn_worker``
+  built the worker with the template's tools but none of its
+  permissions, hooks, approval handler, guardrails, rate limiter, audit
+  log or limits.
+* **Tool dispatch.** Objects with an ``async def __call__`` (and
+  ``functools.partial`` of an async function) are awaited instead of
+  returning a coroutine. A timeout on a blocking sync tool now returns
+  on time instead of waiting for the thread.
+
 ## [0.16.0] — 2026-10-20
 
 ### Changed — `Swarm` handoffs now behave like the reference swarms

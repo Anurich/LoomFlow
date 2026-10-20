@@ -51,6 +51,7 @@ from typing import Any, Literal
 from ...core.protocols import ToolHost
 from ...core.types import ToolDef, ToolEvent, ToolResult
 from ...tools.registry import InProcessToolHost
+from .base import register_inside
 from .filesystem import FilesystemSandbox
 from .subprocess_ import SubprocessSandbox
 
@@ -243,6 +244,10 @@ class OSSandbox:
     @property
     def inner(self) -> ToolHost:
         return self._inner
+
+    def register(self, tool: Any) -> None:
+        """Add ``tool`` under this sandbox (see :func:`register_inside`)."""
+        register_inside(self, tool)
 
     @property
     def mode(self) -> SandboxMode:

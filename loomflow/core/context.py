@@ -243,6 +243,21 @@ _ambient_citations_var: ContextVar[Any] = ContextVar(
     "loomflow_ambient_citations", default=None
 )
 
+# The permission gate for tool calls a running tool makes itself (code
+# mode's ``run_code`` calling tools from the model's code). Set by the
+# gated executor for the duration of each tool call to a callable
+# ``(call, host) -> ToolResult`` that runs ``call`` on ``host`` through
+# the run's hooks, permissions, approval handler and audit log, so a
+# tool can't be used to reach other tools around those gates.
+_tool_gate_var: ContextVar[Any] = ContextVar(
+    "loomflow_tool_gate", default=None
+)
+
+
+def current_tool_gate() -> Any:
+    """The gate for nested tool calls, or ``None`` outside a tool call."""
+    return _tool_gate_var.get()
+
 
 def get_run_context() -> RunContext:
     """Return the :class:`RunContext` for the currently-running agent.

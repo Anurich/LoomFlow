@@ -441,15 +441,17 @@ class Agent:
         host = _coerce_tool_host(tools)
         if has_skills:
             assert skill_registry is not None
-            # InProcessToolHost and ExtendedToolHost both expose
-            # ``register``; for any other host implementation
-            # (MCP / custom), wrap with ExtendedToolHost so we
-            # have a place to push the load_skill tool plus any
-            # pending tools the skills lazy-register on demand.
+            # A skill's bundled tools are registered on the host the
+            # user gave us when it can take them (InProcessToolHost,
+            # or a sandbox, which adds them under itself), so they run
+            # under the same sandbox as every other tool. ``load_skill``
+            # changes the tool list, so it runs outside any sandbox,
+            # on an extension layer for hosts that aren't in-process.
+            skill_host: Any = host if hasattr(host, "register") else None
             if not isinstance(host, InProcessToolHost):
                 host = ExtendedToolHost(host, [])
             load_tool = make_load_skill_tool(
-                skill_registry, host=host
+                skill_registry, host=skill_host or host
             )
             host.register(load_tool)
 

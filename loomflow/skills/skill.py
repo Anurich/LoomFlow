@@ -506,17 +506,23 @@ def _build_subprocess_tools(
     ]
 
 
-def _make_subprocess_tool(
-    spec: ToolSpec, skill_path: Path, prefix: str
-) -> Tool:
-    script_full = (skill_path / spec.script).resolve()
-    interpreter = _interpreter_for(script_full)
-    arg_order = list(spec.args.keys())
+@dataclass(frozen=True)
+class _SkillScript:
+    """A Mode C tool's callable: run the script with the model's args.
 
-    async def _run(**kwargs: Any) -> str:
+    A module-level class rather than a closure so an
+    :class:`~loomflow.security.sandbox.OSSandbox` can ship it to its
+    sandboxed child.
+    """
+
+    interpreter: tuple[str, ...]
+    script: str
+    arg_order: tuple[str, ...]
+
+    async def __call__(self, **kwargs: Any) -> str:
         # Convert kwargs to positional argv in declaration order.
-        argv = [str(kwargs.get(arg_name, "")) for arg_name in arg_order]
-        cmd = [*interpreter, str(script_full), *argv]
+        argv = [str(kwargs.get(arg_name, "")) for arg_name in self.arg_order]
+        cmd = [*self.interpreter, self.script, *argv]
         # anyio.run_process (not asyncio.create_subprocess_exec) so
         # subprocess tools work on any anyio backend, including trio.
         # The fail_after guard kills a wedged script instead of
@@ -540,13 +546,22 @@ def _make_subprocess_tool(
             return f"Error (exit={completed.returncode}):\n{out}"
         return out
 
+
+def _make_subprocess_tool(
+    spec: ToolSpec, skill_path: Path, prefix: str
+) -> Tool:
+    script_full = (skill_path / spec.script).resolve()
     return Tool(
         name=f"{prefix}{spec.name}",
         description=(
             spec.description
             or f"Run the bundled script {spec.script}."
         ),
-        fn=_run,
+        fn=_SkillScript(
+            interpreter=tuple(_interpreter_for(script_full)),
+            script=str(script_full),
+            arg_order=tuple(spec.args.keys()),
+        ),
         input_schema={
             "type": "object",
             "properties": {
@@ -559,6 +574,8 @@ def _make_subprocess_tool(
             },
             "required": list(spec.args.keys()),
         },
+        # Runs an arbitrary script: gate it like ``bash``.
+        destructive=True,
     )
 
 

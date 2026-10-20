@@ -58,6 +58,7 @@ from ...core.errors import ConfigError
 from ...core.protocols import ToolHost
 from ...core.types import ToolDef, ToolEvent, ToolResult
 from ...tools.registry import InProcessToolHost, Tool
+from .base import register_inside
 
 
 class SubprocessSandbox:
@@ -83,6 +84,10 @@ class SubprocessSandbox:
     @property
     def inner(self) -> ToolHost:
         return self._inner
+
+    def register(self, tool: Any) -> None:
+        """Add ``tool`` under this sandbox (see :func:`register_inside`)."""
+        register_inside(self, tool)
 
     @property
     def timeout_seconds(self) -> float:

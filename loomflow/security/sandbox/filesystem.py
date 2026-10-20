@@ -32,6 +32,7 @@ from typing import Any
 
 from ...core.protocols import ToolHost
 from ...core.types import ToolDef, ToolEvent, ToolResult
+from .base import register_inside
 
 DEFAULT_PATH_ARG_NAMES: frozenset[str] = frozenset(
     {
@@ -113,6 +114,10 @@ class FilesystemSandbox:
     @property
     def inner(self) -> ToolHost:
         return self._inner
+
+    def register(self, tool: Any) -> None:
+        """Add ``tool`` under this sandbox (see :func:`register_inside`)."""
+        register_inside(self, tool)
 
     # ---- ToolHost protocol ----------------------------------------------
 

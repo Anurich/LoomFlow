@@ -43,16 +43,18 @@ circular re-implementation:
 from __future__ import annotations
 
 import contextlib
+import itertools
 import json
 import logging
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import anyio
 
 from ..core._deprecation import warn_legacy_protocol
-from ..core.context import RunContext, get_run_context
+from ..core.context import RunContext, _tool_gate_var, get_run_context
 from ..core.streaming import stream_from
 from ..core.types import (
     Event,
@@ -449,6 +451,11 @@ async def audit(
         )
 
 
+_APPROVAL_ACTIONS = frozenset(
+    {"allow", "deny", "edit", "remember_allow", "remember_deny"}
+)
+
+
 async def _resolve_ask_decision(
     call: ToolCall,
     handler: Any,  # ApprovalHandler | None — Any keeps the import flat
@@ -469,6 +476,8 @@ async def _resolve_ask_decision(
     Handler return shapes (G8):
 
     * ``bool`` — legacy allow/deny, 100% back-compat.
+    * an action name (``"allow"``, ``"deny"``, ...) — same as the
+      matching :class:`~loomflow.architecture.base.ApprovalDecision`.
     * :class:`~loomflow.architecture.base.ApprovalDecision` — rich
       actions: ``allow`` / ``deny`` / ``edit`` (swap args, proceed as
       allowed) / ``remember_allow`` / ``remember_deny`` (decide and
@@ -507,8 +516,21 @@ async def _resolve_ask_decision(
         )
         return False, call, None
 
+    if isinstance(decision, bool):
+        return decision, call, None
+    if isinstance(decision, str) and decision in _APPROVAL_ACTIONS:
+        decision = ApprovalDecision(action=decision)  # type: ignore[arg-type]
     if not isinstance(decision, ApprovalDecision):
-        return bool(decision), call, None
+        # ``"deny"`` or ``{"approved": False}`` are truthy: reading
+        # them with ``bool()`` approved the call. Only ``True``, an
+        # action name or an ApprovalDecision can allow.
+        log.warning(
+            "approval_handler returned %r for tool=%s (expected bool, "
+            "action name or ApprovalDecision); treating as deny",
+            decision,
+            call.tool,
+        )
+        return False, call, None
 
     # Widen to ``str``: the Literal annotation on the dataclass is not
     # enforced at runtime, so a handler CAN hand back a bogus action —
@@ -752,6 +774,11 @@ async def run_single_tool(
                     if timeout_s is not None
                     else contextlib.nullcontext()
                 )
+                # Tool calls this tool makes itself (code mode) go
+                # through the same gates as this one.
+                gate_token = _tool_gate_var.set(
+                    _nested_tool_gate(deps, turn=turn, parent_step=resolved_step)
+                )
                 try:
                     with timeout_cm:
                         if deps.fast_runtime:
@@ -776,6 +803,8 @@ async def run_single_tool(
                     )
                 except Exception as exc:  # noqa: BLE001
                     result = ToolResult.error_(call.id, str(exc))
+                finally:
+                    _tool_gate_var.reset(gate_token)
 
                 if not deps.fast_hooks:
                     try:
@@ -851,6 +880,58 @@ async def _guard_tool_result(
     if outcome.text != original:
         return result.model_copy(update={"output": outcome.text})
     return result
+
+
+def _nested_tool_gate(
+    deps: Dependencies, *, turn: int, parent_step: str
+) -> Callable[[ToolCall, Any], Awaitable[ToolResult]]:
+    """Gate for tool calls a running tool makes on ``host`` (code mode).
+
+    Each call gets the full treatment a model-issued call gets: the
+    destructive stamp from ``host``'s defs, hooks, permissions, the
+    approval handler, the timeout, guardrails and audit entries.
+    """
+    counter = itertools.count()
+
+    async def gate(call: ToolCall, host: Any) -> ToolResult:
+        slot = next(counter)
+        session_id = deps.context.session_id or ""
+        if not deps.fast_audit:
+            await audit(
+                deps.audit_log,
+                session_id,
+                "model",
+                "tool_call",
+                {
+                    "tool": call.tool,
+                    "call_id": call.id,
+                    "args": dict(call.args),
+                    "turn": turn,
+                    "via": parent_step,
+                },
+                user_id=deps.context.user_id,
+            )
+        result = await run_single_tool(
+            replace(deps, tools=host),
+            call,
+            turn=turn,
+            slot=slot,
+            step_name=f"{parent_step}.{slot}",
+        )
+        if not deps.fast_audit:
+            await audit(
+                deps.audit_log,
+                session_id,
+                "system",
+                "tool_result",
+                tool_result_payload(
+                    call=call, result=result, turn=turn, audit_log=deps.audit_log
+                ),
+                user_id=deps.context.user_id,
+            )
+        return result
+
+    return gate
 
 
 async def run_gated_tool(

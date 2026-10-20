@@ -913,10 +913,22 @@ def _make_spawn_worker_tool(
         # (``inherit_ambient_memory``), so a worker built without an
         # explicit ``memory=`` inherits it, same as fixed workers.
         if template is not None:
+            # The template's guards come along with its tools: a
+            # spawned worker must not be a way around the
+            # permissions, hooks, approval handler or limits the
+            # template's tools were configured under.
             worker_agent = _Agent(
                 instructions,
                 model=template.model,
                 tools=template.tool_host,
+                permissions=template._permissions,
+                hooks=template._hooks,
+                approval_handler=template._approval_handler,
+                guardrails=list(template._guardrails),
+                rate_limiter=template._rate_limiter,
+                audit_log=template._audit_log,
+                max_turns=template._max_turns,
+                timeout=template._timeout,
             )
         else:
             worker_agent = _Agent(instructions, model=fallback_model)

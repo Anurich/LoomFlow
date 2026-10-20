@@ -8,6 +8,7 @@ type hints. :class:`InProcessToolHost` is the simplest
 
 from __future__ import annotations
 
+import functools
 import inspect
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -103,9 +104,12 @@ class Tool:
     async def execute(self, args: Mapping[str, Any]) -> Any:
         """Invoke the underlying callable.
 
-        Async functions are awaited; sync functions are dispatched to a
-        worker thread via :func:`anyio.to_thread.run_sync` so they don't
-        block the event loop.
+        Async callables (functions, ``functools.partial`` of one, or
+        objects with an ``async def __call__``) are awaited; sync ones
+        run in a worker thread via :func:`anyio.to_thread.run_sync` so
+        they don't block the event loop. A sync callable that returns
+        an awaitable has it awaited. A cancelled or timed-out sync
+        call returns at once; its thread finishes in the background.
         """
         kwargs = dict(args)
         # Coerce stringified args to their declared schema types before
@@ -139,9 +143,23 @@ class Tool:
                     kwargs[name] = adapter.validate_python(json.loads(val))
                 except Exception:  # noqa: BLE001 — keep original value
                     pass
-        if inspect.iscoroutinefunction(self.fn):
+        if _is_async_callable(self.fn):
             return await self.fn(**kwargs)
-        return await anyio.to_thread.run_sync(lambda: self.fn(**kwargs))
+        result = await anyio.to_thread.run_sync(
+            lambda: self.fn(**kwargs), abandon_on_cancel=True
+        )
+        if inspect.isawaitable(result):
+            result = await result
+        return result
+
+
+def _is_async_callable(fn: Any) -> bool:
+    while isinstance(fn, functools.partial):
+        fn = fn.func
+    return inspect.iscoroutinefunction(fn) or (
+        not inspect.isfunction(fn)
+        and inspect.iscoroutinefunction(getattr(fn, "__call__", None))  # noqa: B004
+    )
 
 
 # ---------------------------------------------------------------------------
