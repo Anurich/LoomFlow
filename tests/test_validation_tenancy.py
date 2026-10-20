@@ -75,9 +75,9 @@ async def test_journal_never_replays_another_users_results() -> None:
     anon = Agent("x", model=ScriptedModel([ScriptedTurn(text="fresh for anon")]), runtime=rt)
     assert (await anon.run("hi", session_id="s9")).output == "fresh for anon"
 
-    # The same user still replays their own journal (crash-resume).
+    # The same user still replays their own journal (resume).
     again = Agent("x", model=ScriptedModel([ScriptedTurn(text="re-run")]), runtime=rt)
-    assert (await again.run("hi", session_id="s9", user_id="alice")).output == "alice's answer"
+    assert (await again.resume("hi", session_id="s9", user_id="alice")).output == "alice's answer"
 
 
 async def test_checkpoints_resume_only_for_their_own_user(tmp_path: Any) -> None:

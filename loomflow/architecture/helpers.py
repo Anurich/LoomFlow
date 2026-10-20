@@ -793,7 +793,11 @@ async def run_single_tool(
                                 call.tool,
                                 call.args,
                                 call_id=call.id,
-                                idempotency_key=call.idempotency_key(),
+                                # Position + content: replays on resume,
+                                # runs again for a retry in a later turn.
+                                idempotency_key=(
+                                    f"{resolved_step}:{call.idempotency_key()}"
+                                ),
                             )
                 except TimeoutError:
                     result = ToolResult.error_(

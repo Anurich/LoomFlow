@@ -330,6 +330,29 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
   ``InjectionGuard`` catches "ignore the previous instructions" and
   smuggled tag characters, and escapes ``</untrusted-tool-output>``
   in tool output so a result can't close its own block early.
+* **Durable journal: runs.** A finished run's steps are never replayed
+  into a later run on the same session. Each run journals under the
+  session's current *epoch*, which advances when the run ends; a run
+  that crashed (raised) doesn't advance it, so running it again
+  resumes and replays what already happened. Before, a new request on
+  the session skipped any tool call identical to one made earlier (a
+  second "charge 7" never charged), and a call retried after a failure
+  replayed the failure. ``Agent.resume`` without a checkpoint still
+  replays the last run, finished or not. Runs on one ``(session,
+  user)`` take turns within a process instead of interleaving their
+  journal entries.
+* Tool calls are journaled by position (turn and slot) plus tool and
+  args, so a resumed run replays the same call even when the model is
+  asked again, while a retry in a later turn, or a deliberate second
+  identical call, runs.
+* **Journal values are JSON, not pickle.** ``SqliteRuntime``,
+  ``PostgresRuntime`` and their stores write tagged JSON; decoding
+  never imports a module or runs a constructor. Anyone able to write
+  the journal could previously run code in every process that resumed
+  from it. Pickled rows from earlier releases are skipped (those steps
+  re-execute) unless you pass ``serializer="pickle"``, which also lets
+  steps return arbitrary objects; only use it for a store no untrusted
+  party can write.
 
 ### Packaging
 

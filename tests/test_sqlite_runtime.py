@@ -76,8 +76,10 @@ async def test_journal_persists_across_runtime_instances(tmp_path: Path) -> None
     db = tmp_path / "journal.db"
 
     rt1 = SqliteRuntime(db)
-    async with rt1.session("fixed-id"):
-        first = await rt1.step("step1", expensive)
+    with pytest.raises(RuntimeError):
+        async with rt1.session("fixed-id"):
+            first = await rt1.step("step1", expensive)
+            raise RuntimeError("crash")  # the run doesn't finish
 
     # Simulate a process restart: new SqliteRuntime against the same
     # file, same session id ⇒ replays the cached value.
@@ -103,8 +105,10 @@ async def test_stream_journal_persists_across_runtime_instances(
     db = tmp_path / "journal.db"
 
     rt1 = SqliteRuntime(db)
-    async with rt1.session("s1"):
-        first = [c async for c in rt1.stream_step("stream1", gen)]
+    with pytest.raises(RuntimeError):
+        async with rt1.session("s1"):
+            first = [c async for c in rt1.stream_step("stream1", gen)]
+            raise RuntimeError("crash")  # the run doesn't finish
 
     rt2 = SqliteRuntime(db)
     async with rt2.session("s1"):
@@ -147,8 +151,9 @@ async def test_runtime_path_property(tmp_path: Path) -> None:
 async def test_agent_run_with_sqlite_runtime_writes_journal(
     tmp_path: Path,
 ) -> None:
-    import pickle
     import sqlite3
+
+    from loomflow.runtime import _codec
 
     db = tmp_path / "j.db"
     rt = SqliteRuntime(db)
@@ -171,6 +176,6 @@ async def test_agent_run_with_sqlite_runtime_writes_journal(
     assert rows, "expected a journaled persist_episode step"
     # The persisted value is the episode id (a string from
     # InMemoryMemory.remember).
-    value = pickle.loads(rows[0][1])
+    value = _codec.loads(rows[0][1])
     assert isinstance(value, str)
     assert value.startswith("ep_")

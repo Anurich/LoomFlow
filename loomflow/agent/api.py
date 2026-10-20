@@ -81,6 +81,7 @@ from ..model.echo import EchoModel
 from ..observability.tracing import NoTelemetry
 from ..runtime.inproc import InProcRuntime
 from ..runtime.journal import Checkpoint, CheckpointMeta, journal_scope
+from ..runtime.journaled import resuming_last_run
 from ..security.audit import AuditLog
 from ..security.hooks import HookRegistry, PostToolHook, PreToolHook
 from ..security.permissions import AllowAll
@@ -1856,13 +1857,15 @@ class Agent:
                 run_session_id = session_id
 
         if cp is None:
-            # Legacy resume: journal replay + memory rehydration.
-            return await self.run(
-                effective_prompt,
-                user_id=user_id,
-                session_id=session_id,
-                **kwargs,
-            )
+            # Legacy resume: journal replay (of the session's last run,
+            # even a finished one) + memory rehydration.
+            with resuming_last_run():
+                return await self.run(
+                    effective_prompt,
+                    user_id=user_id,
+                    session_id=session_id,
+                    **kwargs,
+                )
 
         emit = kwargs.pop("emit", None)
         output_schema = kwargs.pop("output_schema", None)
@@ -2327,9 +2330,11 @@ class Agent:
 
         async with (
             _ambient_reset_guard(),
+            # The run context first: the runtime scopes the session's
+            # journal by the run's user.
+            set_run_context(run_ctx),
             self._runtime.session(session_id),
             run_trace,
-            set_run_context(run_ctx),
         ):
             if not fast_audit:
                 # ``FullTranscriptAuditLog`` opts into verbatim

@@ -17,15 +17,27 @@ keyword arguments: Pydantic values via ``model_dump_json``, containers
 recursively (mappings key-sorted), scalars via ``repr``, and a
 ``repr``-with-memory-addresses-stripped fallback for everything else.
 
-When :meth:`step` is passed an ``idempotency_key`` — as the ReAct loop
-does for every tool call, deriving it from the tool name + args — that
-key takes over as the whole journal key, namespaced under ``idem:`` so
-a content-hash can never collide with a positional step name like
-``tool_call_<turn>_<slot>``. This is what makes two *identical* tool
-calls in different turns (or retried calls that differ only in a fresh
-per-attempt ``call_id``) dedupe to a single side-effecting execution
-within a session, rather than re-running because their positional
-names differ.
+When :meth:`step` is passed an ``idempotency_key`` it takes over as
+the whole journal key, namespaced under ``idem:``. The ReAct loop
+passes the call's position and content (``tool_call_<turn>_<slot>``
+plus a hash of the tool name and args), so on resume the same call
+replays — even when its ``call_id`` differs because the model was
+asked again — while a retry in a later turn, or an intentional second
+identical call, runs.
+
+Runs and epochs:
+    A run's steps replay only into that same run resumed: re-running
+    with the same session and inputs after a crash. When a run ends
+    (its outermost ``session`` context exits without an exception)
+    the session's *epoch* advances, and later runs on the session key
+    their steps under the new epoch — so a finished run's results are
+    never replayed into the next request, even an identical one.
+    :func:`resuming_last_run` (what ``Agent.resume`` uses without a
+    checkpoint) continues the most recent run instead, finished or not.
+    Each ``(session, user)`` runs one run at a time in this process:
+    a second concurrent run waits for the first to end (nested
+    ``session`` contexts, such as sub-agents sharing the session, don't
+    wait).
 
 Delivery semantics — **at-least-once**, not exactly-once:
     A step's side effect completes *before* its journal entry is
@@ -57,10 +69,11 @@ from __future__ import annotations
 import contextvars
 import hashlib
 import re
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
+from contextlib import asynccontextmanager, contextmanager
 from typing import Any
 
+import anyio
 from pydantic import BaseModel
 
 from ..core.context import get_run_context
@@ -77,6 +90,44 @@ _current_session_var: contextvars.ContextVar[str | None] = contextvars.ContextVa
     "_jeeves_runtime_session",
     default=None,
 )
+
+#: Journal key holding a scope's current run epoch.
+EPOCH_KEY = "__run_epoch__"
+#: Journal key holding the epoch of the scope's most recent run.
+LAST_RUN_KEY = "__last_run_epoch__"
+
+_resume_last_run_var: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "_loom_resume_last_run", default=False
+)
+
+
+@contextmanager
+def resuming_last_run() -> Iterator[None]:
+    """Sessions opened inside this context continue the scope's most
+    recent run — replaying its steps even if it finished — instead of
+    starting a new one. ``Agent.resume`` uses it when it has no
+    checkpoint to resume from."""
+    token = _resume_last_run_var.set(True)
+    try:
+        yield
+    finally:
+        _resume_last_run_var.reset(token)
+
+
+class _OpenRun:
+    """Per-scope state of the run holding the scope."""
+
+    def __init__(self, epoch: int, next_epoch: int) -> None:
+        self.epoch = epoch
+        self.next_epoch = next_epoch
+        self.depth = 0
+        self.touched = False
+
+
+class _ScopeLock:
+    def __init__(self) -> None:
+        self.lock = anyio.Lock()
+        self.users = 0
 
 # CPython default reprs embed the object's memory address
 # ("<Foo object at 0x104f3b010>"), which changes every process. Strip
@@ -184,6 +235,8 @@ class JournaledRuntime:
         )
         self._sessions: dict[str, JournaledSession] = {}
         self._session_refs: dict[str, int] = {}
+        self._runs: dict[str, _OpenRun] = {}
+        self._scope_locks: dict[str, _ScopeLock] = {}
 
     @property
     def store(self) -> JournalStore:
@@ -193,10 +246,58 @@ class JournaledRuntime:
 
     @asynccontextmanager
     async def session(self, session_id: str) -> AsyncIterator[JournaledSession]:
-        """Open (or re-enter) a session; in-memory session state — the
-        signal mailbox — is discarded when the last open context for
-        this ``session_id`` exits. Journal/checkpoint data lives in
-        the store and is unaffected."""
+        """Open (or re-enter) a session for one run.
+
+        The outermost context for a ``(session, current user)`` scope
+        waits for any other run on it, and on a clean exit advances
+        the scope's epoch (see the module docstring). In-memory session
+        state — the signal mailbox — is discarded when the last open
+        context for this ``session_id`` exits. Journal/checkpoint data
+        lives in the store and is unaffected."""
+        scope = _scope(session_id)
+        nested = _current_session_var.get() == session_id and scope in self._runs
+        if nested:
+            run = self._runs[scope]
+            run.depth += 1
+            try:
+                async with self._enter(session_id) as sess:
+                    yield sess
+            finally:
+                run.depth -= 1
+            return
+
+        holder = self._scope_locks.setdefault(scope, _ScopeLock())
+        holder.users += 1
+        try:
+            async with holder.lock:
+                entry = await self._store.get_step(scope, EPOCH_KEY)
+                next_epoch = entry.value if entry is not None else 0
+                epoch = next_epoch
+                if _resume_last_run_var.get():
+                    last = await self._store.get_step(scope, LAST_RUN_KEY)
+                    if last is not None:
+                        epoch = last.value
+                run = _OpenRun(epoch, next_epoch)
+                self._runs[scope] = run
+                clean = False
+                try:
+                    async with self._enter(session_id) as sess:
+                        yield sess
+                    clean = True
+                finally:
+                    self._runs.pop(scope, None)
+                    if clean and run.touched:
+                        with anyio.CancelScope(shield=True):
+                            await self._store.put_step(
+                                scope, EPOCH_KEY, max(run.next_epoch, run.epoch + 1)
+                            )
+        finally:
+            holder.users -= 1
+            if holder.users == 0:
+                self._scope_locks.pop(scope, None)
+
+    @asynccontextmanager
+    async def _enter(self, session_id: str) -> AsyncIterator[JournaledSession]:
         token = _current_session_var.set(session_id)
         sess = self._get_session(session_id)
         self._session_refs[session_id] = (
@@ -212,6 +313,17 @@ class JournaledRuntime:
                 self._sessions.pop(session_id, None)
             else:
                 self._session_refs[session_id] = remaining
+
+    async def _run_key(self, scope: str, key: str) -> str:
+        """``key`` within the open run's epoch (epoch 0 is unprefixed,
+        so journals written before epochs existed still resume)."""
+        run = self._runs.get(scope)
+        if run is None:
+            return key
+        if not run.touched:
+            run.touched = True
+            await self._store.put_step(scope, LAST_RUN_KEY, run.epoch)
+        return f"{run.epoch}/{key}" if run.epoch else key
 
     def _get_session(self, session_id: str) -> JournaledSession:
         return self._sessions.setdefault(
@@ -282,15 +394,10 @@ class JournaledRuntime:
         ``idempotency_key`` is supplied it becomes the whole key
         (under the ``idem:`` namespace) so two calls with the same key
         dedupe to a single execution regardless of their positional
-        ``name``.
+        ``name``. Either way the key is scoped to the current run
+        (see the module docstring): a finished run never replays into
+        a later one.
 
-        Caveat — this is the *defined* meaning of an idempotency key
-        here: a tool whose result varies per call with identical args
-        (a clock, a counter, ``random()``, a live API read) will
-        **replay** its first recorded result within the session rather
-        than re-execute. That determinism is exactly what a durable,
-        crash-resumable runtime requires; pass no ``idempotency_key``
-        for steps that must genuinely re-run on every distinct call.
         At-least-once: a crash after ``fn`` completes but before the
         journal write re-executes ``fn`` on resume.
         """
@@ -299,7 +406,7 @@ class JournaledRuntime:
             return await fn(*args, **kwargs)
 
         scope = _scope(session_id)
-        key = _step_key(name, args, kwargs, idempotency_key)
+        key = await self._run_key(scope, _step_key(name, args, kwargs, idempotency_key))
         cached = await self._store.get_step(scope, key)
         if cached is not None:
             return cached.value
@@ -342,7 +449,7 @@ class JournaledRuntime:
             return
 
         scope = _scope(session_id)
-        key = _step_key(name, args, kwargs)
+        key = await self._run_key(scope, _step_key(name, args, kwargs))
         cached = await self._store.get_stream(scope, key)
         if cached is not None:
             for chunk in cached:

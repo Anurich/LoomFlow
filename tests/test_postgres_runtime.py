@@ -83,7 +83,7 @@ class _FakePool:
 # ---------------------------------------------------------------------------
 
 
-async def test_put_step_emits_upsert_with_pickled_value() -> None:
+async def test_put_step_emits_upsert_with_encoded_value() -> None:
     state = _FakeState()
     store = PostgresJournalStore(pool=_FakePool(state))
 
@@ -94,7 +94,7 @@ async def test_put_step_emits_upsert_with_pickled_value() -> None:
     assert "ON CONFLICT (session_id, step_name) DO UPDATE" in sql
     assert args[0] == "s1"
     assert args[1] == "step_a"
-    # Third arg is the pickled value bytes.
+    # Third arg is the encoded value bytes.
     assert isinstance(args[2], bytes | bytearray)
 
 
@@ -106,12 +106,12 @@ async def test_get_step_returns_none_for_missing_row() -> None:
     assert out is None
 
 
-async def test_get_step_unpickles_stored_value() -> None:
-    import pickle
+async def test_get_step_decodes_stored_value() -> None:
+    from loomflow.runtime import _codec
 
     state = _FakeState()
     state.next_row = {
-        "value": pickle.dumps({"answer": 42}),
+        "value": _codec.dumps({"answer": 42}),
         "created_at": 1234567.89,
     }
     store = PostgresJournalStore(pool=_FakePool(state))
@@ -121,7 +121,24 @@ async def test_get_step_unpickles_stored_value() -> None:
     assert entry.created_at == 1234567.89
 
 
-async def test_put_stream_pickles_chunk_list() -> None:
+async def test_get_step_skips_pickles_unless_opted_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pickle
+
+    from loomflow.runtime import journal
+
+    monkeypatch.setattr(journal, "_warned", set())
+    state = _FakeState()
+    state.next_row = {"value": pickle.dumps({"answer": 42}), "created_at": 1.0}
+    with pytest.warns(UserWarning, match="pickle"):
+        assert await PostgresJournalStore(pool=_FakePool(state)).get_step("s1", "a") is None
+    opted_in = PostgresJournalStore(pool=_FakePool(state), serializer="pickle")
+    entry = await opted_in.get_step("s1", "a")
+    assert entry is not None and entry.value == {"answer": 42}
+
+
+async def test_put_stream_encodes_chunk_list() -> None:
     state = _FakeState()
     store = PostgresJournalStore(pool=_FakePool(state))
     await store.put_stream("s1", "stream_a", ["a", "b", "c"])
@@ -130,11 +147,11 @@ async def test_put_stream_pickles_chunk_list() -> None:
     assert isinstance(args[2], bytes | bytearray)
 
 
-async def test_get_stream_unpickles_chunks() -> None:
-    import pickle
+async def test_get_stream_decodes_chunks() -> None:
+    from loomflow.runtime import _codec
 
     state = _FakeState()
-    state.next_row = {"chunks": pickle.dumps(["a", "b", "c"])}
+    state.next_row = {"chunks": _codec.dumps(["a", "b", "c"])}
     store = PostgresJournalStore(pool=_FakePool(state))
     chunks = await store.get_stream("s1", "stream_a")
     assert chunks == ["a", "b", "c"]

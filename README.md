@@ -821,8 +821,8 @@ construct a real-world agent it's already covered:
 
 ```python
 agent = Agent("...", model="gpt-4.1-mini")
-# Default policy: 3 attempts, 1 s → 2 s → 4 s backoff
-# (capped at 30 s, ±10% jitter), respects provider Retry-After.
+# Default policy: 3 attempts, up to 1 s → 2 s → 4 s backoff
+# (capped at 30 s, full jitter), respects provider Retry-After.
 ```
 
 The framework normalises every model SDK's exceptions into a small
