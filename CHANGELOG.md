@@ -299,6 +299,22 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
   the first root, where workdir tools open them) instead of the
   process's working directory, and refuses values it cannot decide: a
   null byte, or arguments nested deeper than it scans.
+* **Audit log.** Entries form a hash chain: each carries ``prev_hash``
+  (the previous entry's signature) inside its signed content, so
+  ``verify()`` on both backends, or ``verify_chain(entries, secret)``,
+  reports deleted, inserted and reordered entries, not only edited
+  ones. Cutting entries off the end is caught by passing a ``head``
+  you recorded earlier as ``expected_head``. Entries written before
+  this release still verify.
+* ``FileAuditLog`` takes a file lock per append and continues from the
+  file's last entry, so several processes or log objects writing one
+  file no longer repeat a ``seq``. An append after a torn last line
+  (a crash mid-write) starts a new line instead of corrupting itself.
+  ``query()`` logs the lines it skips; ``verify()`` reports them by
+  line number.
+* Payloads are stored and signed in the same JSON form, so an entry
+  with a ``datetime``, ``set`` or ``tuple`` in its payload verifies
+  after it is read back (it used to fail).
 
 ### Packaging
 

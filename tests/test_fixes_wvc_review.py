@@ -414,13 +414,13 @@ async def test_file_audit_log_init_does_not_scan_file(
     await seed.append(session_id="s", actor="a", action="x", payload={})
 
     scans: list[int] = []
-    original = FileAuditLog._scan_max_seq
+    original = FileAuditLog._recover_tail
 
-    def spy(self: FileAuditLog) -> int:
+    def spy(self: FileAuditLog, *args: Any) -> Any:
         scans.append(1)
-        return original(self)
+        return original(self, *args)
 
-    monkeypatch.setattr(FileAuditLog, "_scan_max_seq", spy)
+    monkeypatch.setattr(FileAuditLog, "_recover_tail", spy)
 
     log = FileAuditLog(path, secret="x")
     assert scans == [], "__init__ read the audit file eagerly"

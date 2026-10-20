@@ -865,6 +865,11 @@ class AuditEntry(BaseModel):
     action: str
     payload: dict[str, Any]
     signature: str
+    #: The previous entry's ``signature`` (``GENESIS_HASH`` for the
+    #: first entry), covered by this entry's own signature, so the
+    #: entries form a hash chain: deleting or reordering entries
+    #: breaks it. Empty on entries written before the chain existed.
+    prev_hash: str = ""
 
 
 class Span(BaseModel):
