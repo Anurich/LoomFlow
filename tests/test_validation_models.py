@@ -445,3 +445,39 @@ def test_free_gateway_variants_cost_nothing_without_a_warning() -> None:
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         assert estimate_cost("anthropic/claude-haiku-5.5:free", 1000, 500) == 0.0
+
+
+@pytest.mark.parametrize(
+    ("name", "canonical"),
+    [
+        ("anthropic/claude-haiku-5.5", "claude-haiku-5-5"),
+        ("~anthropic/claude-haiku-5.5", "claude-haiku-5-5"),
+        ("openai/gpt-5-mini:free", "gpt-5-mini"),
+        ("claude-haiku-5-5", "claude-haiku-5-5"),
+        ("mistralai/mistral-small", "mistralai/mistral-small"),
+    ],
+)
+def test_canonical_model_name(name: str, canonical: str) -> None:
+    from loomflow.model._names import canonical_model_name
+
+    assert canonical_model_name(name) == canonical
+
+
+def test_gateway_ids_get_the_vendor_models_capabilities() -> None:
+    """Behind OpenRouter, ``anthropic/claude-haiku-5.5`` fell back to
+    forced-tool structured output and lost effort; ``openai/gpt-5-mini``
+    was sent ``max_tokens``, the o-series reasoning cap name it rejects."""
+    from loomflow.agent.auto_compact import context_window_for
+    from loomflow.model._effort import anthropic_kwargs, openai_kwargs
+    from loomflow.model.anthropic import _supports_json_outputs
+    from loomflow.model.count_tokens import _encoding_name
+    from loomflow.model.openai import _max_tokens_param
+
+    assert _supports_json_outputs("anthropic/claude-haiku-5.5")
+    assert anthropic_kwargs("low", "anthropic/claude-haiku-5.5", strict=True) == anthropic_kwargs(
+        "low", "claude-haiku-5-5", strict=True
+    )
+    assert openai_kwargs("low", "openai/gpt-5-mini", strict=True) == {"reasoning_effort": "low"}
+    assert _max_tokens_param("openai/gpt-5-mini") == "max_completion_tokens"
+    assert _encoding_name("openai/gpt-5-mini") == "o200k_base"
+    assert context_window_for("anthropic/claude-haiku-5.5") == context_window_for("claude-haiku-5-5")

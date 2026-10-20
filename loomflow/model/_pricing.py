@@ -38,6 +38,8 @@ from __future__ import annotations
 import warnings
 from typing import TypeVar
 
+from ._names import canonical_model_name
+
 _T = TypeVar("_T")
 
 # Prices in USD per **1 million tokens**, as ``(input, output)`` or
@@ -237,23 +239,11 @@ def _cache_read_multiplier(model: str, provider: str) -> float:
     return _CACHE_READ_MULTIPLIER.get(provider, 0.5)
 
 
-# Gateway vendor prefixes (OpenRouter's ``vendor/model`` ids) whose
-# models are billed at the vendor's own prices.
-_GATEWAY_VENDORS = ("anthropic/", "openai/", "deepseek/", "google/")
-
-
 def _canonical_model(model: str) -> str:
-    """The pricing-table name for a gateway id: ``openai/gpt-5-mini``
-    → ``gpt-5-mini``, ``anthropic/claude-haiku-5.5`` →
-    ``claude-haiku-5-5`` (Claude ids use dashes in versions). Other
-    names come back unchanged."""
-    for vendor in _GATEWAY_VENDORS:
-        if model.startswith(vendor):
-            model = model[len(vendor) :]
-            if model.startswith("claude-"):
-                model = model.replace(".", "-")
-            break
-    return model
+    """The pricing-table name for a gateway id (see
+    :func:`~loomflow.model._names.canonical_model_name`); a ``:variant``
+    suffix is kept, since a variant may be priced differently."""
+    return canonical_model_name(model, strip_variant=False)
 
 
 def _provider_for(model: str) -> str:

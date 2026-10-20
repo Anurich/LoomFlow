@@ -25,6 +25,7 @@ import anyio
 
 from ..core.ids import new_id
 from ..core.types import Message, ModelChunk, Role, ToolCall, ToolDef, Usage
+from ._names import canonical_model_name
 from ._pricing import estimate_cost
 from ._timeout import deadline_from, iter_with_deadline, timeout_error
 
@@ -57,7 +58,7 @@ def _apply_chat_tool_limits(model_name: str, kwargs: dict[str, Any]) -> None:
     Chat Completions endpoint restricts tool calling."""
     if "tools" not in kwargs:
         return
-    name = model_name.lower()
+    name = canonical_model_name(model_name).lower()
     if name.startswith(_NO_CHAT_COMPLETIONS_TOOLS):
         from ..core.errors import PermanentModelError
 
@@ -84,7 +85,7 @@ def _apply_chat_tool_limits(model_name: str, kwargs: dict[str, Any]) -> None:
 
 def _max_tokens_param(model_name: str) -> str:
     """Pick the output-cap parameter name for a model."""
-    name = model_name.lower()
+    name = canonical_model_name(model_name).lower()
     if any(name.startswith(p) for p in _MAX_COMPLETION_TOKENS_PREFIXES):
         return "max_completion_tokens"
     return "max_tokens"

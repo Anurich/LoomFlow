@@ -34,21 +34,38 @@ from loomflow import Agent, get_run_context, tool
 from loomflow.governance import RetryPolicy
 from loomflow.memory.inmemory import InMemoryMemory
 
+
 # Try .env (developer ergonomics). CI sets OPENAI_API_KEY directly.
-try:
-    from dotenv import load_dotenv
-    load_dotenv(Path(__file__).resolve().parent.parent / ".env")
-except ImportError:
-    pass
+# Read it without touching ``os.environ``: this module is imported at
+# collection even when the live tests are deselected, and putting a
+# real key in the environment would send every other test that checks
+# for one to the network.
+def _api_key() -> str | None:
+    key = os.environ.get("OPENAI_API_KEY")
+    if key:
+        return key
+    try:
+        from dotenv import dotenv_values
+    except ImportError:
+        return None
+    value = dotenv_values(Path(__file__).resolve().parent.parent / ".env").get("OPENAI_API_KEY")
+    return value or None
+
+
+_KEY = _api_key()
 
 pytestmark = [
     pytest.mark.live,
     pytest.mark.anyio,
-    pytest.mark.skipif(
-        not os.environ.get("OPENAI_API_KEY"),
-        reason="OPENAI_API_KEY not set",
-    ),
+    pytest.mark.skipif(not _KEY, reason="OPENAI_API_KEY not set"),
 ]
+
+
+@pytest.fixture(autouse=True)
+def _openai_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Expose the key to the SDK for these tests only."""
+    if _KEY:
+        monkeypatch.setenv("OPENAI_API_KEY", _KEY)
 
 MODEL = "gpt-4.1-mini"
 
@@ -316,8 +333,10 @@ async def test_auto_extract_populates_facts_after_one_run() -> None:
         user_id="alice",
     )
 
-    # The Consolidator should have run and persisted at least one
+    # Extraction runs in the background after ``run()`` returns; wait
+    # for it, then the Consolidator should have persisted at least one
     # fact to alice's partition.
+    assert await agent.aclose(timeout=60) == 0
     facts = await memory.facts.query(user_id="alice", limit=10)
     assert facts, "expected auto-extracted facts after one run"
     blob = " ".join(f"{f.subject} {f.predicate} {f.object}" for f in facts)

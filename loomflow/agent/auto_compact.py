@@ -147,7 +147,9 @@ def context_window_for(model_name: str) -> int:
     like ``-20250115`` or ``-preview``) and we want the lookup to
     survive that drift.
     """
-    lowered = model_name.lower()
+    from ..model._names import canonical_model_name
+
+    lowered = canonical_model_name(model_name).lower()
     for hint, window in _KNOWN_CONTEXT_WINDOWS.items():
         if hint in lowered:
             return window

@@ -31,6 +31,8 @@ from __future__ import annotations
 import warnings
 from typing import Any
 
+from ._names import canonical_model_name
+
 # ---------------------------------------------------------------------------
 # Shared warning + raise helper
 # ---------------------------------------------------------------------------
@@ -61,6 +63,10 @@ def _clamp(effort: str, allowed: tuple[str, ...]) -> str:
 
 
 def _prefix_lookup(table: dict[str, Any], name: str) -> Any:
+    """The entry of the longest key ``name`` starts with (gateway ids
+    such as ``anthropic/claude-haiku-5.5`` are looked up as the
+    vendor's model)."""
+    name = canonical_model_name(name).lower()
     best = None
     for key in table:
         if name.startswith(key) and (best is None or len(key) > len(best)):
