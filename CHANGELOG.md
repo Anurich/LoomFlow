@@ -286,6 +286,20 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 * Token estimates (when a model has no native counter) use ``o200k``
   for current OpenAI models and count tool-call arguments and images.
 
+### Fixed — runtime and security
+
+* Tools built from objects with an ``async def __call__`` (and
+  ``functools.partial`` of an async function) are awaited instead of
+  returning a coroutine. A timeout on a blocking sync tool now returns
+  on time instead of waiting for the thread.
+* ``grep`` no longer follows a symlink in the workdir to a file
+  outside it (``read`` already refused those).
+* ``FilesystemSandbox`` checks ``file://`` URLs and ``~`` paths as the
+  paths they name, resolves relative paths against ``base=`` (default:
+  the first root, where workdir tools open them) instead of the
+  process's working directory, and refuses values it cannot decide: a
+  null byte, or arguments nested deeper than it scans.
+
 ### Packaging
 
 * Removed the ``dbos`` and ``temporal`` extras: nothing in loomflow
@@ -293,12 +307,6 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 * The test suite passes on a bare ``pip install loomflow`` (tests that
   need an optional SDK, tiktoken or OpenTelemetry skip without it).
 
-### Fixed — tool dispatch
-
-* **Tool dispatch.** Objects with an ``async def __call__`` (and
-  ``functools.partial`` of an async function) are awaited instead of
-  returning a coroutine. A timeout on a blocking sync tool now returns
-  on time instead of waiting for the thread.
 
 ## [0.16.0] — 2026-10-20
 

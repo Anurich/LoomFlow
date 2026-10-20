@@ -21,7 +21,12 @@ validated regardless of separator presence.
 
 Symlinks are resolved before the containment check so an attacker
 can't bypass the sandbox by symlinking ``/etc/passwd`` into the
-allowed root.
+allowed root. ``file://`` URLs and ``~`` paths are checked as the
+paths they name, relative paths resolve against ``base`` (default:
+the first root, which is how workdir-based tools resolve them, not
+the process's working directory), and anything the check can't
+decide — a null byte, arguments nested deeper than it scans —
+is refused.
 """
 
 from __future__ import annotations
@@ -92,6 +97,7 @@ class FilesystemSandbox:
         roots: Iterable[str | Path],
         path_args: Iterable[str] | None = None,
         auto_detect: bool = True,
+        base: str | Path | None = None,
     ) -> None:
         roots_list = [Path(r).resolve() for r in roots]
         if not roots_list:
@@ -100,6 +106,7 @@ class FilesystemSandbox:
             )
         self._inner = inner
         self._roots: tuple[Path, ...] = tuple(roots_list)
+        self._base = Path(base).resolve() if base is not None else roots_list[0]
         self._explicit_path_args: frozenset[str] | None = (
             frozenset(path_args) if path_args is not None else None
         )
@@ -164,7 +171,8 @@ class FilesystemSandbox:
         checked with the pathiness of ``paths``. Returns the
         offending leaf value, or ``None``."""
         if depth > _MAX_ARG_DEPTH:
-            return None
+            # Deeper than we scan: refuse rather than let it through.
+            return f"<arguments nested deeper than {_MAX_ARG_DEPTH} levels>"
         if isinstance(value, str):
             if self._looks_like_path(name, value) and not (
                 self._is_inside_any_root(value)
@@ -214,14 +222,23 @@ class FilesystemSandbox:
             return True
         if self._explicit_path_args is not None or not self._auto_detect:
             return False
-        if isinstance(value, str) and ("/" in value or "\\" in value):
+        if isinstance(value, str) and (
+            "/" in value or "\\" in value or value.startswith(("~", "file:"))
+        ):
             return True
         return False
 
     def _is_inside_any_root(self, raw_path: str) -> bool:
+        if raw_path.startswith("file:"):
+            from urllib.parse import unquote, urlparse
+
+            raw_path = unquote(urlparse(raw_path).path)
         try:
-            resolved = Path(raw_path).expanduser().resolve()
-        except (OSError, RuntimeError):
+            path = Path(raw_path).expanduser()
+            if not path.is_absolute():
+                path = self._base / path
+            resolved = path.resolve()
+        except (OSError, RuntimeError, ValueError):  # ValueError: a null byte
             return False
         for root in self._roots:
             try:

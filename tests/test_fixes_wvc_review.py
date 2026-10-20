@@ -329,10 +329,10 @@ async def test_filesystem_sandbox_rejects_separatorless_list_leaf(
 ) -> None:
     """``paths`` is a path-like name — its leaves are validated even
     without a separator in the value."""
+    # Relative names resolve against ``base``; put it outside the root.
     sandbox = FilesystemSandbox(
-        InProcessToolHost([batch_read]), roots=[tmp_path]
+        InProcessToolHost([batch_read]), roots=[tmp_path], base=tmp_path.parent
     )
-    # Relative name resolves against cwd, which isn't under tmp_path.
     result = await sandbox.call(
         "batch_read", {"paths": ["passwd"]}, call_id="c2"
     )

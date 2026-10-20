@@ -820,8 +820,16 @@ def grep_tool(
         except re.error as exc:
             return f"ERROR: invalid regex {pattern!r}: {exc}"
 
+        workdir_real = workdir_path.resolve()
+
         def _grep_file(fp: Path, hits: list[str]) -> bool:
             """Append matches from one file; True when capped."""
+            # A symlink in the tree can point outside the workdir:
+            # ``read`` refuses those, so grep must not read them either.
+            try:
+                fp.resolve().relative_to(workdir_real)
+            except (ValueError, OSError):
+                return False
             try:
                 text = fp.read_text(encoding="utf-8")
             except (UnicodeDecodeError, OSError):
