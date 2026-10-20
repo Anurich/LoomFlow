@@ -303,7 +303,7 @@ async def test_agent_run_auto_extracts_facts_into_memory() -> None:
     # consolidator's LLM call completes. Drain the pending tasks
     # so this test can deterministically assert the resulting
     # fact made it into the store.
-    await agent._wrapped_memory.aclose(timeout=5.0)
+    assert await agent.aclose(timeout=5.0) == 0
 
     # The fact extracted from the run is in the inner store under
     # alice's partition.

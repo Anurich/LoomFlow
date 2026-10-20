@@ -34,6 +34,7 @@ from typing import Any
 import anyio
 
 from ..core.types import Message, ModelChunk, Role, ToolCall, ToolDef, Usage
+from ._names import canonical_model_name
 from ._pricing import estimate_cost
 from ._timeout import deadline_from, iter_with_deadline, timeout_error
 
@@ -1112,7 +1113,7 @@ _UNSUPPORTED_REGEX = re.compile(r"\(\?[=!<]|\\[bB1-9]")
 
 
 def _supports_json_outputs(model_name: str) -> bool:
-    return model_name.lower().startswith(_JSON_OUTPUT_MODELS)
+    return canonical_model_name(model_name).lower().startswith(_JSON_OUTPUT_MODELS)
 
 
 def _json_output_schema(output_schema: Any) -> dict[str, Any] | None:

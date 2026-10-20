@@ -48,11 +48,14 @@ def test_resolver_sqlite_bare_returns_ephemeral() -> None:
     assert str(m.path) == ":memory:"
 
 
-async def test_bare_sqlite_memory_is_usable() -> None:
+async def test_bare_sqlite_memory_is_usable(monkeypatch: pytest.MonkeyPatch) -> None:
     # Each operation opens its own connection; with a plain ":memory:"
     # every connection was a fresh empty database, so the first run
     # failed with "no such table". Episodes and facts must share one
     # in-memory database for the store's lifetime.
+    # With an OpenAI key in the environment the store embeds through
+    # the API; keep this test offline.
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     agent = Agent("hi", model="echo", memory="sqlite")
     result = await agent.run("hello", user_id="alice")
     assert result.output

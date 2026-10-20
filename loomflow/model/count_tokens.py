@@ -75,7 +75,9 @@ _O200K_PREFIXES = ("gpt-4o", "gpt-4.1", "gpt-4.5", "gpt-5", "gpt-6", "o1", "o3",
 
 
 def _encoding_name(model_name: str) -> str:
-    name = model_name.lower().rsplit("/", 1)[-1]
+    from ._names import canonical_model_name
+
+    name = canonical_model_name(model_name).lower().rsplit("/", 1)[-1]
     return "o200k_base" if name.startswith(_O200K_PREFIXES) else "cl100k_base"
 
 

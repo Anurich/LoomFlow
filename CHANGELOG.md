@@ -7,6 +7,34 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 For development-history detail (per-slice notes, file maps, gate
 counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 
+## [Unreleased]
+
+### Added
+
+* ``Agent.aclose(timeout=30)`` waits for the agent's background work —
+  ``auto_extract`` fact extraction, which runs after ``run()`` returns
+  — and returns how many tasks were still running. Call it before
+  reading the facts a run just produced, or at shutdown. (The only way
+  to wait was a private attribute.)
+
+### Fixed
+
+* **Gateway model ids get the vendor model's capabilities.** Behind
+  OpenRouter (or another gateway naming models ``vendor/model``),
+  ``anthropic/claude-haiku-5.5`` fell back to forced-tool structured
+  output and dropped ``effort``, and ``openai/gpt-5-mini`` was sent
+  ``max_tokens`` and counted with the wrong tokenizer and a default
+  context window. Every lookup — native JSON outputs, effort and
+  thinking, ``max_completion_tokens``, tool-call limits, tokenizer,
+  context window, price — now goes through ``canonical_model_name``
+  (``anthropic/claude-haiku-5.5`` → ``claude-haiku-5-5``); the name sent
+  to the gateway is unchanged. Found in a live run of the native
+  ``AnthropicModel`` through OpenRouter's Anthropic-compatible API.
+* The test suite no longer reads the developer's ``.env`` into the
+  process environment (the live OpenAI tests now read their key
+  without exporting it), so a real key in ``.env`` can't send offline
+  tests to the network.
+
 ## [0.17.1] — 2026-10-20
 
 ### Fixed

@@ -1905,6 +1905,23 @@ class Agent:
             **kwargs,
         )
 
+    async def aclose(self, *, timeout: float = 30.0) -> int:  # noqa: ASYNC109
+        """Wait for background work the agent started to finish: fact
+        extraction from earlier runs (``auto_extract``), which runs
+        after ``run()`` returns. ``timeout`` is how long to wait, in
+        seconds. Returns how many tasks were still running then
+        (``0`` = all done).
+
+        Call it before reading facts a run just produced, and at
+        shutdown so pending extractions aren't lost. It doesn't close
+        the memory backend you passed in, and the agent stays usable.
+        """
+        from ..memory.auto_extract import AutoExtractMemory
+
+        if isinstance(self._wrapped_memory, AutoExtractMemory):
+            return await self._wrapped_memory.aclose(timeout=timeout)
+        return 0
+
     async def list_checkpoints(
         self, session_id: str, limit: int = 50, *, user_id: str | None = None
     ) -> list[CheckpointMeta]:
