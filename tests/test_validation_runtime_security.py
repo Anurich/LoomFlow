@@ -617,7 +617,7 @@ async def test_signals_to_sessions_that_never_run_are_bounded(runtime_cls: str) 
     assert len(rt._sessions) == 100
     # Early signals still reach a session that opens later.
     async with rt.session("s999"):
-        assert await rt.wait_for_signal("s999", "approval", timeout=1) == 999
+        assert await rt.wait_for_signal("s999", "approval", timeout_s=1) == 999
 
 
 @pytest.mark.parametrize("runtime_cls", ["journaled", "inproc"])
@@ -627,7 +627,7 @@ async def test_wait_for_signal_times_out(runtime_cls: str) -> None:
 
     rt: Any = JournaledRuntime() if runtime_cls == "journaled" else InProcRuntime()
     with pytest.raises(TimeoutError):
-        await rt.wait_for_signal("never", "approval", timeout=0.05)
+        await rt.wait_for_signal("never", "approval", timeout_s=0.05)
     assert "never" not in rt._sessions
 
 

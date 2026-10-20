@@ -356,6 +356,13 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
   re-execute) unless you pass ``serializer="pickle"``, which also lets
   steps return arbitrary objects; only use it for a store no untrusted
   party can write.
+* **Signals.** Undelivered signals for sessions that aren't open (sent
+  before a run, or after it ended) are kept for at most
+  ``max_pending_signal_sessions`` sessions (default 10,000) and
+  ``pending_signal_ttl_s`` (default an hour) on ``InProcRuntime`` and
+  ``JournaledRuntime``; they used to accumulate forever, one entry
+  per session ever signalled. ``wait_for_signal(..., timeout_s=)``
+  raises ``TimeoutError`` instead of waiting forever.
 * **Budget wall clock.** ``max_wall_clock`` and
   ``per_user_max_wall_clock`` count time spent running (the agent
   wraps each run in ``StandardBudget.running()``), not time since the

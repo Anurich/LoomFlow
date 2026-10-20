@@ -189,12 +189,12 @@ class SessionTable(Generic[_S]):
     def __len__(self) -> int:
         return len(self._open) + len(self._pending)
 
-    async def wait(self, session_id: str, name: str, timeout: float | None) -> Any:
+    async def wait(self, session_id: str, name: str, timeout_s: float | None) -> Any:
         """Wait for a signal on ``session_id`` (pinned meanwhile);
-        ``TimeoutError`` after ``timeout`` seconds."""
+        ``TimeoutError`` after ``timeout_s`` seconds."""
         sess = self.acquire(session_id)
         try:
-            with anyio.fail_after(timeout):
+            with anyio.fail_after(timeout_s):
                 return await sess._mailbox.wait(name)
         finally:
             self.release(session_id, keep_signals=True)

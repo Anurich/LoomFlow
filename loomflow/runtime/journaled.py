@@ -387,11 +387,11 @@ class JournaledRuntime:
         await self._sessions.for_signal(session_id).deliver(name, payload)
 
     async def wait_for_signal(
-        self, session_id: str, name: str, *, timeout: float | None = None
+        self, session_id: str, name: str, *, timeout_s: float | None = None
     ) -> Any:
         """Park until a matching signal arrives; return its payload.
-        ``TimeoutError`` after ``timeout`` seconds (default: wait)."""
-        return await self._sessions.wait(session_id, name, timeout)
+        ``TimeoutError`` after ``timeout_s`` seconds (default: wait)."""
+        return await self._sessions.wait(session_id, name, timeout_s)
 
     def poll_signal(self, session_id: str, name: str) -> Any | None:
         """Pop a queued signal if present; never blocks."""
