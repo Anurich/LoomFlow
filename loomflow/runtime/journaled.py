@@ -80,7 +80,7 @@ import anyio
 from pydantic import BaseModel
 
 from ..core.context import get_run_context
-from ._signals import SignalMailbox
+from ._signals import DEFAULT_MAX_PENDING, DEFAULT_PENDING_TTL_S, SessionTable, SignalMailbox
 from .journal import (
     Checkpoint,
     CheckpointMeta,
@@ -254,6 +254,8 @@ class JournaledRuntime:
         store: JournalStore | None = None,
         *,
         max_checkpoints_per_session: int = 20,
+        max_pending_signal_sessions: int | None = DEFAULT_MAX_PENDING,
+        pending_signal_ttl_s: float | None = DEFAULT_PENDING_TTL_S,
     ) -> None:
         self._store: JournalStore = (
             store
@@ -262,8 +264,11 @@ class JournaledRuntime:
                 max_checkpoints_per_session=max_checkpoints_per_session
             )
         )
-        self._sessions: dict[str, JournaledSession] = {}
-        self._session_refs: dict[str, int] = {}
+        self._sessions: SessionTable[JournaledSession] = SessionTable(
+            JournaledSession,
+            max_pending=max_pending_signal_sessions,
+            pending_ttl_s=pending_signal_ttl_s,
+        )
         self._scope_locks: dict[str, _ScopeLock] = {}
 
     @property
@@ -349,20 +354,12 @@ class JournaledRuntime:
     @asynccontextmanager
     async def _enter(self, session_id: str) -> AsyncIterator[JournaledSession]:
         token = _current_session_var.set(session_id)
-        sess = self._get_session(session_id)
-        self._session_refs[session_id] = (
-            self._session_refs.get(session_id, 0) + 1
-        )
+        sess = self._sessions.acquire(session_id)
         try:
             yield sess
         finally:
             _current_session_var.reset(token)
-            remaining = self._session_refs.get(session_id, 1) - 1
-            if remaining <= 0:
-                self._session_refs.pop(session_id, None)
-                self._sessions.pop(session_id, None)
-            else:
-                self._session_refs[session_id] = remaining
+            self._sessions.release(session_id, keep_signals=False)
 
     async def _run_key(self, scope: str, key: str) -> str:
         """``key`` within the open run's namespace (an outermost run's
@@ -377,24 +374,24 @@ class JournaledRuntime:
                 await self._store.put_step(scope, LAST_RUN_KEY, run.epoch)
         return f"{run.ns}/{key}" if run.ns else key
 
-    def _get_session(self, session_id: str) -> JournaledSession:
-        return self._sessions.setdefault(
-            session_id, JournaledSession(session_id)
-        )
-
     # ---- signals ----------------------------------------------------------
 
     async def signal(self, session_id: str, name: str, payload: Any) -> None:
         """Deliver a named signal to a session's FIFO mailbox.
 
-        Signals sent before the session is opened are queued and
-        survive until the session's last open context exits.
+        Signals sent while the session isn't open are queued for it —
+        up to ``max_pending_signal_sessions`` sessions, for
+        ``pending_signal_ttl_s`` — and dropped when its last open
+        context exits.
         """
-        await self._get_session(session_id).deliver(name, payload)
+        await self._sessions.for_signal(session_id).deliver(name, payload)
 
-    async def wait_for_signal(self, session_id: str, name: str) -> Any:
-        """Park until a matching signal arrives; return its payload."""
-        return await self._get_session(session_id).wait_signal(name)
+    async def wait_for_signal(
+        self, session_id: str, name: str, *, timeout: float | None = None
+    ) -> Any:
+        """Park until a matching signal arrives; return its payload.
+        ``TimeoutError`` after ``timeout`` seconds (default: wait)."""
+        return await self._sessions.wait(session_id, name, timeout)
 
     def poll_signal(self, session_id: str, name: str) -> Any | None:
         """Pop a queued signal if present; never blocks."""

@@ -595,3 +595,46 @@ async def test_concurrent_runs_count_wall_clock_once() -> None:
             tg.start_soon(run)
     assert budget._elapsed() < timedelta(seconds=0.2)
     assert budget._user_elapsed("u") is not None
+
+
+# ---------------------------------------------------------------------------
+# Signals: bounded mailboxes, timeouts
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("runtime_cls", ["journaled", "inproc"])
+async def test_signals_to_sessions_that_never_run_are_bounded(runtime_cls: str) -> None:
+    from loomflow.runtime.inproc import InProcRuntime
+    from loomflow.runtime.journaled import JournaledRuntime
+
+    rt: Any = (
+        JournaledRuntime(max_pending_signal_sessions=100)
+        if runtime_cls == "journaled"
+        else InProcRuntime(max_pending_signal_sessions=100)
+    )
+    for i in range(1000):
+        await rt.signal(f"s{i}", "approval", i)
+    assert len(rt._sessions) == 100
+    # Early signals still reach a session that opens later.
+    async with rt.session("s999"):
+        assert await rt.wait_for_signal("s999", "approval", timeout=1) == 999
+
+
+@pytest.mark.parametrize("runtime_cls", ["journaled", "inproc"])
+async def test_wait_for_signal_times_out(runtime_cls: str) -> None:
+    from loomflow.runtime.inproc import InProcRuntime
+    from loomflow.runtime.journaled import JournaledRuntime
+
+    rt: Any = JournaledRuntime() if runtime_cls == "journaled" else InProcRuntime()
+    with pytest.raises(TimeoutError):
+        await rt.wait_for_signal("never", "approval", timeout=0.05)
+    assert "never" not in rt._sessions
+
+
+async def test_signals_expire() -> None:
+    from loomflow.runtime.journaled import JournaledRuntime
+
+    rt = JournaledRuntime(pending_signal_ttl_s=0.05)
+    await rt.signal("s", "approval", "late")
+    await anyio.sleep(0.1)
+    assert rt.poll_signal("s", "approval") is None
