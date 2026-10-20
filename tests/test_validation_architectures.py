@@ -582,3 +582,171 @@ async def test_reflexion_lesson_block_is_bounded() -> None:
     blocks = await agent.memory.working()
     lessons = next(b.content for b in blocks if b.name == "reflexion_lessons")
     assert lessons.splitlines() == ["- lesson 2", "- lesson 3"]
+
+
+# ---------------------------------------------------------------------------
+# Persistent workers survive a restart
+# ---------------------------------------------------------------------------
+
+
+async def test_router_with_persistent_workers_resumes_after_a_restart(tmp_path: Path) -> None:
+    from loomflow.architecture import RouterRoute
+    from loomflow.core.types import Event
+    from loomflow.team import Team
+
+    charges: list[int] = []
+
+    @tool
+    async def charge_card(amount: int) -> str:
+        """Charge a card."""
+        charges.append(amount)
+        return "charged"
+
+    def team(runtime: SqliteRuntime) -> Agent:
+        specialist = Agent(
+            "billing",
+            model=ScriptedModel(
+                [
+                    ScriptedTurn(tool_calls=[ToolCall(tool="charge_card", args={"amount": 5})]),
+                    ScriptedTurn(text="refunded"),
+                ]
+            ),
+            tools=[charge_card],
+            runtime=runtime,
+        )
+        return Team.router(
+            [RouterRoute("billing", specialist, "money")],
+            model=ScriptedModel([ScriptedTurn(text="route: billing\nconfidence: 0.9")]),
+            runtime=runtime,
+            persistent_subagents=True,
+        )
+
+    async def crash_when_routed(event: Event) -> None:
+        if event.payload.get("name") == "router.completed":
+            raise RuntimeError("process died")
+
+    db = tmp_path / "j.db"
+    with pytest.raises(RuntimeError, match="process died"):
+        await team(SqliteRuntime(db)).run("refund me", session_id="p1", emit=crash_when_routed)
+    assert charges == [5]
+    result = await team(SqliteRuntime(db)).run("refund me", session_id="p1")
+    assert result.output == "refunded"
+    assert charges == [5]
+
+
+# ---------------------------------------------------------------------------
+# Router, Supervisor, Blackboard
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("**route:** billing\n**confidence:** 0.9", ("billing", 0.9)),
+        ("route: `billing`\nconfidence: 0.9", ("billing", 0.9)),
+        ("route: tech support\nconfidence: 0.9", ("tech support", 0.9)),
+        ("route: billing\nconfidence: 85%", ("billing", 0.85)),
+    ],
+)
+def test_router_reads_formatted_classifications(text: str, expected: tuple[str, float]) -> None:
+    from loomflow.architecture.router import _parse_classification
+
+    assert _parse_classification(text) == pytest.approx(expected)
+
+
+async def test_router_matches_route_names_loosely() -> None:
+    from loomflow.architecture import Router, RouterRoute
+
+    specialist = Agent("s", model=ScriptedModel([ScriptedTurn(text="TECH ANSWER")]))
+    host = Agent(
+        "h",
+        model=ScriptedModel([ScriptedTurn(text="**Route:** Tech Support\nConfidence: 0.9")]),
+        architecture=Router(routes=[RouterRoute("tech_support", specialist, "tech")]),
+    )
+    assert (await host.run("my wifi")).output == "TECH ANSWER"
+
+
+def _call(tool_name: str, **args: Any) -> ScriptedTurn:
+    return ScriptedTurn(tool_calls=[ToolCall(tool=tool_name, args=args)])
+
+
+async def test_supervisor_forward_ends_the_turn() -> None:
+    from loomflow.team import Team
+
+    worker = Agent("w", model=ScriptedModel([ScriptedTurn(text="WORKER RAW")]))
+    sup = ScriptedModel(
+        [
+            _call("delegate", worker="w", instructions="do X"),
+            _call("forward_message", worker="w"),
+            ScriptedTurn(text="my own synthesis"),
+        ]
+    )
+    result = await Team.supervisor({"w": worker}, model=sup, persistent_subagents=False).run("task")
+    assert result.output == "WORKER RAW"
+    assert sup.remaining == 1  # no model call after the forward
+
+
+async def test_supervisor_forward_before_delegate_lets_the_model_retry() -> None:
+    from loomflow.team import Team
+
+    worker = Agent("w", model=ScriptedModel([ScriptedTurn(text="WORKER RAW")]))
+    sup = ScriptedModel(
+        [
+            _call("forward_message", worker="w"),
+            _call("delegate", worker="w", instructions="do X"),
+            ScriptedTurn(text="final"),
+        ]
+    )
+    result = await Team.supervisor({"w": worker}, model=sup, persistent_subagents=False).run("task")
+    assert result.output == "final"
+
+
+async def test_supervisor_prompt_names_the_configured_tools() -> None:
+    from loomflow.team import Team
+
+    seen: list[str] = []
+
+    class Capture(ScriptedModel):
+        async def complete(self, messages: Any, **kwargs: Any) -> Any:
+            seen.append(str(messages[0].content))
+            return await super().complete(messages, **kwargs)
+
+    worker = Agent("w", model=ScriptedModel([ScriptedTurn(text="x")]))
+    team = Team.supervisor(
+        {"w": worker},
+        model=Capture([ScriptedTurn(text="ok")]),
+        delegate_tool_name="ask_worker",
+        forward_tool_name="passthrough",
+        persistent_subagents=False,
+    )
+    await team.run("task")
+    assert "`ask_worker(" in seen[0] and "`passthrough(" in seen[0]
+    assert "`delegate(" not in seen[0] and "forward_message(" not in seen[0]
+
+
+@pytest.mark.parametrize(("value", "expected"), [("false", False), ("no", False), ("true", True), (False, False)])
+def test_blackboard_reads_terminate_strings(value: Any, expected: bool) -> None:
+    import json
+
+    from loomflow.architecture.blackboard import _parse_coordinator_decision
+
+    decision = _parse_coordinator_decision(json.dumps({"terminate": value, "next_agent": "null"}))
+    assert decision.terminate is expected
+    assert decision.next_agent is None
+
+
+async def test_blackboard_keeps_the_board_when_the_budget_runs_out() -> None:
+    from loomflow.architecture import BlackboardArchitecture
+
+    big = Usage(input_tokens=600, output_tokens=600)
+    contributor = Agent(
+        "a", model=ScriptedModel([ScriptedTurn(text=t, usage=big) for t in ("first", "second", "third")])
+    )
+    host = Agent(
+        "h",
+        model="echo",
+        budget=StandardBudget(BudgetConfig(max_tokens=1000)),
+        architecture=BlackboardArchitecture(agents={"a": contributor}, max_rounds=3),
+    )
+    result = await host.run("p")
+    assert result.interrupted and result.output == "first"

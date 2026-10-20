@@ -19,10 +19,16 @@ This module provides the concrete primitives:
   are instead owned by the spawning run's user and refuse everyone
   else.
 
-* :func:`new_worker_id` — produces ``worker_<role>_<ULID>`` IDs.
-  Universal ``worker_`` prefix makes audit/observability grep
-  predictable; the role suffix gives humans something readable;
-  the ULID disambiguates two instances of the same role.
+* :func:`new_worker_id` — produces ``worker_<role>_<ULID>`` IDs for
+  workers spawned mid-run. Universal ``worker_`` prefix makes
+  audit/observability grep predictable; the role suffix gives humans
+  something readable; the ULID disambiguates two instances of the
+  same role. Workers registered when a team is built get
+  :func:`stable_worker_id` instead: ``worker_<role>_<hash>`` of the
+  role and the worker's instructions, the same in every process, so
+  a team rebuilt after a restart finds its workers' sessions — their
+  memory and their journal (a crashed coordinator resumes without
+  repeating a worker's side effects).
 
 The registry itself is a plain ``dict[str, _WorkerHandle]`` stored
 on the coordinator :class:`Agent` instance. Concrete-first per
@@ -102,6 +108,21 @@ def new_worker_id(role: str) -> str:
             f"worker role must be a Python identifier, got {role!r}"
         )
     return new_id(f"worker_{role}")
+
+
+def stable_worker_id(role: str, agent: Agent | None = None, *, index: int = 0) -> str:
+    """A registered worker's ID, identical across processes:
+    ``worker_<role>_<16 hex>`` hashed from the role, the worker's
+    instructions and (for repeated roles) its position."""
+    if not _VALID_ROLE.match(role):
+        raise ValueError(
+            f"worker role must be a Python identifier, got {role!r}"
+        )
+    instructions = str(getattr(agent, "_instructions", "") or "")
+    digest = hashlib.sha256(
+        f"{role}\x00{instructions}\x00{index}".encode()
+    ).hexdigest()
+    return f"worker_{role}_{digest[:16]}"
 
 
 @dataclass(slots=True)
@@ -249,9 +270,9 @@ def build_worker_registry(
 
     The returned tuple:
 
-    * ``registry`` keys are worker IDs (``worker_<role>_<ULID>``);
-      values are :class:`_WorkerHandle` instances ready to be
-      handed to a tool or architecture.
+    * ``registry`` keys are worker IDs (:func:`stable_worker_id`,
+      the same in every process); values are :class:`_WorkerHandle`
+      instances ready to be handed to a tool or architecture.
     * ``role_to_worker_id`` maps the original role key (the dict
       key in ``workers``) to the generated worker ID — lets
       architectures translate model-emitted role names (e.g.
@@ -261,7 +282,7 @@ def build_worker_registry(
     role_to_worker_id: dict[str, str] = {}
     now = datetime.now(UTC)
     for role, worker_agent in workers.items():
-        worker_id = new_worker_id(role)
+        worker_id = stable_worker_id(role, worker_agent)
         handle = _WorkerHandle(
             worker_id=worker_id,
             role=role,

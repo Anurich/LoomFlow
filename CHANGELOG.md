@@ -413,6 +413,25 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
   lesson block keeps the last ``max_lessons`` (default 10).
 * Role models given as strings (``evaluator_model="..."``) use the
   Agent's ``secrets=`` backend, like the main model.
+* **Persistent workers** registered by ``Team.*`` builders get ids
+  derived from their role and instructions (the same in every
+  process) instead of a fresh ULID, so a team rebuilt after a restart
+  finds its workers' memory and journal: a crashed Router / Debate /
+  ActorCritic / Blackboard coordinator resumes without repeating a
+  worker's side effects. Workers spawned mid-run keep random ids.
+* **Router** reads classifications written with markdown, backticks
+  or quotes, multi-word route names and percentage confidences, and
+  matches route names ignoring case and spaces/hyphens/underscores
+  ("Tech Support" → ``tech_support``); "**route:** billing" used to
+  fail to route.
+* **Supervisor.** ``forward_message`` ends the turn — the model is not
+  called again — and fails (so the model can delegate first) when
+  the worker has no output yet. The default prompt names the
+  configured tools (``delegate_tool_name`` / ``forward_tool_name``)
+  instead of hard-coding ``delegate(`` and ``forward_message(``.
+* **Blackboard** reads ``"terminate": "false"`` as false (it ended the
+  run) and ``"next_agent": "null"`` as none, and a run stopped by the
+  budget keeps the board's latest contribution as its output.
 
 ### Packaging
 

@@ -62,6 +62,7 @@ from .helpers import (
     SubagentInvocation,
     add_usage,
     consume_worker_usage,
+    fill_template,
     usage_from_result_dict,
 )
 from .react import ReAct
@@ -76,14 +77,13 @@ You are a supervisor coordinating specialist worker agents.
 
 For each task you receive:
 1. Decide which workers are needed.
-2. Call `delegate(worker, instructions)` to invoke a specialist.
+2. Call `{delegate_tool}(worker, instructions)` to invoke a specialist.
 3. Each worker runs independently and returns its final answer.
 4. Either synthesize worker outputs into a unified response, OR
-   call `forward_message(worker)` if a single worker's output IS
+   call `{forward_tool}(worker)` if a single worker's output IS
    already the final answer the user wants. Forwarding skips a
    paraphrase round-trip: the worker's output is returned verbatim
-   as YOUR final response. End your turn immediately after a
-   forward_message call.
+   as YOUR final response, and your turn ends there.
 
 You can delegate multiple workers in a single turn — they will run
 in parallel. Be specific in the ``instructions`` you pass; workers
@@ -92,10 +92,10 @@ do NOT see the user's original message, only what you write.
 5. To CONTINUE a conversation with a worker (build on its earlier
    work rather than starting fresh), call
    ``send_message(to=<worker_id>, content=...)``. The ``worker_id``
-   is printed at the top of every ``delegate`` response in square
-   brackets like ``[worker_id: worker_coder_01J...]``. The worker
+   is printed at the top of every ``{delegate_tool}`` response in square
+   brackets like ``[worker_id: worker_coder_...]``. The worker
    remembers its full prior context — use ``send_message`` for
-   iterations / follow-ups and ``delegate`` to start a fresh
+   iterations / follow-ups and ``{delegate_tool}`` to start a fresh
    conversation on a different topic.
 
 Available workers:
@@ -110,7 +110,7 @@ You may also CREATE new specialist workers mid-run with
 - ``role`` must be a valid Python identifier not already in the
   roster; ``instructions`` become the new worker's system prompt.
 - At most {max_spawned} workers can be spawned per run.
-- A spawned worker is immediately delegable via `delegate(role, ...)`
+- A spawned worker is immediately delegable via `{delegate_tool}(role, ...)`
   and exists only for the rest of THIS run.
 Prefer the existing roster; spawn only when no current worker fits.
 """
@@ -361,12 +361,17 @@ class Supervisor:
             )
         worker_descriptions = "\n".join(worker_lines)
 
-        supervisor_section = self._template.format(
-            worker_descriptions=worker_descriptions
+        supervisor_section = fill_template(
+            self._template,
+            worker_descriptions=worker_descriptions,
+            delegate_tool=self._delegate_name,
+            forward_tool=self._forward_name,
         )
         if self._allow_spawn:
-            supervisor_section += SPAWN_SECTION_TEMPLATE.format(
-                max_spawned=self._max_spawned
+            supervisor_section += fill_template(
+                SPAWN_SECTION_TEMPLATE,
+                max_spawned=self._max_spawned,
+                delegate_tool=self._delegate_name,
             )
         composed_instructions = (
             f"{session.instructions}\n\n---\n\n{supervisor_section}"
@@ -768,17 +773,17 @@ def _make_forward_message_tool(
         output = last_outputs.get(worker)
         if output is None:
             known = ", ".join(sorted(last_outputs)) or "(none yet)"
-            return (
-                f"Error: no captured output for worker {worker!r}. "
-                f"You must call delegate({worker}, ...) first. "
+            # Raised, so the call fails and the turn goes on.
+            raise ValueError(
+                f"no captured output for worker {worker!r}. "
+                f"Delegate to {worker} first. "
                 f"Workers with captured output: {known}"
             )
         forward_request["output"] = output
         forward_request["worker"] = worker
         return (
             f"[forward_message recorded — {worker}'s last output "
-            "will be returned verbatim as the final response. End "
-            "your turn now without writing any additional text.]"
+            "is returned verbatim as the final response.]"
         )
 
     return Tool(
@@ -787,10 +792,13 @@ def _make_forward_message_tool(
             "Return a worker's last delegated output VERBATIM as "
             "the supervisor's final response. Use this when one "
             "worker already produced exactly what the user asked "
-            "for and synthesis would just paraphrase it. End your "
-            "turn immediately after calling — no additional text."
+            "for and synthesis would just paraphrase it. Your turn "
+            "ends with this call."
         ),
         fn=_forward,
+        # A successful forward is the final answer: stop the loop
+        # rather than asking the model to carry on.
+        ends_turn=True,
         input_schema={
             "type": "object",
             "properties": {
