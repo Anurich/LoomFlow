@@ -70,8 +70,9 @@ class CaseResult(BaseModel):
     """Outcome of one case: the agent's output plus per-metric scores.
 
     ``error`` is set (and ``scores`` left empty) when ``agent.run``
-    raised; the report's ``passed`` flag and ``assert_thresholds``
-    both treat errored cases as failures.
+    raised; ``metric_errors`` maps a metric that raised on this case
+    to its error. The report's ``passed`` flag and
+    ``assert_thresholds`` treat both as failures.
     """
 
     case_id: str
@@ -80,6 +81,7 @@ class CaseResult(BaseModel):
     session_id: str | None = None
     scores: dict[str, float] = Field(default_factory=dict)
     error: str | None = None
+    metric_errors: dict[str, str] = Field(default_factory=dict)
 
 
 class EvalReport(BaseModel):
@@ -91,8 +93,9 @@ class EvalReport(BaseModel):
 
     @property
     def passed(self) -> bool:
-        """True when every case ran to completion without raising."""
-        return all(r.error is None for r in self.results)
+        """True when every case ran, and was scored by every metric,
+        without raising."""
+        return all(r.error is None and not r.metric_errors for r in self.results)
 
     def scores_for(self, metric: str) -> list[float]:
         return [r.scores[metric] for r in self.results if metric in r.scores]
@@ -136,16 +139,23 @@ class EvalReport(BaseModel):
     def assert_thresholds(self, thresholds: Mapping[str, float]) -> None:
         """CI gate: raise :class:`AssertionError` listing every failure.
 
-        A threshold fails when the metric's mean is below it, or when
-        the metric produced no scores at all (a silent skip must not
-        pass a gate). Errored cases are failures regardless of
-        thresholds.
+        A threshold fails when the metric's mean is below it, when the
+        metric produced no scores at all (a silent skip must not pass a
+        gate), or when it raised on any case — a mean over the cases it
+        managed to score says nothing about the rest. Errored cases are
+        failures regardless of thresholds.
         """
         failures: list[str] = []
         for r in self.results:
             if r.error is not None:
                 failures.append(f"case {r.case_id} errored: {r.error}")
         for name, threshold in thresholds.items():
+            errored = [r.case_id for r in self.results if name in r.metric_errors]
+            if errored:
+                failures.append(
+                    f"{name}: raised on {len(errored)}/{len(self.results)} case(s) "
+                    f"({', '.join(errored[:5])}{', ...' if len(errored) > 5 else ''})"
+                )
             mean = self.mean(name)
             if mean is None:
                 failures.append(f"{name}: no scores recorded (threshold {threshold:.2f})")
@@ -169,21 +179,24 @@ async def _score_case(
     case: Case,
     result: RunResult,
     events: list[Event],
-) -> dict[str, float]:
+) -> tuple[dict[str, float], dict[str, str]]:
+    """``(scores, metric_errors)`` for one case."""
     scores: dict[str, float] = {}
+    errors: dict[str, str] = {}
     for metric in metrics:
         if not _metric_applies(metric, case):
             continue
         try:
             scores[metric.name] = await metric.score(case, result, events)
         except Exception as exc:  # noqa: BLE001 - one bad metric must not sink the run
+            errors[metric.name] = f"{type(exc).__name__}: {exc}"
             warnings.warn(
                 f"metric {metric.name!r} raised on case {case.id}: "
-                f"{type(exc).__name__}: {exc}; skipping its score",
+                f"{type(exc).__name__}: {exc}; the case counts as failed",
                 UserWarning,
                 stacklevel=2,
             )
-    return scores
+    return scores, errors
 
 
 class EvalHarness:
@@ -256,13 +269,14 @@ class EvalHarness:
                 session_id=session_id,
                 error=f"{type(exc).__name__}: {exc}",
             )
-        scores = await _score_case(self._metrics, case, result, events)
+        scores, metric_errors = await _score_case(self._metrics, case, result, events)
         return CaseResult(
             case_id=case.id,
             input=case.input,
             output=result.output,
             session_id=session_id,
             scores=scores,
+            metric_errors=metric_errors,
         )
 
     def online(self, *, sample_rate: float = 0.1, seed: int | None = None) -> OnlineScorer:
@@ -329,7 +343,7 @@ class OnlineScorer:
             return None
         self._sampled += 1
         case = Case(input=prompt)  # unlabelled: ground-truth metrics skip via applies()
-        scores = await _score_case(self._metrics, case, result, events)
+        scores, _errors = await _score_case(self._metrics, case, result, events)
         day = result.finished_at.astimezone(UTC).date().isoformat()
         bucket = self._by_day.setdefault(day, {})
         for name, score in scores.items():

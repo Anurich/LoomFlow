@@ -176,6 +176,14 @@ class ReAct:
             except Exception:  # noqa: BLE001 — steering is best-effort
                 pass
 
+            # Auto-compact before the call, when the agent opted in:
+            # this run's own tool results (or a long rehydrated
+            # history) may have pushed the context past its threshold.
+            if deps.compact_context is not None:
+                compacted = await deps.compact_context(session)
+                if compacted is not None:
+                    yield compacted
+
             session.turns += 1
 
             turn_trace: contextlib.AbstractAsyncContextManager[Any] = (

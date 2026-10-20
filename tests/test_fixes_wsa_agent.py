@@ -144,17 +144,17 @@ async def test_auto_compact_checked_without_stop_hooks(
 ) -> None:
     """A default agent (no stop hooks → fast_stop_hooks=True) with
     ``auto_compact_at_tokens=`` configured must run the compaction
-    check after its architecture pass. Before the fix the check
-    lived inside the ``if not fast_stop_hooks:`` branch and never
-    ran for default agents."""
+    check. Before the fix the check lived inside the ``if not
+    fast_stop_hooks:`` branch and never ran for default agents; it
+    now runs before each model call."""
     calls: list[str] = []
-    orig = Agent._maybe_compact
+    orig = Agent._compact
 
-    async def spy(self: Agent, session: AgentSession, emit: Any) -> None:
+    async def spy(self: Agent, session: AgentSession) -> Any:
         calls.append(session.id)
-        await orig(self, session, emit)
+        return await orig(self, session)
 
-    monkeypatch.setattr(Agent, "_maybe_compact", spy)
+    monkeypatch.setattr(Agent, "_compact", spy)
     a = Agent("hi", model=EchoModel(), auto_compact_at_tokens=1_000_000)
     r = await a.run("hello")
     assert r.turns == 1

@@ -266,9 +266,9 @@ class GoalStopHook:
         # --- Guardrail 1: per-goal iteration cap ---
         # ``iteration`` is 0 on the first firing; the (iteration+1)-th
         # architecture pass has already run by the time we're called.
-        if iteration + 1 >= self._max_iterations:
-            self._exit(session, "max_iterations")
-            return None
+        # The cap stops *another* pass: this one is still checked, so
+        # a goal met on the last pass counts as met.
+        last_pass = iteration + 1 >= self._max_iterations
 
         # --- Guardrail 2: hard cost cap (loop-local + Agent-wide) ---
         try:
@@ -350,6 +350,9 @@ class GoalStopHook:
                 self._exit(session, "condition_met")
                 return None
             if p_met <= 0.25:
+                if last_pass:
+                    self._exit(session, "max_iterations")
+                    return None
                 return StopHookResult(
                     inject_message=(
                         "Your run-until goal is NOT yet met. The stop "
@@ -411,6 +414,9 @@ class GoalStopHook:
             done = "DONE" in first_line
         if done:
             self._exit(session, "condition_met")
+            return None
+        if last_pass:
+            self._exit(session, "max_iterations")
             return None
 
         # Not done — re-prompt, naming the condition + the checker's reason.

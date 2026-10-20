@@ -447,6 +447,53 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
   run) and ``"next_agent": "null"`` as none, and a run stopped by the
   budget keeps the board's latest contribution as its output.
 
+### Fixed — agent core
+
+* ``run_until`` checks the goal after every pass, the last included: a
+  goal met on the final allowed pass used to be reported as
+  ``run_until:max_iterations`` without the checker being asked.
+* ``persist_tool_transcripts=True`` saves only the run's own tool
+  calls; each run re-saved every earlier run's (rehydrated) tool
+  messages, so history grew quadratically.
+* **Union ``output_schema``** (``A | B``): the output validates as the
+  member it fills best (most fields set — Pydantic's smart-mode rule),
+  not the first that accepts it, so a full ``Detailed`` payload is no
+  longer a ``Summary``; the union is described in the prompt even on
+  adapters with native structured output (which can't express it); and
+  two models with the same class name get separate ``$defs`` (one
+  overwrote the other).
+* Tool input schemas generate all parameters in one pass, so two
+  nested models sharing a class name no longer collapse into one
+  ``$defs`` entry that rejected valid arguments.
+* Tool descriptions are kept whole: an explicit ``description=`` is
+  used as written, and a docstring keeps its body (minus Args /
+  Returns / ... sections) instead of its first line; ``Args:`` /
+  NumPy ``Parameters`` entries become the parameters' descriptions.
+* **Config typos fail.** ``Agent.from_config`` / ``from_dict`` reject
+  unknown keys, at the top level and in ``[budget]``, naming the
+  closest known key (``max_turn`` → ``max_turns``), as does a
+  ``prompt_caching`` dict; ``snip_window`` and ``prompt_caching`` are
+  read from config. ``output_validation_retries`` below 0 is a
+  ``ValueError`` (was an ``AssertionError`` deep in the run).
+* **Evals.** A metric that raises on a case is recorded
+  (``CaseResult.metric_errors``) and fails ``passed`` and
+  ``assert_thresholds`` — the gate used to pass on the mean of the one
+  case in ten the judge managed to score. ``LLMJudge`` reads
+  ``**Score:** 0.8``, ``score: 0.8.``, ``Final score: 0.8``,
+  ``score: 4/5`` and ``score: 80%``; a bare score outside 0-1 is asked
+  for again instead of being clamped.
+* **Auto-compact works.** ReAct compacts before each model call, so a
+  run whose tool results pile up is compacted while it runs (within
+  one long tool loop it summarises the older exchanges, keeping tool
+  calls with their results), and a long rehydrated history is
+  compacted on the next run's first call. It used to run only after a
+  pass, on messages the next run never reads. Summaries of an
+  unchanged history are cached; short conversations make no counting
+  call.
+* An agent inheriting a workspace from a ``Workflow`` / team gets the
+  notebook section in its system prompt along with the tools (the
+  section was built and dropped).
+
 ### Fixed — Workflow
 
 * Edges, router routes and defaults that name an unregistered node
