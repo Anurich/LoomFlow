@@ -95,6 +95,29 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
   permissions, hooks, approval handler, guardrails, rate limiter, audit
   log or limits.
 
+### Fixed — OS sandbox
+
+* **Bubblewrap (Linux) works.** It failed every call out of the box:
+  binding the interpreter's symlink over ``/usr`` aborted the launch,
+  a virtualenv's python couldn't load ``libpython`` (no loader config
+  in the namespace), and the input/result files were in the host temp
+  dir while the child got a fresh ``/tmp``. Verified in a
+  ``python:3.12-slim`` container on the system Python and in a
+  virtualenv.
+* **Seatbelt (macOS) confines reads.** It allowed reads anywhere, so a
+  sandboxed tool could read any file the user can (the module promised
+  it "cannot read outside its roots"), and it allowed writes to the
+  system temp dir. Both backends now give the child only the system
+  libraries, the Python installation, the tool's own top-level package
+  (and loomflow), the roots, and a private per-call temp dir. The rest
+  of your project, your home directory and ``/etc`` are unreadable.
+* **The child gets a minimal environment**, not the parent's (where API
+  keys live); pass ``OSSandbox(env={...})`` for what a tool needs.
+* **Results come back as JSON.** The parent used to unpickle the
+  child's output, so code in the sandbox could run code in the parent.
+  Non-JSON results come back as their ``str()``. ``@tool`` functions,
+  async tools and skill scripts now run in the sandbox too.
+
 ### Fixed — right to erasure
 
 * **``forget()`` can't be undone by background extraction.**

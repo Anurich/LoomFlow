@@ -68,3 +68,19 @@ def tool_triple(x: int) -> int:
     """Return ``x * 3``. ``@tool`` rebinds this module name to the Tool
     wrapper, so the sandbox has to send it by name, not by pickle."""
     return x * 3
+
+
+def read_text(path: str) -> str:
+    """Read ``path`` — used by OSSandbox tests to check read containment."""
+    with open(path, encoding="utf-8") as fh:
+        return fh.read()
+
+
+def get_env(name: str) -> str | None:
+    """Return environment variable ``name`` as the tool sees it."""
+    return os.environ.get(name)
+
+
+def make_set() -> set[int]:
+    """A result that isn't JSON-serialisable."""
+    return {1, 2}

@@ -518,6 +518,12 @@ class _SkillScript:
     interpreter: tuple[str, ...]
     script: str
     arg_order: tuple[str, ...]
+    skill_dir: str = ""
+
+    @property
+    def sandbox_paths(self) -> tuple[str, ...]:
+        """What an OS sandbox must let the script read: its skill."""
+        return (self.skill_dir or str(Path(self.script).parent),)
 
     async def __call__(self, **kwargs: Any) -> str:
         # Convert kwargs to positional argv in declaration order.
@@ -561,6 +567,7 @@ def _make_subprocess_tool(
             interpreter=tuple(_interpreter_for(script_full)),
             script=str(script_full),
             arg_order=tuple(spec.args.keys()),
+            skill_dir=str(skill_path.resolve()),
         ),
         input_schema={
             "type": "object",
