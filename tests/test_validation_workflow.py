@@ -89,7 +89,7 @@ async def test_fan_out_inside_a_loop_runs_concurrently_and_joins_once(order: lis
     joins: list[Any] = []
     await _loop_with_fan_out(order, stamps, joins).run("x")
     assert joins == [["r1", "r2b"], ["r1", "r2b"]]
-    (r1_start, r1_end), (r2_start, _) = stamps["r1"][0], stamps["r2"][0]
+    (_, r1_end), (r2_start, _) = stamps["r1"][0], stamps["r2"][0]
     assert r2_start < r1_end  # r1 and r2 overlapped
 
 
