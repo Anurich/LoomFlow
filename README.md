@@ -132,7 +132,9 @@ multi-tenancy / structured outputs / retries by hand.
   world vs when you learned them. All five backends partition by
   `user_id`.
 * **Durable runtime** — `SqliteRuntime` gives crash-recovery replay
-  with zero infrastructure. Postgres also supported.
+  with zero infrastructure: re-running a crashed run resumes it
+  without repeating finished tool calls, sub-agents' included.
+  Postgres also supported.
 * **Observable** — OpenTelemetry spans and metrics for every step.
   Drop in your exporter (Honeycomb / Datadog / LangSmith).
 * **Safe** — permission policies, sandbox layers, append-only
@@ -1265,7 +1267,7 @@ End-to-end demo: [`examples/03_multi_user_sessions.py`](examples/03_multi_user_s
 | **Run timeout** | Wall-clock ceiling for the whole run — setup, every model + tool call (incl. parallel dispatch and sub-agents), teardown — via `anyio.fail_after`. Default `None` = unbounded, zero overhead. `run()` raises `RunTimeout` (carries `.seconds`); `stream()` consumers see an `ERROR` event. TOML-expressible (`timeout = 30.0`). | `Agent(timeout=)`, `RunTimeout` (top-level) |
 | **Run-until-done loop** | `Agent(run_until="all tests pass")` re-prompts the agent until a fast checker model confirms a measurable stop condition. Guardrails against runaway loops: `max_iterations`, `max_no_progress`, `max_cost_usd` (also honours the Agent-wide `Budget`). Exit reason in `session.metadata["run_until.exit"]`; guardrail stops set `RunResult.interrupted`. Wraps any architecture; `Team.*` builders forward it. | `Agent(run_until=)`, `GoalStopHook`, `StopHook`, `StopHookResult` (top-level) |
 | **Telemetry** | OpenTelemetry spans + metrics for every milestone | `NoTelemetry` (top-level); `from loomflow.observability import OTelTelemetry` |
-| **Audit log** | HMAC-signed JSONL or in-memory; tracks every tool call; entries attributed by `user_id` | `InMemoryAuditLog`, `AuditLog` (top-level); `from loomflow.security import FileAuditLog, verify_signature` |
+| **Audit log** | HMAC-signed, hash-chained JSONL or in-memory; tracks every tool call; entries attributed by `user_id`; `verify()` reports edited, deleted or reordered entries | `InMemoryAuditLog`, `AuditLog` (top-level); `from loomflow.security import FileAuditLog, verify_chain, verify_signature` |
 | **Certified values** | Freshness + lineage policies | `from loomflow.data import FreshnessPolicy, LineagePolicy` |
 | **Living plan (TodoWrite-style)** | Structured plan the agent atomically rewrites each turn. ``Agent(living_plan=True)`` wires ``plan_write`` / ``plan_read`` and, when ``workspace=`` is also set, mirrors the plan as a ``kind="plan"`` note and auto-adds ``recall_past_plans(query)`` for cross-run plan lineage. Plan becomes load-bearing in the conversation (tool result returns the rendered plan) so drift becomes structurally hard. Per-run state via contextvar — concurrent runs on the same Agent have isolated plans. Default is opt-in for v0.10.0; v0.11 flips to smart-default-on for tool-using agents. | `Agent(living_plan=)`; `LivingPlan`, `LivingPlanStep` (top-level); `from loomflow.tools import make_plan_tools, make_recall_past_plans_tool, get_active_plan, living_plan_prompt_section, resolve_living_plan` |
 | **Declarative config** | Build agents from TOML or dicts | `Agent.from_config(path)`, `Agent.from_dict(cfg)` |
@@ -1369,7 +1371,7 @@ need it promoted.
   BM25 hybrid search, persistence), the document loader with
   chunking strategies, and 12 architectures including selective
   lesson recall (Reflexion), typed handoffs (Swarm),
-  forward_message (Supervisor), Jaccard convergence (Debate), and
+  forward_message (Supervisor), final-answer voting (Debate), and
   parallel proposer/evaluator with min_score floor (TreeOfThoughts).
 
 ---
