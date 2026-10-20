@@ -118,6 +118,25 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
   Non-JSON results come back as their ``str()``. ``@tool`` functions,
   async tools and skill scripts now run in the sandbox too.
 
+### Fixed — memory and RAG
+
+* **Bi-temporal facts follow valid time, not arrival order**, in all five
+  fact stores (in-memory, SQLite, Chroma, Redis, Postgres), using the
+  Zep / Graphiti rule. A historical fact learned after the current one
+  used to close the current one (with ``valid_until`` before its
+  ``valid_from``) and become "current" itself. Now a contradicting
+  earlier fact ends where the new one begins, a backfilled older fact
+  ends where the newer one begins, and no interval is closed before it
+  opens.
+* Naive datetimes on facts and in ``valid_at=`` are read as UTC
+  everywhere (the in-memory store used to raise ``TypeError``).
+* Postgres memory and fact stores work with pgvector-python 0.4+, which
+  returns ``Vector`` objects. Reading an embedding back used to raise
+  ``TypeError``.
+* SQLite fact queries name their columns. A database migrated from
+  before ``user_id`` existed has that column last, which shifted every
+  field on read.
+
 ### Fixed — right to erasure
 
 * **``forget()`` can't be undone by background extraction.**

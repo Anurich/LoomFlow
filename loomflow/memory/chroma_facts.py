@@ -34,6 +34,7 @@ from ._user_key import (
     user_id_where_clause,
 )
 from .embedder import HashEmbedder
+from .facts import plan_supersession
 
 DEFAULT_FACTS_COLLECTION = "jeeves_facts"
 
@@ -113,8 +114,9 @@ class ChromaFactStore:
         coll = await self._get_collection()
 
         async with self._lock:
-            # Namespace-scoped supersession: only invalidate prior
-            # facts in the same ``user_id`` partition.
+            # Valid-time supersession (``plan_supersession``) over the
+            # facts in this user's partition with the same subject +
+            # predicate.
             existing = await anyio.to_thread.run_sync(
                 lambda: coll.get(
                     where={
@@ -122,25 +124,29 @@ class ChromaFactStore:
                             user_id_where_clause(fact.user_id),
                             {"subject": fact.subject},
                             {"predicate": fact.predicate},
-                            {"currently_valid": True},
                         ]
                     },
                     include=["metadatas"],
                 )
             )
-
+            stored = {
+                eid: dict(meta or {})
+                for eid, meta in zip(
+                    existing.get("ids") or [],
+                    existing.get("metadatas") or [],
+                    strict=False,
+                )
+            }
+            closes, until = plan_supersession(
+                fact, [_metadata_to_fact(eid, meta) for eid, meta in stored.items()]
+            )
+            fact = fact.model_copy(update={"valid_until": until})
             ids_to_close: list[str] = []
             metas_to_close: list[dict[str, Any]] = []
-            for eid, meta in zip(
-                existing.get("ids") or [],
-                existing.get("metadatas") or [],
-                strict=False,
-            ):
-                meta = dict(meta or {})
-                if meta.get("object") == fact.object:
-                    continue  # same triple — don't supersede
+            for eid, valid_until in closes.items():
+                meta = stored[eid]
                 meta["currently_valid"] = False
-                meta["valid_until_ts"] = fact.valid_from.timestamp()
+                meta["valid_until_ts"] = valid_until.timestamp()
                 ids_to_close.append(eid)
                 metas_to_close.append(meta)
 

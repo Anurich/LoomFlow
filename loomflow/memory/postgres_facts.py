@@ -23,6 +23,7 @@ from typing import Any
 
 from ..core.protocols import Embedder
 from ..core.types import Fact, _normalize_predicate
+from .facts import plan_supersession
 
 
 class PostgresFactStore:
@@ -191,21 +192,27 @@ class PostgresFactStore:
         """Supersede + insert one fact on an already-acquired
         connection. Shared by :meth:`append` and :meth:`append_many`.
         """
-        # Supersession is namespace-scoped — a fact from user A
-        # never invalidates user B's claim on the same (subject,
-        # predicate). ``IS NOT DISTINCT FROM`` makes the
-        # ``NULL = NULL`` case (anonymous bucket) work correctly.
-        await conn.execute(
-            "UPDATE facts SET valid_until = $1 "
-            "WHERE user_id IS NOT DISTINCT FROM $2 "
-            "AND subject = $3 AND predicate = $4 "
-            "AND object != $5 AND valid_until IS NULL",
-            fact.valid_from,
+        # Valid-time supersession (``plan_supersession``) over the
+        # contradicting facts in this user's namespace — a fact from
+        # user A never invalidates user B's claim. ``IS NOT DISTINCT
+        # FROM`` makes the ``NULL = NULL`` case (anonymous bucket)
+        # work correctly.
+        rows = await conn.fetch(
+            "SELECT id, user_id, subject, predicate, object, confidence, "
+            "valid_from, valid_until, recorded_at, sources, embedding "
+            "FROM facts WHERE user_id IS NOT DISTINCT FROM $1 "
+            "AND subject = $2 AND predicate = $3 AND object != $4",
             fact.user_id,
             fact.subject,
             fact.predicate,
             fact.object,
         )
+        closes, until = plan_supersession(fact, [_row_to_fact(r) for r in rows])
+        for existing_id, valid_until in closes.items():
+            await conn.execute(
+                "UPDATE facts SET valid_until = $1 WHERE id = $2", valid_until, existing_id
+            )
+        fact = fact.model_copy(update={"valid_until": until})
         await conn.execute(
             "INSERT INTO facts "
             "(id, user_id, subject, predicate, object, confidence, "
@@ -432,9 +439,6 @@ def _parse_delete_count(asyncpg_result: str) -> int:
 
 
 def _row_to_fact(row: Any) -> Fact:
-    embedding = row["embedding"]
-    if embedding is not None and not isinstance(embedding, list):
-        embedding = list(embedding)
     sources = row["sources"]
     if sources is None:
         sources = []

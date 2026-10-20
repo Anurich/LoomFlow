@@ -118,11 +118,23 @@ def _fact(
 
 async def test_append_emits_supersede_then_insert() -> None:
     store_state = _FakeStore()
+    earlier = datetime(2020, 1, 1, tzinfo=UTC)
+    # A stored, contradicting claim from before the new fact.
+    store_state.next_rows = [
+        {
+            "id": "fact_old", "user_id": None, "subject": "user", "predicate": "name_is",
+            "object": "Bob", "confidence": 1.0, "valid_from": earlier, "valid_until": None,
+            "recorded_at": earlier, "sources": [], "embedding": None,
+        }
+    ]
     pool = _FakePool(store_state)
     store = PostgresFactStore(pool=pool)
 
     await store.append(_fact())
 
+    # The contradicting rows are read first, then closed, then the
+    # new fact is inserted.
+    assert store_state.queried and store_state.queried[0][0].startswith("SELECT")
     sqls = [sql for sql, _ in store_state.executed]
     assert any("UPDATE facts SET valid_until" in s for s in sqls)
     assert any("INSERT INTO facts" in s for s in sqls)

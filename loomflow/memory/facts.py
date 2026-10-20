@@ -111,10 +111,10 @@ class InMemoryFactStore:
     async def append(self, fact: Fact) -> str:
         """Append a fact, invalidating any superseded predecessors.
 
-        Supersession rule: any existing fact with matching subject +
-        predicate, currently valid (``valid_until is None``), and a
-        different ``object`` gets its ``valid_until`` set to the new
-        fact's ``valid_from``.
+        Supersession follows valid time, not arrival order (see
+        :func:`plan_supersession`): a contradicted earlier fact ends
+        where the new one begins, and a backfilled older fact ends
+        where the newer one begins.
         """
         # Embed outside the lock — embedders may make network calls.
         embedding: list[float] | None = None
@@ -122,28 +122,25 @@ class InMemoryFactStore:
             embedding = await self._embedder.embed(_triple_text(fact))
 
         async with self._lock:
-            for existing_id, existing in list(self._facts.items()):
-                # Supersession is namespace-scoped — alice's facts never
-                # invalidate bob's, anonymous facts never invalidate
-                # named-user facts.
-                if existing.user_id != fact.user_id:
-                    continue
-                if existing.subject != fact.subject:
-                    continue
-                if existing.predicate != fact.predicate:
-                    continue
-                if existing.valid_until is not None:
-                    continue  # already superseded
-                if existing.object == fact.object:
-                    continue  # same claim — don't invalidate
-                # Close off the old fact's validity window.
-                self._facts[existing_id] = existing.model_copy(
-                    update={"valid_until": fact.valid_from}
-                )
+            # Namespace-scoped (alice's facts never invalidate bob's)
+            # valid-time supersession; see ``plan_supersession``.
+            fact = self._supersede(fact)
             self._facts[fact.id] = fact
             if embedding is not None:
                 self._embeddings[fact.id] = embedding
             return fact.id
+
+    def _supersede(self, fact: Fact) -> Fact:
+        """Close the facts ``fact`` contradicts (call under the lock);
+        returns ``fact``, closed itself if it is the older claim."""
+        closes, until = plan_supersession(fact, self._facts.values())
+        for existing_id, valid_until in closes.items():
+            self._facts[existing_id] = self._facts[existing_id].model_copy(
+                update={"valid_until": valid_until}
+            )
+        if until != fact.valid_until:
+            fact = fact.model_copy(update={"valid_until": until})
+        return fact
 
     async def append_many(self, facts: Iterable[Fact]) -> list[str]:
         """Append a batch of facts. Embedder calls are coalesced via
@@ -176,23 +173,7 @@ class InMemoryFactStore:
         ``embed()`` call). Same supersession rules as :meth:`append`.
         """
         async with self._lock:
-            for existing_id, existing in list(self._facts.items()):
-                # Supersession is namespace-scoped (same rule as
-                # ``append``): alice's facts never invalidate bob's,
-                # anonymous facts never invalidate named-user facts.
-                if existing.user_id != fact.user_id:
-                    continue
-                if existing.subject != fact.subject:
-                    continue
-                if existing.predicate != fact.predicate:
-                    continue
-                if existing.valid_until is not None:
-                    continue
-                if existing.object == fact.object:
-                    continue
-                self._facts[existing_id] = existing.model_copy(
-                    update={"valid_until": fact.valid_from}
-                )
+            fact = self._supersede(fact)
             self._facts[fact.id] = fact
             if embedding is not None:
                 self._embeddings[fact.id] = embedding
@@ -423,7 +404,59 @@ async def delete_facts(
 # ---------------------------------------------------------------------------
 
 
+def as_utc(when: datetime) -> datetime:
+    """A naive datetime read as UTC (aware ones pass through)."""
+    return when.replace(tzinfo=UTC) if when.tzinfo is None else when
+
+
+def plan_supersession(
+    incoming: Fact, candidates: Iterable[Fact]
+) -> tuple[dict[str, datetime], datetime | None]:
+    """Valid-time supersession, the Zep / Graphiti rule.
+
+    ``candidates`` are stored facts; those with the same user, subject
+    and predicate but a different object whose validity overlaps
+    ``incoming``'s are contradicted by it:
+
+    * one that started no later than ``incoming`` ends where
+      ``incoming`` begins;
+    * one that started later (``incoming`` is a backfilled, older
+      claim) makes ``incoming`` end where it begins.
+
+    Arrival order doesn't matter, and no interval is ever closed
+    before it opens. Returns ``({existing id: its new valid_until},
+    incoming's valid_until)``. Only valid time is tracked: there is no
+    separate transaction-time "expired at" (``recorded_at`` records
+    when a fact was learned, and a closed interval is updated in place).
+    """
+    closes: dict[str, datetime] = {}
+    incoming_until = incoming.valid_until
+    for existing in candidates:
+        if (
+            existing.id == incoming.id
+            or existing.user_id != incoming.user_id
+            or existing.subject != incoming.subject
+            or existing.predicate != incoming.predicate
+            or existing.object == incoming.object
+            or not _overlaps(existing, incoming)
+        ):
+            continue
+        if existing.valid_from <= incoming.valid_from:
+            if existing.valid_until is None or existing.valid_until > incoming.valid_from:
+                closes[existing.id] = incoming.valid_from
+        elif incoming_until is None or incoming_until > existing.valid_from:
+            incoming_until = existing.valid_from
+    return closes, incoming_until
+
+
+def _overlaps(a: Fact, b: Fact) -> bool:
+    a_ends_after_b_starts = a.valid_until is None or a.valid_until > b.valid_from
+    b_ends_after_a_starts = b.valid_until is None or b.valid_until > a.valid_from
+    return a_ends_after_b_starts and b_ends_after_a_starts
+
+
 def _is_valid_at(fact: Fact, when: datetime) -> bool:
+    when = as_utc(when)
     if when < fact.valid_from:
         return False
     if fact.valid_until is None:

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 import struct
+from typing import Any
 
 
 def cosine(a: list[float], b: list[float]) -> float:
@@ -51,3 +52,21 @@ def unpack_float32(blob: bytes) -> list[float]:
         return []
     n = len(blob) // 4
     return list(struct.unpack(f"{n}f", blob))
+
+
+def vector_to_list(value: Any) -> list[float] | None:
+    """An embedding read back from a database as ``list[float]``:
+    pgvector's ``Vector`` (``to_list``), a numpy array (``tolist``),
+    pgvector's text form (``"[1,2,3]"``) or any sequence."""
+    if value is None:
+        return None
+    if isinstance(value, list):
+        return [float(x) for x in value]
+    for method in ("to_list", "tolist"):
+        convert = getattr(value, method, None)
+        if callable(convert):
+            return [float(x) for x in convert()]
+    if isinstance(value, str):
+        text = value.strip().removeprefix("[").removesuffix("]")
+        return [float(x) for x in text.split(",")] if text else []
+    return [float(x) for x in value]

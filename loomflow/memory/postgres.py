@@ -33,6 +33,7 @@ from ..core.types import (
     Message,
     Role,
 )
+from ._embedding_util import vector_to_list
 from ._user_key import ANON_USER_ID, decode_user_id, encode_user_id
 from .embedder import HashEmbedder, warn_hash_embedder_fallback
 from .facts import count_facts, delete_facts
@@ -743,9 +744,8 @@ def _parse_delete_count(asyncpg_result: str) -> int:
 def _rows_to_episodes(rows: list[Any]) -> list[Episode]:
     out: list[Episode] = []
     for r in rows:
-        emb = r["embedding"]
-        # asyncpg + pgvector returns numpy array or list; coerce.
-        emb_list = list(emb) if emb is not None else None
+        # pgvector returns a Vector / numpy array / text; coerce.
+        emb_list = vector_to_list(r["embedding"])
         # ``user_id`` may not be present on rows fetched from a legacy
         # SELECT that doesn't list it. Treat absence as ``None``.
         try:

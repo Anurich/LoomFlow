@@ -465,6 +465,15 @@ class Fact(BaseModel):
     recorded_at: datetime = Field(default_factory=_utcnow)
     sources: list[str] = Field(default_factory=list)
 
+    @field_validator("valid_from", "valid_until", "recorded_at")
+    @classmethod
+    def _utc(cls, v: datetime | None) -> datetime | None:
+        """Naive datetimes are read as UTC (every store does the same),
+        so mixing naive and aware values can't raise."""
+        if v is not None and v.tzinfo is None:
+            return v.replace(tzinfo=UTC)
+        return v
+
     @field_validator("predicate")
     @classmethod
     def _canonicalise_predicate(cls, v: str) -> str:
