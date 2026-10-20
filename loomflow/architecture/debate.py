@@ -19,21 +19,35 @@ Pattern
 2. **Rounds 1..K (debate).** Each debater receives the original
    question + the full transcript so far. They defend or update
    their position. All debaters in a round run in parallel.
-3. **Optional convergence check.** If all debaters in a round
-   produce exactly-matching answers (after whitespace normalize),
-   terminate early. Defaults on; disable for adversarial-only
-   debates where you want full rounds.
+3. **Optional convergence check.** If every debater in a round
+   gives the same final answer, terminate early. Defaults on;
+   disable for adversarial-only debates where you want full rounds.
 4. **Judge synthesis.** A separate ``judge`` :class:`Agent`
    receives the full transcript and produces the final answer.
-   ``judge=None`` falls back to majority vote (modal answer
-   across the final round; tie-broken by first appearance).
+   ``judge=None`` falls back to majority vote over the final round
+   (Du et al.): the most common final answer wins, ties going to the
+   lowest-numbered debater.
 
-Deterministic session ids
--------------------------
-Each debater invocation uses
-``{parent}__debater_<i>_round_<r>``; the judge uses
-``{parent}__judge``. Replays of the parent journal cache the
-sub-results and don't re-execute debaters.
+Debaters are asked to end with a ``Final answer: ...`` line; the vote
+and the convergence check compare those answers (normalised: case,
+whitespace, surrounding punctuation, ``**bold**`` and ``\boxed{}``).
+A reply without one is compared as a whole — by Jaccard similarity of
+its words for convergence (``convergence_similarity``).
+
+``rounds`` counts debate rounds *after* the independent round 0, so
+each debater answers ``rounds + 1`` times; Du et al.'s ``rounds=2``
+(one round of debate) is ``rounds=1`` here.
+
+A debater that raises or is interrupted (its own ``max_turns``,
+budget) sits that round out (``debate.debater_failed``); the debate
+fails only when no debater answers. Each debater's and the judge's
+spend is charged to the coordinator's budget.
+
+Session ids
+-----------
+Each debater invocation uses ``{parent}__debater_<i>_round_<r>``; the
+judge uses ``{parent}__judge``. When the debaters run on a durable
+runtime, resuming a crashed debate replays their finished work.
 
 Strengths
 ---------
@@ -56,6 +70,7 @@ Weaknesses
 
 from __future__ import annotations
 
+import re
 from collections import Counter
 from collections.abc import AsyncIterator
 from contextlib import aclosing
@@ -68,7 +83,12 @@ from ..core.context import inherit_ambient_memory
 from ..core.streaming import relay
 from ..core.types import Event
 from .base import AgentSession, Dependencies
-from .helpers import SubagentInvocation, budget_gate
+from .helpers import (
+    SubagentInvocation,
+    budget_gate,
+    consume_worker_usage,
+    usage_from_result_dict,
+)
 
 if TYPE_CHECKING:
     from ..agent.api import Agent
@@ -89,8 +109,14 @@ proposed answers (shown below). Your task on this round:
    openly — don't be stubborn for its own sake.
 4. Cite specifics; avoid hand-waving.
 
-End with a clear final answer for THIS round.
+End with a line of the form "Final answer: <your answer>" for THIS
+round.
 """
+
+_ROUND0_SUFFIX = (
+    "Provide your independent answer with reasoning. End with a line of "
+    'the form "Final answer: <your answer>".'
+)
 
 
 DEFAULT_JUDGE_INSTRUCTIONS = """\
@@ -197,8 +223,7 @@ class MultiAgentDebate:
         )
         round0: dict[str, str] = {}
         async for ev in self._run_round_parallel(
-            session, prompt, history=[], round_num=0, responses=round0,
-            user_id=deps.context.user_id,
+            session, deps, prompt, history=[], round_num=0, responses=round0,
         ):
             yield ev
         history.append(round0)
@@ -220,7 +245,7 @@ class MultiAgentDebate:
                 round=0,
                 threshold=self._convergence_similarity,
             )
-            session.output = next(iter(round0.values()))
+            session.output = _majority_vote(round0)
             return
 
         # === Debate rounds ===
@@ -239,9 +264,8 @@ class MultiAgentDebate:
             )
             round_responses: dict[str, str] = {}
             async for ev in self._run_round_parallel(
-                session, prompt, history=history, round_num=r,
+                session, deps, prompt, history=history, round_num=r,
                 responses=round_responses,
-                user_id=deps.context.user_id,
             ):
                 yield ev
             history.append(round_responses)
@@ -330,6 +354,9 @@ class MultiAgentDebate:
                 yield ev
         judge_result = judge_inv.result
         session.turns += int(judge_result.get("turns", 0) or 0)
+        await consume_worker_usage(
+            deps, self._judge, usage_from_result_dict(judge_result)
+        )
 
         if bool(judge_result.get("interrupted", False)):
             session.interrupted = True
@@ -352,21 +379,24 @@ class MultiAgentDebate:
     async def _run_round_parallel(
         self,
         session: AgentSession,
+        deps: Dependencies,
         prompt: str,
         history: list[dict[str, str]],
         round_num: int,
         responses: dict[str, str],
-        user_id: str | None,
     ) -> AsyncIterator[Event]:
         """Run all debaters for a single round in parallel and yield
         their streaming events.
 
-        ``responses`` is mutated in place — each debater's final
-        output is written to ``responses[debater_name]``. Events
+        ``responses`` is filled in debater order (not completion
+        order) with each answering debater's final output. Events
         from each debater's own iteration (model chunks, tool calls,
         nested architecture events) flow through this generator so
         token-level streaming surfaces in ``agent.stream(...)``.
+        Raises when no debater answered.
         """
+        answered: dict[str, str] = {}
+        failures: dict[str, BaseException] = {}
         send, receive = anyio.create_memory_object_stream[Event](
             max_buffer_size=128
         )
@@ -385,12 +415,13 @@ class MultiAgentDebate:
                             name,
                             debater_prompt,
                             session,
+                            deps,
                             round_num,
-                            responses,
+                            answered,
+                            failures,
                             send.clone(),
                             self._worker_registry,
                             self._role_to_worker_id,
-                            user_id,
                         )
 
         # The debaters' task group lives in its own task
@@ -398,6 +429,16 @@ class MultiAgentDebate:
         async with aclosing(relay(_dispatch_all, receive)) as events:
             async for ev in events:
                 yield ev
+        for i in range(len(self._debaters)):
+            name = f"debater_{i}"
+            if name in answered:
+                responses[name] = answered[name]
+        if not responses:
+            first = next(iter(failures.values()), None)
+            raise RuntimeError(
+                f"debate round {round_num}: no debater answered"
+                + (f" ({first})" if first is not None else "")
+            ) from first
 
     def _build_debater_prompt(
         self,
@@ -407,10 +448,7 @@ class MultiAgentDebate:
         round_num: int,
     ) -> str:
         if round_num == 0:
-            return (
-                f"{original_prompt}\n\n"
-                f"Provide your independent answer with reasoning."
-            )
+            return f"{original_prompt}\n\n{_ROUND0_SUFFIX}"
         transcript_lines = [
             self._debater_instructions,
             "",
@@ -454,27 +492,27 @@ async def _run_one_debater_streaming(
     name: str,
     debater_prompt: str,
     session: AgentSession,
+    deps: Dependencies,
     round_num: int,
-    responses: dict[str, str],
+    answered: dict[str, str],
+    failures: dict[str, BaseException],
     send: MemoryObjectSendStream[Event],
     worker_registry: _DebateRegistryT | None,
     role_to_worker_id: _DebateRoleMapT | None,
-    user_id: str | None,
 ) -> None:
     """Single-debater worker for parallel dispatch: run the debater
     via :class:`SubagentInvocation`, forward its events into ``send``,
-    write final output into ``responses[name]``.
+    record its final output in ``answered[name]`` and charge its spend
+    to the coordinator's budget.
 
     When ``worker_registry`` is non-None and the debater has a
     registered handle, use the handle's stable session_id so the
     debater carries memory across rounds AND across multiple
     ``Agent.run()`` invocations. :func:`acquire_worker_session`
     does the cross-user check + per-handle lock + touch with the
-    RUN's real ``user_id`` (pre-fix this touched with a hard-coded
-    ``None``, so the handle was never pinned and the cross-tenant
-    guard could never fire). A cross-user rejection surfaces as an
-    architecture event + an error response for this debater slot
-    instead of crashing the round.
+    RUN's real ``user_id``. A debater that raises, is interrupted, or
+    is refused as cross-user sits the round out: an event says why
+    and the round goes on without it.
     """
     async with send:
         # Lazy import — circular if hoisted to module scope (the
@@ -497,30 +535,41 @@ async def _run_one_debater_streaming(
             session_id=sub_session_id,
             rollup_into=session,
         )
-        if handle is not None:
-            try:
-                async with acquire_worker_session(handle, user_id):
+
+        async def failed(event: str, exc: BaseException | None, error: str) -> None:
+            if exc is not None:
+                failures[name] = exc
+            await send.send(
+                Event.architecture_event(
+                    session.id, event, round=round_num, debater=name, error=error
+                )
+            )
+
+        try:
+            if handle is not None:
+                async with acquire_worker_session(handle, deps.context.user_id):
                     async for ev in invocation.events():
                         await send.send(ev)
-            except CrossUserWorkerError as exc:
-                responses[name] = f"[error: {exc}]"
-                await send.send(
-                    Event.architecture_event(
-                        session.id,
-                        "debate.cross_user_rejected",
-                        round=round_num,
-                        debater=name,
-                        error=str(exc),
-                    )
-                )
-                return
-        else:
-            async for ev in invocation.events():
-                await send.send(ev)
-        responses[name] = str(invocation.result.get("output", ""))
-        session.turns += int(
-            invocation.result.get("turns", 0) or 0
-        )
+            else:
+                async for ev in invocation.events():
+                    await send.send(ev)
+        except CrossUserWorkerError as exc:
+            await failed("debate.cross_user_rejected", exc, str(exc))
+            return
+        except Exception as exc:  # noqa: BLE001 — one debater's failure isn't the debate's
+            await failed("debate.debater_failed", exc, f"{type(exc).__name__}: {exc}")
+            return
+        result = invocation.result
+        session.turns += int(result.get("turns", 0) or 0)
+        await consume_worker_usage(deps, debater, usage_from_result_dict(result))
+        if result.get("interrupted"):
+            await failed(
+                "debate.debater_failed",
+                None,
+                f"interrupted: {result.get('interruption_reason') or 'unknown'}",
+            )
+            return
+        answered[name] = str(result.get("output", ""))
 
 
 # ---------------------------------------------------------------------------
@@ -531,6 +580,31 @@ async def _run_one_debater_streaming(
 def _normalize(text: str) -> str:
     """Whitespace-normalize for naive convergence detection."""
     return " ".join(text.split()).strip().lower()
+
+
+_FINAL_ANSWER_RE = re.compile(
+    r"\bfinal\s+answer\b\s*(?:\*\*|__)?\s*(?:[:=\-–—]|\bis\b)\s*(.+?)\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+_BOXED_RE = re.compile(r"\\boxed\{([^{}]*)\}")
+
+
+def final_answer(text: str) -> str | None:
+    """The normalised answer from a reply's last ``Final answer: ...``
+    line (or ``\\boxed{...}``), or ``None`` when it has neither."""
+    matches = _FINAL_ANSWER_RE.findall(text)
+    if matches:
+        answer = matches[-1]
+    else:
+        boxed = _BOXED_RE.findall(text)
+        if not boxed:
+            return None
+        answer = boxed[-1]
+    boxed_inner = _BOXED_RE.findall(answer)
+    if boxed_inner:
+        answer = boxed_inner[-1]
+    answer = answer.replace("**", "").replace("__", "")
+    return _normalize(answer).strip(" .,;:!\"'`$")
 
 
 def _jaccard(a: str, b: str) -> float:
@@ -554,21 +628,23 @@ def _jaccard(a: str, b: str) -> float:
 def _converged(
     round_responses: dict[str, str], *, threshold: float = 0.85
 ) -> bool:
-    """Pairwise Jaccard similarity ≥ ``threshold`` for every pair.
+    """True when the round agrees: every reply has the same final
+    answer (see :func:`final_answer`), or — when some reply has none —
+    every pair's word-level Jaccard similarity is at least
+    ``threshold`` (``1.0`` = whitespace-normalised equality).
 
-    With ``threshold=1.0`` this reduces to strict (whitespace-
-    normalized) equality — the legacy v0.5 behaviour. The default
-    ``0.85`` allows minor wording differences ("the answer is 42"
-    vs "answer: 42"). Lower values terminate debate earlier and
-    cut cost; the trade-off is risking premature exit on disputes
-    where debaters technically disagree but use overlapping
-    vocabulary.
+    Comparing answers rather than whole replies keeps two long,
+    similarly worded arguments for *different* answers ("Final
+    answer: 42" / "Final answer: 48") from counting as agreement.
     """
     if not round_responses:
         return False
     if len(round_responses) == 1:
         return True
     responses = list(round_responses.values())
+    answers = [final_answer(r) for r in responses]
+    if all(a is not None for a in answers):
+        return len(set(answers)) == 1
     for i in range(len(responses)):
         for j in range(i + 1, len(responses)):
             if _jaccard(responses[i], responses[j]) < threshold:
@@ -577,19 +653,21 @@ def _converged(
 
 
 def _majority_vote(round_responses: dict[str, str]) -> str:
-    """Pick the modal answer; ties broken by first appearance.
+    """The reply whose final answer is the most common; ties go to the
+    answer given first in debater order.
 
-    Whitespace-normalized for matching, but the original (unnormalized)
-    string is returned so casing / formatting is preserved.
+    Replies are grouped by :func:`final_answer` (whole normalised text
+    when a reply has none); the first reply in the winning group is
+    returned unchanged.
     """
     if not round_responses:
         return ""
-    normalized_to_original: dict[str, str] = {}
+    first_reply: dict[str, str] = {}
     counts: Counter[str] = Counter()
     for resp in round_responses.values():
-        norm = _normalize(resp)
-        counts[norm] += 1
-        if norm not in normalized_to_original:
-            normalized_to_original[norm] = resp
-    winner_norm, _votes = counts.most_common(1)[0]
-    return normalized_to_original[winner_norm]
+        key = final_answer(resp) or _normalize(resp)
+        counts[key] += 1
+        first_reply.setdefault(key, resp)
+    # Counter.most_common keeps insertion order among equal counts.
+    winner, _votes = counts.most_common(1)[0]
+    return first_reply[winner]

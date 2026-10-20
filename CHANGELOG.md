@@ -340,7 +340,10 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
   replayed the failure. ``Agent.resume`` without a checkpoint still
   replays the last run, finished or not. Runs on one ``(session,
   user)`` take turns within a process instead of interleaving their
-  journal entries.
+  journal entries. A run started inside another run (a sub-agent,
+  debater or worker) journals under the enclosing run, so resuming the
+  outer run replays the sub-runs' tool calls too, and two calls to one
+  persistent worker within a run stay distinct.
 * Tool calls are journaled by position (turn and slot) plus tool and
   args, so a resumed run replays the same call even when the model is
   asked again, while a retry in a later turn, or a deliberate second
@@ -360,6 +363,22 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
   once that much time had passed, even while idle. Concurrent or
   nested runs count once. Code that drives ``allows_step`` /
   ``consume`` itself wraps its work in ``budget.running()``.
+
+### Fixed — architectures
+
+* **Debate.** The majority vote compares each debater's final answer
+  (debaters are asked for a ``Final answer: ...`` line; ``\boxed{}``
+  also counts) and breaks ties by debater order: it used to compare
+  whole replies, so differently worded agreement never matched and the
+  reply that finished first won ("2 of 3 said 42, 7 won"). Convergence
+  likewise compares final answers, so two similar arguments for
+  different answers no longer end the debate. A debater that raises or
+  is interrupted sits the round out (``debate.debater_failed``)
+  instead of failing the debate with an ``ExceptionGroup`` or being
+  counted as an answer; the debate fails only when nobody answers.
+  Debater and judge spend is charged to the coordinator's budget.
+  ``rounds`` is documented as debate rounds after the independent one
+  (Du et al.'s ``rounds=2`` is ``rounds=1``).
 
 ### Packaging
 
