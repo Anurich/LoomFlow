@@ -177,34 +177,56 @@ class _AnthropicRecorder:
         return _Msg()
 
 
-async def test_anthropic_complete_forces_synthetic_tool_call() -> None:
-    """When ``output_schema=Receipt`` is passed, the Anthropic
-    adapter must:
+async def test_anthropic_complete_uses_native_json_outputs() -> None:
+    """Claude 4.5 and later: ``output_schema`` goes out as
+    ``output_config.format`` (no synthetic tool, no forced
+    tool_choice, so real tools stay callable) and the JSON text
+    reply comes back as the message text."""
 
-    * add a synthetic ``__output__`` tool whose ``input_schema`` IS
-      the requested schema, AND
-    * set ``tool_choice`` to force the model to invoke it.
+    class _JsonReply(_AnthropicRecorder):
+        async def create(self, **kwargs: Any) -> Any:
+            self.last_kwargs = kwargs
 
-    Together these constrain the model to emit JSON matching the
-    schema as the tool's args — Anthropic's idiomatic structured-
-    output pattern.
-    """
-    fake = _AnthropicRecorder()
+            class _Block:
+                type = "text"
+                text = '{"amount": 42.0, "currency": "USD"}'
+
+            class _Msg:
+                content = [_Block()]
+                stop_reason = "end_turn"
+                usage = type("U", (), {"input_tokens": 10, "output_tokens": 5})()
+
+            return _Msg()
+
+    fake = _JsonReply()
     model = AnthropicModel("claude-opus-4-7", client=fake)
+    text, tool_calls, _, _ = await model.complete(
+        [Message(role=Role.USER, content="give me a receipt")],
+        output_schema=Receipt,
+    )
+    assert json.loads(text) == {"amount": 42.0, "currency": "USD"}
+    assert tool_calls == []
+    fmt = fake.last_kwargs["output_config"]["format"]
+    assert fmt["type"] == "json_schema"
+    assert "amount" in fmt["schema"]["properties"]
+    assert fmt["schema"]["additionalProperties"] is False
+    assert "tool_choice" not in fake.last_kwargs
+    assert "tools" not in fake.last_kwargs
+
+
+async def test_anthropic_complete_forces_synthetic_tool_call_on_older_models() -> None:
+    """Models without JSON outputs fall back to a synthetic
+    ``__output__`` tool. With no other tools it is forced; its args
+    are promoted to the message text, not surfaced as a tool call."""
+    fake = _AnthropicRecorder()
+    model = AnthropicModel("claude-opus-4-1", client=fake)
 
     text, tool_calls, _, _ = await model.complete(
         [Message(role=Role.USER, content="give me a receipt")],
         output_schema=Receipt,
     )
-
-    # The synthetic tool's args were promoted to the message text.
     assert json.loads(text) == {"amount": 42.0, "currency": "USD"}
-    # The synthetic tool is NOT surfaced as a real tool_call to the
-    # agent loop — it's the structured output, not a tool dispatch.
     assert tool_calls == []
-
-    # The request payload must include the synthetic tool + force
-    # the model to invoke it.
     sent_tools = fake.last_kwargs.get("tools", [])
     synthetic = next((t for t in sent_tools if t["name"] == "__output__"), None)
     assert synthetic is not None

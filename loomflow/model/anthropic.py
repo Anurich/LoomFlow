@@ -26,6 +26,7 @@ from __future__ import annotations
 import inspect
 import json
 import os
+import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
@@ -94,6 +95,8 @@ def _apply_anthropic_cache_control(
     if cache_ctrl is None:
         return
     tail_marked = _mark_message_tail(messages, cache_ctrl)
+    # Empty text blocks can't be cached (or sent): drop them.
+    system_parts = [part for part in system_parts if part]
     if system_parts:
         # Build content blocks for each system part; mark the LAST
         # N with cache_control. Anthropic supports 4 breakpoints
@@ -225,6 +228,30 @@ def _temperature_kwargs(method: Any, temperature: float) -> dict[str, Any]:
     return {"extra_body": {"temperature": temperature}}
 
 
+def _fit_to_sdk(method: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Move request fields the installed SDK's ``method`` doesn't take
+    as keywords (API features newer than the SDK, e.g.
+    ``output_config`` on anthropic 0.x) into ``extra_body``."""
+    try:
+        params = inspect.signature(method).parameters
+    except (TypeError, ValueError):
+        return kwargs
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return kwargs
+    fitted: dict[str, Any] = {}
+    extra = dict(kwargs.get("extra_body") or {})
+    for key, value in kwargs.items():
+        if key == "extra_body":
+            continue
+        if key in params:
+            fitted[key] = value
+        else:
+            extra[key] = value
+    if extra:
+        fitted["extra_body"] = extra
+    return fitted
+
+
 @dataclass
 class _PartialTool:
     id: str = ""
@@ -243,13 +270,12 @@ class _PartialThinking:
 class AnthropicModel:
     """Talks to Claude via :class:`anthropic.AsyncAnthropic`."""
 
-    # See ``OpenAIModel.supports_native_structured_output``. Anthropic
-    # has no first-party ``response_format``; we translate
-    # ``output_schema`` into a forced tool call (``tool_choice``
-    # pointing at a synthetic ``__output__`` tool whose ``input_schema``
-    # IS the requested schema). The tool is required, so the model
-    # MUST emit a JSON object matching the schema. Equivalent
-    # constraint, no schema text needed in the prompt.
+    # See ``OpenAIModel.supports_native_structured_output``. On models
+    # with JSON outputs (Claude 4.5 and later) ``output_schema`` is sent
+    # as ``output_config.format``: the reply is constrained to the
+    # schema and real tools stay callable. Older models, and schemas
+    # the API's JSON-schema subset can't express, fall back to a
+    # synthetic ``__output__`` tool.
     supports_native_structured_output: bool = True
 
     def __init__(
@@ -307,7 +333,9 @@ class AnthropicModel:
                 resolved_key = secrets.lookup_sync("ANTHROPIC_API_KEY")
             if resolved_key is None:
                 resolved_key = os.environ.get("ANTHROPIC_API_KEY")
-            self._client = AsyncAnthropic(api_key=resolved_key)
+            # Retries happen once, in loomflow's RetryingModel; the
+            # SDK's own (2 by default) would multiply them.
+            self._client = AsyncAnthropic(api_key=resolved_key, max_retries=0)
 
     async def count_tokens(
         self,
@@ -356,6 +384,42 @@ class AnthropicModel:
                 **kwargs
             )
         return int(getattr(resp, "input_tokens", 0))
+
+    def _structured_output(
+        self,
+        output_schema: Any | None,
+        anth_tools: list[dict[str, Any]],
+        *,
+        thinking: bool,
+    ) -> tuple[dict[str, Any] | None, str, dict[str, Any] | None]:
+        """How to ask for ``output_schema``: ``(output_config.format,
+        synthetic tool name, tool_choice)``.
+
+        Models with JSON outputs get ``output_config.format`` and no
+        tool_choice, so real tools stay callable. Otherwise a
+        synthetic ``__output__`` tool is appended to ``anth_tools``:
+        forced when it's the only tool, required-among-tools
+        (``any``) when there are others, and left to the model
+        (``auto``) when thinking is on, since a forced tool_choice
+        can't be combined with thinking.
+        """
+        if output_schema is None:
+            return None, "", None
+        if _supports_json_outputs(self.name):
+            schema = _json_output_schema(output_schema)
+            if schema is not None:
+                return {"type": "json_schema", "schema": schema}, "", None
+        synthetic = _schema_as_tool(output_schema)
+        if synthetic is None:
+            return None, "", None
+        others = bool(anth_tools)
+        anth_tools.append(synthetic)
+        name = str(synthetic["name"])
+        if thinking:
+            return None, name, None
+        if others:
+            return None, name, {"type": "any"}
+        return None, name, {"type": "tool", "name": name}
 
     def _effort_kwargs(
         self, effort: str | None, strict_effort: bool
@@ -426,14 +490,9 @@ class AnthropicModel:
             ),
         )
         anth_tools = [_to_anthropic_tool(t) for t in (tools or [])]
-
-        # Structured output: synthesize a forced tool call.
-        synthetic_tool_name = ""
-        if output_schema is not None:
-            synthetic = _schema_as_tool(output_schema)
-            if synthetic is not None:
-                anth_tools.append(synthetic)
-                synthetic_tool_name = synthetic["name"]
+        json_format, synthetic_tool_name, tool_choice = self._structured_output(
+            output_schema, anth_tools, thinking=bool(effort_kwargs.get("thinking"))
+        )
 
         create = getattr(getattr(self._client, "messages", None), "create", None)
         kwargs: dict[str, Any] = {
@@ -449,19 +508,18 @@ class AnthropicModel:
             kwargs["system"] = "\n\n".join(system_parts)
         if anth_tools:
             kwargs["tools"] = anth_tools
-        if synthetic_tool_name:
-            # Force the model to invoke the structured-output tool.
-            # The model can still chain real-tool calls before it,
-            # but its terminal response MUST be the synthetic one.
-            kwargs["tool_choice"] = {
-                "type": "tool",
-                "name": synthetic_tool_name,
-            }
+        if tool_choice is not None:
+            kwargs["tool_choice"] = tool_choice
         # Reasoning-effort kwargs (resolved above). Adapter picks the
-        # right regime (Opus 4.7 adaptive-only / 4.6 adaptive+effort /
-        # legacy budget_tokens) based on the model name; drops the
-        # kwarg with a warning on models that don't support it.
+        # regime (adaptive + output_config.effort, or budget_tokens)
+        # from the model name; drops the kwarg with a warning on
+        # models that don't support it.
         kwargs.update(effort_kwargs)
+        if json_format is not None:
+            kwargs["output_config"] = {
+                **kwargs.get("output_config", {}),
+                "format": json_format,
+            }
         # Thinking constraints: budget_tokens < max_tokens, and
         # temperature must stay at the API default.
         _reconcile_thinking_kwargs(kwargs)
@@ -501,6 +559,7 @@ class AnthropicModel:
                     prompt_caching=prompt_caching,
                 )
             )
+        kwargs = _fit_to_sdk(create, kwargs)
         try:
             if timeout_s is not None:
                 with anyio.fail_after(timeout_s):
@@ -655,12 +714,9 @@ class AnthropicModel:
             ),
         )
         anth_tools = [_to_anthropic_tool(t) for t in (tools or [])]
-        synthetic_tool_name = ""
-        if output_schema is not None:
-            synthetic = _schema_as_tool(output_schema)
-            if synthetic is not None:
-                anth_tools.append(synthetic)
-                synthetic_tool_name = synthetic["name"]
+        json_format, synthetic_tool_name, tool_choice = self._structured_output(
+            output_schema, anth_tools, thinking=bool(effort_kwargs.get("thinking"))
+        )
 
         kwargs: dict[str, Any] = {
             "model": self.name,
@@ -673,14 +729,16 @@ class AnthropicModel:
             # cache-control helper rewrites this to a multi-block list
             # when caching is enabled.
             kwargs["system"] = "\n\n".join(system_parts)
-        if synthetic_tool_name:
-            kwargs["tool_choice"] = {
-                "type": "tool",
-                "name": synthetic_tool_name,
-            }
+        if tool_choice is not None:
+            kwargs["tool_choice"] = tool_choice
         if anth_tools:
             kwargs["tools"] = anth_tools
         kwargs.update(effort_kwargs)
+        if json_format is not None:
+            kwargs["output_config"] = {
+                **kwargs.get("output_config", {}),
+                "format": json_format,
+            }
         # Thinking constraints: budget_tokens < max_tokens, and
         # temperature must stay at the API default.
         _reconcile_thinking_kwargs(kwargs)
@@ -711,6 +769,7 @@ class AnthropicModel:
         agg_output = 0
         finish_reason: str | None = None
 
+        kwargs = _fit_to_sdk(self._client.messages.stream, kwargs)
         async with self._client.messages.stream(**kwargs) as stream:
             async for event in iter_with_deadline(
                 stream, deadline, self.name, timeout_s
@@ -721,16 +780,16 @@ class AnthropicModel:
                     msg = getattr(event, "message", None)
                     usage = getattr(msg, "usage", None) if msg is not None else None
                     if usage is not None:
-                        agg_input += getattr(usage, "input_tokens", 0) or 0
-                        agg_output += getattr(usage, "output_tokens", 0) or 0
+                        agg_input = getattr(usage, "input_tokens", 0) or 0
+                        agg_output = getattr(usage, "output_tokens", 0) or 0
                         # Cache stats are emitted on ``message_start``
                         # in the streaming event sequence (the API
                         # decides cache hit/miss before producing
                         # tokens). Pull them once here.
-                        agg_cache_read += (
+                        agg_cache_read = (
                             getattr(usage, "cache_read_input_tokens", 0) or 0
                         )
-                        agg_cache_write += (
+                        agg_cache_write = (
                             getattr(usage, "cache_creation_input_tokens", 0)
                             or 0
                         )
@@ -816,7 +875,21 @@ class AnthropicModel:
                 elif etype == "message_delta":
                     usage = getattr(event, "usage", None)
                     if usage is not None:
-                        agg_output += getattr(usage, "output_tokens", 0) or 0
+                        # Delta usage is cumulative for the message
+                        # (Anthropic streaming docs): it replaces what
+                        # ``message_start`` reported rather than adding.
+                        out = getattr(usage, "output_tokens", None)
+                        if out is not None:
+                            agg_output = out
+                        agg_input = getattr(usage, "input_tokens", None) or agg_input
+                        agg_cache_read = (
+                            getattr(usage, "cache_read_input_tokens", None)
+                            or agg_cache_read
+                        )
+                        agg_cache_write = (
+                            getattr(usage, "cache_creation_input_tokens", None)
+                            or agg_cache_write
+                        )
                     delta = getattr(event, "delta", None)
                     if delta is not None:
                         sr = getattr(delta, "stop_reason", None)
@@ -995,6 +1068,138 @@ def _to_anthropic_tool(t: ToolDef) -> dict[str, Any]:
         "description": t.description,
         "input_schema": t.input_schema or {"type": "object", "properties": {}},
     }
+
+
+#: Models with JSON outputs (``output_config.format``), per the
+#: structured-outputs docs.
+_JSON_OUTPUT_MODELS = (
+    "claude-fable",
+    "claude-mythos",
+    "claude-opus-5",
+    "claude-opus-4-8",
+    "claude-opus-4-7",
+    "claude-opus-4-6",
+    "claude-opus-4-5",
+    "claude-sonnet-5",
+    "claude-sonnet-4-6",
+    "claude-sonnet-4-5",
+    "claude-haiku-5",
+    "claude-haiku-4-5",
+)
+
+# JSON-schema keywords the API rejects; their values are moved into the
+# field's description (the agent loop still validates the reply
+# against the full schema).
+_UNSUPPORTED_JSON_KEYWORDS = (
+    "minimum",
+    "maximum",
+    "exclusiveMinimum",
+    "exclusiveMaximum",
+    "multipleOf",
+    "minLength",
+    "maxLength",
+    "maxItems",
+    "uniqueItems",
+    "minProperties",
+    "maxProperties",
+    "patternProperties",
+)
+_SUPPORTED_FORMATS = frozenset(
+    {"date-time", "time", "date", "duration", "email", "hostname",
+     "uri", "ipv4", "ipv6", "uuid"}
+)
+_UNSUPPORTED_REGEX = re.compile(r"\(\?[=!<]|\\[bB1-9]")
+
+
+def _supports_json_outputs(model_name: str) -> bool:
+    return model_name.lower().startswith(_JSON_OUTPUT_MODELS)
+
+
+def _json_output_schema(output_schema: Any) -> dict[str, Any] | None:
+    """``output_schema``'s JSON schema in the subset the API accepts, or
+    ``None`` when it can't be expressed there (not a Pydantic model,
+    recursive, or a free-form ``dict`` field)."""
+    if not (isinstance(output_schema, type) and hasattr(output_schema, "model_json_schema")):
+        return None
+    schema = output_schema.model_json_schema()
+    if _is_recursive(schema):
+        return None
+    try:
+        subset: dict[str, Any] = _to_json_output_subset(schema)
+    except _Inexpressible:
+        return None
+    return subset
+
+
+class _Inexpressible(Exception):
+    pass
+
+
+def _is_recursive(schema: dict[str, Any]) -> bool:
+    defs = {**schema.get("$defs", {}), **schema.get("definitions", {})}
+
+    def refs(node: Any) -> set[str]:
+        found: set[str] = set()
+        if isinstance(node, dict):
+            ref = node.get("$ref")
+            if isinstance(ref, str) and ref.startswith("#/"):
+                found.add(ref.rsplit("/", 1)[-1])
+            for value in node.values():
+                found |= refs(value)
+        elif isinstance(node, list):
+            for value in node:
+                found |= refs(value)
+        return found
+
+    edges = {name: refs(body) for name, body in defs.items()}
+
+    def reaches(start: str, target: str, seen: set[str]) -> bool:
+        for nxt in edges.get(start, ()):
+            if nxt == target or (nxt not in seen and reaches(nxt, target, seen | {nxt})):
+                return True
+        return False
+
+    return any(reaches(name, name, {name}) for name in edges)
+
+
+def _to_json_output_subset(node: Any) -> Any:
+    if isinstance(node, list):
+        return [_to_json_output_subset(v) for v in node]
+    if not isinstance(node, dict):
+        return node
+    out: dict[str, Any] = {}
+    notes: list[str] = []
+    for key, value in node.items():
+        if key in _UNSUPPORTED_JSON_KEYWORDS:
+            notes.append(f"{key}: {json.dumps(value)}")
+        elif key == "format" and value not in _SUPPORTED_FORMATS:
+            notes.append(f"format: {value}")
+        elif key == "pattern" and isinstance(value, str) and _UNSUPPORTED_REGEX.search(value):
+            notes.append(f"pattern: {value}")
+        elif key == "minItems" and isinstance(value, int) and value > 1:
+            notes.append(f"minItems: {value}")
+            out["minItems"] = 1
+        elif key == "oneOf":
+            out["anyOf"] = _to_json_output_subset(value)
+        elif key == "allOf" and isinstance(value, list) and len(value) == 1:
+            # Pydantic's ``allOf: [{"$ref": ...}]`` wrapper; ``allOf``
+            # with ``$ref`` isn't supported, the plain ``$ref`` is.
+            out.update(_to_json_output_subset(value[0]))
+        elif key == "additionalProperties" and value not in (False, None):
+            if value is True or isinstance(value, dict) and value:
+                raise _Inexpressible  # a free-form / dict[str, X] field
+        elif key in ("properties", "$defs", "definitions") and isinstance(value, dict):
+            out[key] = {k: _to_json_output_subset(v) for k, v in value.items()}
+        else:
+            out[key] = _to_json_output_subset(value)
+    if out.get("type") == "object" or "properties" in out:
+        out["additionalProperties"] = False
+    if notes:
+        description = out.get("description", "")
+        out["description"] = (description + " " if description else "") + (
+            "(" + "; ".join(notes) + ")"
+        )
+    return out
 
 
 def _schema_as_tool(output_schema: Any | None) -> dict[str, Any] | None:

@@ -130,6 +130,41 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
   session-scoped forget still leaves them, since blocks aren't per
   session. ``MemoryExport`` now includes the user's ``blocks``.
 
+### Fixed — models (checked against the provider docs, October 2026)
+
+* **Pricing** updated to the official tables: Opus 5.5 $4/$20, Sonnet
+  5.5 $2/$10, Haiku 5.5 $0.10/$0.50 (and $0.50/$2.50 above 100K prompt
+  tokens), Fable / Mythos 5.x, GPT-6.x / 5.6 / 5.2 / pro models, o1-pro,
+  DeepSeek V4 (peak rate). Per-model cache-read rates, GPT-6 / 5.6
+  cache writes and long-context tiers are applied.
+* **Anthropic structured output** uses native JSON outputs
+  (``output_config.format``) on Claude 4.5 and later, so real tools
+  stay callable. It used to force ``tool_choice``, which blocked tools
+  and is rejected by current models. Older models keep a synthetic
+  output tool, forced only when it's the only tool and never with
+  thinking.
+* **Effort** reaches every current Claude model, clamped to the levels
+  each model accepts (``minimal`` → ``low``). OpenAI effort follows
+  each family's documented levels. An unknown effort string now
+  raises ``ValueError``.
+* **GPT-6 tools:** GPT-6 Astra and 6.1 Sol raise a clear error when
+  given tools through Chat Completions, and GPT-6 Sol / Luna send
+  ``reasoning_effort="none"`` when tools are offered, as OpenAI
+  requires. Bare ``o1`` / ``o3`` model ids resolve.
+* **Retries:** SDK clients loomflow builds no longer retry on their own
+  (that used to multiply attempts). A mid-stream ``overloaded_error``
+  and HTTP 408/409 are retried, and an OpenAI ``insufficient_quota``
+  429 isn't. ``retry-after-ms`` and HTTP-date ``Retry-After`` are read,
+  and a hint beyond ``max_delay_s`` ends the retries.
+  **Behaviour change:** ``RetryPolicy`` uses full jitter by default
+  (``jitter="full"``).
+* **Context windows** for current models (1M for Claude 4.6+ / 5.x,
+  1.05M for GPT-5.4+ / 6.x, 1M for DeepSeek V4).
+* Anthropic stream output tokens are no longer double-counted. Empty
+  system parts get no cache marker. OpenAI strict schemas inline
+  ``$ref`` with sibling keys, and schemas with ``dict`` fields go out
+  non-strict instead of forcing ``{}``.
+
 ### Packaging
 
 * Removed the ``dbos`` and ``temporal`` extras: nothing in loomflow

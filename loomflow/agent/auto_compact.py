@@ -78,17 +78,27 @@ if TYPE_CHECKING:
 # "claude-sonnet-4-6" before "claude-sonnet", "gpt-5.4" before
 # "gpt-5").
 _KNOWN_CONTEXT_WINDOWS: dict[str, int] = {
-    # Claude family — Opus 4.6/4.7 + Sonnet 4.6 expanded to 1M; older
-    # Opus (4.5/4.1/4.0), Sonnet 4.5/4, and Haiku stay at 200k.
+    # Claude (platform.claude.com context-windows): every model from
+    # Opus / Sonnet 4.6 on, Haiku 5.5, Fable and Mythos has 1M by
+    # default; Opus 4.5 and earlier, Sonnet 4.5 / 4 and Haiku 4.5 200k.
+    "claude-fable": 1_000_000,
+    "claude-mythos": 1_000_000,
+    "claude-opus-5": 1_000_000,
+    "claude-opus-4-8": 1_000_000,
     "claude-opus-4-7": 1_000_000,
     "claude-opus-4-6": 1_000_000,
     "claude-opus-4": 200_000,
+    "claude-sonnet-5": 1_000_000,
     "claude-sonnet-4-6": 1_000_000,
     "claude-sonnet": 200_000,
+    "claude-haiku-5": 1_000_000,
     "claude-haiku": 200_000,
     "claude-3-5": 200_000,
-    # OpenAI family — GPT-5.x: 5.5 = 1M, 5.4 = 1.05M, 5/codex = 400k.
-    "gpt-5.5": 1_000_000,
+    # OpenAI (developers.openai.com model pages): GPT-6.x, GPT-5.6,
+    # 5.5 and 5.4 = 1.05M; GPT-5.3 / 5.x / codex = 400k.
+    "gpt-6": 1_050_000,
+    "gpt-5.6": 1_050_000,
+    "gpt-5.5": 1_050_000,
     "gpt-5.4": 1_050_000,
     "gpt-5.3": 400_000,
     "gpt-5": 400_000,
@@ -100,6 +110,10 @@ _KNOWN_CONTEXT_WINDOWS: dict[str, int] = {
     "o3": 200_000,
     "o4": 200_000,
     "o1": 200_000,
+    # DeepSeek V4 (api-docs.deepseek.com) = 1M; V3.x chat/reasoner 128k.
+    "deepseek-flash": 1_000_000,
+    "deepseek-v4": 1_000_000,
+    "deepseek": 128_000,
     # Gemini
     "gemini-1.5": 1_000_000,
     "gemini-2": 1_000_000,

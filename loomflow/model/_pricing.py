@@ -7,8 +7,9 @@ to :class:`~loomflow.core.types.Usage`. Without this, every
 cap is unenforceable.
 
 Snapshots, not facts. Provider pricing changes; the table below
-captures rates as of **May 2026** for the models loomflow's adapters
-target by default. Two ways to keep up:
+captures the official list prices as of **October 2026**
+(platform.claude.com pricing, developers.openai.com pricing,
+api-docs.deepseek.com pricing). Two ways to keep up:
 
 * Override at the call site — adapters accept a ``cost_per_mtoken=``
   constructor kwarg (an ``(input_rate, output_rate)`` tuple in USD
@@ -25,61 +26,98 @@ match (so ``gpt-4.1-mini-2026-05-13`` still gets the
 ``gpt-4.1-mini`` rate). If even that misses, the call returns
 ``0.0`` and emits a one-time warning per unknown model — quiet
 enough for production noise, loud enough to surface a typo.
+
+Long-context tiers (Claude Haiku 5.5 above 100K prompt tokens; GPT-5.4
+and later above 272K) bill the whole request at the higher rate.
+DeepSeek's V4 models are billed at their peak-hour rate, an upper
+bound (off-peak is half).
 """
 
 from __future__ import annotations
 
 import warnings
+from typing import TypeVar
 
-# Prices in USD per **1 million tokens**, as ``(input, output)``.
-# Cached input + cache-write tokens ARE discounted in
-# :func:`estimate_cost` via the multiplier tables below (cache reads
-# can be per-model — see :data:`_CACHE_READ_OVERRIDE`).
-PRICING_PER_MTOKEN: dict[str, tuple[float, float]] = {
+_T = TypeVar("_T")
+
+# Prices in USD per **1 million tokens**, as ``(input, output)`` or
+# ``(input, output, cached_input)``. Without the third element cache
+# hits bill at the provider's multiplier below; with it, at that
+# absolute rate. Cache-write tokens bill via the write multipliers.
+PRICING_PER_MTOKEN: dict[str, tuple[float, float] | tuple[float, float, float]] = {
     # ----- OpenAI ---------------------------------------------------------
-    # GPT-5.x family (current generation). Cached input is 10% of the
-    # input rate for the whole family — see _CACHE_READ_OVERRIDE.
-    "gpt-5.5":          (5.00,  30.00),
-    "gpt-5.5-pro":      (30.00, 180.00),
-    "gpt-5.4":          (2.50,  15.00),
-    "gpt-5.4-mini":     (0.75,   4.50),
-    "gpt-5.4-nano":     (0.20,   1.25),
-    "gpt-5.4-pro":      (30.00, 180.00),
-    "gpt-5.3-codex":    (1.75,  14.00),
-    "gpt-5":            (1.25,  10.00),
-    "gpt-5-mini":       (0.25,   2.00),
-    "gpt-5-nano":       (0.05,   0.40),
-    "gpt-4.1":          (2.00,   8.00),
-    "gpt-4.1-mini":     (0.40,   1.60),
-    "gpt-4.1-nano":     (0.10,   0.40),
-    "gpt-4o":           (2.50,  10.00),
-    "gpt-4o-mini":      (0.15,   0.60),
-    "gpt-4-turbo":      (10.00, 30.00),
-    "gpt-4":            (30.00, 60.00),
-    "gpt-3.5-turbo":    (0.50,   1.50),
+    # Cached input from the official table; "pro" models have no
+    # cached rate (cache hits bill at the input rate).
+    "gpt-6-astra":      (10.00,  50.00, 1.00),
+    "gpt-6.1-sol":      (2.00,   10.00, 0.10),
+    "gpt-6-sol":        (2.00,   10.00, 0.20),
+    "gpt-6-luna":       (0.10,    0.50, 0.01),
+    "gpt-5.6-sol":      (4.00,   20.00, 0.40),
+    "gpt-5.6-terra":    (2.00,   12.00, 0.20),
+    "gpt-5.6-luna":     (0.20,    1.20, 0.02),
+    "gpt-5.5":          (5.00,   30.00, 0.50),
+    "gpt-5.5-pro":      (30.00, 180.00, 30.00),
+    "gpt-5.4":          (2.50,   15.00, 0.25),
+    "gpt-5.4-mini":     (0.75,    4.50, 0.075),
+    "gpt-5.4-nano":     (0.20,    1.25, 0.02),
+    "gpt-5.4-pro":      (30.00, 180.00, 30.00),
+    "gpt-5.3-codex":    (1.75,   14.00, 0.175),
+    "gpt-5.2":          (1.75,   14.00, 0.175),
+    "gpt-5.2-pro":      (21.00, 168.00, 21.00),
+    "gpt-5.1":          (1.25,   10.00, 0.125),
+    "gpt-5-search-api": (1.25,   10.00, 0.125),
+    "gpt-5":            (1.25,   10.00, 0.125),
+    "gpt-5-pro":        (15.00, 120.00, 15.00),
+    "gpt-5-mini":       (0.25,    2.00, 0.025),
+    "gpt-5-nano":       (0.05,    0.40, 0.005),
+    "chat-latest":      (5.00,   30.00, 0.50),
+    "gpt-4.1":          (2.00,    8.00, 0.50),
+    "gpt-4.1-mini":     (0.40,    1.60, 0.10),
+    "gpt-4.1-nano":     (0.10,    0.40, 0.025),
+    "gpt-4o":           (2.50,   10.00, 1.25),
+    "gpt-4o-2024-05-13": (5.00,  15.00, 5.00),
+    "gpt-4o-mini":      (0.15,    0.60, 0.075),
+    "gpt-4-turbo":      (10.00,  30.00, 10.00),
+    "gpt-4":            (30.00,  60.00, 30.00),
+    "gpt-3.5-turbo":    (0.50,    1.50, 0.50),
     # Reasoning models
-    "o1":               (15.00, 60.00),
-    "o1-preview":       (15.00, 60.00),
-    "o1-mini":          (3.00,  12.00),
-    "o3-pro":           (20.00, 80.00),
-    "o3":               (2.00,   8.00),
-    "o3-mini":          (1.10,   4.40),
-    "o4-mini":          (1.10,   4.40),
+    "o1":               (15.00,  60.00, 7.50),
+    "o1-pro":           (150.00, 600.00, 150.00),
+    "o1-preview":       (15.00,  60.00, 7.50),
+    "o1-mini":          (3.00,   12.00, 1.50),
+    "o3-pro":           (20.00,  80.00, 20.00),
+    "o3":               (2.00,    8.00, 0.50),
+    "o3-mini":          (1.10,    4.40, 0.55),
+    "o4-mini":          (1.10,    4.40, 0.275),
 
     # ----- Anthropic ------------------------------------------------------
-    # Opus 4.5+ dropped to $5/$25; Opus 4.1 / 4.0 keep the old $15/$75.
+    # Cache hits are 0.1x input except Opus/Sonnet 5.5 (0.05x) and
+    # Fable/Mythos 5.1 (0.025x). Haiku 5.5's >100K tier is below.
+    "claude-fable-5-1":  (10.00, 50.00, 0.25),
+    "claude-mythos-5-1": (10.00, 50.00, 0.25),
+    "claude-fable-5":    (10.00, 50.00),
+    "claude-mythos-5":   (10.00, 50.00),
+    "claude-fable":      (10.00, 50.00),
+    "claude-mythos":     (10.00, 50.00),
+    "claude-opus-5-5":  (4.00,  20.00, 0.20),
+    "claude-opus-5":    (5.00,  25.00),
+    "claude-opus-4-8":  (5.00,  25.00),
     "claude-opus-4-7":  (5.00,  25.00),
     "claude-opus-4-6":  (5.00,  25.00),
     "claude-opus-4-5":  (5.00,  25.00),
     "claude-opus-4-1":  (15.00, 75.00),
     "claude-opus-4-0":  (15.00, 75.00),
-    "claude-opus":      (5.00,  25.00),  # generic — current-gen rate
+    "claude-opus-4-20250514": (15.00, 75.00),
+    "claude-opus":      (5.00,  25.00),  # generic — conservative current-gen rate
+    "claude-sonnet-5-5": (2.00, 10.00, 0.10),
+    "claude-sonnet-5":  (2.00,  10.00),
     "claude-sonnet-4-6":(3.00,  15.00),
     "claude-sonnet-4-5":(3.00,  15.00),
     "claude-sonnet-4-0":(3.00,  15.00),
+    "claude-sonnet-4-20250514": (3.00, 15.00),
     "claude-sonnet":    (3.00,  15.00),
+    "claude-haiku-5-5": (0.10,   0.50),
     "claude-haiku-4-5": (1.00,   5.00),
-    "claude-haiku-4-0": (0.80,   4.00),
     "claude-haiku":     (1.00,   5.00),
     "claude-3-5-sonnet":(3.00,  15.00),
     "claude-3-5-haiku": (0.80,   4.00),
@@ -93,12 +131,12 @@ PRICING_PER_MTOKEN: dict[str, tuple[float, float]] = {
     "jev":               (0.042,  0.00),
 
     # ----- DeepSeek -------------------------------------------------------
-    # V3.2 unified pricing (chat and reasoner converged). Cache hits
-    # bill at 10% of the input rate — the "deepseek" entry in
-    # _CACHE_READ_MULTIPLIER. The V4 gateway names (deepseek-v4-flash /
-    # deepseek-v4-pro) are resold at gateway-specific rates, so they
-    # are deliberately NOT listed: pass cost_per_mtoken=(in, out,
-    # cached_in) with your gateway's actual rates instead.
+    # V4 models at their peak-hour rate (off-peak is half): an upper
+    # bound, so budget caps never under-count. ``deepseek-v4-flash``
+    # is the retired name, now served and billed as ``deepseek-flash``.
+    "deepseek-flash":    (0.30,   1.20, 0.006),
+    "deepseek-v4-flash": (0.30,   1.20, 0.006),
+    "deepseek-v4-pro":   (1.32,   3.96, 0.044),
     "deepseek-chat":     (0.28,   0.42),
     "deepseek-reasoner": (0.28,   0.42),
 
@@ -112,6 +150,28 @@ PRICING_PER_MTOKEN: dict[str, tuple[float, float]] = {
     "gemini-1.5-flash": (0.075,  0.30),
     "gemini-2.0-flash": (0.10,   0.40),
 }
+
+# Long-context tiers: ``model prefix -> (prompt token threshold,
+# (input, output, cached_input))``. A request whose prompt (input +
+# cached + cache-write tokens) exceeds the threshold bills entirely at
+# the tier's rates.
+LONG_CONTEXT_PER_MTOKEN: dict[str, tuple[int, tuple[float, float, float]]] = {
+    "claude-haiku-5-5": (100_000, (0.50, 2.50, 0.05)),
+    "gpt-6-astra":      (272_000, (20.00, 75.00, 2.00)),
+    "gpt-6.1-sol":      (272_000, (4.00, 15.00, 0.20)),
+    "gpt-6-sol":        (272_000, (4.00, 15.00, 0.40)),
+    "gpt-6-luna":       (272_000, (0.20, 0.75, 0.02)),
+    "gpt-5.6-sol":      (272_000, (8.00, 30.00, 0.80)),
+    "gpt-5.6-terra":    (272_000, (4.00, 18.00, 0.40)),
+    "gpt-5.6-luna":     (272_000, (0.40, 1.80, 0.04)),
+    "gpt-5.5":          (272_000, (10.00, 45.00, 1.00)),
+    "gpt-5.5-pro":      (272_000, (60.00, 270.00, 60.00)),
+    "gpt-5.4":          (272_000, (5.00, 22.50, 0.50)),
+    "gpt-5.4-pro":      (272_000, (60.00, 270.00, 60.00)),
+}
+
+# The mini / nano variants of a long-context family have no tier.
+_NO_LONG_CONTEXT = ("gpt-5.4-mini", "gpt-5.4-nano")
 
 
 # Track models we've already warned about so the log isn't flooded.
@@ -146,17 +206,22 @@ _CACHE_WRITE_MULTIPLIER: dict[str, dict[str, float]] = {
     "litellm": {"5m": 1.25, "1h": 2.0},   # assume Anthropic-style
 }
 
-# Per-model cache-read overrides. OpenAI's cache-read discount is no
-# longer uniform, so the provider-level default above is too coarse:
-#   * GPT-5.x  — cached input costs 10% of the input rate (0.1x).
-#   * GPT-4.1  — 25% (0.25x).
+# Per-model cache-read multipliers for table entries that don't carry
+# an absolute cached rate (e.g. a dated or user-added ``gpt-5.x``):
+#   * GPT-5.x / GPT-6.x — cached input costs 10% of the input rate.
+#   * GPT-4.1 — 25%.
 # Matched by longest-prefix on the model name (like the pricing
-# table). Anything unmatched falls back to the provider default, so
-# gpt-4o keeps its historic 0.5x. Anthropic / Gemini are already
-# uniform at 0.1x and need no per-model entries.
+# table). Anything unmatched falls back to the provider default.
 _CACHE_READ_OVERRIDE: dict[str, float] = {
+    "gpt-6": 0.1,
     "gpt-5": 0.1,
     "gpt-4.1": 0.25,
+}
+
+# OpenAI bills cache writes only on GPT-6 and GPT-5.6, at 1.25x input.
+_CACHE_WRITE_OVERRIDE: dict[str, float] = {
+    "gpt-6": 1.25,
+    "gpt-5.6": 1.25,
 }
 
 
@@ -181,7 +246,7 @@ def _provider_for(model: str) -> str:
         return "openai"
     if model.startswith("claude-"):
         return "anthropic"
-    if model.startswith(("gpt-", "o1-", "o3-", "o4-")):
+    if model.startswith(("gpt-", "o1", "o3", "o4", "chat-latest")):
         return "openai"
     if model.startswith("gemini-"):
         return "gemini"
@@ -229,6 +294,9 @@ def estimate_cost(
     3. **Longest-prefix** match (``gpt-4.1-mini-2026-05-13`` →
        ``gpt-4.1-mini``).
     4. Miss → return ``0.0`` and warn once per unknown model.
+
+    Without an override, a prompt larger than the model's
+    :data:`LONG_CONTEXT_PER_MTOKEN` threshold bills at that tier.
     """
     if not model:
         return 0.0
@@ -250,9 +318,17 @@ def estimate_cost(
                 stacklevel=3,
             )
         return 0.0
-    # 3-tuple override carries an absolute cached-input rate; the
-    # 2-tuple form (and the table) falls back to the provider's
-    # cache-read multiplier.
+    if override is None:
+        tier = _prefix_lookup(LONG_CONTEXT_PER_MTOKEN, model)
+        prompt_tokens = input_tokens + cached_input_tokens + cache_write_tokens
+        if (
+            tier is not None
+            and prompt_tokens > tier[0]
+            and not model.startswith(_NO_LONG_CONTEXT)
+        ):
+            pricing = tier[1]
+    # A 3-tuple carries an absolute cached-input rate; the 2-tuple
+    # form falls back to the provider's cache-read multiplier.
     cached_rate: float | None = None
     if len(pricing) == 3:
         in_rate, out_rate, cached_rate = pricing
@@ -262,8 +338,11 @@ def estimate_cost(
     provider = _provider_for(model)
     if cached_rate is None:
         cached_rate = in_rate * _cache_read_multiplier(model, provider)
-    write_mult = _CACHE_WRITE_MULTIPLIER.get(provider, {}).get(
-        cache_ttl, 1.25
+    write_override = _prefix_lookup(_CACHE_WRITE_OVERRIDE, model)
+    write_mult = (
+        write_override
+        if write_override is not None
+        else _CACHE_WRITE_MULTIPLIER.get(provider, {}).get(cache_ttl, 1.25)
     )
 
     total = (
@@ -275,7 +354,18 @@ def estimate_cost(
     return total / 1_000_000.0
 
 
-def _longest_prefix_match(model: str) -> tuple[float, float] | None:
+def _prefix_lookup(table: dict[str, _T], model: str) -> _T | None:
+    """The value of the longest key in ``table`` that ``model`` starts with."""
+    best: str | None = None
+    for key in table:
+        if model.startswith(key) and (best is None or len(key) > len(best)):
+            best = key
+    return table[best] if best is not None else None
+
+
+def _longest_prefix_match(
+    model: str,
+) -> tuple[float, float] | tuple[float, float, float] | None:
     """Find the longest key in the pricing table that ``model`` starts
     with. Returns ``None`` if no key is a prefix.
 

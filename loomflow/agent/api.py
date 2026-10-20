@@ -617,6 +617,9 @@ class Agent:
         # ``Agent(effort="high")`` makes "this agent always thinks
         # hard" the contract; per-call ``run(..., effort=)`` still
         # wins for callers that want to override per-prompt.
+        from ..model._effort import validate_effort
+
+        validate_effort(effort)  # a typo raises here, not silently later
         self._default_effort: str | None = effort
         # ``strict_effort`` is agent-level only — no per-call
         # override. If you want a run to fail when the model can't
@@ -2102,6 +2105,9 @@ class Agent:
         dispatch, sub-agents — is cancelled via the ``fail_after``
         scope and :class:`~loomflow.RunTimeout` is raised.
         """
+        from ..model._effort import validate_effort
+
+        validate_effort(kwargs.get("effort"))
         if self._timeout is None:
             return await self._loop(prompt, **kwargs)
         try:
@@ -3309,8 +3315,8 @@ def _resolve_model(
     Strings dispatch by prefix:
 
     * ``claude-*`` -> :class:`AnthropicModel` (direct, no LiteLLM hop)
-    * ``gpt-*`` / ``o1-*`` / ``o3-*`` / ``o4-*`` -> :class:`OpenAIModel`
-      (direct)
+    * ``gpt-*`` / ``o1`` / ``o3`` / ``o1-*`` / ``o3-*`` / ``o4-*`` ->
+      :class:`OpenAIModel` (direct)
     * ``deepseek-*`` -> :class:`OpenAIModel` pointed at DeepSeek's
       OpenAI-compatible endpoint (needs ``DEEPSEEK_API_KEY``). For a
       reseller / gateway, construct ``OpenAIModel(...,
@@ -3350,7 +3356,7 @@ def _resolve_model(
     if spec.startswith("claude-"):
         from ..model.anthropic import AnthropicModel
         return AnthropicModel(spec, secrets=secrets)
-    if spec.startswith(("gpt-", "o1-", "o3-", "o4-")):
+    if spec.startswith(("gpt-", "o1-", "o3-", "o4-")) or spec in ("o1", "o3"):
         from ..model.openai import OpenAIModel
         return OpenAIModel(spec, secrets=secrets)
     if spec.startswith("deepseek-"):
@@ -3390,7 +3396,7 @@ def _resolve_model(
         return LiteLLMModel(inner, secrets=secrets)
     raise ConfigError(
         f"unknown model spec: {spec!r}. Recognised prefixes:\n"
-        "  claude-*, gpt-*, o1-*, o3-*, o4-*, deepseek-* "
+        "  claude-*, gpt-*, o1, o3, o1-*, o3-*, o4-*, deepseek-* "
         "(direct adapters)\n"
         "  mistral-, command-, bedrock/, vertex_ai/, ollama/, "
         "gemini/, groq/, together_ai/, replicate/, azure/ "

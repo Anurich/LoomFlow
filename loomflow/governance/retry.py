@@ -22,8 +22,11 @@ that hit the same SDK).
 
 from __future__ import annotations
 
+import math
 import random
 from dataclasses import dataclass
+from email.utils import parsedate_to_datetime
+from typing import Literal
 
 from ..core.errors import (
     AuthenticationError,
@@ -39,6 +42,7 @@ __all__ = [
     "RetryPolicy",
     "classify_model_error",
     "compute_backoff",
+    "retry_after_exceeds_cap",
 ]
 
 
@@ -53,7 +57,8 @@ class RetryPolicy:
 
     The default is sensible for production: up to **3 attempts**
     (one initial + two retries), starting at 1 s, doubling each
-    attempt, capped at 30 s, with ±10% jitter so synchronised
+    attempt, capped at 30 s, with AWS-style "full jitter" (each delay
+    drawn uniformly from 0 to the computed backoff) so synchronised
     clients don't reform a thundering herd.
 
     Examples::
@@ -77,7 +82,8 @@ class RetryPolicy:
     ``Retry-After`` hints (carried on
     :class:`~loomflow.RateLimitError.retry_after`) override the
     computed delay when they ask for *more* time — we never sleep
-    less than the provider asked for.
+    less than the provider asked for — but a hint longer than
+    ``max_delay_s`` ends the retries instead of sleeping that long.
     """
 
     max_attempts: int = 3
@@ -97,9 +103,11 @@ class RetryPolicy:
     """Geometric growth between successive retries. ``2.0`` doubles
     each time; ``1.0`` makes the policy linear (fixed-interval)."""
 
-    jitter: float = 0.1
-    """Fractional ±jitter applied to each computed delay. ``0.1`` =
-    ±10%. Set to ``0`` for deterministic backoff (useful in tests)."""
+    jitter: float | Literal["full"] = "full"
+    """``"full"`` (default): AWS "full jitter", each delay drawn
+    uniformly from ``[0, backoff]``. A float applies that fractional
+    ±jitter instead (``0.1`` = ±10%). ``0`` gives deterministic
+    backoff (useful in tests)."""
 
     @classmethod
     def disabled(cls) -> RetryPolicy:
@@ -138,27 +146,33 @@ def compute_backoff(
 
     ``retry_after`` (provider hint, e.g. from a 429 ``Retry-After``
     header) acts as a *floor*: we never wait less than the provider
-    asked for, but we still cap at ``policy.max_delay_s``. This
-    means a provider-supplied 60-second hint paired with a 30-second
-    cap is honoured at 60 seconds (exceeding the cap on purpose —
-    the provider is more authoritative than our heuristic).
+    asked for. Callers check :func:`retry_after_exceeds_cap` first: a
+    hint longer than ``policy.max_delay_s`` means "don't retry".
     """
     if policy.max_attempts <= 1:
         return 0.0
 
     base = policy.initial_delay_s * (policy.multiplier ** max(0, attempt - 1))
     base = min(base, policy.max_delay_s)
-    if policy.jitter > 0:
-        r = rng or random
+    r = rng or random
+    if policy.jitter == "full":
+        base = r.uniform(0.0, base)
+    elif policy.jitter > 0:
         # Symmetric ±jitter around ``base``.
         base = base * (1.0 + r.uniform(-policy.jitter, policy.jitter))
     base = max(0.0, base)
 
     if retry_after is not None and retry_after > base:
-        # Provider asked for more time — honour it (still bounded
-        # below by 0; can exceed our cap when the provider says so).
+        # Provider asked for more time — honour it.
         return retry_after
     return base
+
+
+def retry_after_exceeds_cap(policy: RetryPolicy, retry_after: float | None) -> bool:
+    """``True`` when the provider asked us to wait longer than the
+    policy allows: retrying sooner would only be refused again, and
+    sleeping that long (an hour, a day) would stall the run."""
+    return retry_after is not None and retry_after > policy.max_delay_s
 
 
 # ---------------------------------------------------------------------------
@@ -211,6 +225,11 @@ def _classify_openai(exc: BaseException) -> ModelError | None:
 
     # Rate limit is a subclass of APIStatusError; check it first.
     if isinstance(exc, getattr(openai, "RateLimitError", ())):
+        if _error_code(exc) == "insufficient_quota":
+            # Out of credit / over the spend cap: waiting won't help.
+            return PermanentModelError(
+                f"OpenAI quota exhausted: {exc}", cause=exc
+            )
         return RateLimitError(
             f"OpenAI rate limit: {exc}",
             retry_after=_extract_retry_after(exc),
@@ -248,7 +267,7 @@ def _classify_openai(exc: BaseException) -> ModelError | None:
     if isinstance(exc, getattr(openai, "APIStatusError", ())):
         # Anything else with an HTTP status from the OpenAI SDK.
         status = getattr(exc, "status_code", None)
-        if status is not None and 500 <= int(status) < 600:
+        if status is not None and _retryable_status(int(status)):
             return TransientModelError(
                 f"OpenAI {status}: {exc}",
                 retry_after=_extract_retry_after(exc),
@@ -300,8 +319,23 @@ def _classify_anthropic(exc: BaseException) -> ModelError | None:
             cause=exc,
         )
     if isinstance(exc, getattr(anthropic, "APIStatusError", ())):
+        # An error event in the middle of a stream arrives with the
+        # stream's HTTP 200: classify it by the body's error type.
+        etype = _error_type(exc)
+        if etype == "rate_limit_error":
+            return RateLimitError(
+                f"Anthropic rate limit: {exc}",
+                retry_after=_extract_retry_after(exc),
+                cause=exc,
+            )
+        if etype in ("overloaded_error", "api_error"):
+            return TransientModelError(
+                f"Anthropic {etype}: {exc}",
+                retry_after=_extract_retry_after(exc),
+                cause=exc,
+            )
         status = getattr(exc, "status_code", None)
-        if status is not None and 500 <= int(status) < 600:
+        if status is not None and _retryable_status(int(status)):
             return TransientModelError(
                 f"Anthropic {status}: {exc}",
                 retry_after=_extract_retry_after(exc),
@@ -344,12 +378,37 @@ def _classify_httpx(exc: BaseException) -> ModelError | None:
 # ---------------------------------------------------------------------------
 
 
-def _extract_retry_after(exc: BaseException) -> float | None:
-    """Pull a ``Retry-After`` value off a SDK exception when one is
-    available. SDKs vary: some carry the response on ``.response``,
-    some on ``.body``, some not at all.
+def _retryable_status(status: int) -> bool:
+    """HTTP statuses the provider SDKs themselves retry: 408 (request
+    timeout), 409 (lock conflict), 429 and 5xx."""
+    return status in (408, 409, 429) or 500 <= status < 600
 
-    Returns the value in seconds, or ``None`` when nothing is set.
+
+def _error_body(exc: BaseException) -> dict[str, object]:
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        inner = body.get("error")
+        return inner if isinstance(inner, dict) else body
+    return {}
+
+
+def _error_type(exc: BaseException) -> str | None:
+    value = _error_body(exc).get("type")
+    return value if isinstance(value, str) else None
+
+
+def _error_code(exc: BaseException) -> str | None:
+    value = _error_body(exc).get("code") or getattr(exc, "code", None)
+    return value if isinstance(value, str) else None
+
+
+def _extract_retry_after(exc: BaseException) -> float | None:
+    """Pull the provider's retry hint off a SDK exception: the
+    ``retry-after-ms`` header (milliseconds, sent by OpenAI and
+    Anthropic) or ``Retry-After`` (seconds or an HTTP date).
+
+    Returns the value in seconds, or ``None`` when nothing usable is
+    set (missing, negative, NaN or infinite values are ignored).
     """
     response = getattr(exc, "response", None)
     if response is None:
@@ -357,13 +416,30 @@ def _extract_retry_after(exc: BaseException) -> float | None:
     headers = getattr(response, "headers", None)
     if headers is None:
         return None
-    raw = headers.get("retry-after") or headers.get("Retry-After")
-    if not raw:
+    seconds: float | None = None
+    raw_ms = headers.get("retry-after-ms")
+    if raw_ms:
+        try:
+            seconds = float(raw_ms) / 1000.0
+        except (TypeError, ValueError):
+            seconds = None
+    if seconds is None:
+        raw = headers.get("retry-after") or headers.get("Retry-After")
+        if not raw:
+            return None
+        try:
+            seconds = float(raw)
+        except (TypeError, ValueError):
+            try:
+                when = parsedate_to_datetime(str(raw))
+            except (TypeError, ValueError):
+                return None
+            from datetime import UTC, datetime
+
+            seconds = (when - datetime.now(UTC)).total_seconds()
+    if not math.isfinite(seconds) or seconds < 0:
         return None
-    try:
-        return float(raw)
-    except (TypeError, ValueError):
-        return None
+    return seconds
 
 
 _CONTENT_FILTER_HINTS = (
