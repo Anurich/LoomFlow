@@ -417,3 +417,31 @@ async def test_token_estimates_count_tool_calls_images_and_use_o200k() -> None:
     base = await count_tokens(Named(), plain)
     assert await count_tokens(Named(), with_call) > base + 20
     assert await count_tokens(Named(), with_image) >= base + IMAGE_TOKEN_ESTIMATE
+
+
+@pytest.mark.parametrize(
+    ("gateway_id", "direct_id"),
+    [
+        ("anthropic/claude-haiku-5.5", "claude-haiku-5-5"),
+        ("openai/gpt-5-mini", "gpt-5-mini"),
+        ("anthropic/claude-sonnet-5.5", "claude-sonnet-5-5"),
+    ],
+)
+def test_gateway_model_ids_are_priced_like_the_vendor_model(gateway_id: str, direct_id: str) -> None:
+    """OpenRouter-style ``vendor/model`` ids cost $0 (so ``max_cost_usd``
+    never tripped) though the gateway passes the vendor's prices through."""
+    from loomflow.model._pricing import estimate_cost
+
+    cost = estimate_cost(gateway_id, 1000, 500, cached_input_tokens=200)
+    assert cost > 0
+    assert cost == estimate_cost(direct_id, 1000, 500, cached_input_tokens=200)
+
+
+def test_free_gateway_variants_cost_nothing_without_a_warning() -> None:
+    import warnings
+
+    from loomflow.model._pricing import estimate_cost
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert estimate_cost("anthropic/claude-haiku-5.5:free", 1000, 500) == 0.0

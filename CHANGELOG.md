@@ -7,6 +7,17 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 For development-history detail (per-slice notes, file maps, gate
 counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 
+## [Unreleased]
+
+### Fixed
+
+* **Gateway model ids are priced.** OpenRouter-style ids
+  (``anthropic/claude-haiku-5.5``, ``openai/gpt-5-mini``) used with
+  ``OpenAIModel(base_url=...)`` were reported at $0 — with a warning —
+  so ``max_cost_usd`` budgets never tripped. They are now priced as the
+  vendor's model (the gateway passes those prices through); ``:free``
+  variants cost nothing. Found in a live run through OpenRouter.
+
 ## [0.17.0] — 2026-10-20
 
 Every subsystem was checked against its reference — provider SDKs and

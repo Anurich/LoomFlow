@@ -237,11 +237,31 @@ def _cache_read_multiplier(model: str, provider: str) -> float:
     return _CACHE_READ_MULTIPLIER.get(provider, 0.5)
 
 
+# Gateway vendor prefixes (OpenRouter's ``vendor/model`` ids) whose
+# models are billed at the vendor's own prices.
+_GATEWAY_VENDORS = ("anthropic/", "openai/", "deepseek/", "google/")
+
+
+def _canonical_model(model: str) -> str:
+    """The pricing-table name for a gateway id: ``openai/gpt-5-mini``
+    → ``gpt-5-mini``, ``anthropic/claude-haiku-5.5`` →
+    ``claude-haiku-5-5`` (Claude ids use dashes in versions). Other
+    names come back unchanged."""
+    for vendor in _GATEWAY_VENDORS:
+        if model.startswith(vendor):
+            model = model[len(vendor) :]
+            if model.startswith("claude-"):
+                model = model.replace(".", "-")
+            break
+    return model
+
+
 def _provider_for(model: str) -> str:
     """Map a model name onto its provider family for cache-rate
     lookup. Detection is name-prefix based — the same heuristic used
     by ``_resolve_model`` in :mod:`loomflow.agent.api`.
     """
+    model = _canonical_model(model)
     if not model:
         return "openai"
     if model.startswith("claude-"):
@@ -287,6 +307,11 @@ def estimate_cost(
       multiplier — for gateways / resellers whose cached rate isn't
       a standard fraction of the input rate.
 
+    Gateway ids are looked up under the vendor's own name
+    (``anthropic/claude-haiku-5.5`` → ``claude-haiku-5-5``; see
+    :func:`_canonical_model`), and OpenRouter's ``:free`` variants
+    cost nothing.
+
     Lookup order:
 
     1. The ``override`` tuple, when supplied.
@@ -300,6 +325,10 @@ def estimate_cost(
     """
     if not model:
         return 0.0
+    if override is None and model.endswith(":free"):
+        return 0.0
+    if override is None:
+        model = _canonical_model(model)
     pricing = override
     if pricing is None:
         pricing = PRICING_PER_MTOKEN.get(model)
