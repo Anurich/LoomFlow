@@ -2632,7 +2632,14 @@ class Agent:
             # history) and the same deps (already includes
             # ``context``, ``fast_*`` flags, the wrapped model +
             # memory).
-            if not fast_stop_hooks and self._max_stop_hook_iterations > 0:
+            # A turn ended by an ``ends_turn`` tool (a Swarm handoff)
+            # handed control to someone else on purpose: don't re-prompt.
+            ended_by_tool = session.metadata.get("ended_by_tool")
+            if (
+                not fast_stop_hooks
+                and self._max_stop_hook_iterations > 0
+                and not ended_by_tool
+            ):
                 iter_count = 0
                 while iter_count < self._max_stop_hook_iterations:
                     hook_result: StopHookResult | None = None
@@ -2741,7 +2748,11 @@ class Agent:
             # calls are spent fixing the output; on the last
             # failure :class:`OutputValidationError` is raised.
             parsed: Any | None = None
-            if output_schema is not None and not output_blocked_by_guardrail:
+            if (
+                output_schema is not None
+                and not output_blocked_by_guardrail
+                and not session.metadata.get("ended_by_tool")
+            ):
                 parsed = await self._validate_output_with_retry(
                     session=session,
                     schema=output_schema,

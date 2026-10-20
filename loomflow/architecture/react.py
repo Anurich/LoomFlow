@@ -8,7 +8,8 @@ Each turn:
 4. If no tool calls, the model is done; break.
 5. Otherwise, dispatch all tool calls in parallel through hooks
    → permissions → tool host. Append results to messages.
-6. Loop.
+6. If one of them was an ``ends_turn`` tool that succeeded (a
+   Swarm handoff), stop; otherwise loop.
 
 This is the v0.1.x default behaviour, lifted verbatim out of
 ``Agent._loop`` and behind the :class:`Architecture` protocol.
@@ -199,6 +200,8 @@ class ReAct:
                 # ``model_chunk`` Event so a ``stream()`` consumer
                 # sees tokens as they arrive.
                 tool_defs = await deps.tools.list_tools()
+                # Read before tool-search stubbing, which rebuilds defs.
+                ends_turn_tools = {d.name for d in tool_defs if d.ends_turn}
                 # G1 — tool search / deferred tool loading. When
                 # enabled AND the full def block is heavier than the
                 # threshold, ship stubs (name + one-liner +
@@ -538,6 +541,21 @@ class ReAct:
                     if c.tool != "plan_write" and final.ok:
                         from ..tools.plan import record_tool_call
                         record_tool_call(str(final.call_id))
+
+                # 2f. A successful call to an ``ends_turn`` tool (a Swarm
+                # handoff, say) has handed control elsewhere: stop here
+                # instead of asking the model to carry on.
+                ended_by = next(
+                    (
+                        c.tool
+                        for r, c in zip(results, tool_calls, strict=True)
+                        if r is not None and r.ok and c.tool in ends_turn_tools
+                    ),
+                    None,
+                )
+                if ended_by is not None:
+                    session.metadata["ended_by_tool"] = ended_by
+                    break
 
 
 # ---------------------------------------------------------------------------

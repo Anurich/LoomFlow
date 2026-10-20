@@ -72,6 +72,12 @@ class ToolDef(BaseModel):
     gate without needing to look up the Tool object separately.
     Default ``False`` for backward compat with adapters that
     constructed ToolDef pre-0.10.17 without setting it."""
+    ends_turn: bool = False
+    """When a call to this tool succeeds, the ReAct loop records the
+    result and ends the agent's turn instead of calling the model
+    again. Used for control-transfer tools such as Swarm handoffs,
+    where the next agent takes over and the current one should not
+    keep talking. Not sent to the model."""
 
 
 class ToolCall(BaseModel):

@@ -80,6 +80,9 @@ class Tool:
     fn: Callable[..., Any]
     input_schema: dict[str, Any] = field(default_factory=dict)
     destructive: bool = False
+    # End the calling agent's turn once this tool succeeds (see
+    # ToolDef.ends_turn) — for control-transfer tools like handoffs.
+    ends_turn: bool = False
     # Validators for non-primitive params (Pydantic models, lists,
     # dicts, Literals, ...) keyed by param name — populated by the
     # ``@tool`` decorator so ``execute`` can turn the model's raw
@@ -94,6 +97,7 @@ class Tool:
             description=self.description,
             input_schema=self.input_schema,
             destructive=self.destructive,
+            ends_turn=self.ends_turn,
         )
 
     async def execute(self, args: Mapping[str, Any]) -> Any:
@@ -155,6 +159,7 @@ def tool(
     name: str | None = None,
     description: str | None = None,
     destructive: bool = False,
+    ends_turn: bool = False,
 ) -> Callable[[Callable[..., Any]], Tool]: ...
 
 
@@ -164,10 +169,13 @@ def tool(
     name: str | None = None,
     description: str | None = None,
     destructive: bool = False,
+    ends_turn: bool = False,
 ) -> Tool | Callable[[Callable[..., Any]], Tool]:
     """Promote a callable to a :class:`Tool`.
 
     Use as ``@tool`` (bare) or ``@tool(name=..., description=..., destructive=...)``.
+    ``ends_turn=True`` makes a successful call end the agent's turn (the
+    model is not called again), for tools that hand control elsewhere.
     The schema is derived from parameter annotations: primitive types map
     to their JSON-Schema equivalents, and complex types (Pydantic models,
     ``list[...]``, ``dict[...]``, ``Literal``, optionals, ...) get a full
@@ -194,6 +202,7 @@ def tool(
             fn=f,
             input_schema=schema,
             destructive=destructive,
+            ends_turn=ends_turn,
             param_adapters=adapters,
         )
 

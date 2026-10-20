@@ -51,7 +51,7 @@ yourself::
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from .agent.api import DEFAULT_MAX_TURNS, Agent, Tuning
@@ -431,6 +431,8 @@ class Team:
         detect_cycles: bool = True,
         pass_full_history: bool = True,
         handoff_tool_name: str = "handoff",
+        handoffs: Mapping[str, Sequence[str]] | None = None,
+        resume_last_agent: bool = True,
         persistent_subagents: bool = True,
     ) -> Agent:
         """Build a peer-swarm of agents that hand off control via a
@@ -439,6 +441,14 @@ class Team:
         ``input_type``).
 
         ``entry_agent`` is the peer that receives the first message.
+        Later messages in the same ``session_id`` go to whichever peer
+        answered last (``resume_last_agent=False`` always starts at
+        ``entry_agent``).
+
+        ``handoffs`` limits who may hand off to whom, e.g.
+        ``{"triage": ["billing", "tech"], "billing": ["triage"]}``; a
+        peer left out of the map cannot hand off. By default every
+        peer may hand off to every other peer.
 
         ``workspace`` wires a shared notebook across every peer.
         Each peer's dict key becomes its author identity in the
@@ -474,6 +484,8 @@ class Team:
                 detect_cycles=detect_cycles,
                 pass_full_history=pass_full_history,
                 handoff_tool_name=handoff_tool_name,
+                handoffs=handoffs,
+                resume_last_agent=resume_last_agent,
                 worker_registry=worker_registry,
                 role_to_worker_id=role_to_worker_id,
             ),

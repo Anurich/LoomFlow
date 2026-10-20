@@ -9,6 +9,55 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 
 ## [Unreleased]
 
+### Changed — `Swarm` handoffs now behave like the reference swarms
+
+Checked against OpenAI Swarm, the OpenAI Agents SDK's handoffs and
+LangGraph Swarm, which agree on each point below. **Behaviour changes:**
+
+* **A handoff ends the agent's turn at once.** The handoff tools are
+  ``ends_turn`` tools (below), so the next peer takes over without the
+  handing-off agent making another model call. Previously it carried on
+  for one more call ("I'll pass you to billing"), costing a model call
+  per handoff, and that text could end up as the final answer.
+* **The next peer sees the shared thread**, including each earlier
+  peer's tool calls and their results (``[triage called
+  lookup_order({...}) → ...]``), not only its final text.
+* **The user's next message goes to the peer that answered last**
+  within the same ``session_id`` (``resume_last_agent=True``; the
+  Agents SDK's ``last_agent``, LangGraph Swarm's ``active_agent``).
+  In-process and bounded, so after a restart a conversation starts at
+  ``entry_agent`` again. ``resume_last_agent=False`` restores the old
+  behaviour.
+* **Loop stops still answer, and say so.** When ``detect_cycles`` or
+  ``max_handoffs`` stops the swarm, the peer just handed the
+  conversation gets one final turn with no handoff tools, and the run
+  is marked ``interrupted`` (``swarm:cycle_detected`` /
+  ``swarm:max_handoffs``). Previously the handing-off agent's text came
+  back silently as the answer with ``interrupted=False``.
+* **Cycle detection waits for three A↔B round trips** instead of two,
+  so handing back and forth once or twice (normal in every reference
+  swarm) is no longer cut off.
+
+### Added
+
+* ``Swarm(handoffs={...})`` / ``Team.swarm(handoffs=...)``: who may
+  hand off to whom, e.g. ``{"triage": ["billing", "tech"],
+  "billing": ["triage"]}``. A peer left out of the map cannot hand off.
+* ``Tool(ends_turn=True)`` / ``@tool(ends_turn=True)``: a successful
+  call ends the agent's turn instead of calling the model again; stop
+  hooks and ``output_schema`` validation are skipped for that run.
+
+### Fixed — `Swarm`
+
+* An agent could hand off to itself (the tool listed it as a target),
+  restarting itself and spending a handoff. Peers now only see others.
+* ``pass_full_history=False`` gave the next peer only the handoff
+  marker, without the user's request or anything the previous peer
+  found. It now gets the request plus the latest handoff segment, as
+  documented.
+* A model calling two handoffs in one turn: the first wins; the second
+  call fails back to the model.
+
 ### Fixed — Jev images + Box follow-ups
 
 * ``typesafe`` extra now requires ``typesafe-sdk>=0.7.5`` — the first

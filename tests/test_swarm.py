@@ -35,22 +35,33 @@ pytestmark = pytest.mark.anyio
 # ---------------------------------------------------------------------------
 
 
-def test_is_cycling_detects_a_b_a_b() -> None:
+def test_is_cycling_detects_three_round_trips() -> None:
+    from collections import deque
+
+    handoffs: deque[tuple[str, str]] = deque(
+        [("A", "B"), ("B", "A")] * 3,
+        maxlen=6,
+    )
+    assert _is_cycling(handoffs)
+
+
+def test_is_cycling_allows_two_round_trips() -> None:
+    # Handing back once or twice is normal swarm behaviour.
     from collections import deque
 
     handoffs: deque[tuple[str, str]] = deque(
         [("A", "B"), ("B", "A"), ("A", "B"), ("B", "A")],
-        maxlen=4,
+        maxlen=6,
     )
-    assert _is_cycling(handoffs)
+    assert not _is_cycling(handoffs)
 
 
 def test_is_cycling_false_for_linear_chain() -> None:
     from collections import deque
 
     handoffs: deque[tuple[str, str]] = deque(
-        [("A", "B"), ("B", "C"), ("C", "D"), ("D", "E")],
-        maxlen=4,
+        [("A", "B"), ("B", "C"), ("C", "D"), ("D", "E"), ("E", "F"), ("F", "G")],
+        maxlen=6,
     )
     assert not _is_cycling(handoffs)
 
@@ -59,7 +70,7 @@ def test_is_cycling_false_when_history_short() -> None:
     from collections import deque
 
     handoffs: deque[tuple[str, str]] = deque(
-        [("A", "B"), ("B", "A")], maxlen=4
+        [("A", "B"), ("B", "A")], maxlen=6
     )
     assert not _is_cycling(handoffs)
 
@@ -255,31 +266,26 @@ async def test_swarm_handoff_chain_a_to_b_to_c() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_swarm_detects_a_b_a_b_cycle() -> None:
-    """A → B → A → B triggers cycle detection. Output is the latest
-    agent's text. Note: each agent needs ENOUGH scripted turns for
-    each invocation; 4 invocations of each = 8 turns each (tool call +
-    text).
-    """
-    def _ping_pong(target: str, replies: int) -> Agent:
-        turns: list[ScriptedTurn] = []
-        for i in range(replies):
-            turns.append(
-                ScriptedTurn(
-                    tool_calls=[
-                        ToolCall(
-                            id=f"c{i}",
-                            tool="handoff",
-                            args={"target": target},
-                        )
-                    ]
-                )
+async def test_swarm_detects_ping_pong_cycle() -> None:
+    """Three A↔B round trips trip cycle detection. The peer just
+    handed the conversation gets a final turn with no handoff tools,
+    and the run is flagged as interrupted."""
+
+    def _ping_pong(target: str, replies: int, final: str) -> Agent:
+        # A handoff ends the turn, so each activation is one model call.
+        turns = [
+            ScriptedTurn(
+                tool_calls=[
+                    ToolCall(id=f"c{i}", tool="handoff", args={"target": target})
+                ]
             )
-            turns.append(ScriptedTurn(text=f"output {i}"))
+            for i in range(replies)
+        ]
+        turns.append(ScriptedTurn(text=final))
         return Agent("ping-pong", model=ScriptedModel(turns))
 
-    a = _ping_pong("B", replies=4)
-    b = _ping_pong("A", replies=4)
+    a = _ping_pong("B", replies=3, final="A answers at last")
+    b = _ping_pong("A", replies=3, final="B answers at last")
 
     agent = Agent(
         "host",
@@ -297,7 +303,12 @@ async def test_swarm_detects_a_b_a_b_cycle() -> None:
         for e in events
         if e.kind == "architecture_event"
     ]
+    assert arch_names.count("swarm.handoff") == 6
     assert "swarm.cycle_detected" in arch_names
+    result = events[-1].payload["result"]
+    assert result["output"] == "A answers at last"
+    assert result["interrupted"] is True
+    assert result["interruption_reason"] == "swarm:cycle_detected"
 
 
 # ---------------------------------------------------------------------------
@@ -515,12 +526,9 @@ def test_typed_handoff_emits_per_target_tools() -> None:
     # Internal: typed_mode flips on
     assert sw._typed_mode is True
     # The typed tools list contains transfer_to_a / transfer_to_b
-    handoff_request: dict[str, object] = {}
-    tools = sw._build_handoff_tools(handoff_request)
-    names = {t.name for t in tools}
-    assert "transfer_to_a" in names
-    assert "transfer_to_b" in names
-    assert "handoff" not in names
+    # One tool per OTHER peer: an agent never gets a tool for itself.
+    assert {t.name for t in sw._build_handoff_tools("a", {})} == {"transfer_to_b"}
+    assert {t.name for t in sw._build_handoff_tools("b", {})} == {"transfer_to_a"}
 
 
 def test_typed_handoff_schema_mirrors_pydantic_model() -> None:
@@ -529,10 +537,10 @@ def test_typed_handoff_schema_mirrors_pydantic_model() -> None:
     ``message`` field."""
     b = _agent_no_handoff("y")
     sw = Swarm(
-        agents={"b": Handoff(agent=b, input_type=RefundRequest)},
-        entry_agent="b",
+        agents={"a": _agent_no_handoff("x"), "b": Handoff(agent=b, input_type=RefundRequest)},
+        entry_agent="a",
     )
-    tools = sw._build_handoff_tools({})
+    tools = sw._build_handoff_tools("a", {})
     refund_tool = next(t for t in tools if t.name == "transfer_to_b")
     props = refund_tool.input_schema["properties"]
     assert "reason" in props
@@ -541,7 +549,8 @@ def test_typed_handoff_schema_mirrors_pydantic_model() -> None:
 
 async def test_typed_handoff_validates_payload_via_pydantic() -> None:
     """Calling ``transfer_to_<name>`` with valid args records the
-    validated payload; missing-field call returns an error string."""
+    validated payload; a missing field fails the call (so the turn
+    continues and the model sees the error)."""
     b = _agent_no_handoff("billing answer")
     sw = Swarm(
         agents={
@@ -551,8 +560,9 @@ async def test_typed_handoff_validates_payload_via_pydantic() -> None:
         entry_agent="a",
     )
     handoff_request: dict[str, object] = {}
-    tools = sw._build_handoff_tools(handoff_request)
+    tools = sw._build_handoff_tools("a", handoff_request)
     transfer = next(t for t in tools if t.name == "transfer_to_billing")
+    assert transfer.ends_turn
 
     # Valid payload — pydantic validates, request is recorded.
     out = await transfer.fn(reason="damaged", amount=49.99)
@@ -563,18 +573,18 @@ async def test_typed_handoff_validates_payload_via_pydantic() -> None:
     assert payload["reason"] == "damaged"
     assert payload["amount"] == 49.99
 
-    # Missing required field — pydantic rejects, error returned.
+    # Missing required field — pydantic rejects, the call fails.
     handoff_request.clear()
-    err = await transfer.fn(reason="late")  # no amount
-    assert "Error" in err
+    with pytest.raises(ValueError, match="invalid handoff payload"):
+        await transfer.fn(reason="late")  # no amount
     assert "target" not in handoff_request
 
 
 def test_legacy_handoff_tool_enumerates_peer_names_in_schema() -> None:
-    """The legacy single-handoff tool must enumerate all peer names
-    in its JSON Schema enum so strict-schema providers reject
-    invalid targets at the API boundary instead of bouncing through
-    our error path."""
+    """The legacy single-handoff tool must enumerate the peers the
+    active agent may hand off to (never itself) in its JSON Schema
+    enum, so strict-schema providers reject invalid targets at the
+    API boundary instead of bouncing through our error path."""
     a = _agent_no_handoff("a")
     b = _agent_no_handoff("b")
     c = _agent_no_handoff("c")
@@ -583,15 +593,17 @@ def test_legacy_handoff_tool_enumerates_peer_names_in_schema() -> None:
         entry_agent="alpha",
     )
     assert sw._typed_mode is False
-    tool = sw._build_legacy_tool({})
+    (tool,) = sw._build_handoff_tools("alpha", {})
+    assert tool.ends_turn
     target_schema = tool.input_schema["properties"]["target"]
     assert "enum" in target_schema
-    assert set(target_schema["enum"]) == {"alpha", "bravo", "charlie"}
+    assert set(target_schema["enum"]) == {"bravo", "charlie"}
     # Description should also list the names so models that don't
     # honour enum still see them in plain text.
     desc = tool.input_schema["properties"]["target"]["description"]
-    for name in ("alpha", "bravo", "charlie"):
+    for name in ("bravo", "charlie"):
         assert name in desc
+    assert "alpha" not in desc
 
 
 def test_legacy_handoff_tool_description_lists_each_peers_role() -> None:
@@ -609,9 +621,10 @@ def test_legacy_handoff_tool_description_lists_each_peers_role() -> None:
         agents={"triage": triage, "billing": billing},
         entry_agent="triage",
     )
-    tool = sw._build_legacy_tool({})
-    assert "Triage incoming" in tool.description
-    assert "Handle refunds" in tool.description
+    (from_triage,) = sw._build_handoff_tools("triage", {})
+    assert "Handle refunds" in from_triage.description
+    (from_billing,) = sw._build_handoff_tools("billing", {})
+    assert "Triage incoming" in from_billing.description
 
 
 def test_input_filter_replaces_history_for_receiving_peer() -> None:
@@ -641,3 +654,285 @@ def test_input_filter_replaces_history_for_receiving_peer() -> None:
     # Just verify the filter is wired up — full e2e is covered by
     # the existing handoff tests, which we don't need to duplicate.
     assert sw._handoffs["billing"].input_filter is my_filter
+
+
+# ---------------------------------------------------------------------------
+# Behaviour aligned with the reference swarms (OpenAI Swarm, OpenAI
+# Agents SDK handoffs, LangGraph Swarm)
+# ---------------------------------------------------------------------------
+
+
+class _Recording(ScriptedModel):
+    """ScriptedModel that keeps the last user message of every call."""
+
+    def __init__(self, turns: list[ScriptedTurn]) -> None:
+        super().__init__(turns)
+        self.prompts: list[str] = []
+
+    def _note(self, messages: object) -> None:
+        last_user = next(
+            (m.content for m in reversed(list(messages)) if m.role == "user"),  # type: ignore[attr-defined]
+            "",
+        )
+        self.prompts.append(str(last_user))
+
+    async def complete(self, messages, *args, **kwargs):  # type: ignore[no-untyped-def]
+        self._note(messages)
+        return await super().complete(messages, *args, **kwargs)
+
+    async def stream(self, messages, *args, **kwargs):  # type: ignore[no-untyped-def]
+        self._note(messages)
+        async for chunk in super().stream(messages, *args, **kwargs):
+            yield chunk
+
+
+def _handoff_turn(target: str, message: str = "") -> ScriptedTurn:
+    return ScriptedTurn(
+        tool_calls=[
+            ToolCall(
+                id=f"h-{target}",
+                tool="handoff",
+                args={"target": target, "message": message},
+            )
+        ]
+    )
+
+
+def _swarm_host(**kwargs: object) -> Agent:
+    return Agent(
+        "host",
+        model=ScriptedModel([ScriptedTurn(text="never")]),
+        architecture=Swarm(**kwargs),  # type: ignore[arg-type]
+    )
+
+
+async def test_handoff_ends_the_turn_immediately() -> None:
+    # Reference behaviour: the next agent takes over at once; the
+    # handing-off agent makes no further model call.
+    triage = _Recording([_handoff_turn("billing"), ScriptedTurn(text="unused")])
+    billing = _Recording([ScriptedTurn(text="refund issued")])
+    host = _swarm_host(
+        agents={
+            "triage": Agent("triage", model=triage),
+            "billing": Agent("billing", model=billing),
+        },
+        entry_agent="triage",
+    )
+    result = await host.run("charged twice")
+    assert result.output == "refund issued"
+    assert len(triage.prompts) == 1
+    assert triage.remaining == 1
+
+
+async def test_peer_can_hand_back_to_the_previous_peer() -> None:
+    a = _Recording(
+        [_handoff_turn("B", "billing issue"), ScriptedTurn(text="A: final answer")]
+    )
+    b = _Recording([_handoff_turn("A", "needs triage again")])
+    host = _swarm_host(
+        agents={"A": Agent("triage", model=a), "B": Agent("billing", model=b)},
+        entry_agent="A",
+    )
+    events = [e async for e in host.stream("charged twice")]
+    handoffs = [
+        (e.payload["from_agent"], e.payload["to_agent"])
+        for e in events
+        if e.kind == "architecture_event" and e.payload["name"] == "swarm.handoff"
+    ]
+    assert handoffs == [("A", "B"), ("B", "A")]
+    result = events[-1].payload["result"]
+    assert result["output"] == "A: final answer"
+    assert result["interrupted"] is False
+    # A sees the whole thread when it gets control back.
+    assert "[Handoff: A → B] billing issue" in a.prompts[-1]
+    assert "[Handoff: B → A] needs triage again" in a.prompts[-1]
+
+
+async def test_next_peer_sees_previous_peers_tool_calls() -> None:
+    from loomflow import tool
+
+    @tool
+    async def lookup_order(order_id: str) -> str:
+        """Look up an order."""
+        return "order 123: charged twice, 49.00"
+
+    triage = _Recording(
+        [
+            ScriptedTurn(
+                tool_calls=[
+                    ToolCall(id="l1", tool="lookup_order", args={"order_id": "123"})
+                ]
+            ),
+            _handoff_turn("billing"),
+        ]
+    )
+    billing = _Recording([ScriptedTurn(text="ok")])
+    host = _swarm_host(
+        agents={
+            "triage": Agent("triage", model=triage, tools=[lookup_order]),
+            "billing": Agent("billing", model=billing),
+        },
+        entry_agent="triage",
+    )
+    await host.run("charged twice on order 123")
+    seen = billing.prompts[0]
+    assert 'triage called lookup_order({"order_id": "123"})' in seen
+    assert "order 123: charged twice, 49.00" in seen
+    # The handoff call itself shows up as the marker, not as a tool line.
+    assert "called handoff" not in seen
+
+
+async def test_pass_full_history_false_keeps_request_and_latest_handoff() -> None:
+    a = _Recording(
+        [ScriptedTurn(text="A found order 123", tool_calls=_handoff_turn("B", "refund").tool_calls)]
+    )
+    b = _Recording([_handoff_turn("C", "please confirm")])
+    c = _Recording([ScriptedTurn(text="done")])
+    host = _swarm_host(
+        agents={
+            "A": Agent("a", model=a),
+            "B": Agent("b", model=b),
+            "C": Agent("c", model=c),
+        },
+        entry_agent="A",
+        pass_full_history=False,
+    )
+    await host.run("I was charged twice")
+    assert b.prompts[0].startswith("I was charged twice")
+    assert "A found order 123" in b.prompts[0]
+    assert "[Handoff: A → B] refund" in b.prompts[0]
+    # C gets the request and B's handoff, not A's older segment.
+    assert c.prompts[0].startswith("I was charged twice")
+    assert "[Handoff: B → C] please confirm" in c.prompts[0]
+    assert "A found order 123" not in c.prompts[0]
+
+
+async def test_agent_cannot_hand_off_to_itself() -> None:
+    a = _Recording([_handoff_turn("A"), ScriptedTurn(text="A answers")])
+    host = _swarm_host(
+        agents={"A": Agent("a", model=a), "B": _agent_no_handoff("B")},
+        entry_agent="A",
+    )
+    events = [e async for e in host.stream("hi")]
+    names = [e.payload["name"] for e in events if e.kind == "architecture_event"]
+    assert "swarm.handoff" not in names
+    failed = [
+        e.payload["result"]
+        for e in events
+        if e.kind == "tool_result" and not e.payload["result"]["ok"]
+    ]
+    assert failed and "cannot hand off to 'A'" in failed[0]["error"]
+    assert events[-1].payload["result"]["output"] == "A answers"
+
+
+def test_handoffs_map_limits_targets() -> None:
+    sw = Swarm(
+        agents={
+            "triage": _agent_no_handoff("t"),
+            "billing": _agent_no_handoff("b"),
+            "tech": _agent_no_handoff("x"),
+        },
+        entry_agent="triage",
+        handoffs={"triage": ["billing", "tech"], "billing": ["triage"]},
+    )
+    (from_triage,) = sw._build_handoff_tools("triage", {})
+    assert from_triage.input_schema["properties"]["target"]["enum"] == ["billing", "tech"]
+    (from_billing,) = sw._build_handoff_tools("billing", {})
+    assert from_billing.input_schema["properties"]["target"]["enum"] == ["triage"]
+    # Left out of the map: no handoff tool, so tech has to answer.
+    assert sw._build_handoff_tools("tech", {}) == []
+
+
+@pytest.mark.parametrize(
+    ("handoffs", "message"),
+    [
+        ({"nobody": ["a"]}, "unknown peers: nobody"),
+        ({"a": ["nobody"]}, "unknown peers: nobody"),
+        ({"a": ["a"]}, "lists 'a' itself"),
+    ],
+)
+def test_handoffs_map_is_validated(handoffs: dict[str, list[str]], message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        Swarm(
+            agents={"a": _agent_no_handoff("a"), "b": _agent_no_handoff("b")},
+            entry_agent="a",
+            handoffs=handoffs,
+        )
+
+
+async def test_next_message_in_a_session_goes_to_the_last_active_peer() -> None:
+    triage = _Recording([_handoff_turn("billing"), ScriptedTurn(text="triage again")])
+    billing = _Recording([ScriptedTurn(text="refund issued"), ScriptedTurn(text="5 days")])
+    host = _swarm_host(
+        agents={
+            "triage": Agent("triage", model=triage),
+            "billing": Agent("billing", model=billing),
+        },
+        entry_agent="triage",
+    )
+    first = await host.run("charged twice", session_id="conv-1")
+    second = await host.run("when will it arrive?", session_id="conv-1")
+    assert (first.output, second.output) == ("refund issued", "5 days")
+    # A different conversation still starts at the entry agent.
+    other = await host.run("hello", session_id="conv-2")
+    assert other.output == "triage again"
+
+
+async def test_resume_last_agent_can_be_turned_off() -> None:
+    triage = _Recording([_handoff_turn("billing"), ScriptedTurn(text="triage answers")])
+    billing = _Recording([ScriptedTurn(text="refund issued")])
+    host = _swarm_host(
+        agents={
+            "triage": Agent("triage", model=triage),
+            "billing": Agent("billing", model=billing),
+        },
+        entry_agent="triage",
+        resume_last_agent=False,
+    )
+    await host.run("charged twice", session_id="conv-1")
+    second = await host.run("thanks", session_id="conv-1")
+    assert second.output == "triage answers"
+
+
+async def test_max_handoffs_gives_a_final_answer_and_flags_the_run() -> None:
+    a = _Recording([_handoff_turn("B")])
+    b = _Recording([_handoff_turn("A"), ScriptedTurn(text="B answers without handing off")])
+    host = _swarm_host(
+        agents={"A": Agent("a", model=a), "B": Agent("b", model=b)},
+        entry_agent="A",
+        max_handoffs=1,
+    )
+    result = await host.run("go")
+    assert result.output == "B answers without handing off"
+    assert result.interrupted is True
+    assert result.interruption_reason == "swarm:max_handoffs"
+    # The final turn had no handoff tool to call.
+    assert "No more handoffs are possible" in b.prompts[-1]
+
+
+async def test_ends_turn_tool_stops_a_plain_agent_and_skips_output_schema() -> None:
+    from pydantic import BaseModel as _BaseModel
+
+    from loomflow import tool
+
+    class Answer(_BaseModel):
+        text: str
+
+    @tool(ends_turn=True)
+    async def escalate(reason: str) -> str:
+        """Hand the case to a human."""
+        return "escalated"
+
+    model = _Recording(
+        [
+            ScriptedTurn(
+                text="Escalating.",
+                tool_calls=[ToolCall(id="e1", tool="escalate", args={"reason": "angry"})],
+            ),
+            ScriptedTurn(text="should not be called"),
+        ]
+    )
+    agent = Agent("support", model=model, tools=[escalate], output_schema=Answer)
+    result = await agent.run("I want a human")
+    assert result.output == "Escalating."
+    assert model.remaining == 1

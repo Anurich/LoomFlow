@@ -487,18 +487,19 @@ async def test_reflexion_gates_attempts_on_budget() -> None:
 
 
 async def test_swarm_gates_each_handoff_iteration_on_budget() -> None:
+    # A handoff ends a's turn, so its text rides along with the call.
     model_a = ScriptedModel(
         [
             ScriptedTurn(
+                text="a is done",
                 tool_calls=[
                     ToolCall(
                         id="h1",
                         tool="handoff",
                         args={"target": "b", "message": "yours"},
                     )
-                ]
+                ],
             ),
-            ScriptedTurn(text="a is done"),
         ]
     )
     model_b = ScriptedModel([ScriptedTurn(text="b never runs")])
