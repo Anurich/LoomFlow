@@ -101,6 +101,21 @@ async def test_skill_python_tools_run_in_a_subprocess_sandbox(tmp_path: Path) ->
     assert str(result.output) != f"Hi A from {os.getpid()}"  # ran in the child
 
 
+async def test_a_closure_tool_is_an_error_result_not_a_crash() -> None:
+    # What a skill's build_tools(ctx) returns: closures can't reach a
+    # child process. On Python 3.12 / 3.13 pickle raised AttributeError,
+    # which escaped SubprocessSandbox.call.
+    def make() -> Tool:
+        def greet(name: str) -> str:
+            return f"hello {name}"
+
+        return Tool(name="greet", description="g", fn=greet)
+
+    sandbox = SubprocessSandbox(InProcessToolHost([make()]))
+    result = await sandbox.call("greet", {"name": "A"}, call_id="c")
+    assert not result.ok and "not picklable" in (result.error or "")
+
+
 @requires_backend
 async def test_skill_python_tools_run_in_the_os_sandbox(tmp_path: Path) -> None:
     root = tmp_path / "root"

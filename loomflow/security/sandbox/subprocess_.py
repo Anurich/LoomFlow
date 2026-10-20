@@ -193,10 +193,12 @@ def _dump_function(fn: Any) -> bytes:
         return pickle.dumps(("file", *from_file, qualname))
     try:
         return pickle.dumps(("fn", fn))
-    except pickle.PicklingError:
+    except (pickle.PicklingError, AttributeError) as exc:
+        # A closure fails with AttributeError on some Pythons and
+        # PicklingError on others; callers handle PicklingError.
         module = getattr(fn, "__module__", None)
         if not module or "<locals>" in qualname:
-            raise
+            raise pickle.PicklingError(str(exc)) from exc
         return pickle.dumps(("ref", module, qualname))
 
 

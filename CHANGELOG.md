@@ -25,7 +25,10 @@ the code.
   failed with ``ModuleNotFoundError``: the module is loaded under a
   name the child can't import. The child now loads it from its file
   (and Seatbelt / Bubblewrap let it read the skill's directory).
-  ``build_tools(ctx)`` closures still can't cross a process boundary.
+  ``build_tools(ctx)`` closures still can't cross a process boundary;
+  under ``SubprocessSandbox`` such a tool now gets an error result on
+  every Python (on 3.12 and 3.13 the pickling ``AttributeError``
+  escaped ``call()``).
 * **Seatbelt starts the child in its first root**, as Bubblewrap does.
   It inherited the parent's working directory, and when the profile
   didn't let it read that directory Python failed to start
