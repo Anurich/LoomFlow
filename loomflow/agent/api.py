@@ -61,6 +61,7 @@ from ..core.protocols import (
     Telemetry,
     ToolHost,
 )
+from ..core.streaming import stream_from
 from ..core.types import (
     Episode,
     Event,
@@ -1937,10 +1938,6 @@ class Agent:
         existing one to resume against a durable runtime's journal.
         ``extra_tools`` works the same as :meth:`run`'s.
         """
-        send, receive = anyio.create_memory_object_stream[Event](
-            max_buffer_size=DEFAULT_STREAM_BUFFER
-        )
-
         # Same fallback as ``run``: per-call schema wins; agent's
         # default is used otherwise.
         effective_schema = (
@@ -1966,11 +1963,11 @@ class Agent:
         if resolved_session_id is None:
             resolved_session_id = new_id("sess")
 
-        async def _produce() -> None:
+        async def _produce(send: Callable[[Event], Awaitable[None]]) -> None:
             try:
                 await self._loop_guarded(
                     prompt,
-                    emit=send.send,
+                    emit=send,
                     user_id=user_id,
                     session_id=resolved_session_id,
                     metadata=metadata,
@@ -1983,19 +1980,17 @@ class Agent:
                 )
             except Exception as exc:  # noqa: BLE001 — surface as ERROR + re-raise
                 with anyio.CancelScope(shield=True):
-                    await send.send(Event.error(resolved_session_id, exc))
+                    await send(Event.error(resolved_session_id, exc))
                 raise
-            finally:
-                send.close()
 
-        async with anyio.create_task_group() as tg:
-            tg.start_soon(_produce)
-            try:
-                async with receive:
-                    async for event in receive:
-                        yield event
-            finally:
-                tg.cancel_scope.cancel()
+        # No task group is held open across ``yield`` (see
+        # core/streaming.py), so a consumer may simply ``break``.
+        events = stream_from(_produce, buffer_size=DEFAULT_STREAM_BUFFER)
+        try:
+            async for event in events:
+                yield event
+        finally:
+            await events.aclose()
 
     async def _maybe_compact(self, session: AgentSession, emit: Emit) -> None:
         """Auto-compact ``session.messages`` when past the token threshold.

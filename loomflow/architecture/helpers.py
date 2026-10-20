@@ -53,6 +53,7 @@ import anyio
 
 from ..core._deprecation import warn_legacy_protocol
 from ..core.context import RunContext, get_run_context
+from ..core.streaming import stream_from
 from ..core.types import (
     Event,
     Message,
@@ -1086,48 +1087,43 @@ class SubagentInvocation:
         ``turns``, ``tokens_in``, ``tokens_out``, ``cost_usd``,
         ``interrupted``, ``interruption_reason``).
         """
-        send, receive = anyio.create_memory_object_stream[Event](
-            max_buffer_size=self._buffer_size
-        )
+        async def _run_worker(send: Callable[[Event], Awaitable[None]]) -> None:
+            async def _capture(ev: Event) -> None:
+                if ev.kind.value == "completed":
+                    # Capture the result dict; don't forward — parent
+                    # emits its own COMPLETED at the end of its own loop.
+                    result = ev.payload.get("result", {}) or {}
+                    self.result.update(result)
+                    # Roll worker usage into the parent session so the
+                    # parent's RunResult.cost_usd / tokens reflect work
+                    # the sub-agent did (field-name swap handled by
+                    # ``usage_from_result_dict``).
+                    if self._rollup_into is not None:
+                        sub_usage = usage_from_result_dict(result)
+                        self._rollup_into.cumulative_usage = add_usage(
+                            self._rollup_into.cumulative_usage, sub_usage
+                        )
+                elif ev.kind.value == "started":
+                    # Suppress sub-agent's STARTED; parent owns framing.
+                    return
+                else:
+                    await send(ev)
 
-        async def _capture(ev: Event) -> None:
-            if ev.kind.value == "completed":
-                # Capture the result dict; don't forward — parent
-                # emits its own COMPLETED at the end of its own loop.
-                result = ev.payload.get("result", {}) or {}
-                self.result.update(result)
-                # Roll worker usage into the parent session so the
-                # parent's RunResult.cost_usd / tokens reflect work
-                # the sub-agent did (field-name swap handled by
-                # ``usage_from_result_dict``).
-                if self._rollup_into is not None:
-                    sub_usage = usage_from_result_dict(result)
-                    self._rollup_into.cumulative_usage = add_usage(
-                        self._rollup_into.cumulative_usage, sub_usage
-                    )
-            elif ev.kind.value == "started":
-                # Suppress sub-agent's STARTED; parent owns framing.
-                return
-            else:
-                await send.send(ev)
+            await self._agent.run(
+                self._prompt,
+                session_id=self._session_id,
+                context=self._context,
+                extra_tools=self._extra_tools,
+                emit=_capture,
+            )
 
-        async def _run_worker() -> None:
-            try:
-                await self._agent.run(
-                    self._prompt,
-                    session_id=self._session_id,
-                    context=self._context,
-                    extra_tools=self._extra_tools,
-                    emit=_capture,
-                )
-            finally:
-                await send.aclose()
-
-        async with anyio.create_task_group() as tg:
-            tg.start_soon(_run_worker)
-            async with receive:
-                async for ev in receive:
-                    yield ev
+        # The worker runs as its own task (core/streaming.py), so no
+        # cancel scope is held across ``yield``.
+        async with contextlib.aclosing(
+            stream_from(_run_worker, buffer_size=self._buffer_size)
+        ) as events:
+            async for ev in events:
+                yield ev
 
 
 def parse_score(text: str) -> float:

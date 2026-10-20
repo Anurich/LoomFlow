@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 
 import anyio
 
+from ..core.streaming import relay
 from ..core.types import (
     Event,
     Image,
@@ -792,13 +793,17 @@ async def _dispatch_streaming(
             results[slot] = result
             await sender.send(Event.tool_result(session.id, result))
 
-    async with anyio.create_task_group() as tg:
+    async def _dispatch_all() -> None:
         async with send:
-            for i, call in enumerate(tool_calls):
-                tg.start_soon(_stream_one, i, call, send.clone())
-        async with receive:
-            async for ev in receive:
-                yield ev
+            async with anyio.create_task_group() as tg:
+                for i, call in enumerate(tool_calls):
+                    tg.start_soon(_stream_one, i, call, send.clone())
+
+    # The workers' task group lives in its own task (core/streaming.py),
+    # so no cancel scope is held across ``yield``.
+    async with contextlib.aclosing(relay(_dispatch_all, receive)) as events:
+        async for ev in events:
+            yield ev
 
 
 async def _run_one_tool(

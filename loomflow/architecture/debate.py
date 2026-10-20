@@ -58,12 +58,14 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import AsyncIterator
+from contextlib import aclosing
 from typing import TYPE_CHECKING, Any
 
 import anyio
 from anyio.streams.memory import MemoryObjectSendStream
 
 from ..core.context import inherit_ambient_memory
+from ..core.streaming import relay
 from ..core.types import Event
 from .base import AgentSession, Dependencies
 from .helpers import SubagentInvocation, budget_gate
@@ -391,11 +393,11 @@ class MultiAgentDebate:
                             user_id,
                         )
 
-        async with anyio.create_task_group() as outer_tg:
-            outer_tg.start_soon(_dispatch_all)
-            async with receive:
-                async for ev in receive:
-                    yield ev
+        # The debaters' task group lives in its own task
+        # (core/streaming.py), so no cancel scope is held across ``yield``.
+        async with aclosing(relay(_dispatch_all, receive)) as events:
+            async for ev in events:
+                yield ev
 
     def _build_debater_prompt(
         self,

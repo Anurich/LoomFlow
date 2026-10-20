@@ -9,6 +9,31 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 
 ## [Unreleased]
 
+### Fixed — validated against current SDKs, specs and reference implementations
+
+* **Claude models work on anthropic SDK 1.x.** SDK 1.0 removed
+  ``temperature`` from ``messages.create``, and the adapter always sent
+  it, so every Claude-backed agent raised ``TypeError`` before making a
+  request. Temperature is now sent only when you set it. Auto-compaction
+  and the tool-result summariser no longer force ``temperature=0.0``,
+  which current Claude models reject.
+* **MCP works on mcp SDK 2.x.** Tool schemas, ``isError`` and
+  ``destructiveHint`` were read under their 1.x attribute names and lost
+  on 2.x, and Streamable HTTP never connected. ``tools/list``,
+  ``resources/list`` and ``prompts/list`` now follow ``nextCursor``.
+  **Behaviour change:** MCP tools are exposed to the model as
+  ``server__tool`` (was ``server.tool``), because providers reject ``.``
+  in tool names. The dotted name still resolves.
+* **Breaking out of a stream no longer breaks the caller.** After
+  ``async for ev in agent.stream(...): break`` (or ``Workflow.stream``),
+  the caller's next unrelated ``await`` raised ``CancelledError``: the
+  stream yielded from inside a task group that was later torn down from
+  another task. Streams now run their producer as a separate task. An
+  abandoned stream cancels its run, and ``aclose()`` returns once the
+  run has unwound. Errors from ``agent.stream`` are raised as-is, not
+  wrapped in an ``ExceptionGroup``. On trio, close streams with
+  ``contextlib.aclosing`` before abandoning them.
+
 ## [0.16.0] — 2026-10-20
 
 ### Changed — `Swarm` handoffs now behave like the reference swarms

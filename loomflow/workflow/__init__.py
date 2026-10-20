@@ -69,7 +69,8 @@ from __future__ import annotations
 
 import inspect
 import math
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
+from contextlib import aclosing
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -85,6 +86,7 @@ from ..core.context import (
 )
 from ..core.ids import new_id
 from ..core.protocols import Memory, Telemetry
+from ..core.streaming import stream_from
 from ..core.types import Event, EventKind
 from ..observability.tracing import NoTelemetry
 from ..tools.registry import Tool
@@ -730,13 +732,16 @@ class Workflow:
         this context automatically.
         """
         events: list[Event] = []
-        async for ev in self.stream(
-            input,
-            user_id=user_id,
-            session_id=session_id,
-            metadata=metadata,
-        ):
-            events.append(ev)
+        async with aclosing(
+            self._stream_impl(
+                input,
+                user_id=user_id,
+                session_id=session_id,
+                metadata=metadata,
+            )
+        ) as stream:
+            async for ev in stream:
+                events.append(ev)
 
         # Reconstruct WorkflowResult from the event stream so
         # ``run`` and ``stream`` share execution.
@@ -783,6 +788,35 @@ class Workflow:
         sequential graphs yield the exact sequence the sequential
         walker produced.
         """
+
+        async def produce(send: Callable[[Event], Awaitable[None]]) -> None:
+            # The scheduler (``_stream_impl``) keeps a task group open
+            # across its yields, so it is driven to the end, or closed,
+            # inside this one producer task; the consumer never holds
+            # that cancel scope and may simply ``break``.
+            async with aclosing(
+                self._stream_impl(
+                    input, user_id=user_id, session_id=session_id, metadata=metadata
+                )
+            ) as inner:
+                async for event in inner:
+                    await send(event)
+
+        events = stream_from(produce)
+        try:
+            async for event in events:
+                yield event
+        finally:
+            await events.aclose()
+
+    async def _stream_impl(
+        self,
+        input: Any = None,
+        *,
+        user_id: str | None = None,
+        session_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> AsyncGenerator[Event, None]:
         if self._start is None and self._entry_router is None:
             raise RuntimeError(
                 f"workflow {self.name!r} has no start node; "

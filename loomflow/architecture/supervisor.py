@@ -44,6 +44,7 @@ Composition
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Callable
+from contextlib import aclosing
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
@@ -53,6 +54,7 @@ from anyio.streams.memory import MemoryObjectSendStream
 from ..core.context import get_run_context, inherit_ambient_memory
 from ..core.ids import new_id
 from ..core.protocols import Memory, Model
+from ..core.streaming import relay
 from ..core.types import Event, Usage
 from ..tools.registry import Tool
 from .base import AgentSession, Architecture, Dependencies
@@ -397,11 +399,11 @@ class Supervisor:
                 await send_chan.aclose()
 
         try:
-            async with anyio.create_task_group() as tg:
-                tg.start_soon(_run_base)
-                async with recv_chan:
-                    async for ev in recv_chan:
-                        yield ev
+            # The base loop runs as its own task (core/streaming.py), so
+            # no cancel scope is held across ``yield``.
+            async with aclosing(relay(_run_base, recv_chan)) as events:
+                async for ev in events:
+                    yield ev
         finally:
             # Restore the original instructions on session even
             # though the session is single-use; harmless and keeps
