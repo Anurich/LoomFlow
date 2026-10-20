@@ -26,6 +26,7 @@ from ..core.types import (
     Message,
     Role,
 )
+from . import _extractions
 from ._hybrid import hybrid_rank_episodes
 from .consolidator import Consolidator
 from .facts import (
@@ -385,6 +386,11 @@ class InMemoryMemory:
         session_id: str | None = None,
         before: datetime | None = None,
     ) -> int:
+        # A background extraction of an erased episode would write
+        # its facts back after this returns.
+        await _extractions.stop_extractions(
+            self, user_id=user_id, session_id=session_id, before=before
+        )
         deleted = 0
         async with self._lock:
             to_delete: list[str] = []

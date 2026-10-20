@@ -30,6 +30,7 @@ from ..core.types import (
     Role,
 )
 from ..vectorstore.chroma import get_or_create_cosine_collection
+from . import _extractions
 from ._user_key import (
     decode_legacy_user_id,
     encode_user_id,
@@ -506,6 +507,11 @@ class ChromaMemory:
         session_id: str | None = None,
         before: datetime | None = None,
     ) -> int:
+        # A background extraction of an erased episode would write
+        # its facts back after this returns.
+        await _extractions.stop_extractions(
+            self, user_id=user_id, session_id=session_id, before=before
+        )
         coll = await self._get_collection()
         where_filter: dict[str, Any] = user_id_where_clause(user_id)
         # Chroma's where filter doesn't natively support "<" on

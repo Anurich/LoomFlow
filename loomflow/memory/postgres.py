@@ -34,6 +34,7 @@ from ..core.types import (
     Role,
 )
 from ..vectorstore._pgvector import hnsw_scan
+from . import _extractions
 from ._embedding_util import vector_to_list
 from ._user_key import ANON_USER_ID, decode_user_id, encode_user_id
 from .embedder import HashEmbedder, warn_hash_embedder_fallback
@@ -665,6 +666,11 @@ class PostgresMemory:
         session_id: str | None = None,
         before: datetime | None = None,
     ) -> int:
+        # A background extraction of an erased episode would write
+        # its facts back after this returns.
+        await _extractions.stop_extractions(
+            self, user_id=user_id, session_id=session_id, before=before
+        )
         # Build episode-delete clause; ``IS NOT DISTINCT FROM`` makes
         # NULL=NULL behave as expected for the anonymous bucket.
         clauses = ["namespace = $1", "user_id IS NOT DISTINCT FROM $2"]

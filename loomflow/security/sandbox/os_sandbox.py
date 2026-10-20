@@ -9,10 +9,11 @@ Backends (auto-selected by platform):
 
 * **macOS** — ``sandbox-exec`` (Seatbelt). A generated profile denies
   everything by default, then allows writes only under the declared
-  roots, reads only under the roots, the Python installation and its
-  import paths (``sys.path``, which includes your project directory)
-  and the system libraries, and (optionally) network. Paths elsewhere
-  can be ``stat``-ed but not read or listed.
+  roots, reads only under the roots, the Python installation, the
+  tool's own top-level package (and loomflow) and the system
+  libraries, and (optionally) network. The rest of your project and
+  your home directory can be ``stat``-ed but not read or listed. The
+  child starts in the first root.
 * **Linux** — ``bwrap`` (Bubblewrap, from the ``bubblewrap`` package).
   A new mount + PID (+ network) namespace with a private ``/tmp``:
   the system directories, the Python installation and import paths
@@ -152,9 +153,16 @@ def _import_paths(fn: Any) -> list[Path]:
     visible."""
     import importlib.util
 
+    from .subprocess_ import _file_module
+
     owner = fn if inspect.isfunction(fn) or inspect.ismethod(fn) else type(fn)
     modules = {getattr(owner, "__module__", "") or "", "loomflow"}
     found: list[str | None] = [str(p) for p in getattr(fn, "sandbox_paths", ())]
+    from_file = _file_module(fn)
+    if from_file is not None:
+        # Shipped as its file (a skill's tools.py): the child reads
+        # that file's directory.
+        found.append(os.path.dirname(from_file[1]))
     for name in modules:
         top = name.split(".")[0]
         if not top or top == "__main__":
@@ -485,7 +493,7 @@ class _OSSandboxError(Exception):
 _CHILD_SOURCE = """\
 import sys
 inp, outp = sys.argv[1], sys.argv[2]
-import asyncio, importlib, inspect, json, pickle
+import asyncio, importlib, importlib.util, inspect, json, pickle
 
 def load():
     with open(inp, "rb") as f:
@@ -493,13 +501,20 @@ def load():
         ref = pickle.load(f)
         args = pickle.load(f)
     if ref[0] == "fn":
-        fn = ref[1]
+        return ref[1], args
+    if ref[0] == "file":
+        spec = importlib.util.spec_from_file_location(ref[1], ref[2])
+        fn = importlib.util.module_from_spec(spec)
+        sys.modules[ref[1]] = fn
+        spec.loader.exec_module(fn)
+        qualname = ref[3]
     else:
         fn = importlib.import_module(ref[1])
-        for part in ref[2].split("."):
-            fn = getattr(fn, part)
-        if type(fn).__name__ == "Tool" and callable(getattr(fn, "fn", None)):
-            fn = fn.fn
+        qualname = ref[2]
+    for part in qualname.split("."):
+        fn = getattr(fn, part)
+    if type(fn).__name__ == "Tool" and callable(getattr(fn, "fn", None)):
+        fn = fn.fn
     return fn, args
 
 async def wait(awaitable):
@@ -599,8 +614,15 @@ async def _run_in_os_sandbox(
 
         try:
             with anyio.fail_after(timeout):
+                # The child starts in the first root, as under
+                # Bubblewrap's ``--chdir``: the parent's directory may
+                # be unreadable under the profile, and Python's import
+                # system fails on an unreadable working directory.
                 proc = await anyio.run_process(
-                    argv, check=False, env=_child_env(io_dir, roots, env)
+                    argv,
+                    check=False,
+                    env=_child_env(io_dir, roots, env),
+                    cwd=roots[0],
                 )
         except TimeoutError as exc:
             raise _OSSandboxTimeout(

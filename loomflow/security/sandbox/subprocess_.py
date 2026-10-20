@@ -37,7 +37,8 @@ Constraints:
 Cost:
 
 * Spawning a Python subprocess takes ~100-300ms on most platforms
-  (macOS uses ``spawn`` start method which is slower than fork).
+  (it always uses the ``spawn`` start method, which is slower than
+  fork).
   Don't use this for fast tools — the spawn dwarfs the work. It
   pays off for tools that take seconds, can crash, or use a lot of
   memory.
@@ -46,9 +47,13 @@ Cost:
 from __future__ import annotations
 
 import importlib
+import importlib.machinery
+import importlib.util
+import inspect
 import multiprocessing
 import os
 import pickle
+import sys
 from collections.abc import AsyncIterator, Mapping
 from typing import Any
 
@@ -156,6 +161,22 @@ class _SubprocessExecutionError(Exception):
     """Raised when a subprocess tool call ran but raised an exception."""
 
 
+def _file_module(fn: Any) -> tuple[str, str] | None:
+    """``(module name, file)`` when ``fn`` is a function from a module
+    the child can't import by name: one loaded from a file under a
+    name that isn't on ``sys.path``, as a skill's ``tools.py`` is."""
+    if not inspect.isfunction(fn):
+        return None
+    name = getattr(fn, "__module__", None) or ""
+    module = sys.modules.get(name)
+    path = getattr(module, "__file__", None)
+    if not path or name == "__main__":
+        return None
+    if importlib.machinery.PathFinder.find_spec(name.split(".")[0], sys.path):
+        return None
+    return name, str(path)
+
+
 def _dump_function(fn: Any) -> bytes:
     """Pickle ``fn`` for the child, by name if ``@tool`` shadowed it.
 
@@ -163,13 +184,17 @@ def _dump_function(fn: Any) -> bytes:
     refuses when that name no longer points at the function. ``@tool``
     does exactly that: the module attribute becomes the ``Tool``
     wrapper. So fall back to sending the name and let the child look it
-    up and unwrap the Tool.
+    up and unwrap the Tool. A function from a module that can only be
+    loaded from its file (a skill's ``tools.py``) is sent as that file.
     """
+    qualname = getattr(fn, "__qualname__", "")
+    from_file = _file_module(fn)
+    if from_file is not None and "<locals>" not in qualname:
+        return pickle.dumps(("file", *from_file, qualname))
     try:
         return pickle.dumps(("fn", fn))
     except pickle.PicklingError:
         module = getattr(fn, "__module__", None)
-        qualname = getattr(fn, "__qualname__", "")
         if not module or "<locals>" in qualname:
             raise
         return pickle.dumps(("ref", module, qualname))
@@ -179,8 +204,16 @@ def _load_function(payload: bytes) -> Any:
     kind, *rest = pickle.loads(payload)
     if kind == "fn":
         return rest[0]
-    module, qualname = rest
-    obj: Any = importlib.import_module(module)
+    if kind == "file":
+        module_name, path, qualname = rest
+        spec = importlib.util.spec_from_file_location(module_name, path)
+        assert spec is not None and spec.loader is not None
+        obj: Any = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = obj
+        spec.loader.exec_module(obj)
+    else:
+        module, qualname = rest
+        obj = importlib.import_module(module)
     for part in qualname.split("."):
         obj = getattr(obj, part)
     return obj.fn if isinstance(obj, Tool) else obj

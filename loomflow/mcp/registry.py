@@ -8,11 +8,12 @@ Tool name collisions across servers are auto-disambiguated:
 * If a tool name is unique across all servers, agents see the bare name
   (``get_weather``).
 * If two servers expose the same name, both are registered as
-  ``server.tool`` (``city_api.get_weather``, ``noaa.get_weather``).
+  ``server__tool`` (``city_api__get_weather``, ``noaa__get_weather``):
+  providers reject ``.`` in tool names.
 
-Either form is accepted at call time: the qualified ``server.tool``
-key is always indexed, and the bare name is indexed too whenever it
-is unambiguous.
+Any form is accepted at call time: the qualified ``server__tool`` and
+the older dotted ``server.tool`` keys are always indexed, and the
+bare name is indexed too whenever it is unambiguous.
 
 Prompts follow the same bare-when-unique / qualified-always naming
 (``server.prompt``); resources are qualified with ``server:uri`` when
@@ -730,11 +731,12 @@ def _build_index(
 ) -> dict[str, _IndexEntry]:
     """Build the name index with auto-disambiguation.
 
-    Every tool is indexed under its qualified ``server.name`` key.
-    A name that's unique across all servers is ALSO indexed under
-    the bare key (and displayed with the bare name); a name that
-    appears in multiple servers is displayed qualified and gets no
-    bare key (it would be ambiguous).
+    Every tool is indexed under its qualified ``server__name`` key
+    (and the older dotted ``server.name``). A name that's unique
+    across all servers is ALSO indexed under the bare key (and
+    displayed with the bare name); a name that appears in multiple
+    servers is displayed qualified and gets no bare key (it would be
+    ambiguous).
     """
     counts: dict[str, int] = {}
     for tools in per_server.values():
