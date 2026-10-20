@@ -11,8 +11,8 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 
 ### Fixed
 
-Found while checking the docs against the code. All but the last are
-regressions in 0.17.0 - 0.17.2; the ReWOO prompt bug is older.
+Found while checking the docs against the code; all but the ReWOO
+prompt bug came with 0.17.0 - 0.17.2.
 
 * **Workspace and living-plan tools work under a process sandbox.**
   With ``tools=OSSandbox(...)`` or ``SubprocessSandbox(...)`` plus
@@ -47,6 +47,14 @@ regressions in 0.17.0 - 0.17.2; the ReWOO prompt bug is older.
   graph node: ``WorkflowResult.interrupted`` is set,
   ``interruption_reason`` is ``"fan_out:<branch>:<reason>"`` and
   ``merge`` isn't called.
+* **Role-model strings can take their key from the Agent's secrets.**
+  ``Reflexion(evaluator_model="gpt-4.1-mini")`` (or any OpenAI /
+  DeepSeek id) raised a missing-credentials error in the
+  architecture's constructor when the key was only in
+  ``Tuning(secrets=...)``: an OpenAI client needs its key when it is
+  built, before the Agent could pass its secrets. The spec is now
+  checked with a stand-in key and the Agent builds the model with its
+  secrets, as 0.17.0 intended; a bad spec still fails at construction.
 * **ReWOO's default planner prompt shows the reference it reads.** Its
   prose went through ``str.format`` and told the model to write
   ``{En}``, which the executor didn't recognise, so a step following it

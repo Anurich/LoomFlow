@@ -275,3 +275,42 @@ async def test_rewoo_reads_single_brace_references() -> None:
     )
     await Agent("x", model=model, tools=[fetch], architecture=ReWOO()).run("task")
     assert seen == ["a", "page<a>"]
+
+
+# ---------------------------------------------------------------------------
+# Role-model spec strings and the Agent's secrets
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("spec", "key"), [("gpt-4.1-mini", "OPENAI_API_KEY"), ("deepseek-chat", "DEEPSEEK_API_KEY")]
+)
+def test_role_model_key_can_live_only_in_the_agents_secrets(
+    spec: str, key: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An OpenAI client needs its key when it's built, so these specs
+    # failed in the architecture's constructor before the Agent could
+    # hand them its secrets.
+    pytest.importorskip("openai")
+    from loomflow import Tuning
+    from loomflow.architecture import Reflexion
+    from loomflow.security import DictSecrets
+
+    for name in ("OPENAI_API_KEY", "DEEPSEEK_API_KEY", "ANTHROPIC_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    agent = Agent(
+        "x",
+        model=_model(),
+        architecture=Reflexion(evaluator_model=spec),
+        tuning=Tuning(secrets=DictSecrets({key: "sk-from-secrets"})),
+    )
+    evaluator = agent._architecture._evaluator_model  # type: ignore[attr-defined]
+    assert evaluator._client.api_key == "sk-from-secrets"
+
+
+def test_a_bad_role_model_spec_still_fails_at_construction() -> None:
+    from loomflow.architecture import Reflexion
+    from loomflow.core.errors import ConfigError
+
+    with pytest.raises(ConfigError):
+        Reflexion(evaluator_model="no-such-model-family")
