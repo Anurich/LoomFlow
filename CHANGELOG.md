@@ -11,8 +11,8 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 
 ### Fixed
 
-Regressions in 0.17.0 - 0.17.2, found while checking the docs against
-the code.
+Found while checking the docs against the code. All but the last are
+regressions in 0.17.0 - 0.17.2; the ReWOO prompt bug is older.
 
 * **Workspace and living-plan tools work under a process sandbox.**
   With ``tools=OSSandbox(...)`` or ``SubprocessSandbox(...)`` plus
@@ -47,6 +47,12 @@ the code.
   graph node: ``WorkflowResult.interrupted`` is set,
   ``interruption_reason`` is ``"fan_out:<branch>:<reason>"`` and
   ``merge`` isn't called.
+* **ReWOO's default planner prompt shows the reference it reads.** Its
+  prose went through ``str.format`` and told the model to write
+  ``{En}``, which the executor didn't recognise, so a step following it
+  got the literal text instead of the earlier step's output. The prose
+  now says ``{{En}}``, and ``{En}`` is read as a reference too (a
+  custom prompt's ``{{En}}`` becomes ``{En}`` once formatted).
 
 ## [0.17.2] — 2026-10-20
 

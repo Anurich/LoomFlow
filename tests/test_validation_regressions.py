@@ -236,3 +236,42 @@ async def test_parallel_without_interruptions_merges_as_before() -> None:
     b = Agent("b", model=ScriptedModel([ScriptedTurn(text="B")]))
     result = await Workflow.parallel([a, b]).run("go")
     assert not result.interrupted and result.output == ["A", "B"]
+
+
+# ---------------------------------------------------------------------------
+# ReWOO step references
+# ---------------------------------------------------------------------------
+
+
+def test_rewoo_default_prompt_teaches_the_reference_it_parses() -> None:
+    # The prose said ``{{En}}`` in source, which str.format renders as
+    # ``{En}``: the model was taught a form the executor didn't read.
+    from loomflow.architecture import rewoo
+    from loomflow.architecture.helpers import fill_template
+
+    rendered = fill_template(rewoo.DEFAULT_PLANNER_PROMPT, tool_descriptions="- t")
+    assert "using `{{En}}`" in rendered and "`{En}`" not in rendered
+
+
+async def test_rewoo_reads_single_brace_references() -> None:
+    import json
+
+    from loomflow.architecture import ReWOO
+
+    seen: list[str] = []
+
+    @tool
+    async def fetch(url: str) -> str:
+        """Fetch a URL."""
+        seen.append(url)
+        return f"page<{url}>"
+
+    plan = [
+        {"id": "E1", "tool": "fetch", "args": {"url": "a"}},
+        {"id": "E2", "tool": "fetch", "args": {"url": "{E1}"}},
+    ]
+    model = ScriptedModel(
+        [ScriptedTurn(text=json.dumps(plan)), ScriptedTurn(text="ANSWER")]
+    )
+    await Agent("x", model=model, tools=[fetch], architecture=ReWOO()).run("task")
+    assert seen == ["a", "page<a>"]
