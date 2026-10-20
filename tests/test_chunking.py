@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import importlib.util
+
 import pytest
 
 from loomflow.loader import (
@@ -11,6 +13,11 @@ from loomflow.loader import (
     SentenceChunker,
     TokenChunker,
     chunk,
+)
+
+# TokenChunker needs the optional ``tiktoken`` (loomflow[loader-token]).
+requires_tiktoken = pytest.mark.skipif(
+    importlib.util.find_spec("tiktoken") is None, reason="tiktoken not installed"
 )
 
 # ---------------------------------------------------------------------------
@@ -175,6 +182,7 @@ def test_sentence_chunker_metadata() -> None:
 # ---------------------------------------------------------------------------
 
 
+@requires_tiktoken
 def test_token_chunker_respects_token_count() -> None:
     text = "hello world " * 200
     chunks = TokenChunker(chunk_size=20, chunk_overlap=0).split(text)
@@ -183,10 +191,12 @@ def test_token_chunker_respects_token_count() -> None:
         assert c.metadata["token_count"] <= 20
 
 
+@requires_tiktoken
 def test_token_chunker_empty_text() -> None:
     assert TokenChunker().split("") == []
 
 
+@requires_tiktoken
 def test_token_chunker_metadata_includes_encoding() -> None:
     chunks = TokenChunker(chunk_size=100).split("hello")
     if chunks:
@@ -220,6 +230,7 @@ def test_chunk_factory_sentence() -> None:
     assert all(c.metadata["strategy"] == "sentence" for c in out)
 
 
+@requires_tiktoken
 def test_chunk_factory_token() -> None:
     out = chunk(
         "hello world " * 50,

@@ -9,6 +9,9 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+
+pytest.importorskip("opentelemetry.sdk")
+
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from opentelemetry.sdk.trace import TracerProvider

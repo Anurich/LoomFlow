@@ -32,8 +32,6 @@ chroma = ["chromadb>=0.5.0"]
 redis = ["redis>=5.0.0"]
 voyage = ["voyageai>=0.2.0"]
 cohere = ["cohere>=5.0.0"]
-dbos = ["dbos>=0.7.0"]
-temporal = ["temporalio>=1.7.0"]
 # ASGI server for `loom serve` / running loomflow.serve.create_app.
 # The app itself is framework-free pure ASGI — any server works;
 # this extra just pulls the recommended one.

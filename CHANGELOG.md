@@ -130,6 +130,13 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
   session-scoped forget still leaves them, since blocks aren't per
   session. ``MemoryExport`` now includes the user's ``blocks``.
 
+### Packaging
+
+* Removed the ``dbos`` and ``temporal`` extras: nothing in loomflow
+  uses those packages.
+* The test suite passes on a bare ``pip install loomflow`` (tests that
+  need an optional SDK, tiktoken or OpenTelemetry skip without it).
+
 ### Fixed — tool dispatch
 
 * **Tool dispatch.** Objects with an ``async def __call__`` (and

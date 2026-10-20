@@ -280,6 +280,7 @@ async def test_string_model_spec_resolves_to_correct_adapter(
     model-id string. Dummy API keys keep SDK construction quiet —
     no network calls happen here.
     """
+    pytest.importorskip("openai")
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
 
@@ -311,6 +312,7 @@ async def test_deepseek_spec_resolves_to_openai_adapter_with_base_url(
     """``deepseek-*`` specs ride the OpenAI-compatible adapter pointed
     at DeepSeek's endpoint, keyed by DEEPSEEK_API_KEY — never the
     OPENAI_API_KEY fallback."""
+    pytest.importorskip("openai")
     monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-test-key")
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 

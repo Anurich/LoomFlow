@@ -144,6 +144,7 @@ def _patched_httpx_client(response: Any) -> Any:
 
 
 async def test_serper_happy_path_formats_results() -> None:
+    pytest.importorskip("httpx")
     payload = {
         "organic": [
             {
@@ -169,6 +170,7 @@ async def test_serper_happy_path_formats_results() -> None:
 
 
 async def test_serper_empty_organic_says_no_results() -> None:
+    pytest.importorskip("httpx")
     # Serper returned 200 but no organic results — the wrapper
     # must produce the same "(no results)" the helper does.
     with _patched_httpx_client(_mock_httpx_response({"organic": []})):
@@ -178,6 +180,7 @@ async def test_serper_empty_organic_says_no_results() -> None:
 
 
 async def test_serper_http_error_returns_failure_string() -> None:
+    pytest.importorskip("httpx")
     # 401 / 500 / network blip — the tool returns a "(web search
     # failed: ...)" string instead of raising. Agents can see the
     # failure as a tool result and act on it.

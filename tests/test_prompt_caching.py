@@ -322,6 +322,7 @@ def test_anthropic_complete_parses_cache_fields() -> None:
     ``cache_creation_input_tokens`` in its usage block, the adapter
     must surface both on the Usage object AND compute cost using
     the discount + write premium."""
+    pytest.importorskip("anthropic")
 
     class _FakeUsage:
         input_tokens = 50
@@ -375,6 +376,7 @@ def test_openai_complete_normalises_subset_to_separate_buckets() -> None:
         cached_input_tokens = cached
     so downstream code doesn't double-count.
     """
+    pytest.importorskip("openai")
 
     class _FakeDetails:
         cached_tokens = 1500
@@ -423,6 +425,7 @@ def test_openai_complete_with_cache_key_forwards_to_api() -> None:
     """When ``PromptCacheConfig.cache_key`` is set, the adapter
     forwards it as ``prompt_cache_key`` to OpenAI's API for better
     routing on shared-prefix requests."""
+    pytest.importorskip("openai")
 
     captured: dict[str, object] = {}
 
@@ -565,6 +568,7 @@ def test_openai_complete_parses_deepseek_native_cache_field() -> None:
     top-level ``prompt_cache_hit_tokens`` (no
     ``prompt_tokens_details``). The adapter must fall back to it and
     apply the same subset-to-separate-buckets split."""
+    pytest.importorskip("openai")
 
     class _FakeUsage:
         prompt_tokens = 2000  # total; 1500 of which are cache hits
@@ -610,6 +614,7 @@ def test_openai_cache_key_not_forwarded_when_disabled() -> None:
     """``enabled`` is the master switch: a config carrying a
     cache_key but ``enabled=False`` must NOT put ``prompt_cache_key``
     on the wire."""
+    pytest.importorskip("openai")
 
     captured: dict[str, object] = {}
 
