@@ -1360,13 +1360,12 @@ def parse_score(text: str) -> float:
     """
     if "{" in text:
         parsed = parse_fenced_json(text)
-        if isinstance(parsed, dict) and isinstance(
-            parsed.get("score"), int | float | str
-        ) and not isinstance(parsed.get("score"), bool):
-            try:
-                return _scaled(float(parsed["score"]))
-            except ValueError:
-                pass
+        value = parsed.get("score") if isinstance(parsed, dict) else None
+        if isinstance(value, int | float) and not isinstance(value, bool):
+            return _scaled(float(value))
+        if isinstance(value, str) and value.strip():
+            # "7/10", "40%": read it as a labelled score line.
+            return parse_score(f"score: {value.strip()}")
     match = _SCORE_LINE_RE.search(text)
     if match is not None:
         try:

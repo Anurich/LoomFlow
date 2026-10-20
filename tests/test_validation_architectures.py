@@ -267,7 +267,10 @@ def test_parse_fenced_json_finds_json_in_prose(text: str) -> None:
         ("score: 7", 0.7),
         ("score: 1.5", 1.0),
         ('{"score": 0.4}', 0.4),
+        ('{"score": "40%"}', 0.4),
+        ('{"score": "7/10"}', 0.7),
         ("0 errors found", 0.0),
+        ("40% of tests fail", 0.0),
     ],
 )
 def test_parse_score_reads_the_scale(text: str, expected: float) -> None:

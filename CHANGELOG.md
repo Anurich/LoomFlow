@@ -430,8 +430,9 @@ reproduced, fixed and given a regression test.
   ``rounds`` is documented as debate rounds after the independent one
   (Du et al.'s ``rounds=2`` is ``rounds=1``).
 * **Scores and JSON from model replies.** ``parse_score`` (Reflexion,
-  Tree of Thoughts, ActorCritic) reads scales: "7/10" is 0.7, "40%"
-  0.4, "2 out of 10" 0.2, "score: 7" 0.7, and a negative score 0;
+  Tree of Thoughts, ActorCritic) reads scales: "score: 7/10" is 0.7,
+  "score: 40%" 0.4, "2 out of 10" 0.2, "score: 7" 0.7, a JSON
+  ``{"score": "40%"}`` 0.4, and a negative score 0;
   "3/10" and "40%" used to read as 1.0, a false success. JSON wrapped
   in prose or a fence, or followed by prose, is found (ActorCritic
   scored such critiques 0.0 and never approved; ReWOO and
