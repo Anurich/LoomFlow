@@ -45,6 +45,7 @@ import anyio.to_thread
 from anyio.from_thread import BlockingPortal, start_blocking_portal
 
 from ..core.errors import MCPError
+from ._fields import mcp_field
 from .spec import MCPServerSpec, SamplingHandler
 
 if TYPE_CHECKING:
@@ -281,8 +282,8 @@ class MCPClient:
 
             try:
                 result = handler(
-                    getattr(params, "messages", None),
-                    getattr(params, "modelPreferences", None),
+                    mcp_field(params, "messages"),
+                    mcp_field(params, "modelPreferences"),
                 )
                 if inspect.isawaitable(result):
                     result = await result
@@ -364,8 +365,31 @@ class MCPClient:
         session = self._session
         if session is None:
             raise MCPError(f"MCP client {self._spec.name!r}: session not initialised")
-        result = await self._run_session_call(session.list_tools)
-        return list(getattr(result, "tools", result) or [])
+        return await self._list_all(session.list_tools, "tools")
+
+    async def _list_all(self, method: Any, key: str) -> list[Any]:
+        """Every item of a paginated ``*/list`` call, following
+        ``nextCursor`` until the server stops returning one (the spec
+        lets servers split tools, resources and prompts into pages)."""
+        items: list[Any] = []
+        cursor: str | None = None
+        seen: set[str] = set()
+        # mcp >= 1.2x takes ``params=PaginatedRequestParams``; older
+        # 1.x releases take ``cursor=`` directly.
+        by_params = "params" in inspect.signature(method).parameters
+        while True:
+            if cursor is None:
+                call = method
+            elif by_params:
+                call = partial(method, params=_page_params(cursor))
+            else:
+                call = partial(method, cursor=cursor)
+            result = await self._run_session_call(call)
+            items.extend(getattr(result, key, result) or [])
+            cursor = mcp_field(result, "nextCursor")
+            if not cursor or cursor in seen:  # a repeated cursor would loop forever
+                return items
+            seen.add(cursor)
 
     async def call_tool(
         self, name: str, args: dict[str, Any]
@@ -380,8 +404,7 @@ class MCPClient:
     async def list_resources(self) -> list[Any]:
         """Return the SDK's resource descriptors (``uri``, ``name``, ...)."""
         session = await self._require_session()
-        result = await self._run_session_call(session.list_resources)
-        return list(getattr(result, "resources", result) or [])
+        return await self._list_all(session.list_resources, "resources")
 
     async def read_resource(self, uri: str) -> Any:
         """Read ``uri``. Returns the SDK's ReadResourceResult.
@@ -395,8 +418,7 @@ class MCPClient:
     async def list_prompts(self) -> list[Any]:
         """Return the SDK's prompt descriptors (``name``, ``arguments``, ...)."""
         session = await self._require_session()
-        result = await self._run_session_call(session.list_prompts)
-        return list(getattr(result, "prompts", result) or [])
+        return await self._list_all(session.list_prompts, "prompts")
 
     async def get_prompt(
         self, name: str, arguments: dict[str, str] | None = None
@@ -483,13 +505,30 @@ class MCPClient:
                 raise MCPError(
                     f"http MCP spec {self._spec.name!r} has no url set"
                 )
-            ctx = streamablehttp_client(
-                self._spec.url,
-                headers=dict(self._spec.headers) if self._spec.headers else None,
-            )
+            headers = dict(self._spec.headers) if self._spec.headers else None
+            if "http_client" in inspect.signature(streamablehttp_client).parameters:
+                # Current SDKs take a ready client instead of headers=;
+                # the SDK's own factory picks httpx or httpx2 to match
+                # and applies MCP's default timeouts.
+                from mcp.shared._httpx_utils import (  # type: ignore[import-not-found, import-untyped]
+                    create_mcp_http_client,
+                )
+
+                http_client = await stack.enter_async_context(
+                    create_mcp_http_client(headers=headers)
+                )
+                ctx = streamablehttp_client(self._spec.url, http_client=http_client)
+            else:
+                ctx = streamablehttp_client(self._spec.url, headers=headers)
             triplet = await stack.enter_async_context(ctx)
             # streamablehttp_client returns (read, write, get_session_id)
             read, write = triplet[0], triplet[1]
             return read, write
 
         raise MCPError(f"unsupported transport: {self._spec.transport!r}")
+
+
+def _page_params(cursor: str) -> Any:
+    import mcp.types as types  # type: ignore[import-not-found, import-untyped]
+
+    return types.PaginatedRequestParams(cursor=cursor)

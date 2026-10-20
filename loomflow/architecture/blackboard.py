@@ -270,6 +270,8 @@ class BlackboardArchitecture:
             for gate_event in gate_events:
                 yield gate_event
             if blocked:
+                # Keep what the board has so far rather than ''.
+                session.output = _fallback_final(bb)
                 return
 
             # Coordinator: stream its events through, capture decision.
@@ -578,6 +580,14 @@ class BlackboardArchitecture:
         final_holder.append(str(decider_result.get("output", "")))
 
 
+def _truthy(value: object) -> bool:
+    """JSON booleans, and the strings and numbers models write for
+    them: ``"false"`` / ``"no"`` / ``"0"`` are false."""
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "yes", "1", "y")
+    return bool(value)
+
+
 def _fallback_final(bb: Blackboard) -> str:
     """No-decider final answer: last ``answer``-kind entry wins;
     fall through to the last ``contribution``; finally the empty
@@ -599,11 +609,12 @@ def _parse_coordinator_decision(text: str) -> _CoordinatorDecision:
     parsed: object = parse_fenced_json(text)
 
     if isinstance(parsed, dict):
-        terminate = bool(parsed.get("terminate", False))
+        terminate = _truthy(parsed.get("terminate", False))
         next_agent_raw = parsed.get("next_agent")
         next_agent = (
-            str(next_agent_raw)
+            str(next_agent_raw).strip()
             if next_agent_raw is not None
+            and str(next_agent_raw).strip().lower() not in ("", "null", "none")
             else None
         )
         instruction_raw = parsed.get("instruction")

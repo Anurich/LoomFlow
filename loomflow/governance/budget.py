@@ -13,12 +13,22 @@ per-user caps in addition to (or instead of) the global ones. The
 agent loop forwards ``user_id`` from the live :class:`RunContext`
 into every ``allows_step`` / ``consume`` call automatically;
 direct callers pass it explicitly via the keyword.
+
+**Wall clock.** ``max_wall_clock`` / ``per_user_max_wall_clock`` cap the
+time spent *running* — the agent loop wraps each run in
+:meth:`StandardBudget.running` — not the time since the budget was
+created: an agent that sat idle between requests isn't blocked for it.
+Concurrent or nested runs count once (the clock runs while at least one
+is in progress). For a cap on a single run, use ``Agent(timeout=)``.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import contextlib
+from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import anyio
 
@@ -88,13 +98,36 @@ class BudgetConfig:
 
 
 @dataclass(slots=True)
+class _Clock:
+    """Time during which at least one run was in progress."""
+
+    total: timedelta = timedelta(0)
+    active: int = 0
+    since: datetime | None = None
+
+    def start(self, now: datetime) -> None:
+        if self.active == 0:
+            self.since = now
+        self.active += 1
+
+    def stop(self, now: datetime) -> None:
+        self.active = max(0, self.active - 1)
+        if self.active == 0 and self.since is not None:
+            self.total += now - self.since
+            self.since = None
+
+    def elapsed(self, now: datetime) -> timedelta:
+        return self.total + (now - self.since if self.since is not None else timedelta(0))
+
+
+@dataclass(slots=True)
 class _UserUsage:
     """Per-user-id bucket. Mirrors the global counters."""
 
     tokens_in: int = 0
     tokens_out: int = 0
     cost: float = 0.0
-    started_at: datetime | None = None
+    clock: _Clock = field(default_factory=_Clock)
 
     def total_tokens(self) -> int:
         return self.tokens_in + self.tokens_out
@@ -124,7 +157,7 @@ class StandardBudget:
         self._tokens_in = 0
         self._tokens_out = 0
         self._cost = 0.0
-        self._started_at = datetime.now(UTC)
+        self._clock = _Clock()
         # Per-user counters. Bounded so a runaway tenant or
         # adversarial caller can't grow this dict without limit
         # (process OOM is the only ceiling otherwise). LRU evicts
@@ -167,11 +200,30 @@ class StandardBudget:
             self._tokens_out += tokens_out
             self._cost += cost_usd
             bucket = self._by_user.setdefault(user_id, _UserUsage())
-            if bucket.started_at is None:
-                bucket.started_at = datetime.now(UTC)
             bucket.tokens_in += tokens_in
             bucket.tokens_out += tokens_out
             bucket.cost += cost_usd
+
+    @contextlib.asynccontextmanager
+    async def running(self, *, user_id: str | None = None) -> AsyncIterator[None]:
+        """Count the enclosed run's time toward the wall-clock caps.
+
+        The agent loop wraps every run in this; call it yourself when
+        driving ``allows_step`` / ``consume`` directly."""
+        async with self._lock:
+            now = datetime.now(UTC)
+            self._clock.start(now)
+            self._by_user.setdefault(user_id, _UserUsage()).clock.start(now)
+        try:
+            yield
+        finally:
+            with anyio.CancelScope(shield=True):
+                async with self._lock:
+                    now = datetime.now(UTC)
+                    self._clock.stop(now)
+                    bucket = self._by_user.get(user_id)
+                    if bucket is not None:
+                        bucket.clock.stop(now)
 
     # ---- introspection (test + ops helper) ------------------------------
 
@@ -193,13 +245,13 @@ class StandardBudget:
         return self._tokens_in + self._tokens_out
 
     def _elapsed(self) -> timedelta:
-        return datetime.now(UTC) - self._started_at
+        return self._clock.elapsed(datetime.now(UTC))
 
     def _user_elapsed(self, user_id: str | None) -> timedelta | None:
         bucket = self._by_user.get(user_id)
-        if bucket is None or bucket.started_at is None:
+        if bucket is None:
             return None
-        return datetime.now(UTC) - bucket.started_at
+        return bucket.clock.elapsed(datetime.now(UTC))
 
     def _first_block_reason(self, user_id: str | None) -> str | None:
         c = self._cfg
@@ -274,3 +326,13 @@ class StandardBudget:
         ):
             return f"per-user cost at {u.cost / c.per_user_max_cost_usd:.0%}"
         return None
+
+
+def run_clock(budget: Any, *, user_id: str | None) -> contextlib.AbstractAsyncContextManager[Any]:
+    """``budget.running(user_id=...)`` when the budget keeps a run
+    clock, else a no-op context."""
+    running = getattr(budget, "running", None)
+    if running is None:
+        return contextlib.nullcontext()
+    cm: contextlib.AbstractAsyncContextManager[Any] = running(user_id=user_id)
+    return cm

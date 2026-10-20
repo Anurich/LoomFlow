@@ -329,10 +329,10 @@ async def test_filesystem_sandbox_rejects_separatorless_list_leaf(
 ) -> None:
     """``paths`` is a path-like name — its leaves are validated even
     without a separator in the value."""
+    # Relative names resolve against ``base``; put it outside the root.
     sandbox = FilesystemSandbox(
-        InProcessToolHost([batch_read]), roots=[tmp_path]
+        InProcessToolHost([batch_read]), roots=[tmp_path], base=tmp_path.parent
     )
-    # Relative name resolves against cwd, which isn't under tmp_path.
     result = await sandbox.call(
         "batch_read", {"paths": ["passwd"]}, call_id="c2"
     )
@@ -414,13 +414,13 @@ async def test_file_audit_log_init_does_not_scan_file(
     await seed.append(session_id="s", actor="a", action="x", payload={})
 
     scans: list[int] = []
-    original = FileAuditLog._scan_max_seq
+    original = FileAuditLog._recover_tail
 
-    def spy(self: FileAuditLog) -> int:
+    def spy(self: FileAuditLog, *args: Any) -> Any:
         scans.append(1)
-        return original(self)
+        return original(self, *args)
 
-    monkeypatch.setattr(FileAuditLog, "_scan_max_seq", spy)
+    monkeypatch.setattr(FileAuditLog, "_recover_tail", spy)
 
     log = FileAuditLog(path, secret="x")
     assert scans == [], "__init__ read the audit file eagerly"

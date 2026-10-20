@@ -8,8 +8,10 @@ type hints. :class:`InProcessToolHost` is the simplest
 
 from __future__ import annotations
 
+import functools
 import inspect
 import json
+import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, overload
@@ -103,9 +105,12 @@ class Tool:
     async def execute(self, args: Mapping[str, Any]) -> Any:
         """Invoke the underlying callable.
 
-        Async functions are awaited; sync functions are dispatched to a
-        worker thread via :func:`anyio.to_thread.run_sync` so they don't
-        block the event loop.
+        Async callables (functions, ``functools.partial`` of one, or
+        objects with an ``async def __call__``) are awaited; sync ones
+        run in a worker thread via :func:`anyio.to_thread.run_sync` so
+        they don't block the event loop. A sync callable that returns
+        an awaitable has it awaited. A cancelled or timed-out sync
+        call returns at once; its thread finishes in the background.
         """
         kwargs = dict(args)
         # Coerce stringified args to their declared schema types before
@@ -139,9 +144,23 @@ class Tool:
                     kwargs[name] = adapter.validate_python(json.loads(val))
                 except Exception:  # noqa: BLE001 — keep original value
                     pass
-        if inspect.iscoroutinefunction(self.fn):
+        if _is_async_callable(self.fn):
             return await self.fn(**kwargs)
-        return await anyio.to_thread.run_sync(lambda: self.fn(**kwargs))
+        result = await anyio.to_thread.run_sync(
+            lambda: self.fn(**kwargs), abandon_on_cancel=True
+        )
+        if inspect.isawaitable(result):
+            result = await result
+        return result
+
+
+def _is_async_callable(fn: Any) -> bool:
+    while isinstance(fn, functools.partial):
+        fn = fn.func
+    return inspect.iscoroutinefunction(fn) or (
+        not inspect.isfunction(fn)
+        and inspect.iscoroutinefunction(getattr(fn, "__call__", None))  # noqa: B004
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -196,9 +215,17 @@ def tool(
         except (NameError, TypeError):
             sig = inspect.signature(f)
         schema, adapters = _schema_from_signature(sig)
+        doc_text, param_docs = _parse_docstring(f.__doc__ or "")
+        for pname, text in param_docs.items():
+            prop = schema["properties"].get(pname)
+            if prop is not None and "description" not in prop:
+                prop["description"] = text
         return Tool(
             name=name or f.__name__,
-            description=(description or (f.__doc__ or "")).strip().split("\n")[0],
+            # An explicit description is used as written; otherwise the
+            # docstring, minus its Args / Returns / ... sections (whose
+            # parameter entries describe the parameters instead).
+            description=description.strip() if description else doc_text,
             fn=f,
             input_schema=schema,
             destructive=destructive,
@@ -211,6 +238,50 @@ def tool(
     return _make
 
 
+_DOC_SECTION_RE = re.compile(
+    r"^(Args|Arguments|Parameters|Params|Keyword Args|Keyword Arguments|"
+    r"Returns?|Yields?|Raises|Examples?|Notes?|See Also|Attributes)\s*:?\s*$",
+    re.IGNORECASE,
+)
+# Google ``name (type): text`` / ``name: text``; NumPy ``name : type``
+# (a space before the colon — the text follows on indented lines).
+_DOC_PARAM_RE = re.compile(r"^(\*{0,2}\w+)( ?)(\([^)]*\))?\s*:\s*(.*)$")
+
+
+def _parse_docstring(doc: str) -> tuple[str, dict[str, str]]:
+    """``(description, {param: text})`` from a Google- or NumPy-style
+    docstring: the text before the first section heading, and the
+    entries of an ``Args:`` / ``Parameters`` section."""
+    lines = inspect.cleandoc(doc).splitlines() if doc else []
+    description: list[str] = []
+    params: dict[str, str] = {}
+    section: str | None = None
+    current: str | None = None
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        underline = i + 1 < len(lines) and set(lines[i + 1].strip()) == {"-"}
+        if _DOC_SECTION_RE.match(stripped) and (stripped.endswith(":") or underline):
+            section = stripped.rstrip(":").lower()
+            current = None
+            continue
+        if set(stripped) == {"-"} and section is not None:
+            continue  # NumPy heading underline
+        if section is None:
+            description.append(line)
+            continue
+        if section not in ("args", "arguments", "parameters", "params", "keyword args", "keyword arguments"):
+            continue
+        match = _DOC_PARAM_RE.match(stripped)
+        indent = len(line) - len(line.lstrip())
+        if match and indent <= 4 and not (current and indent > 4):
+            current = match.group(1).lstrip("*")
+            numpy_style = bool(match.group(2)) and not match.group(3)
+            params[current] = "" if numpy_style else match.group(4).strip()
+        elif current and stripped:
+            params[current] = f"{params[current]} {stripped}".strip()
+    return "\n".join(description).strip(), {k: v for k, v in params.items() if v}
+
+
 def _schema_from_signature(
     sig: inspect.Signature,
 ) -> tuple[dict[str, Any], dict[str, TypeAdapter[Any]]]:
@@ -219,10 +290,12 @@ def _schema_from_signature(
     Primitives map straight to their JSON-Schema type (and stay on the
     cheap string-coercion path in :meth:`Tool.execute`). Anything else
     goes through :class:`pydantic.TypeAdapter` for a full recursive
-    schema — nested ``$defs`` are hoisted to the schema root so
-    ``#/$defs/...`` refs stay valid inside the tool definition.
-    Annotations Pydantic cannot model fall back to ``string`` exactly
-    as before.
+    schema, all parameters in one generation pass so two different
+    models sharing a class name get distinct ``$defs`` entries; a
+    parameter that is a model is inlined, and ``$defs`` sit at the
+    schema root so ``#/$defs/...`` refs stay valid inside the tool
+    definition. Annotations Pydantic cannot model fall back to
+    ``string`` exactly as before.
     """
     properties: dict[str, dict[str, Any]] = {}
     required: list[str] = []
@@ -244,15 +317,27 @@ def _schema_from_signature(
         else:
             try:
                 adapter: TypeAdapter[Any] = TypeAdapter(ann)
-                piece = adapter.json_schema()
+                adapter.json_schema()
             except Exception:  # noqa: BLE001 — unmodellable → legacy fallback
                 properties[pname] = {"type": "string"}
             else:
-                defs.update(piece.pop("$defs", {}))
-                properties[pname] = piece
+                properties[pname] = {}  # filled below, in signature order
                 adapters[pname] = adapter
         if param.default is inspect.Parameter.empty:
             required.append(pname)
+    if adapters:
+        by_key, top = TypeAdapter.json_schemas(
+            [(name, "validation", a) for name, a in adapters.items()]
+        )
+        defs = dict(top.get("$defs", {}))
+        for name in adapters:
+            piece = dict(by_key[(name, "validation")])
+            ref = piece.get("$ref")
+            if len(piece) == 1 and isinstance(ref, str) and ref.startswith("#/$defs/"):
+                target = defs.get(ref.removeprefix("#/$defs/"))
+                if target is not None:
+                    piece = dict(target)
+            properties[name] = piece
     schema: dict[str, Any] = {
         "type": "object",
         "properties": properties,

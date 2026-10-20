@@ -42,7 +42,44 @@ class _OAIPartial:
 # Older chat models — and OpenAI-compatible third-party servers
 # reached via ``base_url`` — still accept ``max_tokens``, so we keep
 # it for everything else rather than switching unconditionally.
-_MAX_COMPLETION_TOKENS_PREFIXES = ("o1", "o3", "o4", "gpt-5")
+_MAX_COMPLETION_TOKENS_PREFIXES = ("o1", "o3", "o4", "gpt-5", "gpt-6")
+
+# Chat Completions limits on tool calling (OpenAI reasoning guide and
+# model pages): none at all on these (tools need the Responses API) ...
+_NO_CHAT_COMPLETIONS_TOOLS = ("gpt-6-astra", "gpt-6.1-sol")
+# ... and only with ``reasoning_effort="none"`` on these.
+_CHAT_COMPLETIONS_TOOLS_NEED_NO_REASONING = ("gpt-6-sol", "gpt-6-luna")
+_WARNED_TOOL_EFFORT: set[str] = set()
+
+
+def _apply_chat_tool_limits(model_name: str, kwargs: dict[str, Any]) -> None:
+    """Fail clearly, or adjust ``reasoning_effort``, where a model's
+    Chat Completions endpoint restricts tool calling."""
+    if "tools" not in kwargs:
+        return
+    name = model_name.lower()
+    if name.startswith(_NO_CHAT_COMPLETIONS_TOOLS):
+        from ..core.errors import PermanentModelError
+
+        raise PermanentModelError(
+            f"{model_name} doesn't support tool calling through Chat "
+            "Completions (OpenAI requires the Responses API for it). "
+            "Use it without tools, or pick a model that has them."
+        )
+    if name.startswith(_CHAT_COMPLETIONS_TOOLS_NEED_NO_REASONING):
+        requested = kwargs.get("reasoning_effort")
+        if requested not in (None, "none") and model_name not in _WARNED_TOOL_EFFORT:
+            _WARNED_TOOL_EFFORT.add(model_name)
+            import warnings
+
+            warnings.warn(
+                f"{model_name} calls tools through Chat Completions only "
+                f"with reasoning_effort='none'; effort={requested!r} is "
+                "dropped on requests that offer tools.",
+                UserWarning,
+                stacklevel=3,
+            )
+        kwargs["reasoning_effort"] = "none"
 
 
 def _max_tokens_param(model_name: str) -> str:
@@ -116,6 +153,9 @@ class OpenAIModel:
             self._client = AsyncOpenAI(
                 api_key=resolved_key,
                 base_url=base_url,
+                # Retries happen once, in loomflow's RetryingModel; the
+                # SDK's own (2 by default) would multiply them.
+                max_retries=0,
             )
 
     def _effort_kwargs(
@@ -194,6 +234,7 @@ class OpenAIModel:
         # everything else (warn-once or strict-raise depending on
         # the caller). See ``loomflow/model/_effort.py``.
         kwargs.update(self._effort_kwargs(effort, strict_effort))
+        _apply_chat_tool_limits(self.name, kwargs)
 
         # OpenAI prompt caching is **automatic** — no request-side
         # change required. The optional ``prompt_cache_key`` improves
@@ -361,6 +402,7 @@ class OpenAIModel:
         if rf is not None:
             kwargs["response_format"] = rf
         kwargs.update(self._effort_kwargs(effort, strict_effort))
+        _apply_chat_tool_limits(self.name, kwargs)
         # See the ``complete()`` path for the rationale — caching is
         # automatic on OpenAI; only the optional routing hint flows
         # through here (and it's what pins failover gateways to one
@@ -629,7 +671,17 @@ def _build_response_format(output_schema: Any | None) -> dict[str, Any] | None:
     if not callable(schema_method):
         return None
     name = getattr(output_schema, "__name__", "Output")
-    schema = _normalise_schema_for_openai_strict(schema_method())
+    raw = schema_method()
+    if _has_free_form_object(raw):
+        # A ``dict[str, X]`` (or untyped ``dict``) field can't be
+        # strict: strict mode needs ``additionalProperties: false``,
+        # which would leave the model able to return only ``{}``.
+        # Send the schema unconstrained; the agent loop validates.
+        return {
+            "type": "json_schema",
+            "json_schema": {"name": name, "schema": raw, "strict": False},
+        }
+    schema = _normalise_schema_for_openai_strict(raw)
     return {
         "type": "json_schema",
         "json_schema": {
@@ -638,6 +690,19 @@ def _build_response_format(output_schema: Any | None) -> dict[str, Any] | None:
             "strict": True,
         },
     }
+
+
+def _has_free_form_object(schema: Any) -> bool:
+    """Does any object in ``schema`` take arbitrary keys (a mapping
+    field) rather than a fixed set of ``properties``?"""
+    if isinstance(schema, list):
+        return any(_has_free_form_object(v) for v in schema)
+    if not isinstance(schema, dict):
+        return False
+    if schema.get("type") == "object" and "properties" not in schema:
+        if schema.get("additionalProperties", True) is not False:
+            return True
+    return any(_has_free_form_object(v) for v in schema.values())
 
 
 def _normalise_schema_for_openai_strict(schema: Any) -> Any:
@@ -656,23 +721,47 @@ def _normalise_schema_for_openai_strict(schema: Any) -> Any:
        ``anyOf: [T, null]`` which strict mode DOES accept when
        listed as required, so this is the right move.
 
+    3. A ``$ref`` with sibling keywords (Pydantic puts a field's
+       ``description`` / ``default`` next to it) is inlined, as the
+       openai SDK's ``to_strict_json_schema`` does: strict mode
+       rejects ``$ref`` combined with other keys.
+    4. ``default: null`` is dropped (strict mode rejects it).
+
     Returns the same object (mutated). Non-dict inputs return
     unchanged.
     """
+    return _normalise_strict(schema, schema)
+
+
+def _resolve_ref(root: Any, ref: str) -> Any:
+    node = root
+    for part in ref.removeprefix("#/").split("/"):
+        node = node[part]
+    return node
+
+
+def _normalise_strict(schema: Any, root: Any) -> Any:
     if isinstance(schema, dict):
+        ref = schema.get("$ref")
+        if isinstance(ref, str) and ref.startswith("#/") and len(schema) > 1:
+            siblings = {k: v for k, v in schema.items() if k != "$ref"}
+            schema.clear()
+            schema.update({**_resolve_ref(root, ref), **siblings})
+        if "default" in schema and schema["default"] is None:
+            del schema["default"]
         # Walk $defs first so the referenced sub-schemas are
         # normalised before strict-mode validation reads them.
         defs = schema.get("$defs")
         if isinstance(defs, dict):
             for d in defs.values():
-                _normalise_schema_for_openai_strict(d)
+                _normalise_strict(d, root)
         if schema.get("type") == "object":
             schema["additionalProperties"] = False
             props = schema.get("properties")
             if isinstance(props, dict):
                 schema["required"] = list(props.keys())
                 for v in props.values():
-                    _normalise_schema_for_openai_strict(v)
+                    _normalise_strict(v, root)
         # Recurse into other constructs (anyOf / oneOf / allOf /
         # arrays / etc.) so nested objects deeper in the tree are
         # also normalised.
@@ -680,8 +769,8 @@ def _normalise_schema_for_openai_strict(schema: Any) -> Any:
             if key in ("$defs", "properties"):
                 continue
             if isinstance(v, (dict, list)):
-                _normalise_schema_for_openai_strict(v)
+                _normalise_strict(v, root)
     elif isinstance(schema, list):
         for item in schema:
-            _normalise_schema_for_openai_strict(item)
+            _normalise_strict(item, root)
     return schema

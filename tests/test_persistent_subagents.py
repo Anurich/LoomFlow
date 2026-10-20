@@ -93,18 +93,22 @@ def test_build_worker_registry_assigns_stable_sessions() -> None:
     assert registry[role_map["alpha"]].user_id is None
 
 
-def test_handle_touch_pins_user_id_first_time() -> None:
-    """First touch pins user_id; subsequent touches don't override."""
+def test_handle_keeps_one_stable_session_per_user() -> None:
+    """A registered worker is never pinned to its first user: each
+    user gets their own stable session, anonymous runs the base one."""
     a = Agent(instructions="", model=EchoModel())
     registry, role_map = build_worker_registry({"x": a})
     handle = registry[role_map["x"]]
 
     handle.touch(user_id="alice")
-    assert handle.user_id == "alice"
+    assert handle.user_id is None
     assert handle.last_used_at is not None
 
-    handle.touch(user_id="bob")  # second touch must NOT override pin
-    assert handle.user_id == "alice"
+    alice, bob = handle.session_for("alice"), handle.session_for("bob")
+    assert alice != bob
+    assert handle.session_for(None) == handle.session_id
+    assert alice != handle.session_id and bob != handle.session_id
+    assert handle.session_for("alice") == alice  # stable across calls
 
 
 def test_resolve_persistent_session_falls_back_when_no_registry() -> None:
@@ -301,23 +305,61 @@ async def test_send_message_unknown_id_returns_error_string() -> None:
     assert "worker_ghost_X" in out
 
 
-async def test_send_message_cross_tenant_rejected() -> None:
-    """Cross-user invocation surfaces a clear refusal string."""
+async def test_send_message_runs_each_user_in_their_own_session() -> None:
+    """Two users messaging one registered worker each reach their own
+    session of it, so neither sees the other's conversation."""
+    from loomflow.core.context import RunContext, get_run_context, set_run_context
+
+    seen: list[tuple[str | None, str | None]] = []
+
+    class CtxSpy(EchoModel):
+        async def complete(self, messages, **kwargs):  # type: ignore[no-untyped-def]
+            ctx = get_run_context()
+            seen.append((ctx.user_id, ctx.session_id))
+            return await super().complete(messages, **kwargs)
+
+        async def stream(self, messages, **kwargs):  # type: ignore[no-untyped-def]
+            ctx = get_run_context()
+            seen.append((ctx.user_id, ctx.session_id))
+            async for chunk in super().stream(messages, **kwargs):
+                yield chunk
+
+    from loomflow.architecture.base import AgentSession
+
+    a = Agent(instructions="", model=CtxSpy())
+    registry, role_map = build_worker_registry({"alpha": a})
+    handle = registry[role_map["alpha"]]
+    tool = make_send_message_tool(
+        registry,
+        session=AgentSession(id="s1", instructions=""),
+        memory=InMemoryMemory(),
+    )
+    for user in ("alice", "bob"):
+        ctx = RunContext(user_id=user, session_id="s1", run_id="r1", metadata={})
+        async with set_run_context(ctx):
+            out = await tool.fn(to=handle.worker_id, content="hello")
+        assert not out.startswith("Error:"), out
+    assert seen == [
+        ("alice", handle.session_for("alice")),
+        ("bob", handle.session_for("bob")),
+    ]
+
+
+async def test_send_message_to_a_spawned_worker_refuses_other_users() -> None:
     a = Agent(instructions="", model=EchoModel())
     registry, role_map = build_worker_registry({"alpha": a})
     handle = registry[role_map["alpha"]]
-    handle.touch(user_id="alice")  # pin to alice
-
+    handle.owner_only = True
+    handle.user_id = "alice"
     tool = make_send_message_tool(
         registry, session=_FakeSession(), memory=InMemoryMemory()
     )
 
     from loomflow.core.context import RunContext, set_run_context
 
-    ctx = RunContext(
-        user_id="bob", session_id="s1", run_id="r1", metadata={}
-    )
-    async with set_run_context(ctx):
-        out = await tool.fn(to=handle.worker_id, content="hello")
-    assert "cross-tenant" in out.lower() or "rejected" in out.lower()
-    assert "alice" in out and "bob" in out
+    for user in ("bob", None):
+        ctx = RunContext(user_id=user, session_id="s1", run_id="r1", metadata={})
+        async with set_run_context(ctx):
+            out = await tool.fn(to=handle.worker_id, content="hello")
+        assert "cross-tenant" in out.lower() or "rejected" in out.lower()
+        assert "alice" in out

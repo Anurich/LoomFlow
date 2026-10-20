@@ -9,6 +9,579 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 
 ## [Unreleased]
 
+Every subsystem was checked against its reference — provider SDKs and
+docs, the MCP / A2A / OpenTelemetry specs, the papers behind the
+architectures, the Agent Skills spec — and each defect found was
+reproduced, fixed and given a regression test.
+
+### Upgrading — behaviour changes
+
+* MCP tools are named ``server__tool`` (was ``server.tool``); the
+  dotted name still resolves.
+* ``Mode.ACCEPT_EDITS`` auto-approves only the ``write`` / ``edit``
+  tools; an approval handler result that isn't ``True``, an action name
+  or an ``ApprovalDecision`` denies; a pre-tool hook that times out or
+  raises denies.
+* Durable runtimes: a finished run's steps never replay into a later
+  run on the same session (``Agent.resume`` still replays the last
+  run); journal values are JSON, and pickled rows from earlier
+  releases are skipped unless ``serializer="pickle"``.
+* ``FilesystemSandbox`` resolves relative paths against its first root
+  (``base=``), not the process's working directory.
+* ``RetryPolicy`` uses full jitter by default; OpenTelemetry spans and
+  metrics follow the GenAI conventions (``chat {model}``,
+  ``execute_tool {tool}``, ``gen_ai.client.*`` metrics); the serve
+  ``/stream`` fatal frame is ``stream_error``.
+* ``A2AClient`` speaks A2A v1.0 by default (falling back to v0.3).
+* Budget wall-clock caps count time spent running.
+* Debates vote on ``Final answer:`` lines; ``parse_score`` reads
+  "7/10" as 0.7 (and "score: 7" as 0.7); the Supervisor's
+  ``forward_message`` ends the turn.
+* Workflows reject edges to unregistered nodes and stop at an
+  interrupted Agent node (``WorkflowResult.interrupted``).
+* ``Agent.from_config`` rejects unknown keys; skill names and
+  descriptions are validated against the Agent Skills spec; eval gates
+  fail when a metric raises.
+* ``wait_for_signal(timeout_s=)``; undelivered signals are bounded.
+* Removed the unused ``dbos`` / ``temporal`` extras.
+
+### Fixed — validated against current SDKs, specs and reference implementations
+
+* **Claude models work on anthropic SDK 1.x.** SDK 1.0 removed
+  ``temperature`` from ``messages.create``, and the adapter always sent
+  it, so every Claude-backed agent raised ``TypeError`` before making a
+  request. Temperature is now sent only when you set it. Auto-compaction
+  and the tool-result summariser no longer force ``temperature=0.0``,
+  which current Claude models reject.
+* **MCP works on mcp SDK 2.x.** Tool schemas, ``isError`` and
+  ``destructiveHint`` were read under their 1.x attribute names and lost
+  on 2.x, and Streamable HTTP never connected. ``tools/list``,
+  ``resources/list`` and ``prompts/list`` now follow ``nextCursor``.
+  **Behaviour change:** MCP tools are exposed to the model as
+  ``server__tool`` (was ``server.tool``), because providers reject ``.``
+  in tool names. The dotted name still resolves.
+* **Breaking out of a stream no longer breaks the caller.** After
+  ``async for ev in agent.stream(...): break`` (or ``Workflow.stream``),
+  the caller's next unrelated ``await`` raised ``CancelledError``: the
+  stream yielded from inside a task group that was later torn down from
+  another task. Streams now run their producer as a separate task. An
+  abandoned stream cancels its run, and ``aclose()`` returns once the
+  run has unwound. Errors from ``agent.stream`` are raised as-is, not
+  wrapped in an ``ExceptionGroup``. On trio, close streams with
+  ``contextlib.aclosing`` before abandoning them.
+
+### Fixed — tenant isolation
+
+* **Journals and checkpoints are kept per user.** They were keyed by
+  session id alone, so a second user who reused a session id replayed
+  the first user's journaled results, and ``resume()`` restored the
+  first user's transcript. Both are now stored under
+  ``journal_scope(session_id, user_id)``. Runs without a ``user_id``
+  keep the bare session id, so single-user data written by earlier
+  versions still resumes. **Behaviour change:** a run *with* a
+  ``user_id`` won't replay journal entries or resume checkpoints that
+  earlier versions wrote for it. ``Agent.list_checkpoints`` takes
+  ``user_id=``.
+* **Persistent sub-agents keep one session per user.** A registered
+  worker used to be pinned to the first user who touched it. Anonymous
+  runs then got into that user's worker session (and replayed their
+  tool results), and every other user was refused, so a shared
+  ``Team`` coordinator served only one user. Each user now gets their
+  own stable session of the worker (``handle.session_for(user_id)``).
+  Workers spawned mid-run by ``spawn_worker`` belong to the spawning
+  user and refuse everyone else, anonymous callers included.
+* **Reflexion lessons stay with their user.** Lessons (which quote the
+  failing prompt) were recalled into every user's runs and written to
+  the anonymous memory bucket. They are now tagged with the run's
+  ``user_id``. A run recalls its own lessons plus any tagged
+  ``user_id="*"`` (``SHARED_LESSON``), which is how to seed curated
+  lessons for everyone; untagged lessons from earlier versions are no
+  longer recalled. Legacy-mode lessons go to the run's own memory
+  block, one per line (they used to run together).
+
+### Fixed — permission gates
+
+* **Code mode can't reach tools around the gates.** Tools called from
+  ``run_code`` went straight to the tool host, past the deny-list,
+  hooks, approval handler and audit log, so approving "run some code"
+  approved whatever it called. Each call it makes now gets the same
+  checks as a call the model made directly.
+* **Skill tools are gated and sandboxed.** A skill's bundled script
+  tools were registered outside a sandboxed tool host and weren't
+  marked destructive, so they read files the sandbox blocks without
+  asking. They are now destructive (they run arbitrary scripts) and are
+  registered under the sandbox you passed as ``tools=``. Sandbox
+  wrappers gained ``register()`` for this.
+* **``ACCEPT_EDITS`` approves file edits only**, as the Agent SDK's
+  ``acceptEdits`` does. It used to auto-approve every destructive tool,
+  ``bash`` included. **Behaviour change:** only the built-in ``write``
+  and ``edit`` tools are auto-approved; every other destructive tool
+  asks. Pass ``StandardPermissions(edit_tools=[...])`` to name your own
+  editors.
+* **An approval handler's "no" is a no.** The result was read with
+  ``bool()``, so ``"deny"`` or ``{"approved": False}`` approved the
+  call. Now only ``True``, an action name (``"allow"``, ``"deny"``,
+  ...) or an ``ApprovalDecision`` count; anything else denies.
+* **A pre-tool hook that times out or raises denies the call.** A timed
+  out hook used to count as allow, and a raising hook crashed the run.
+  ``HookRegistry(timeout_denies=False)`` restores the old timeout
+  behaviour.
+* **Spawned workers keep their template's guards.** ``spawn_worker``
+  built the worker with the template's tools but none of its
+  permissions, hooks, approval handler, guardrails, rate limiter, audit
+  log or limits.
+
+### Fixed — OS sandbox
+
+* **Bubblewrap (Linux) works.** It failed every call out of the box:
+  binding the interpreter's symlink over ``/usr`` aborted the launch,
+  a virtualenv's python couldn't load ``libpython`` (no loader config
+  in the namespace), and the input/result files were in the host temp
+  dir while the child got a fresh ``/tmp``. Verified in a
+  ``python:3.12-slim`` container on the system Python and in a
+  virtualenv.
+* **Seatbelt (macOS) confines reads.** It allowed reads anywhere, so a
+  sandboxed tool could read any file the user can (the module promised
+  it "cannot read outside its roots"), and it allowed writes to the
+  system temp dir. Both backends now give the child only the system
+  libraries, the Python installation, the tool's own top-level package
+  (and loomflow), the roots, and a private per-call temp dir. The rest
+  of your project, your home directory and ``/etc`` are unreadable.
+* **The child gets a minimal environment**, not the parent's (where API
+  keys live); pass ``OSSandbox(env={...})`` for what a tool needs.
+* **Results come back as JSON.** The parent used to unpickle the
+  child's output, so code in the sandbox could run code in the parent.
+  Non-JSON results come back as their ``str()``. ``@tool`` functions,
+  async tools and skill scripts now run in the sandbox too.
+
+### Fixed — memory and RAG
+
+* **Bi-temporal facts follow valid time, not arrival order**, in all five
+  fact stores (in-memory, SQLite, Chroma, Redis, Postgres), using the
+  Zep / Graphiti rule. A historical fact learned after the current one
+  used to close the current one (with ``valid_until`` before its
+  ``valid_from``) and become "current" itself. Now a contradicting
+  earlier fact ends where the new one begins, a backfilled older fact
+  ends where the newer one begins, and no interval is closed before it
+  opens.
+* Naive datetimes on facts and in ``valid_at=`` are read as UTC
+  everywhere (the in-memory store used to raise ``TypeError``).
+* Postgres memory and fact stores work with pgvector-python 0.4+, which
+  returns ``Vector`` objects. Reading an embedding back used to raise
+  ``TypeError``.
+* SQLite fact queries name their columns. A database migrated from
+  before ``user_id`` existed has that column last, which shifted every
+  field on read.
+* **Redis recall** returned ids like ``episode:ep_...`` (the key prefix
+  cut at the first ``:``), so anonymous recall listed every hit twice.
+* **Hybrid recall** with ``alpha=0.0`` is pure BM25 and ``1.0`` pure
+  vector, as with the vector stores (the other ranking used to keep a
+  vote).
+* **Chroma:**
+  * ``ChromaMemory.recall(time_range=...)`` filters inside the query.
+    Matching older episodes were lost when the range was applied after
+    a top-``limit`` query.
+  * ``ChromaFactStore.query(limit=...)`` returns the newest facts, not
+    the first inserted.
+  * New memory and fact collections use cosine space, like every other
+    backend; existing ones warn.
+  * Vector-store filters support ``$exists`` and ``$not``.
+* **Postgres:**
+  * Filtered and large-``k`` searches return every match. HNSW scans
+    stopped at ``ef_search`` (40) rows and filtered afterwards, so a
+    rare tenant's rows or ``k > 40`` came back short. Now
+    ``ef_search`` is sized to the request, with iterative index scans
+    on pgvector 0.8+.
+  * ``$ne`` / ``$not`` treat a missing key as "not equal" (they
+    dropped those rows).
+  * ``memory="postgres://..."`` creates its tables on first connect
+    (it never did).
+* **Seed injection** keeps cross-session memories. It recalled three
+  episodes and then dropped this session's own, so the answer from
+  another session was lost; it now over-fetches. With
+  ``memory_token_budget``, facts and episodes are ranked on the same
+  (reciprocal-rank) scale; a fixed 1.0 for facts beat every episode.
+* **Erasure on disk:** SQLite memory and journal databases set
+  ``PRAGMA secure_delete``, so forgotten data is overwritten, not left
+  in free pages.
+* ``recall(..., limit=0)`` on SQLite returns nothing (it returned
+  everything). A ``user_id`` that isn't a string or ``None`` is
+  rejected. A dict like ``{"$ne": "mallory"}`` used to reach Chroma's
+  filter as an operator and match other users' rows.
+
+* **Redis vector recall works on redis-py 8.** redis-py 8 talks RESP3,
+  so ``FT.SEARCH`` replies arrive as a map; the decoder only read the
+  RESP2 list and returned no hits, so ``RedisMemory.recall`` found
+  nothing. Both reply shapes are read (verified against Redis Stack
+  7.4 over RESP2 and RESP3).
+
+### Fixed — chunking
+
+* **``RecursiveChunker`` follows LangChain's text-splitter semantics:**
+  chunks never exceed ``chunk_size`` (unless a single unsplittable
+  piece is larger), overlap is made of whole pieces (it used to be a raw
+  character tail that started mid-word), no text is lost, and chunks
+  are stripped of surrounding whitespace.
+* ``SentenceChunker`` splits sentences longer than ``chunk_size``
+  (a 551-character chunk came out of a 100-character setting).
+* ``TokenChunker`` cuts on character boundaries; decoding token slices
+  produced U+FFFD replacement characters in CJK text and emoji.
+* ``MarkdownChunker`` ignores ``#`` lines inside fenced code blocks
+  (shell and Python comments became headings).
+
+### Fixed — right to erasure
+
+* **``forget()`` can't be undone by background extraction.**
+  ``AutoExtractMemory`` (on by default with a real model) extracts facts
+  in the background. An extraction still running when ``forget()`` was
+  called wrote the erased facts back (an erased SSN reappeared). It now
+  stops the extractions of the episodes it erases before erasing.
+* **``forget(user_id=...)`` erases the user's working blocks** in every
+  backend (they were left behind), honouring ``before=``. A
+  session-scoped forget still leaves them, since blocks aren't per
+  session. ``MemoryExport`` now includes the user's ``blocks``.
+
+### Fixed — A2A speaks v1.0 (and still v0.3)
+
+* **The server implements the A2A v1.0 JSON-RPC binding.** The card said
+  protocolVersion 1.0 but only v0.3 methods existed, so official v1.0
+  clients (a2a-sdk 1.x) got "unknown method: SendMessage". It now serves
+  ``SendMessage``, ``SendStreamingMessage``, ``GetTask``, ``CancelTask``
+  and ``ListTasks`` with v1.0 shapes (ProtoJSON enums such as
+  ``TASK_STATE_COMPLETED``, untagged parts, ``{"task": ...}`` results).
+  The v0.3 methods keep their v0.3 shapes. The ``A2A-Version`` header
+  selects the version (an unsupported one is ``-32009``); without it
+  the method name decides. Verified both ways against a2a-sdk 1.2.3.
+* **Cancelling works:** a running task can be cancelled. A finished one
+  answers ``TaskNotCancelableError`` (``-32002``). Subscribing, push
+  notifications and the extended card answer with their spec error
+  codes.
+* **The card** lists v1.0 and v0.3 JSON-RPC interfaces in
+  ``supportedInterfaces``, keeps the v0.3 fields, defaults ``url`` to
+  the address it was fetched from, and gives every skill its required
+  ``tags``.
+* **``A2AClient`` speaks v1.0** and falls back to v0.3 when the remote
+  doesn't know the v1.0 method (``protocol_version="auto"``, the
+  default). Pass ``"1.0"`` or ``"0.3"`` to pin one.
+
+### Changed — telemetry follows the OpenTelemetry GenAI conventions
+
+* **OTel span names and kinds.** Exported model-call spans are named
+  ``chat {model}`` with kind ``CLIENT``, tool spans ``execute_tool
+  {tool}``, and the run span ``invoke_agent``. The loomflow name
+  (``loom.model.complete`` etc.) moves to the ``loom.span.name``
+  attribute. **Behaviour change** for dashboards keyed on OTel span
+  names; the in-memory, console and JSONL sinks keep the ``loom.*``
+  names.
+* ``gen_ai.usage.input_tokens`` now includes cached tokens, with
+  ``gen_ai.usage.cache_read.input_tokens`` /
+  ``cache_write.input_tokens`` alongside.
+* A failed or refused tool call sets ``error.type`` and ERROR status.
+  An exception is recorded once (it used to be recorded twice) and
+  carries ``error.type``.
+* **Metrics:** new ``gen_ai.client.inference.duration`` (seconds),
+  ``gen_ai.client.inference.usage.*`` token counters,
+  ``gen_ai.client.inference.operation.*_tokens`` histograms and
+  ``gen_ai.execute_tool.duration``, with the spec's units and bucket
+  boundaries. ``loom.*`` metrics get units. **Behaviour change:**
+  metrics no longer carry ``session_id``, ``turns`` or ``user_id``
+  attributes, since per-session or per-user series are unbounded
+  cardinality. Those ids stay on the spans.
+* **``/stream``:** a failure after the stream started is sent as
+  ``event: stream_error`` (it reused ``error``, the name of agent
+  error events, with a different payload).
+
+### Fixed — models (checked against the provider docs, October 2026)
+
+* **Pricing** updated to the official tables: Opus 5.5 $4/$20, Sonnet
+  5.5 $2/$10, Haiku 5.5 $0.10/$0.50 (and $0.50/$2.50 above 100K prompt
+  tokens), Fable / Mythos 5.x, GPT-6.x / 5.6 / 5.2 / pro models, o1-pro,
+  DeepSeek V4 (peak rate). Per-model cache-read rates, GPT-6 / 5.6
+  cache writes and long-context tiers are applied.
+* **Anthropic structured output** uses native JSON outputs
+  (``output_config.format``) on Claude 4.5 and later, so real tools
+  stay callable. It used to force ``tool_choice``, which blocked tools
+  and is rejected by current models. Older models keep a synthetic
+  output tool, forced only when it's the only tool and never with
+  thinking.
+* **Effort** reaches every current Claude model, clamped to the levels
+  each model accepts (``minimal`` → ``low``). OpenAI effort follows
+  each family's documented levels. An unknown effort string now
+  raises ``ValueError``.
+* **GPT-6 tools:** GPT-6 Astra and 6.1 Sol raise a clear error when
+  given tools through Chat Completions, and GPT-6 Sol / Luna send
+  ``reasoning_effort="none"`` when tools are offered, as OpenAI
+  requires. Bare ``o1`` / ``o3`` model ids resolve.
+* **Retries:** SDK clients loomflow builds no longer retry on their own
+  (that used to multiply attempts). A mid-stream ``overloaded_error``
+  and HTTP 408/409 are retried, and an OpenAI ``insufficient_quota``
+  429 isn't. ``retry-after-ms`` and HTTP-date ``Retry-After`` are read,
+  and a hint beyond ``max_delay_s`` ends the retries.
+  **Behaviour change:** ``RetryPolicy`` uses full jitter by default
+  (``jitter="full"``).
+* **Context windows** for current models (1M for Claude 4.6+ / 5.x,
+  1.05M for GPT-5.4+ / 6.x, 1M for DeepSeek V4).
+* Anthropic stream output tokens are no longer double-counted. Empty
+  system parts get no cache marker. OpenAI strict schemas inline
+  ``$ref`` with sibling keys, and schemas with ``dict`` fields go out
+  non-strict instead of forcing ``{}``.
+* Token estimates (when a model has no native counter) use ``o200k``
+  for current OpenAI models and count tool-call arguments and images.
+
+### Fixed — runtime and security
+
+* Tools built from objects with an ``async def __call__`` (and
+  ``functools.partial`` of an async function) are awaited instead of
+  returning a coroutine. A timeout on a blocking sync tool now returns
+  on time instead of waiting for the thread.
+* ``grep`` no longer follows a symlink in the workdir to a file
+  outside it (``read`` already refused those).
+* ``FilesystemSandbox`` checks ``file://`` URLs and ``~`` paths as the
+  paths they name, resolves relative paths against ``base=`` (default:
+  the first root, where workdir tools open them) instead of the
+  process's working directory, and refuses values it cannot decide: a
+  null byte, or arguments nested deeper than it scans.
+* **Audit log.** Entries form a hash chain: each carries ``prev_hash``
+  (the previous entry's signature) inside its signed content, so
+  ``verify()`` on both backends, or ``verify_chain(entries, secret)``,
+  reports deleted, inserted and reordered entries, not only edited
+  ones. Cutting entries off the end is caught by passing a ``head``
+  you recorded earlier as ``expected_head``. Entries written before
+  this release still verify.
+* ``FileAuditLog`` takes a file lock per append and continues from the
+  file's last entry, so several processes or log objects writing one
+  file no longer repeat a ``seq``. An append after a torn last line
+  (a crash mid-write) starts a new line instead of corrupting itself.
+  ``query()`` logs the lines it skips; ``verify()`` reports them by
+  line number.
+* Payloads are stored and signed in the same JSON form, so an entry
+  with a ``datetime``, ``set`` or ``tuple`` in its payload verifies
+  after it is read back (it used to fail).
+* **Guardrails on streamed text.** With output-stage guards wired,
+  streamed text chunks go through them before they are sent
+  (``GuardedStream``): text is held back briefly, guarded, and released
+  with a 128-character hold-back so a match still being written is
+  caught. A ``PIIGuard`` used to redact only the final output while
+  the raw text had already been streamed; a blocking guard now stops
+  the text it blocks. Runs without output guards stream as before.
+* Guards match fullwidth letters, zero-width and other invisible
+  characters, soft hyphens and Unicode tag characters (``PIIGuard``,
+  ``RegexGuard``, ``InjectionGuard``), redacting the span of the
+  original text. ``PIIGuard`` also finds dotted card numbers,
+  space-separated SSNs and ``+``-prefixed international phone numbers.
+  ``InjectionGuard`` catches "ignore the previous instructions" and
+  smuggled tag characters, and escapes ``</untrusted-tool-output>``
+  in tool output so a result can't close its own block early.
+* **Durable journal: runs.** A finished run's steps are never replayed
+  into a later run on the same session. Each run journals under the
+  session's current *epoch*, which advances when the run ends; a run
+  that crashed (raised) doesn't advance it, so running it again
+  resumes and replays what already happened. Before, a new request on
+  the session skipped any tool call identical to one made earlier (a
+  second "charge 7" never charged), and a call retried after a failure
+  replayed the failure. ``Agent.resume`` without a checkpoint still
+  replays the last run, finished or not. Runs on one ``(session,
+  user)`` take turns within a process instead of interleaving their
+  journal entries. A run started inside another run (a sub-agent,
+  debater or worker) journals under the enclosing run, so resuming the
+  outer run replays the sub-runs' tool calls too, and two calls to one
+  persistent worker within a run stay distinct.
+* Tool calls are journaled by position (turn and slot) plus tool and
+  args, so a resumed run replays the same call even when the model is
+  asked again, while a retry in a later turn, or a deliberate second
+  identical call, runs.
+* **Journal values are JSON, not pickle.** ``SqliteRuntime``,
+  ``PostgresRuntime`` and their stores write tagged JSON; decoding
+  never imports a module or runs a constructor. Anyone able to write
+  the journal could previously run code in every process that resumed
+  from it. Pickled rows from earlier releases are skipped (those steps
+  re-execute) unless you pass ``serializer="pickle"``, which also lets
+  steps return arbitrary objects; only use it for a store no untrusted
+  party can write.
+* **Signals.** Undelivered signals for sessions that aren't open (sent
+  before a run, or after it ended) are kept for at most
+  ``max_pending_signal_sessions`` sessions (default 10,000) and
+  ``pending_signal_ttl_s`` (default an hour) on ``InProcRuntime`` and
+  ``JournaledRuntime``; they used to accumulate forever, one entry
+  per session ever signalled. ``wait_for_signal(..., timeout_s=)``
+  raises ``TimeoutError`` instead of waiting forever.
+* **Skills follow the Agent Skills spec** (agentskills.io): names may
+  not start or end with a hyphen or contain ``--``; a description may
+  not contain XML tags (Claude's skill rule — they would also open or
+  close tags in the prompt the catalog is rendered into);
+  ``compatibility`` is at most 500 characters; the spec's
+  space-separated ``allowed-tools`` is read (``allowed_tools`` lists
+  still work); a name that differs from its directory warns.
+* **Budget wall clock.** ``max_wall_clock`` and
+  ``per_user_max_wall_clock`` count time spent running (the agent
+  wraps each run in ``StandardBudget.running()``), not time since the
+  budget was created. A long-lived agent used to be blocked for good
+  once that much time had passed, even while idle. Concurrent or
+  nested runs count once. Code that drives ``allows_step`` /
+  ``consume`` itself wraps its work in ``budget.running()``.
+
+### Fixed — architectures
+
+* **Debate.** The majority vote compares each debater's final answer
+  (debaters are asked for a ``Final answer: ...`` line; ``\boxed{}``
+  also counts) and breaks ties by debater order: it used to compare
+  whole replies, so differently worded agreement never matched and the
+  reply that finished first won ("2 of 3 said 42, 7 won"). Convergence
+  likewise compares final answers, so two similar arguments for
+  different answers no longer end the debate. A debater that raises or
+  is interrupted sits the round out (``debate.debater_failed``)
+  instead of failing the debate with an ``ExceptionGroup`` or being
+  counted as an answer; the debate fails only when nobody answers.
+  Debater and judge spend is charged to the coordinator's budget.
+  ``rounds`` is documented as debate rounds after the independent one
+  (Du et al.'s ``rounds=2`` is ``rounds=1``).
+* **Scores and JSON from model replies.** ``parse_score`` (Reflexion,
+  Tree of Thoughts, ActorCritic) reads scales: "score: 7/10" is 0.7,
+  "score: 40%" 0.4, "2 out of 10" 0.2, "score: 7" 0.7, a JSON
+  ``{"score": "40%"}`` 0.4, and a negative score 0;
+  "3/10" and "40%" used to read as 1.0, a false success. JSON wrapped
+  in prose or a fence, or followed by prose, is found (ActorCritic
+  scored such critiques 0.0 and never approved; ReWOO and
+  Plan-and-Execute saw no plan).
+* **ActorCritic** charges actor and critic spend to the coordinator's
+  budget and gates the first actor call.
+* **Tree of Thoughts** picks the winner from the deepest level reached
+  (Yao et al., Alg. 1), so an interior step no longer beats the steps
+  built on it; node ids are tree paths, so a resumed search replays
+  instead of calling the model again.
+* **ReWOO** skips a step whose input step failed or that references a
+  step the plan lacks (instead of running it on an error message or a
+  literal ``{{E9}}``), renames repeated step ids, accepts the paper's
+  ``#E1`` references and ``{"steps": [...]}`` plans, emits
+  ``tool_call`` / ``tool_result`` events, caps tool output in the
+  solver prompt at ``tool_result_max_chars`` and shows the solver each
+  step's inputs. Custom prompts containing JSON braces work
+  (ActorCritic's too). Planner and solver calls are budget-gated, as
+  are Plan-and-Execute's planner and synthesizer.
+* **Plan-and-Execute** plan parsing drops lead-in prose ("Here is the
+  plan:") and blank steps, and accepts ``{"steps": [...]}``.
+* **Self-Refine** stops only when the critique *is* the stop phrase
+  (the whole reply or its first line), not when it mentions it
+  ("Grammar: no issues. Fact: wrong date."), and the refiner sees
+  every earlier output and critique (Madaan et al., Eq. 4).
+* **Reflexion** treats an attempt that runs out of turns as a failed
+  trial — it reflects and retries — instead of ending the run; the
+  reflector sees the attempt's actions and observations; the legacy
+  lesson block keeps the last ``max_lessons`` (default 10).
+* Role models given as strings (``evaluator_model="..."``) use the
+  Agent's ``secrets=`` backend, like the main model.
+* **Persistent workers** registered by ``Team.*`` builders get ids
+  derived from their role and instructions (the same in every
+  process) instead of a fresh ULID, so a team rebuilt after a restart
+  finds its workers' memory and journal: a crashed Router / Debate /
+  ActorCritic / Blackboard coordinator resumes without repeating a
+  worker's side effects. Workers spawned mid-run keep random ids.
+* **Router** reads classifications written with markdown, backticks
+  or quotes, multi-word route names and percentage confidences, and
+  matches route names ignoring case and spaces/hyphens/underscores
+  ("Tech Support" → ``tech_support``); "**route:** billing" used to
+  fail to route.
+* **Supervisor.** ``forward_message`` ends the turn — the model is not
+  called again — and fails (so the model can delegate first) when
+  the worker has no output yet. The default prompt names the
+  configured tools (``delegate_tool_name`` / ``forward_tool_name``)
+  instead of hard-coding ``delegate(`` and ``forward_message(``.
+* **Blackboard** reads ``"terminate": "false"`` as false (it ended the
+  run) and ``"next_agent": "null"`` as none, and a run stopped by the
+  budget keeps the board's latest contribution as its output.
+
+### Fixed — agent core
+
+* ``run_until`` checks the goal after every pass, the last included: a
+  goal met on the final allowed pass used to be reported as
+  ``run_until:max_iterations`` without the checker being asked.
+* ``persist_tool_transcripts=True`` saves only the run's own tool
+  calls; each run re-saved every earlier run's (rehydrated) tool
+  messages, so history grew quadratically.
+* **Union ``output_schema``** (``A | B``): the output validates as the
+  member it fills best (most fields set — Pydantic's smart-mode rule),
+  not the first that accepts it, so a full ``Detailed`` payload is no
+  longer a ``Summary``; the union is described in the prompt even on
+  adapters with native structured output (which can't express it); and
+  two models with the same class name get separate ``$defs`` (one
+  overwrote the other).
+* Tool input schemas generate all parameters in one pass, so two
+  nested models sharing a class name no longer collapse into one
+  ``$defs`` entry that rejected valid arguments.
+* Tool descriptions are kept whole: an explicit ``description=`` is
+  used as written, and a docstring keeps its body (minus Args /
+  Returns / ... sections) instead of its first line; ``Args:`` /
+  NumPy ``Parameters`` entries become the parameters' descriptions.
+* **Config typos fail.** ``Agent.from_config`` / ``from_dict`` reject
+  unknown keys, at the top level and in ``[budget]``, naming the
+  closest known key (``max_turn`` → ``max_turns``), as does a
+  ``prompt_caching`` dict; ``snip_window`` and ``prompt_caching`` are
+  read from config. ``output_validation_retries`` below 0 is a
+  ``ValueError`` (was an ``AssertionError`` deep in the run).
+* **Evals.** A metric that raises on a case is recorded
+  (``CaseResult.metric_errors``) and fails ``passed`` and
+  ``assert_thresholds`` — the gate used to pass on the mean of the one
+  case in ten the judge managed to score. ``LLMJudge`` reads
+  ``**Score:** 0.8``, ``score: 0.8.``, ``Final score: 0.8``,
+  ``score: 4/5`` and ``score: 80%``; a bare score outside 0-1 is asked
+  for again instead of being clamped.
+* **Auto-compact works.** ReAct compacts before each model call, so a
+  run whose tool results pile up is compacted while it runs (within
+  one long tool loop it summarises the older exchanges, keeping tool
+  calls with their results), and a long rehydrated history is
+  compacted on the next run's first call. It used to run only after a
+  pass, on messages the next run never reads. Summaries of an
+  unchanged history are cached; short conversations make no counting
+  call.
+* An agent inheriting a workspace from a ``Workflow`` / team gets the
+  notebook section in its system prompt along with the tools (the
+  section was built and dropped).
+
+### Fixed — Workflow
+
+* Edges, router routes and defaults that name an unregistered node
+  fail when the run starts (``ValueError`` listing them), before any
+  node runs; a typo used to end the run silently after the source
+  node.
+* A fan-out inside a loop runs its branches concurrently and its join
+  fires once per iteration: the join rule now follows the graph's
+  forward edges (a loop's edge back to its head no longer counts), so
+  branches neither ran one at a time nor, with another declaration
+  order, fired the join early with half its inputs.
+* ``result.output`` no longer depends on which branch finished last:
+  when several branches end separately it is the deepest one, then
+  the one declared last. A branch that ends early (routes to END)
+  doesn't become the output of a run that went on elsewhere.
+* An Agent (or nested Workflow) node that comes back interrupted —
+  its ``max_turns``, a budget, a guardrail — stops the run:
+  ``WorkflowResult.interrupted`` / ``interruption_reason``
+  (``"<node>:<reason>"``) are set and ``output`` is the last value
+  completed before it. Downstream nodes used to run on ``''``.
+* Nested Workflow nodes, Agent nodes and ``as_tool`` run with the
+  outer run's ``user_id``, ``session_id`` and ``metadata`` (a nested
+  workflow got none of them; Agent nodes lost the metadata).
+* Agent nodes on a durable runtime run as child runs of the workflow
+  run: each journals under its own namespace (one node's tool result
+  is never replayed into another), parallel nodes sharing a runtime
+  and session run together instead of taking turns, and a workflow
+  used as a tool inside a durable agent run is replayed with it.
+* A failing node emits an ``ERROR`` event after
+  ``WORKFLOW_STEP_FAILED``, as the ``stream()`` docstring promised.
+* ``Workflow.parallel`` raises a failing branch's exception itself, not
+  an ``ExceptionGroup``, and takes ``max_concurrency``.
+* ``@step`` writes ``step_started`` / ``step_completed`` /
+  ``step_failed`` audit entries naming the step when the workflow has
+  an ``audit_log``, as documented; the docs no longer claim it
+  journals the step.
+
+### Packaging
+
+* Removed the ``dbos`` and ``temporal`` extras: nothing in loomflow
+  uses those packages.
+* The test suite passes on a bare ``pip install loomflow`` (tests that
+  need an optional SDK, tiktoken or OpenTelemetry skip without it).
+
+
 ## [0.16.0] — 2026-10-20
 
 ### Changed — `Swarm` handoffs now behave like the reference swarms

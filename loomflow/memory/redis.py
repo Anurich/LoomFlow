@@ -38,7 +38,7 @@ from ..core.types import (
 from ._embedding_util import cosine, pack_float32, unpack_float32
 from ._user_key import decode_legacy_user_id, encode_user_id
 from .embedder import HashEmbedder, warn_hash_embedder_fallback
-from .facts import count_facts, delete_facts
+from .facts import count_facts, delete_blocks, delete_facts
 from .inmemory import _DEFAULT_MAX_USERS, _DEFAULT_USER_TTL_SECONDS
 
 DEFAULT_KEY_PREFIX = "jeeves:episode:"
@@ -420,7 +420,7 @@ class RedisMemory:
             result = await self._client.execute_command(*params)
         except Exception as exc:  # noqa: BLE001
             raise MemoryStoreError(f"RediSearch KNN query failed: {exc}") from exc
-        return _decode_ft_search_pairs(result)
+        return _decode_ft_search_pairs(result, self._key_prefix)
 
     async def recall_scored(
         self,
@@ -643,6 +643,12 @@ class RedisMemory:
             deleted += await delete_facts(
                 self.facts, user_id=user_id, before=before
             )
+        if session_id is None:
+            # Working blocks are per user too (no session).
+            async with self._lock:
+                deleted += delete_blocks(
+                    self._blocks, user_id=user_id, before=before
+                )
         return deleted
 
     async def export(
@@ -659,6 +665,7 @@ class RedisMemory:
             user_id=user_id,
             episodes=sorted(episodes, key=lambda e: e.occurred_at),
             facts=sorted(facts, key=lambda f: f.recorded_at),
+            blocks=await self.working(user_id=user_id),
         )
 
     # ---- key helpers -----------------------------------------------------
@@ -759,41 +766,56 @@ def _decode_hash(data: dict[Any, Any]) -> Episode | None:
     )
 
 
+def _ft_search_rows(result: Any) -> list[tuple[Any, dict[str, Any]]]:
+    """``(doc_id, {field: value})`` rows of an ``FT.SEARCH`` reply in
+    either protocol's shape."""
+
+    def _key(k: Any) -> str:
+        return k.decode("utf-8") if isinstance(k, bytes) else str(k)
+
+    rows: list[tuple[Any, dict[str, Any]]] = []
+    if isinstance(result, dict):  # RESP3 map
+        items = {_key(k): v for k, v in result.items()}
+        for row in items.get("results") or []:
+            if not isinstance(row, dict):
+                continue
+            fields = {_key(k): v for k, v in row.items()}
+            attrs = fields.get("extra_attributes") or {}
+            if isinstance(attrs, dict) and fields.get("id") is not None:
+                rows.append((fields["id"], {_key(k): v for k, v in attrs.items()}))
+        return rows
+    if not result or not isinstance(result, list):
+        return rows
+    body = result[1:]  # RESP2: the first element is the total count
+    for i in range(0, len(body) - 1, 2):
+        kvs = body[i + 1]
+        if not isinstance(kvs, list):
+            continue
+        rows.append((body[i], {_key(kvs[j]): kvs[j + 1] for j in range(0, len(kvs) - 1, 2)}))
+    return rows
+
+
 def _decode_ft_search_pairs(
     result: Any,
+    key_prefix: str = DEFAULT_KEY_PREFIX,
 ) -> list[tuple[Episode, float | None]]:
     """Translate a ``FT.SEARCH`` reply into ``(episode, similarity)``
     pairs. The KNN clause returns the cosine *distance* under the
     ``score`` alias; we convert to a similarity via ``1 - distance``
     (``None`` when the field is missing).
 
-    The reply shape is ``[total, id1, [k1, v1, k2, v2, ...], id2, [...], ...]``.
+    Both reply shapes are read: RESP2's ``[total, id1, [k1, v1, ...],
+    id2, [...], ...]`` and RESP3's ``{"results": [{"id": ...,
+    "extra_attributes": {...}}, ...]}`` (what redis-py returns when the
+    connection speaks RESP3, as redis-py 8 does by default).
     """
-    if not result or not isinstance(result, list):
-        return []
     out: list[tuple[Episode, float | None]] = []
-    # First element is the total count.
-    body = result[1:]
-    for i in range(0, len(body), 2):
-        if i + 1 >= len(body):
-            break
-        kvs = body[i + 1]
-        if not isinstance(kvs, list):
-            continue
-        decoded: dict[str, Any] = {}
-        for j in range(0, len(kvs), 2):
-            if j + 1 >= len(kvs):
-                break
-            k = kvs[j]
-            v = kvs[j + 1]
-            key = k.decode("utf-8") if isinstance(k, bytes) else str(k)
-            decoded[key] = v
+    for doc_id, decoded in _ft_search_rows(result):
         # Use the doc id as our episode id.
-        doc_id = body[i]
         eid = doc_id.decode("utf-8") if isinstance(doc_id, bytes) else str(doc_id)
-        # Strip the prefix if present.
-        if ":" in eid:
-            eid = eid.split(":", 1)[-1]
+        # The doc id is the hash key: drop the configured key prefix
+        # (``jeeves:episode:``), not just up to the first ``:``.
+        eid = eid.removeprefix(key_prefix)
         occurred_raw = _decode_field(decoded.get("occurred_at", "0"))
         try:
             occurred_at = datetime.fromtimestamp(float(occurred_raw), tz=UTC)
@@ -825,9 +847,9 @@ def _decode_ft_search_pairs(
     return out
 
 
-def _decode_ft_search(result: Any) -> list[Episode]:
+def _decode_ft_search(result: Any, key_prefix: str = DEFAULT_KEY_PREFIX) -> list[Episode]:
     """Back-compat wrapper: Episodes only, scores dropped."""
-    return [ep for ep, _ in _decode_ft_search_pairs(result)]
+    return [ep for ep, _ in _decode_ft_search_pairs(result, key_prefix)]
 
 
 __all__ = [

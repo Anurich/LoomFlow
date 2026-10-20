@@ -161,7 +161,9 @@ async def test_name_collision_auto_disambiguates() -> None:
 
     defs = await reg.list_tools()
     names = {d.name for d in defs}
-    assert names == {"alpha.search", "beta.search"}
+    # Qualified with "__", not ".": tool names must match the
+    # providers' ^[a-zA-Z0-9_-]{1,128}$ rule.
+    assert names == {"alpha__search", "beta__search"}
 
 
 async def test_registry_routes_calls_to_correct_server() -> None:

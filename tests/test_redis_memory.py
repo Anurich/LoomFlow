@@ -7,6 +7,7 @@ when that's not set so CI without Redis still runs.
 from __future__ import annotations
 
 import os
+import uuid
 from datetime import UTC, datetime
 from typing import Any
 
@@ -219,9 +220,13 @@ async def test_recall_scored_respects_user_partition() -> None:
 async def test_live_redis_remember_and_recall() -> None:  # pragma: no cover
     url = os.environ["JEEVES_TEST_REDIS_URL"]
     mem = await RedisMemory.connect(url, embedder=HashEmbedder())
+    # Unique text (the default prefix keeps earlier runs' episodes) and
+    # no output, so the stored embedding is exactly the query's — the
+    # HashEmbedder isn't semantic, so only an exact match ranks first.
+    marker = f"live alpha {uuid.uuid4().hex}"
     try:
-        eid = await mem.remember(_ep("live alpha", "live beta"))
-        out = await mem.recall("live alpha", limit=1)
-        assert any(ep.id == eid for ep in out)
+        eid = await mem.remember(_ep(marker))
+        out = await mem.recall(marker, limit=1)
+        assert any(ep.id == eid for ep in out), (eid, [(e.id, e.input) for e in out])
     finally:
         await mem.aclose()

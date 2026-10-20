@@ -260,17 +260,20 @@ async def test_replay_a_full_run_against_same_session_id() -> None:
     )
     runtime = JournaledRuntime(InMemoryJournalStore())
 
-    # First run records.
-    async with runtime.session("fixed"):
-        # Manually wire the loop's step calls — simulating a run.
-        result = await runtime.step(
-            "tool_call_1_0",
-            _call_tool_directly,
-            echo,
-            {"msg": "hi"},
-        )
-        assert result == "echoed:hi"
-        assert actual_calls["count"] == 1
+    # First run records, then crashes (a run that ends cleanly is
+    # finished, and a later run never replays it).
+    with pytest.raises(RuntimeError):
+        async with runtime.session("fixed"):
+            # Manually wire the loop's step calls — simulating a run.
+            result = await runtime.step(
+                "tool_call_1_0",
+                _call_tool_directly,
+                echo,
+                {"msg": "hi"},
+            )
+            assert result == "echoed:hi"
+            assert actual_calls["count"] == 1
+            raise RuntimeError("crash")
 
     # Second run (crash-resume) with same session + step name + inputs
     # replays the cache.
@@ -362,7 +365,7 @@ async def test_idempotency_key_is_namespaced_under_idem_prefix() -> None:
     async with runtime.session("s1"):
         await runtime.step("tool_call_1_0", run, idempotency_key="hash123")
 
-    names = {n for s, n in store.step_keys() if s == "s1"}
+    names = {n for s, n in store.step_keys() if s == "s1" and not n.startswith("__")}
     assert names == {"idem:hash123"}
 
 
@@ -379,7 +382,7 @@ async def test_no_idempotency_key_falls_back_to_positional_name() -> None:
     async with runtime.session("s1"):
         await runtime.step("tool_call_1_0", run)
 
-    names = {n for s, n in store.step_keys() if s == "s1"}
+    names = {n for s, n in store.step_keys() if s == "s1" and not n.startswith("__")}
     assert len(names) == 1
     (key,) = names
     assert key.startswith("tool_call_1_0@")
@@ -410,7 +413,7 @@ async def test_idem_namespace_separates_from_positional_loop_names() -> None:
     assert a == 1
     assert b == 2  # distinct journal keys => both executed
     assert counter["calls"] == 2
-    names = {n for s, n in store.step_keys() if s == "s1"}
+    names = {n for s, n in store.step_keys() if s == "s1" and not n.startswith("__")}
     assert "idem:tool_call_1_0" in names
     positional = names - {"idem:tool_call_1_0"}
     assert len(positional) == 1

@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 import anyio
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from ..architecture import (
     AgentSession,
@@ -47,8 +47,9 @@ from ..architecture import (
     Dependencies,
     resolve_architecture,
 )
+from ..architecture.helpers import bind_role_model_secrets
 from ..architecture.tool_host_wrappers import ExtendedToolHost
-from ..core.context import RunContext, set_run_context
+from ..core.context import RunContext, get_run_context, set_run_context
 from ..core.errors import OutputValidationError, RunTimeout
 from ..core.ids import new_id
 from ..core.protocols import (
@@ -61,6 +62,7 @@ from ..core.protocols import (
     Telemetry,
     ToolHost,
 )
+from ..core.streaming import stream_from
 from ..core.types import (
     Episode,
     Event,
@@ -71,14 +73,16 @@ from ..core.types import (
     ToolDef,
     Usage,
 )
-from ..governance.budget import NoBudget
+from ..governance.budget import NoBudget, run_clock
 from ..governance.rate_limit import RateLimiter
 from ..governance.retry import RetryPolicy
 from ..guardrails.base import Guardrail, apply_guardrails
+from ..guardrails.streaming import GuardedStream
 from ..model.echo import EchoModel
 from ..observability.tracing import NoTelemetry
 from ..runtime.inproc import InProcRuntime
-from ..runtime.journal import Checkpoint, CheckpointMeta
+from ..runtime.journal import Checkpoint, CheckpointMeta, journal_scope
+from ..runtime.journaled import resuming_last_run
 from ..security.audit import AuditLog
 from ..security.hooks import HookRegistry, PostToolHook, PreToolHook
 from ..security.permissions import AllowAll
@@ -440,15 +444,17 @@ class Agent:
         host = _coerce_tool_host(tools)
         if has_skills:
             assert skill_registry is not None
-            # InProcessToolHost and ExtendedToolHost both expose
-            # ``register``; for any other host implementation
-            # (MCP / custom), wrap with ExtendedToolHost so we
-            # have a place to push the load_skill tool plus any
-            # pending tools the skills lazy-register on demand.
+            # A skill's bundled tools are registered on the host the
+            # user gave us when it can take them (InProcessToolHost,
+            # or a sandbox, which adds them under itself), so they run
+            # under the same sandbox as every other tool. ``load_skill``
+            # changes the tool list, so it runs outside any sandbox,
+            # on an extension layer for hosts that aren't in-process.
+            skill_host: Any = host if hasattr(host, "register") else None
             if not isinstance(host, InProcessToolHost):
                 host = ExtendedToolHost(host, [])
             load_tool = make_load_skill_tool(
-                skill_registry, host=host
+                skill_registry, host=skill_host or host
             )
             host.register(load_tool)
 
@@ -614,6 +620,9 @@ class Agent:
         # ``Agent(effort="high")`` makes "this agent always thinks
         # hard" the contract; per-call ``run(..., effort=)`` still
         # wins for callers that want to override per-prompt.
+        from ..model._effort import validate_effort
+
+        validate_effort(effort)  # a typo raises here, not silently later
         self._default_effort: str | None = effort
         # ``strict_effort`` is agent-level only — no per-call
         # override. If you want a run to fail when the model can't
@@ -632,6 +641,9 @@ class Agent:
             prompt_caching
         )
         self._architecture: Architecture = resolve_architecture(architecture)
+        # Role models given as spec strings (``evaluator_model="..."``)
+        # authenticate with this agent's secrets, like the main model.
+        bind_role_model_secrets(self._architecture, self._secrets)
 
         # Stop hooks — framework-level Ralph loop. Auto-hooks
         # (today: living_plan in-progress checker) prepend; user-
@@ -810,6 +822,16 @@ class Agent:
             self._auto_compact_summariser = _resolve_model(
                 auto_compact_summariser, secrets=self._secrets
             )
+        # Compaction goes through a cache so an unchanged history isn't
+        # summarised again on every run (``_auto_compact_summariser``
+        # stays the model the caller configured).
+        from .auto_compact import CachingSummariser
+
+        self._compact_summariser: Model | None = (
+            cast("Model", CachingSummariser(self._auto_compact_summariser))
+            if self._auto_compact_summariser is not None
+            else None
+        )
         if auto_compact_keep_recent_turns < 1:
             raise ValueError(
                 "auto_compact_keep_recent_turns must be >= 1"
@@ -1404,6 +1426,7 @@ class Agent:
         from ..mcp import MCPRegistry, MCPServerSpec
         from ..skills import SkillSource
 
+        _reject_unknown_keys(cfg, _CONFIG_KEYS, "Agent.from_dict")
         instructions = cfg.get("instructions")
         if not isinstance(instructions, str):
             raise ConfigError(
@@ -1454,6 +1477,9 @@ class Agent:
         budget: Budget | None = None
         if "budget" in cfg:
             b = cfg["budget"]
+            if not isinstance(b, Mapping):
+                raise ConfigError("Agent.from_dict: 'budget' must be a table / dict.")
+            _reject_unknown_keys(b, _BUDGET_CONFIG_KEYS, "Agent.from_dict: budget")
             wall_clock = None
             if "max_wall_clock_minutes" in b:
                 wall_clock = timedelta(minutes=float(b["max_wall_clock_minutes"]))
@@ -1540,6 +1566,8 @@ class Agent:
             approval_handler=approval_handler,
             living_plan=living_plan_arg,
             run_until=run_until_arg,
+            prompt_caching=cfg.get("prompt_caching"),
+            snip_window=int(cfg.get("snip_window", 0)),
             # Rarely-touched knobs go through Tuning (see loomflow.Tuning).
             tuning=Tuning(
                 response_tone=response_tone,
@@ -1815,16 +1843,19 @@ class Agent:
 
         cp: Checkpoint | None = None
         run_session_id = session_id
+        # Checkpoints are stored per (session, user): one user can't
+        # resume from another's transcript by reusing a session id.
+        scope = journal_scope(session_id, user_id)
         get_latest = getattr(self._runtime, "get_latest_checkpoint", None)
         get_by_id = getattr(self._runtime, "get_checkpoint", None)
         if get_latest is not None and get_by_id is not None:
             try:
                 if from_checkpoint == "latest":
-                    cp = await get_latest(session_id)
+                    cp = await get_latest(scope)
                 else:
-                    cp = await get_by_id(session_id, from_checkpoint)
+                    cp = await get_by_id(scope, from_checkpoint)
                     if cp is not None:
-                        latest = await get_latest(session_id)
+                        latest = await get_latest(scope)
                         if (
                             latest is None
                             or latest.checkpoint_id != cp.checkpoint_id
@@ -1846,13 +1877,15 @@ class Agent:
                 run_session_id = session_id
 
         if cp is None:
-            # Legacy resume: journal replay + memory rehydration.
-            return await self.run(
-                effective_prompt,
-                user_id=user_id,
-                session_id=session_id,
-                **kwargs,
-            )
+            # Legacy resume: journal replay (of the session's last run,
+            # even a finished one) + memory rehydration.
+            with resuming_last_run():
+                return await self.run(
+                    effective_prompt,
+                    user_id=user_id,
+                    session_id=session_id,
+                    **kwargs,
+                )
 
         emit = kwargs.pop("emit", None)
         output_schema = kwargs.pop("output_schema", None)
@@ -1873,18 +1906,21 @@ class Agent:
         )
 
     async def list_checkpoints(
-        self, session_id: str, limit: int = 50
+        self, session_id: str, limit: int = 50, *, user_id: str | None = None
     ) -> list[CheckpointMeta]:
         """Newest-first checkpoint metadata for a session (G4).
 
         Convenience delegate to the runtime's duck-typed
         ``list_checkpoints`` extension. Returns ``[]`` when the
-        runtime has no checkpoint support.
+        runtime has no checkpoint support. Pass the ``user_id`` the
+        run used: checkpoints are stored per (session, user).
         """
         lister = getattr(self._runtime, "list_checkpoints", None)
         if lister is None:
             return []
-        result: list[CheckpointMeta] = await lister(session_id, limit=limit)
+        result: list[CheckpointMeta] = await lister(
+            journal_scope(session_id, user_id), limit=limit
+        )
         return result
 
     async def signal(
@@ -1937,10 +1973,6 @@ class Agent:
         existing one to resume against a durable runtime's journal.
         ``extra_tools`` works the same as :meth:`run`'s.
         """
-        send, receive = anyio.create_memory_object_stream[Event](
-            max_buffer_size=DEFAULT_STREAM_BUFFER
-        )
-
         # Same fallback as ``run``: per-call schema wins; agent's
         # default is used otherwise.
         effective_schema = (
@@ -1966,11 +1998,11 @@ class Agent:
         if resolved_session_id is None:
             resolved_session_id = new_id("sess")
 
-        async def _produce() -> None:
+        async def _produce(send: Callable[[Event], Awaitable[None]]) -> None:
             try:
                 await self._loop_guarded(
                     prompt,
-                    emit=send.send,
+                    emit=send,
                     user_id=user_id,
                     session_id=resolved_session_id,
                     metadata=metadata,
@@ -1983,74 +2015,84 @@ class Agent:
                 )
             except Exception as exc:  # noqa: BLE001 — surface as ERROR + re-raise
                 with anyio.CancelScope(shield=True):
-                    await send.send(Event.error(resolved_session_id, exc))
+                    await send(Event.error(resolved_session_id, exc))
                 raise
-            finally:
-                send.close()
 
-        async with anyio.create_task_group() as tg:
-            tg.start_soon(_produce)
-            try:
-                async with receive:
-                    async for event in receive:
-                        yield event
-            finally:
-                tg.cancel_scope.cancel()
+        # No task group is held open across ``yield`` (see
+        # core/streaming.py), so a consumer may simply ``break``.
+        events = stream_from(_produce, buffer_size=DEFAULT_STREAM_BUFFER)
+        try:
+            async for event in events:
+                yield event
+        finally:
+            await events.aclose()
 
     async def _maybe_compact(self, session: AgentSession, emit: Emit) -> None:
-        """Auto-compact ``session.messages`` when past the token threshold.
+        """Auto-compact ``session.messages`` between architecture passes
+        (see :meth:`_compact`); emits the resulting event."""
+        event = await self._compact(session)
+        if event is not None:
+            await emit(event)
 
-        Runs after every architecture pass (including the only pass of
-        a default no-stop-hook agent), so long conversations shrink
-        regardless of whether the Ralph loop is active. Pure no-op
-        when not opted in (``auto_compact_at_tokens=None``). Failures
-        are graceful — the compactor NEVER kills a turn — but they are
-        surfaced as an ``auto_compact.failed`` architecture event so
-        a silently-disabled compaction is observable.
+    async def _compact(self, session: AgentSession) -> Event | None:
+        """Compact ``session.messages`` when past the token threshold
+        and return the ``auto_compacted`` (or ``auto_compact.failed``)
+        event; ``None`` when nothing happened.
+
+        ReAct calls this before every model call
+        (``Dependencies.compact_context``). Pure no-op when not opted
+        in (``auto_compact_at_tokens=None``). Tokens are only counted
+        once the transcript's character count could exceed the
+        threshold (a token is at least one character), so short
+        conversations make no counting call. Failures are graceful —
+        the compactor NEVER kills a turn — but are surfaced as an
+        ``auto_compact.failed`` event so a silently-disabled
+        compaction is observable.
         """
         if (
             self._auto_compact_at_tokens is None
             or self._auto_compact_summariser is None
         ):
-            return
+            return None
+        chars = sum(len(m.content or "") + 16 for m in session.messages)
+        chars += sum(
+            len(str(c.args)) + len(c.tool) for m in session.messages for c in (m.tool_calls or ())
+        )
+        if chars <= self._auto_compact_at_tokens:
+            return None
         from ..model.count_tokens import count_tokens
         from .auto_compact import maybe_auto_compact
         try:
             current = await count_tokens(self._model, session.messages)
         except Exception as exc:  # noqa: BLE001 — never kill a turn
-            await emit(
-                Event.architecture_event(
-                    session.id,
-                    "auto_compact.failed",
-                    stage="count_tokens",
-                    error=f"{type(exc).__name__}: {exc}",
-                )
+            return Event.architecture_event(
+                session.id,
+                "auto_compact.failed",
+                stage="count_tokens",
+                error=f"{type(exc).__name__}: {exc}",
             )
-            return
         if current <= self._auto_compact_at_tokens:
-            return
+            return None
         new_msgs, summary = await maybe_auto_compact(
             session.messages,
-            summariser=self._auto_compact_summariser,
+            summariser=self._compact_summariser or self._auto_compact_summariser,
             at_tokens=self._auto_compact_at_tokens,
             current_token_count=current,
             keep_recent_turns=self._auto_compact_keep_recent_turns,
         )
         if new_msgs is None:
-            return
+            return None
         dropped = len(session.messages) - len(new_msgs)
         messages_before = len(session.messages)
         session.messages = new_msgs
-        await emit(
-            Event.architecture_event(
-                session.id,
-                "auto_compacted",
-                tokens_before=current,
-                messages_before=messages_before,
-                messages_after=len(session.messages),
-                messages_dropped=dropped,
-                summary_chars=len(summary),
-            )
+        return Event.architecture_event(
+            session.id,
+            "auto_compacted",
+            tokens_before=current,
+            messages_before=messages_before,
+            messages_after=len(session.messages),
+            messages_dropped=dropped,
+            summary_chars=len(summary),
         )
 
     async def _maybe_checkpoint(self, session: AgentSession) -> None:
@@ -2070,7 +2112,10 @@ class Agent:
         try:
             await put(
                 Checkpoint(
-                    session_id=session.id,
+                    # Stored per (session, user); see ``resume``.
+                    session_id=journal_scope(
+                        session.id, get_run_context().user_id
+                    ),
                     turn=session.turns,
                     messages=list(session.messages),
                     cumulative_usage=session.cumulative_usage,
@@ -2096,6 +2141,19 @@ class Agent:
         dispatch, sub-agents — is cancelled via the ``fail_after``
         scope and :class:`~loomflow.RunTimeout` is raised.
         """
+        from ..model._effort import validate_effort
+
+        validate_effort(kwargs.get("effort"))
+        retries = kwargs.get("output_validation_retries", 1)
+        if isinstance(retries, bool) or not isinstance(retries, int) or retries < 0:
+            raise ValueError(
+                f"output_validation_retries must be a non-negative int, not {retries!r}"
+            )
+        user_id = kwargs.get("user_id")
+        if user_id is not None and not isinstance(user_id, str):
+            # It partitions memory, journals and workers: a dict here
+            # could reach a backend filter as an operator.
+            raise TypeError(f"user_id must be a string or None, not {type(user_id).__name__}")
         if self._timeout is None:
             return await self._loop(prompt, **kwargs)
         try:
@@ -2213,6 +2271,13 @@ class Agent:
         # site (input / output here, tool_result in
         # ``run_single_tool``) is skipped entirely.
         fast_guardrails = len(self._guardrails) == 0
+        # Streamed text reaches the caller before the output stage
+        # runs: with output-stage guards wired, it goes through them
+        # first (see :class:`~loomflow.guardrails.streaming.GuardedStream`).
+        if not fast_guardrails and any(
+            "output" in g.stages for g in self._guardrails
+        ):
+            emit = GuardedStream(self._guardrails, emit, context=run_ctx)
 
         run_trace: contextlib.AbstractAsyncContextManager[Any] = (
             _NULL_CTX
@@ -2223,6 +2288,11 @@ class Agent:
                 max_turns=self._max_turns,
                 model=self._model.name,
                 architecture=self._architecture.name,
+                **{
+                    "gen_ai.operation.name": "invoke_agent",
+                    "gen_ai.conversation.id": session_id,
+                    "gen_ai.request.model": self._model.name,
+                },
             )
         )
 
@@ -2297,9 +2367,12 @@ class Agent:
 
         async with (
             _ambient_reset_guard(),
+            # The run context first: the runtime scopes the session's
+            # journal by the run's user.
+            set_run_context(run_ctx),
             self._runtime.session(session_id),
             run_trace,
-            set_run_context(run_ctx),
+            _NULL_CTX if fast_budget else run_clock(self._budget, user_id=run_ctx.user_id),
         ):
             if not fast_audit:
                 # ``FullTranscriptAuditLog`` opts into verbatim
@@ -2389,8 +2462,12 @@ class Agent:
             # We check ``self._model`` (the raw adapter) rather than
             # ``_wrapped_model`` (which adds retry decoration) — the
             # flag is an adapter-level capability, not a wrapper one.
+            # Native structured output constrains one object schema;
+            # a union (``A | B``) has no native form, so the model is
+            # told the shapes in the prompt instead.
             native_structured = (
                 output_schema is not None
+                and len(_extract_schema_types(output_schema)) == 1
                 and getattr(
                     self._model,
                     "supports_native_structured_output",
@@ -2478,6 +2555,8 @@ class Agent:
                 effective_instructions = (
                     f"{effective_instructions.rstrip()}\n\n{ambient_ws_section}"
                 )
+                # The session was built above; it carries the prompt.
+                session.instructions = effective_instructions
 
             effective_tools = (
                 ExtendedToolHost(self._tool_host, per_run_extras)
@@ -2579,6 +2658,12 @@ class Agent:
                 fast_tool_summary=fast_tool_summary,
                 tool_result_summarizer=self._tool_result_summarizer,
                 goal_checker=self._goal_checker,
+                compact_context=(
+                    self._compact
+                    if self._auto_compact_at_tokens is not None
+                    and self._auto_compact_summariser is not None
+                    else None
+                ),
                 goal_decider=self._goal_decider,
                 tool_result_summary_threshold=(
                     self._tool_result_summary_threshold
@@ -2601,12 +2686,12 @@ class Agent:
             async for event in self._architecture.run(session, deps, prompt):
                 await emit(event)
 
-            # Auto-compact after every architecture pass — including
-            # the only pass of a default (no-stop-hook) agent, so
-            # opting into ``auto_compact_at_tokens=`` works without
-            # also registering stop hooks. See :meth:`_maybe_compact`
-            # (no-op unless opted in; failures never kill the turn).
-            await self._maybe_compact(session, emit)
+            # Auto-compact after the pass when the result is kept:
+            # a checkpoint is about to snapshot it, or a stop-hook
+            # pass may follow. (Within a pass, ReAct compacts before
+            # each model call via ``deps.compact_context``.)
+            if self._checkpoint_enabled or not fast_stop_hooks:
+                await self._maybe_compact(session, emit)
 
             # G4 — persist a transcript snapshot after the pass (after
             # compaction, so the checkpoint captures the compacted
@@ -2766,7 +2851,9 @@ class Agent:
             # session_messages() rehydration. None when disabled —
             # backends skip the sidecar write entirely.
             transcript = (
-                self._build_tool_transcript(session.messages)
+                self._build_tool_transcript(
+                    _this_run_messages(session.messages, prompt)
+                )
                 if self._persist_tool_transcripts
                 else None
             )
@@ -2818,12 +2905,11 @@ class Agent:
 
             elapsed_ms = (anyio.current_time() - loop_started) * 1000
             if not fast_telemetry:
+                # No session id / turn count: unbounded cardinality.
                 await self._telemetry.emit_metric(
                     "loom.session.duration_ms",
                     elapsed_ms,
-                    session_id=session_id,
                     interrupted=session.interrupted,
-                    turns=session.turns,
                 )
 
             # Auto-consolidate runs after the response is finalized but
@@ -2875,6 +2961,18 @@ class Agent:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _this_run_messages(messages: list[Message], prompt: str) -> list[Message]:
+    """The messages this run added: everything after its own prompt
+    (the last USER message carrying it). Rehydrated history — which
+    holds earlier runs' persisted tool transcripts — comes before it,
+    so a run's transcript doesn't re-persist theirs."""
+    for i in range(len(messages) - 1, -1, -1):
+        m = messages[i]
+        if m.role is Role.USER and m.content == prompt:
+            return messages[i + 1 :]
+    return messages
 
 
 async def _noop_emit(_event: Event) -> None:
@@ -2988,38 +3086,38 @@ def _union_json_schema(types: list[type[BaseModel]]) -> dict[str, Any]:
     """
     if len(types) == 1:
         return types[0].model_json_schema()
-    branches: list[dict[str, Any]] = []
-    merged_defs: dict[str, Any] = {}
-    for t in types:
-        s = dict(t.model_json_schema())
-        # Hoist nested $defs to the union root so cross-branch refs
-        # remain resolvable. Last writer wins on name collisions —
-        # that's acceptable since identical model names should
-        # have identical schemas.
-        nested = s.pop("$defs", None)
-        if isinstance(nested, dict):
-            merged_defs.update(nested)
-        branches.append(s)
-    out: dict[str, Any] = {"anyOf": branches}
-    if merged_defs:
-        out["$defs"] = merged_defs
-    return out
+    # One generation pass over the union: Pydantic gives two different
+    # models that share a class name (two ``Item``s) distinct ``$defs``
+    # keys, where merging per-model ``$defs`` let one overwrite the other.
+    import functools
+    import operator
+
+    union = functools.reduce(operator.or_, types)
+    schema: dict[str, Any] = TypeAdapter(union).json_schema()
+    return schema
 
 
 def _try_validate_union(
     text: str, types: list[type[BaseModel]]
 ) -> tuple[BaseModel | None, ValidationError | None]:
-    """Try each Pydantic type in order; return the first that
-    validates. When all fail, return ``(None, last_error)`` for the
-    retry path. The order of ``types`` is the order the user wrote
-    them (``A | B`` → ``[A, B]``), so callers can put the more
-    specific / preferred type first."""
+    """Validate against every member and keep the best match: the one
+    that sets the most fields from the output (Pydantic's smart-mode
+    rule), ties going to the order the user wrote (``A | B`` → A
+    first). A full ``Detailed`` payload is a ``Detailed``, not a
+    ``Summary`` that happens to accept it by ignoring extra keys. When
+    all fail, return ``(None, last_error)`` for the retry path."""
     last_error: ValidationError | None = None
+    best: BaseModel | None = None
     for t in types:
         try:
-            return t.model_validate_json(text), None
+            candidate = t.model_validate_json(text)
         except ValidationError as exc:
             last_error = exc
+            continue
+        if best is None or len(candidate.model_fields_set) > len(best.model_fields_set):
+            best = candidate
+    if best is not None:
+        return best, None
     return None, last_error
 
 
@@ -3173,6 +3271,39 @@ def _normalize_model_spec(
     return resolved_spec, effort, strict_effort
 
 
+#: Keys ``Agent.from_dict`` / ``from_config`` read; anything else is a typo.
+_CONFIG_KEYS = frozenset({
+    "instructions", "model", "max_turns", "timeout", "auto_consolidate",
+    "architecture", "effort", "strict_effort", "response_tone", "auto_extract",
+    "memory", "runtime", "telemetry", "audit_log", "permissions", "budget",
+    "skills", "mcp", "living_plan", "run_until", "prompt_caching", "snip_window",
+})
+_BUDGET_CONFIG_KEYS = frozenset({
+    "max_tokens", "max_input_tokens", "max_output_tokens", "max_cost_usd",
+    "max_wall_clock_minutes", "soft_warning_at",
+})
+
+
+def _reject_unknown_keys(cfg: Mapping[str, Any], known: frozenset[str], where: str) -> None:
+    """Raise :class:`ConfigError` naming keys not in ``known`` — with
+    the closest known key for a likely typo (``max_turn`` →
+    ``max_turns``)."""
+    import difflib
+
+    from ..core.errors import ConfigError
+
+    unknown = sorted(str(k) for k in cfg if k not in known)
+    if not unknown:
+        return
+    hints = []
+    for key in unknown:
+        close = difflib.get_close_matches(key, sorted(known), n=1)
+        hints.append(f"{key!r}" + (f" (did you mean {close[0]!r}?)" if close else ""))
+    raise ConfigError(
+        f"{where}: unknown key(s) {', '.join(hints)}. Known keys: {', '.join(sorted(known))}."
+    )
+
+
 def _resolve_prompt_caching(
     spec: bool | Mapping[str, Any] | None,
 ) -> PromptCacheConfig:
@@ -3195,6 +3326,7 @@ def _resolve_prompt_caching(
     if spec is True:
         return PromptCacheConfig(enabled=True)
     if isinstance(spec, Mapping):
+        _reject_unknown_keys(spec, frozenset({"enabled", "ttl", "cache_key"}), "prompt_caching=")
         enabled = bool(spec.get("enabled", True))
         ttl = spec.get("ttl", "5m")
         if ttl not in ("5m", "1h"):
@@ -3303,8 +3435,8 @@ def _resolve_model(
     Strings dispatch by prefix:
 
     * ``claude-*`` -> :class:`AnthropicModel` (direct, no LiteLLM hop)
-    * ``gpt-*`` / ``o1-*`` / ``o3-*`` / ``o4-*`` -> :class:`OpenAIModel`
-      (direct)
+    * ``gpt-*`` / ``o1`` / ``o3`` / ``o1-*`` / ``o3-*`` / ``o4-*`` ->
+      :class:`OpenAIModel` (direct)
     * ``deepseek-*`` -> :class:`OpenAIModel` pointed at DeepSeek's
       OpenAI-compatible endpoint (needs ``DEEPSEEK_API_KEY``). For a
       reseller / gateway, construct ``OpenAIModel(...,
@@ -3344,7 +3476,7 @@ def _resolve_model(
     if spec.startswith("claude-"):
         from ..model.anthropic import AnthropicModel
         return AnthropicModel(spec, secrets=secrets)
-    if spec.startswith(("gpt-", "o1-", "o3-", "o4-")):
+    if spec.startswith(("gpt-", "o1-", "o3-", "o4-")) or spec in ("o1", "o3"):
         from ..model.openai import OpenAIModel
         return OpenAIModel(spec, secrets=secrets)
     if spec.startswith("deepseek-"):
@@ -3384,7 +3516,7 @@ def _resolve_model(
         return LiteLLMModel(inner, secrets=secrets)
     raise ConfigError(
         f"unknown model spec: {spec!r}. Recognised prefixes:\n"
-        "  claude-*, gpt-*, o1-*, o3-*, o4-*, deepseek-* "
+        "  claude-*, gpt-*, o1, o3, o1-*, o3-*, o4-*, deepseek-* "
         "(direct adapters)\n"
         "  mistral-, command-, bedrock/, vertex_ai/, ollama/, "
         "gemini/, groq/, together_ai/, replicate/, azure/ "

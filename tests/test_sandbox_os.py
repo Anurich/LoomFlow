@@ -135,32 +135,22 @@ async def test_write_inside_root_succeeds(tmp_path: Path) -> None:
 
 @requires_backend
 async def test_write_outside_root_is_blocked(tmp_path: Path) -> None:
-    # The kernel must reject a write outside the declared root. The
-    # target must be outside BOTH the root AND the OS temp dir, since the
-    # profile grants temp for writes (Python needs __pycache__/tempfiles)
-    # — and pytest's tmp_path itself lives under temp, so a sibling of it
-    # would (correctly) be allowed. Use a uniquely-named dir under $HOME.
-    home_outside = Path.home() / ".loomflow-sandbox-test-outside"
-    home_outside.mkdir(exist_ok=True)
-    leak = home_outside / "leak.txt"
-    if leak.exists():
-        leak.unlink()
-    try:
-        sb = OSSandbox(_host_with(_WRITE), roots=[tmp_path])
-        res = await sb.call(
-            "write_under",
-            {"path": str(leak), "content": "x"},
-            call_id="c4",
-        )
-        assert not res.ok  # kernel denied the write → tool raised
-        assert not leak.exists()
-    finally:
-        if leak.exists():
-            leak.unlink()
-        try:
-            home_outside.rmdir()
-        except OSError:
-            pass
+    # The kernel must reject a write outside the declared root, the
+    # system temp dir included (the child's temp dir is private).
+    root = tmp_path / "root"
+    root.mkdir()
+    leak = tmp_path / "leak.txt"
+    sb = OSSandbox(_host_with(_WRITE), roots=[root])
+    res = await sb.call(
+        "write_under",
+        {"path": str(leak), "content": "x"},
+        call_id="c4",
+    )
+    # Seatbelt denies the write; under bwrap /tmp is a private tmpfs,
+    # so the write lands there and never reaches the host.
+    if sb.mode == "seatbelt":
+        assert not res.ok
+    assert not leak.exists()
 
 
 @requires_backend

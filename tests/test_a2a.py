@@ -259,9 +259,16 @@ async def test_agent_card_well_known_and_legacy_paths(agent: Agent) -> None:
         assert card["url"] == "https://bots.example/a2a"
         assert card["version"] == __version__
         assert card["capabilities"] == {"streaming": True, "pushNotifications": False}
-        assert card["skills"] == [{"id": "echo", "name": "echo", "description": "Echoes text."}]
-        assert card["defaultInputModes"] == ["text"]
-        assert card["defaultOutputModes"] == ["text"]
+        # ``tags`` is required by the spec; defaults to the skill id.
+        assert card["skills"] == [
+            {"id": "echo", "name": "echo", "description": "Echoes text.", "tags": ["echo"]}
+        ]
+        assert card["defaultInputModes"] == ["text/plain"]
+        assert card["defaultOutputModes"] == ["text/plain"]
+        assert card["supportedInterfaces"] == [
+            {"url": "https://bots.example/a2a", "protocolBinding": "JSONRPC", "protocolVersion": "1.0"},
+            {"url": "https://bots.example/a2a", "protocolBinding": "JSONRPC", "protocolVersion": "0.3"},
+        ]
         # The payload round-trips through the pydantic model (conformance).
         AgentCard.model_validate(card)
 
@@ -523,11 +530,22 @@ async def test_client_send_extracts_artifact_text() -> None:
     url, payload = fake.posts[0]
     assert url == "https://r.example/"
     assert payload["jsonrpc"] == "2.0"
-    assert payload["method"] == "message/send"
+    # v1.0 by default: PascalCase method, ProtoJSON enums, untagged parts.
+    assert payload["method"] == "SendMessage"
     message = payload["params"]["message"]
-    assert message["role"] == "user"
+    assert message["role"] == "ROLE_USER"
     assert message["contextId"] == "ctx-9"
-    assert message["parts"] == [{"kind": "text", "text": "do the thing"}]
+    assert message["parts"] == [{"text": "do the thing"}]
+
+
+async def test_client_pinned_to_v03_speaks_v03() -> None:
+    fake = _FakeHttp(post_response=_FakeHttpResponse(200, _completed_task_payload("remote reply")))
+    client = A2AClient("https://r.example", http=fake, protocol_version="0.3")
+    assert await client.send("do the thing") == "remote reply"
+    _, payload = fake.posts[0]
+    assert payload["method"] == "message/send"
+    assert payload["params"]["message"]["role"] == "user"
+    assert payload["params"]["message"]["parts"] == [{"kind": "text", "text": "do the thing"}]
 
 
 async def test_client_send_raises_on_rpc_error() -> None:

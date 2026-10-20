@@ -10,6 +10,9 @@ Opt-in, ordered, composable text guards::
         guardrails=[InjectionGuard(), PIIGuard()],
     )
 
+With output-stage guards wired, streamed text goes through them before
+it is sent (see :class:`GuardedStream`).
+
 Deliberately NOT re-exported from the top-level ``loomflow``
 namespace — guardrails are a security capability you import
 explicitly.
@@ -28,8 +31,10 @@ from .builtin import (
     PIIGuard,
     RegexGuard,
 )
+from .streaming import GuardedStream
 
 __all__ = [
+    "GuardedStream",
     "Guardrail",
     "GuardrailOutcome",
     "GuardrailTrigger",

@@ -9,6 +9,9 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+
+pytest.importorskip("opentelemetry.sdk")
+
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from opentelemetry.sdk.trace import TracerProvider
@@ -47,6 +50,13 @@ def _setup_otel() -> tuple[
         meter_provider=meter_provider,
     )
     return telemetry, span_exporter, metric_reader
+
+
+def _loom_name(span: Any) -> str:
+    """A span's loomflow name: the OTel exporter names GenAI spans per
+    the semconv (``chat {model}``, ``execute_tool {tool}``,
+    ``invoke_agent``) and keeps the loomflow one as ``loom.span.name``."""
+    return str((span.attributes or {}).get("loom.span.name", span.name))
 
 
 def _metrics_by_name(reader: InMemoryMetricReader) -> dict[str, list[Any]]:
@@ -163,7 +173,7 @@ async def test_agent_run_emits_run_turn_and_model_spans() -> None:
     agent = Agent("hi", model="echo", telemetry=tel)
     await agent.run("hello world")
 
-    names = [s.name for s in exporter.get_finished_spans()]
+    names = [_loom_name(s) for s in exporter.get_finished_spans()]
     assert "loom.run" in names
     assert "loom.turn" in names
     # ReAct emits ``jeeves.model.complete`` on the non-streaming hot
@@ -186,7 +196,7 @@ async def test_run_span_has_session_id_and_model_attributes() -> None:
     result = await agent.run("anything")
 
     run_span = next(
-        s for s in exporter.get_finished_spans() if s.name == "loom.run"
+        s for s in exporter.get_finished_spans() if _loom_name(s) == "loom.run"
     )
     assert run_span.attributes["session_id"] == result.session_id
     assert run_span.attributes["model"] == "echo"
@@ -198,7 +208,7 @@ async def test_turn_span_is_a_child_of_run_span() -> None:
     await agent.run("hello")
 
     spans = exporter.get_finished_spans()
-    by_name = {s.name: s for s in spans}
+    by_name = {_loom_name(s): s for s in spans}
     run = by_name["loom.run"]
     turn = by_name["loom.turn"]
     # The turn span's parent must be the run span.
@@ -225,7 +235,7 @@ async def test_tool_span_emitted_with_tool_attribute_and_duration_metric() -> No
     await agent.run("ping?")
 
     tool_spans = [
-        s for s in exporter.get_finished_spans() if s.name == "loom.tool"
+        s for s in exporter.get_finished_spans() if _loom_name(s) == "loom.tool"
     ]
     assert len(tool_spans) == 1
     assert tool_spans[0].attributes["tool"] == "ping"
@@ -266,7 +276,7 @@ async def test_parallel_tool_calls_emit_independent_tool_spans() -> None:
     await agent.run("...")
 
     tool_spans = [
-        s for s in exporter.get_finished_spans() if s.name == "loom.tool"
+        s for s in exporter.get_finished_spans() if _loom_name(s) == "loom.tool"
     ]
     tools = {s.attributes["tool"] for s in tool_spans}
     assert tools == {"alpha", "beta"}

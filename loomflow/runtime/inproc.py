@@ -22,7 +22,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Any
 
-from ._signals import SignalMailbox
+from ._signals import DEFAULT_MAX_PENDING, DEFAULT_PENDING_TTL_S, SessionTable, SignalMailbox
 from .journal import Checkpoint, CheckpointMeta, InMemoryJournalStore
 
 
@@ -48,9 +48,18 @@ class InProcRuntime:
 
     name = "inproc"
 
-    def __init__(self, *, max_checkpoints_per_session: int = 20) -> None:
-        self._sessions: dict[str, InProcSession] = {}
-        self._session_refs: dict[str, int] = {}
+    def __init__(
+        self,
+        *,
+        max_checkpoints_per_session: int = 20,
+        max_pending_signal_sessions: int | None = DEFAULT_MAX_PENDING,
+        pending_signal_ttl_s: float | None = DEFAULT_PENDING_TTL_S,
+    ) -> None:
+        self._sessions: SessionTable[InProcSession] = SessionTable(
+            InProcSession,
+            max_pending=max_pending_signal_sessions,
+            pending_ttl_s=pending_signal_ttl_s,
+        )
         # Reuse the in-memory journal store purely for its checkpoint
         # shelf — step journaling stays disabled (steps run directly).
         self._checkpoints = InMemoryJournalStore(
@@ -83,38 +92,30 @@ class InProcRuntime:
         """Open (or re-enter) a session; its in-memory state — the
         signal mailbox — is discarded when the last open context for
         this ``session_id`` exits (checkpoints are kept)."""
-        s = self._get_session(session_id)
-        self._session_refs[session_id] = (
-            self._session_refs.get(session_id, 0) + 1
-        )
+        s = self._sessions.acquire(session_id)
         try:
             yield s
         finally:
-            remaining = self._session_refs.get(session_id, 1) - 1
-            if remaining <= 0:
-                self._session_refs.pop(session_id, None)
-                self._sessions.pop(session_id, None)
-            else:
-                self._session_refs[session_id] = remaining
-
-    def _get_session(self, session_id: str) -> InProcSession:
-        return self._sessions.setdefault(
-            session_id, InProcSession(session_id)
-        )
+            self._sessions.release(session_id, keep_signals=False)
 
     # ---- signals -------------------------------------------------------------
 
     async def signal(self, session_id: str, name: str, payload: Any) -> None:
         """Deliver a named signal to a session's FIFO mailbox.
 
-        Signals sent before the session is opened are queued and
-        survive until the session's last open context exits.
+        Signals sent while the session isn't open are queued for it —
+        up to ``max_pending_signal_sessions`` sessions, for
+        ``pending_signal_ttl_s`` — and dropped when its last open
+        context exits.
         """
-        await self._get_session(session_id).deliver(name, payload)
+        await self._sessions.for_signal(session_id).deliver(name, payload)
 
-    async def wait_for_signal(self, session_id: str, name: str) -> Any:
-        """Park until a matching signal arrives; return its payload."""
-        return await self._get_session(session_id).wait_signal(name)
+    async def wait_for_signal(
+        self, session_id: str, name: str, *, timeout_s: float | None = None
+    ) -> Any:
+        """Park until a matching signal arrives; return its payload.
+        ``TimeoutError`` after ``timeout_s`` seconds (default: wait)."""
+        return await self._sessions.wait(session_id, name, timeout_s)
 
     def poll_signal(self, session_id: str, name: str) -> Any | None:
         """Pop a queued signal if present; never blocks."""

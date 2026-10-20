@@ -15,6 +15,20 @@ from ...core.protocols import ToolHost
 from ...core.types import ToolDef, ToolEvent, ToolResult
 
 
+def register_inside(wrapper: Any, tool: Any) -> None:
+    """Register ``tool`` on the host a sandbox wraps, so every call to
+    it passes through the sandbox (used for tools added after
+    construction, such as a skill's bundled tools). A wrapped host
+    with no ``register`` gets an extension layer to hold it."""
+    inner = wrapper._inner
+    if not hasattr(inner, "register"):
+        from ...architecture.tool_host_wrappers import ExtendedToolHost
+
+        inner = ExtendedToolHost(inner, [])
+        wrapper._inner = inner
+    inner.register(tool)
+
+
 class NoSandbox:
     """Pass-through wrapper around a :class:`ToolHost`."""
 
@@ -24,6 +38,10 @@ class NoSandbox:
     @property
     def inner(self) -> ToolHost:
         return self._inner
+
+    def register(self, tool: Any) -> None:
+        """Add ``tool`` under this sandbox (see :func:`register_inside`)."""
+        register_inside(self, tool)
 
     async def list_tools(self, *, query: str | None = None) -> list[ToolDef]:
         return await self._inner.list_tools(query=query)

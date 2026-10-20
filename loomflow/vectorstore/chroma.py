@@ -25,10 +25,79 @@ import anyio
 
 from ..core.protocols import Embedder
 from ..loader.base import Chunk
-from ._filter import COMPARISON_OPERATORS, LOGICAL_OPERATORS, FilterError
+from ._filter import COMPARISON_OPERATORS, LOGICAL_OPERATORS, FilterError, evaluate_filter
 from ._mmr import rerank_tail
 from ._util import embed_all, resolve_ids
 from .base import SearchResult, _chunks_from_texts
+
+
+def get_or_create_cosine_collection(client: Any, name: str) -> Any:
+    """Get or create the collection ``name`` in cosine space.
+
+    ``hnsw:space: cosine`` makes Chroma's distance a true cosine
+    distance, so rankings match the other backends. (Chroma defaults
+    to L2 when the space is unspecified, which ranks differently for
+    embeddings that aren't unit length.) ``get_or_create`` can't change
+    the space of a pre-existing collection, so a non-cosine one gets a
+    warning; missing metadata means it pre-dates this setting and runs
+    on Chroma's L2 default.
+    """
+    collection = client.get_or_create_collection(
+        name=name, metadata={"hnsw:space": "cosine"}
+    )
+    coll_meta = getattr(collection, "metadata", None) or {}
+    space = coll_meta.get("hnsw:space", "l2")
+    if space != "cosine":
+        warnings.warn(
+            f"Chroma collection {name!r} already exists with "
+            f"hnsw:space={space!r} (not 'cosine'); its scores won't "
+            "follow the cosine contract and rankings can differ from "
+            "other backends. Re-index into a new collection to fix.",
+            UserWarning,
+            stacklevel=3,
+        )
+    return collection
+
+
+# Filter operators Chroma's ``where`` can't express. Filters using
+# them are split: Chroma evaluates the rest (a superset of the
+# matches) and the full filter is re-checked in Python.
+_POST_FILTER_OPS = frozenset({"$exists", "$not"})
+
+
+def _engine_part(node: Mapping[str, Any]) -> dict[str, Any] | None:
+    """A filter Chroma can run that matches *at least* what ``node``
+    matches (``None`` = no constraint): unsupported conditions are
+    dropped from conjunctions, and a disjunction with one is dropped
+    whole, so nothing that should match is filtered out."""
+    kept: list[dict[str, Any]] = []
+    for key, value in node.items():
+        if key == "$not":
+            continue
+        if key == "$and" and isinstance(value, list):
+            parts = [p for p in (_engine_part(v) for v in value) if p]
+            kept.extend(parts)
+        elif key == "$or" and isinstance(value, list):
+            or_parts = [_engine_part(v) for v in value]
+            if all(or_parts):
+                kept.append({"$or": or_parts})
+        elif isinstance(value, Mapping) and value and all(k.startswith("$") for k in value):
+            supported = {op: v for op, v in value.items() if op not in _POST_FILTER_OPS}
+            if supported:
+                kept.append({key: supported})
+        else:
+            kept.append({key: value})
+    if not kept:
+        return None
+    return kept[0] if len(kept) == 1 else {"$and": kept}
+
+
+def _needs_post_filter(node: Any) -> bool:
+    if isinstance(node, Mapping):
+        return any(k in _POST_FILTER_OPS or _needs_post_filter(v) for k, v in node.items())
+    if isinstance(node, list):
+        return any(_needs_post_filter(v) for v in node)
+    return False
 
 
 def _translate_filter(
@@ -51,12 +120,10 @@ def _xlate_node(node: Mapping[str, Any]) -> dict[str, Any]:
     for key, value in node.items():
         if key in LOGICAL_OPERATORS:
             if key == "$not":
-                # Chroma 0.5+ doesn't have a plain $not; emulate via
-                # negated comparisons isn't always feasible. Raise
-                # and ask the caller to invert manually.
+                # Never reached from search: ``_engine_part`` drops
+                # ``$not`` (it is post-filtered in Python).
                 raise FilterError(
-                    "$not isn't supported by Chroma. "
-                    "Invert the underlying comparison instead."
+                    "$not isn't supported by Chroma's where filter."
                 )
             assert isinstance(value, list)
             out[key] = [_xlate_node(sub) for sub in value]
@@ -155,28 +222,9 @@ class ChromaVectorStore:
         else:
             self._client = chromadb.Client()
 
-        # ``hnsw:space: cosine`` makes Chroma's distance a true cosine
-        # distance so ``1 - distance`` is the contract's cosine score.
-        # (Chroma defaults to L2 when the space is unspecified.)
-        self._collection = self._client.get_or_create_collection(
-            name=collection_name,
-            metadata={"hnsw:space": "cosine"},
+        self._collection = get_or_create_cosine_collection(
+            self._client, collection_name
         )
-        # ``get_or_create`` can't change the space of a pre-existing
-        # collection; warn when we can see it isn't cosine. Missing
-        # metadata means the collection pre-dates this setting and
-        # runs on Chroma's L2 default.
-        coll_meta = getattr(self._collection, "metadata", None) or {}
-        space = coll_meta.get("hnsw:space", "l2")
-        if space != "cosine":
-            warnings.warn(
-                f"Chroma collection {collection_name!r} already exists "
-                f"with hnsw:space={space!r} (not 'cosine'); search "
-                "scores from this store will not follow the cosine "
-                "score contract. Re-index into a new collection to fix.",
-                UserWarning,
-                stacklevel=2,
-            )
 
     # ---------------------------------------------------------------
     # Factory classmethods — explicit kwargs so IDEs autocomplete
@@ -322,10 +370,16 @@ class ChromaVectorStore:
         filter: Mapping[str, Any] | None = None,
         diversity: float | None = None,
     ) -> list[SearchResult]:
-        where = _translate_filter(filter)
+        # ``$exists`` / ``$not``: Chroma runs a looser filter, the full
+        # one is applied below over an over-fetched pool.
+        post_filter = bool(filter) and _needs_post_filter(filter)
+        engine_filter = _engine_part(filter) if post_filter and filter else filter
+        where = _translate_filter(engine_filter)
         # When diversity is requested, fetch a wider candidate pool
         # and rerank in-process via MMR.
         n_fetch = max(k * 4, 20) if diversity else k
+        if post_filter:
+            n_fetch = max(n_fetch, k * 8, 50)
 
         result = await anyio.to_thread.run_sync(
             lambda: self._collection.query(
@@ -361,6 +415,8 @@ class ChromaVectorStore:
             score = 1.0 - float(dist)
             chunk_meta = dict(meta or {})
             chunk_meta.pop("_empty", None)
+            if post_filter and not evaluate_filter(filter, chunk_meta):
+                continue
             candidates.append(
                 SearchResult(
                     chunk=Chunk(

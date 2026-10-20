@@ -28,9 +28,13 @@ from .dataset import Case
 
 __all__ = ["LLMJudge"]
 
-# An explicit, labelled score line: ``score: 0.7`` / ``Score = 1``.
-# Anchored per-line; prose numbers never match.
-_SCORE_LINE_RE = re.compile(r"(?im)^\s*score\s*[:=]\s*([01](?:\.\d+)?|\.\d+)\s*$")
+# An explicit, labelled score line: ``score: 0.7`` / ``Score = 1`` —
+# also ``**Score:** 0.8``, ``Final score: 0.8.``, ``score: 4/5`` and
+# ``score: 80%``. Anchored per-line; prose numbers never match.
+_SCORE_LINE_RE = re.compile(
+    r"(?im)^[\s*_#>-]*(?:final\s+)?score[*_\s]*[:=][*_\s]*"
+    r"(-?\d*\.?\d+)\s*(?:(%)|/\s*(\d+(?:\.\d+)?))?[*_\s.]*$"
+)
 
 _DEFAULT_RUBRIC = (
     "Judge whether the agent's answer correctly and completely addresses "
@@ -47,15 +51,27 @@ _RETRY_NUDGE = (
 
 
 def _parse_score_line(text: str) -> float | None:
-    """Extract the score from an explicit ``score:`` line, or None."""
+    """Extract the score from an explicit ``score:`` line, or None.
+
+    A fraction or percentage is scaled to 0-1. A bare value outside
+    [0, 1] is not a score on the requested scale, so it reads as
+    unparseable (the judge is asked again) rather than being clamped
+    into a perfect or zero score."""
     matches = _SCORE_LINE_RE.findall(text)
     if not matches:
         return None
+    number, percent, denominator = matches[-1]  # last line wins if the judge rambled
     try:
-        value = float(matches[-1])  # last line wins if the judge rambled
+        value = float(number)
+        if percent:
+            value /= 100
+        elif denominator:
+            value = value / float(denominator) if float(denominator) > 0 else -1.0
     except ValueError:  # pragma: no cover - regex guarantees a float
         return None
-    return max(0.0, min(1.0, value))
+    if not 0.0 <= value <= 1.0:
+        return None
+    return value
 
 
 async def _complete_text(model: Model, messages: list[Message]) -> str:

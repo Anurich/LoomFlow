@@ -44,6 +44,7 @@ Composition
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Callable
+from contextlib import aclosing
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
@@ -53,6 +54,7 @@ from anyio.streams.memory import MemoryObjectSendStream
 from ..core.context import get_run_context, inherit_ambient_memory
 from ..core.ids import new_id
 from ..core.protocols import Memory, Model
+from ..core.streaming import relay
 from ..core.types import Event, Usage
 from ..tools.registry import Tool
 from .base import AgentSession, Architecture, Dependencies
@@ -60,6 +62,7 @@ from .helpers import (
     SubagentInvocation,
     add_usage,
     consume_worker_usage,
+    fill_template,
     usage_from_result_dict,
 )
 from .react import ReAct
@@ -74,14 +77,13 @@ You are a supervisor coordinating specialist worker agents.
 
 For each task you receive:
 1. Decide which workers are needed.
-2. Call `delegate(worker, instructions)` to invoke a specialist.
+2. Call `{delegate_tool}(worker, instructions)` to invoke a specialist.
 3. Each worker runs independently and returns its final answer.
 4. Either synthesize worker outputs into a unified response, OR
-   call `forward_message(worker)` if a single worker's output IS
+   call `{forward_tool}(worker)` if a single worker's output IS
    already the final answer the user wants. Forwarding skips a
    paraphrase round-trip: the worker's output is returned verbatim
-   as YOUR final response. End your turn immediately after a
-   forward_message call.
+   as YOUR final response, and your turn ends there.
 
 You can delegate multiple workers in a single turn — they will run
 in parallel. Be specific in the ``instructions`` you pass; workers
@@ -90,10 +92,10 @@ do NOT see the user's original message, only what you write.
 5. To CONTINUE a conversation with a worker (build on its earlier
    work rather than starting fresh), call
    ``send_message(to=<worker_id>, content=...)``. The ``worker_id``
-   is printed at the top of every ``delegate`` response in square
-   brackets like ``[worker_id: worker_coder_01J...]``. The worker
+   is printed at the top of every ``{delegate_tool}`` response in square
+   brackets like ``[worker_id: worker_coder_...]``. The worker
    remembers its full prior context — use ``send_message`` for
-   iterations / follow-ups and ``delegate`` to start a fresh
+   iterations / follow-ups and ``{delegate_tool}`` to start a fresh
    conversation on a different topic.
 
 Available workers:
@@ -108,7 +110,7 @@ You may also CREATE new specialist workers mid-run with
 - ``role`` must be a valid Python identifier not already in the
   roster; ``instructions`` become the new worker's system prompt.
 - At most {max_spawned} workers can be spawned per run.
-- A spawned worker is immediately delegable via `delegate(role, ...)`
+- A spawned worker is immediately delegable via `{delegate_tool}(role, ...)`
   and exists only for the rest of THIS run.
 Prefer the existing roster; spawn only when no current worker fits.
 """
@@ -359,12 +361,17 @@ class Supervisor:
             )
         worker_descriptions = "\n".join(worker_lines)
 
-        supervisor_section = self._template.format(
-            worker_descriptions=worker_descriptions
+        supervisor_section = fill_template(
+            self._template,
+            worker_descriptions=worker_descriptions,
+            delegate_tool=self._delegate_name,
+            forward_tool=self._forward_name,
         )
         if self._allow_spawn:
-            supervisor_section += SPAWN_SECTION_TEMPLATE.format(
-                max_spawned=self._max_spawned
+            supervisor_section += fill_template(
+                SPAWN_SECTION_TEMPLATE,
+                max_spawned=self._max_spawned,
+                delegate_tool=self._delegate_name,
             )
         composed_instructions = (
             f"{session.instructions}\n\n---\n\n{supervisor_section}"
@@ -397,11 +404,11 @@ class Supervisor:
                 await send_chan.aclose()
 
         try:
-            async with anyio.create_task_group() as tg:
-                tg.start_soon(_run_base)
-                async with recv_chan:
-                    async for ev in recv_chan:
-                        yield ev
+            # The base loop runs as its own task (core/streaming.py), so
+            # no cancel scope is held across ``yield``.
+            async with aclosing(relay(_run_base, recv_chan)) as events:
+                async for ev in events:
+                    yield ev
         finally:
             # Restore the original instructions on session even
             # though the session is single-use; harmless and keeps
@@ -560,7 +567,7 @@ def _make_delegate_tool(
                 async with acquire_worker_session(
                     handle, caller_user
                 ):
-                    worker_session_id = handle.session_id
+                    worker_session_id = handle.session_for(caller_user)
                     # Memory propagation: install the coordinator's
                     # memory as ambient so a worker constructed
                     # without an explicit ``memory=`` inherits it.
@@ -766,17 +773,17 @@ def _make_forward_message_tool(
         output = last_outputs.get(worker)
         if output is None:
             known = ", ".join(sorted(last_outputs)) or "(none yet)"
-            return (
-                f"Error: no captured output for worker {worker!r}. "
-                f"You must call delegate({worker}, ...) first. "
+            # Raised, so the call fails and the turn goes on.
+            raise ValueError(
+                f"no captured output for worker {worker!r}. "
+                f"Delegate to {worker} first. "
                 f"Workers with captured output: {known}"
             )
         forward_request["output"] = output
         forward_request["worker"] = worker
         return (
             f"[forward_message recorded — {worker}'s last output "
-            "will be returned verbatim as the final response. End "
-            "your turn now without writing any additional text.]"
+            "is returned verbatim as the final response.]"
         )
 
     return Tool(
@@ -785,10 +792,13 @@ def _make_forward_message_tool(
             "Return a worker's last delegated output VERBATIM as "
             "the supervisor's final response. Use this when one "
             "worker already produced exactly what the user asked "
-            "for and synthesis would just paraphrase it. End your "
-            "turn immediately after calling — no additional text."
+            "for and synthesis would just paraphrase it. Your turn "
+            "ends with this call."
         ),
         fn=_forward,
+        # A successful forward is the final answer: stop the loop
+        # rather than asking the model to carry on.
+        ends_turn=True,
         input_schema={
             "type": "object",
             "properties": {
@@ -911,10 +921,22 @@ def _make_spawn_worker_tool(
         # (``inherit_ambient_memory``), so a worker built without an
         # explicit ``memory=`` inherits it, same as fixed workers.
         if template is not None:
+            # The template's guards come along with its tools: a
+            # spawned worker must not be a way around the
+            # permissions, hooks, approval handler or limits the
+            # template's tools were configured under.
             worker_agent = _Agent(
                 instructions,
                 model=template.model,
                 tools=template.tool_host,
+                permissions=template._permissions,
+                hooks=template._hooks,
+                approval_handler=template._approval_handler,
+                guardrails=list(template._guardrails),
+                rate_limiter=template._rate_limiter,
+                audit_log=template._audit_log,
+                max_turns=template._max_turns,
+                timeout=template._timeout,
             )
         else:
             worker_agent = _Agent(instructions, model=fallback_model)
@@ -928,12 +950,12 @@ def _make_spawn_worker_tool(
             # so unlike ``persistent_*`` sessions this one is never
             # revisited by a later run.
             session_id=f"{session.id}__spawned_{worker_id}",
-            # Pin to the spawning run's user immediately: a spawned
-            # worker belongs to the caller from birth (first-touch
-            # pinning would leave a None window). ``None`` for
-            # anonymous runs keeps first-touch semantics.
+            # Owned by the spawning run's user from birth: its
+            # instructions came from that user's conversation, so
+            # every other caller (anonymous included) is refused.
             user_id=get_run_context().user_id,
             created_at=datetime.now(UTC),
+            owner_only=True,
         )
 
         run_workers[role] = worker_agent

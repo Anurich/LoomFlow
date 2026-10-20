@@ -3,7 +3,9 @@
 Three modes mirror the Claude Agent SDK so users don't relearn:
 
 - ``DEFAULT`` — allow non-destructive tools, ask on destructive
-- ``ACCEPT_EDITS`` — auto-approve filesystem writes; otherwise like default
+- ``ACCEPT_EDITS`` — auto-approve file edits (the workdir-confined
+  ``write`` / ``edit`` tools); every other destructive tool, ``bash``
+  included, still asks, as in the Agent SDK's ``acceptEdits``
 - ``BYPASS`` — allow everything (CI / sandbox use only)
 
 Allow- and deny-lists win over modes; deny-list wins over allow-list.
@@ -12,7 +14,7 @@ The decision flow:
     1. Tool in deny-list → deny
     2. Allow-list set and tool not in it → deny
     3. Mode == BYPASS → allow
-    4. Mode == ACCEPT_EDITS and call is a non-destructive edit → allow
+    4. Mode == ACCEPT_EDITS and the tool is a file-edit tool → allow
     5. Tool is destructive → ask
     6. Otherwise → allow
 """
@@ -48,8 +50,17 @@ class AllowAll:
         return PermissionDecision.allow_()
 
 
+#: Names of the built-in file-edit tools (``write_tool`` / ``edit_tool``).
+DEFAULT_EDIT_TOOLS = frozenset({"write", "edit"})
+
+
 class StandardPermissions:
-    """Mode + allow/deny-list permission policy."""
+    """Mode + allow/deny-list permission policy.
+
+    ``edit_tools`` names the tools ``ACCEPT_EDITS`` auto-approves.
+    The default is the built-in ``write`` and ``edit`` tools; list
+    yours here if you renamed them or ship your own file editors.
+    """
 
     def __init__(
         self,
@@ -57,10 +68,12 @@ class StandardPermissions:
         mode: Mode = Mode.DEFAULT,
         allowed_tools: list[str] | None = None,
         denied_tools: list[str] | None = None,
+        edit_tools: list[str] | frozenset[str] = DEFAULT_EDIT_TOOLS,
     ) -> None:
         self._mode = mode
         self._allowed = set(allowed_tools) if allowed_tools is not None else None
         self._denied = set(denied_tools or [])
+        self._edit_tools = frozenset(edit_tools)
 
     async def check(
         self,
@@ -75,7 +88,9 @@ class StandardPermissions:
             return PermissionDecision.deny_(f"{call.tool}: not in allow-list")
         if self._mode == Mode.BYPASS:
             return PermissionDecision.allow_()
-        if call.is_destructive() and self._mode != Mode.ACCEPT_EDITS:
+        if self._mode == Mode.ACCEPT_EDITS and call.tool in self._edit_tools:
+            return PermissionDecision.allow_()
+        if call.is_destructive():
             return PermissionDecision.ask_(
                 f"{call.tool}: destructive call requires approval"
             )

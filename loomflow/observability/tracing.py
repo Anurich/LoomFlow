@@ -9,11 +9,10 @@
   in-memory providers; production users wire up their exporters once at
   startup and the adapter inherits.
 
-Metric type dispatch is by suffix:
-
-* names ending in ``_ms``, ``_seconds``, or ``_bytes`` -> histogram
-* everything else -> counter
-
+Metric instruments come from :func:`~loomflow.observability.semconv.instrument_for`:
+the GenAI semconv metrics get their spec kind, unit and bucket
+boundaries; other names dispatch by suffix (``_ms`` / ``_seconds`` /
+``_bytes`` -> histogram with that unit, everything else -> counter).
 That keeps the public interface a single :meth:`emit_metric` while still
 producing the right OTel instrument under the hood.
 """
@@ -35,8 +34,7 @@ from typing import Any, Literal
 import anyio
 
 from ..core.types import Span
-
-_HISTOGRAM_SUFFIXES = ("_ms", "_seconds", "_bytes")
+from .semconv import instrument_for, otel_span_identity
 
 
 def _clean(attrs: dict[str, Any]) -> dict[str, Any]:
@@ -48,7 +46,7 @@ def _instrument_kind(name: str) -> Literal["counter", "histogram"]:
     """Mirror the OTel adapter's suffix-based dispatch so the
     in-memory / console / multi sinks tag each captured metric
     with the same instrument kind users see in OTLP output."""
-    return "histogram" if name.endswith(_HISTOGRAM_SUFFIXES) else "counter"
+    return "histogram" if instrument_for(name)[0] == "histogram" else "counter"
 
 
 # ---------------------------------------------------------------------------
@@ -177,9 +175,22 @@ class OTelTelemetry:
 
     @asynccontextmanager
     async def trace(self, name: str, **attrs: Any) -> AsyncIterator[Span]:
+        from opentelemetry.trace import SpanKind, Status, StatusCode
+
         clean_attrs = _clean(attrs)
+        # GenAI spans get their semconv name and kind; the loomflow
+        # name stays findable as an attribute.
+        span_name, kind = otel_span_identity(name, clean_attrs)
+        otel_attrs = dict(clean_attrs)
+        if span_name != name:
+            otel_attrs["loom.span.name"] = name
         with self._tracer.start_as_current_span(
-            name, attributes=clean_attrs
+            span_name,
+            kind=SpanKind.CLIENT if kind == "CLIENT" else SpanKind.INTERNAL,
+            attributes=otel_attrs,
+            # Recorded below, once (the defaults would record it again).
+            record_exception=False,
+            set_status_on_exception=False,
         ) as otel_span:
             ctx = otel_span.get_span_context()
             our_span = Span(
@@ -188,38 +199,48 @@ class OTelTelemetry:
                 span_id=format(ctx.span_id, "016x"),
                 attributes=dict(clean_attrs),
             )
+            failed = False
             try:
                 yield our_span
             except Exception as exc:
+                failed = True
                 otel_span.record_exception(exc)
-                from opentelemetry.trace import Status, StatusCode
-
+                otel_span.set_attribute("error.type", type(exc).__qualname__)
                 otel_span.set_status(Status(StatusCode.ERROR, str(exc)))
                 raise
             finally:
                 # Post-hoc attributes: emit sites may add keys to the
                 # yielded handle after the wrapped work completes
                 # (e.g. ``gen_ai.usage.*`` once token counts are
-                # known). Propagate anything new/changed to the OTel
-                # span before it ends.
+                # known, ``error.type`` for a failed tool). Propagate
+                # anything new/changed to the OTel span before it ends.
                 for key, value in our_span.attributes.items():
                     if value is not None and clean_attrs.get(key) != value:
                         otel_span.set_attribute(key, value)
+                error_type = our_span.attributes.get("error.type")
+                if error_type and not failed:
+                    otel_span.set_status(Status(StatusCode.ERROR, str(error_type)))
 
     async def emit_metric(
         self, name: str, value: float, **attrs: Any
     ) -> None:
         clean_attrs = _clean(attrs)
-        if name.endswith(_HISTOGRAM_SUFFIXES):
+        kind, unit, buckets = instrument_for(name)
+        if kind == "histogram":
             histo = self._histograms.get(name)
             if histo is None:
-                histo = self._meter.create_histogram(name)
+                try:
+                    histo = self._meter.create_histogram(
+                        name, unit=unit, explicit_bucket_boundaries_advisory=buckets
+                    )
+                except TypeError:  # opentelemetry-api without the advisory
+                    histo = self._meter.create_histogram(name, unit=unit)
                 self._histograms[name] = histo
             histo.record(value, attributes=clean_attrs)
         else:
             counter = self._counters.get(name)
             if counter is None:
-                counter = self._meter.create_counter(name)
+                counter = self._meter.create_counter(name, unit=unit)
                 self._counters[name] = counter
             counter.add(value, attributes=clean_attrs)
 

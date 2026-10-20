@@ -17,7 +17,8 @@ What it does:
 * :class:`~loomflow.TransientModelError` (rate limit, 5xx,
   network) is retried after a backoff computed by
   :func:`~loomflow.governance.compute_backoff`. Provider-supplied
-  ``Retry-After`` hints set a floor on the wait.
+  ``Retry-After`` hints set a floor on the wait; a hint longer than
+  the policy's ``max_delay_s`` ends the retries.
 * Unrecognised exceptions (anything :func:`classify_model_error`
   returns ``None`` for) propagate unchanged — better to let an
   unknown error bubble up than silently retry it.
@@ -54,6 +55,7 @@ from ..governance.retry import (
     RetryPolicy,
     classify_model_error,
     compute_backoff,
+    retry_after_exceeds_cap,
 )
 
 __all__ = ["RetryingModel"]
@@ -174,7 +176,9 @@ class RetryingModel:
                     if classified is not None:
                         raise classified from exc
                     raise
-                if attempt >= self._policy.max_attempts:
+                if attempt >= self._policy.max_attempts or retry_after_exceeds_cap(
+                    self._policy, classified.retry_after
+                ):
                     raise classified from exc
                 delay = compute_backoff(
                     self._policy,
@@ -202,7 +206,9 @@ class RetryingModel:
                 if not isinstance(exc, TransientModelError):
                     raise
                 last_transient = exc
-                if attempt >= self._policy.max_attempts:
+                if attempt >= self._policy.max_attempts or retry_after_exceeds_cap(
+                    self._policy, exc.retry_after
+                ):
                     raise
                 delay = compute_backoff(
                     self._policy,
@@ -223,10 +229,11 @@ class RetryingModel:
                     if isinstance(classified, TransientModelError)
                     else None
                 )
-                if attempt >= self._policy.max_attempts:
-                    if classified is not None:
-                        raise classified from exc
-                    raise
+                if attempt >= self._policy.max_attempts or retry_after_exceeds_cap(
+                    self._policy,
+                    last_transient.retry_after if last_transient is not None else None,
+                ):
+                    raise classified from exc
                 delay = compute_backoff(
                     self._policy,
                     attempt,

@@ -32,6 +32,7 @@ from ..core.protocols import Embedder
 from ..core.types import Fact, _normalize_predicate
 from ._embedding_util import cosine as _cosine
 from ._embedding_util import pack_float32, unpack_float32
+from .facts import plan_supersession
 
 _FACTS_DDL = """
 CREATE TABLE IF NOT EXISTS facts (
@@ -51,6 +52,14 @@ CREATE TABLE IF NOT EXISTS facts (
 
 # Idempotent ALTER for upgrades from a pre-``user_id`` schema.
 _FACTS_ADD_USER_ID = "ALTER TABLE facts ADD COLUMN user_id TEXT"
+
+# Explicit column order for every SELECT: a database migrated from
+# before ``user_id`` existed has that column last, so ``SELECT *``
+# would hand ``_row_to_fact`` the columns shifted.
+_COLUMNS = (
+    "id, user_id, subject, predicate, object, confidence, "
+    "valid_from, valid_until, recorded_at, sources, embedding"
+)
 
 _FACTS_SUBJECT_INDEX = (
     "CREATE INDEX IF NOT EXISTS facts_subject_idx ON facts (subject)"
@@ -121,6 +130,10 @@ class SqliteFactStore:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA busy_timeout=5000")
+        # Overwrite deleted content with zeros, so a forgotten user's
+        # data doesn't linger in free pages of the file (the default
+        # depends on how SQLite was compiled).
+        conn.execute("PRAGMA secure_delete = ON")
         try:
             yield conn
         finally:
@@ -168,23 +181,22 @@ class SqliteFactStore:
         embedding_blob: bytes | None,
     ) -> None:
         with self._connect() as conn:
-            # Close off any still-valid superseded predecessors.
-            # Namespace-scoped: alice's facts never invalidate bob's.
-            # SQLite uses ``IS`` to compare against NULL (since
-            # ``=`` returns NULL when either side is NULL).
-            conn.execute(
-                "UPDATE facts SET valid_until = ? "
-                "WHERE user_id IS ? "
-                "AND subject = ? AND predicate = ? AND object != ? "
-                "AND valid_until IS NULL",
-                (
-                    _to_epoch(fact.valid_from),
-                    fact.user_id,
-                    fact.subject,
-                    fact.predicate,
-                    fact.object,
-                ),
-            )
+            # Valid-time supersession (``plan_supersession``) over the
+            # contradicting facts in this user's namespace. SQLite
+            # uses ``IS`` to compare against NULL (since ``=`` returns
+            # NULL when either side is NULL).
+            rows = conn.execute(
+                "SELECT " + _COLUMNS + " FROM facts WHERE user_id IS ? "
+                "AND subject = ? AND predicate = ? AND object != ?",
+                (fact.user_id, fact.subject, fact.predicate, fact.object),
+            ).fetchall()
+            closes, until = plan_supersession(fact, [_row_to_fact(r) for r in rows])
+            for existing_id, valid_until in closes.items():
+                conn.execute(
+                    "UPDATE facts SET valid_until = ? WHERE id = ?",
+                    (_to_epoch(valid_until), existing_id),
+                )
+            fact = fact.model_copy(update={"valid_until": until})
             conn.execute(
                 "INSERT OR REPLACE INTO facts "
                 "(id, user_id, subject, predicate, object, confidence, "
@@ -241,7 +253,7 @@ class SqliteFactStore:
         user_id: str | None,
     ) -> list[tuple[Any, ...]]:
         # Hard namespace partition by ``user_id`` (always in WHERE).
-        sql_parts = ["SELECT * FROM facts WHERE user_id IS ?"]
+        sql_parts = ["SELECT " + _COLUMNS + " FROM facts WHERE user_id IS ?"]
         params: list[Any] = [user_id]
         if subject is not None:
             sql_parts.append("AND subject = ?")
@@ -333,14 +345,14 @@ class SqliteFactStore:
         with self._connect() as conn:
             if valid_at is None:
                 cursor = conn.execute(
-                    "SELECT * FROM facts WHERE user_id IS ? "
+                    "SELECT " + _COLUMNS + " FROM facts WHERE user_id IS ? "
                     "ORDER BY recorded_at DESC",
                     (user_id,),
                 )
             else:
                 ts = _to_epoch(valid_at)
                 cursor = conn.execute(
-                    "SELECT * FROM facts "
+                    "SELECT " + _COLUMNS + " FROM facts "
                     "WHERE user_id IS ? "
                     "AND valid_from <= ? "
                     "AND (valid_until IS NULL OR ? < valid_until) "
@@ -356,7 +368,7 @@ class SqliteFactStore:
     def _all_sync(self) -> list[tuple[Any, ...]]:
         with self._connect() as conn:
             return conn.execute(
-                "SELECT * FROM facts ORDER BY recorded_at DESC"
+                "SELECT " + _COLUMNS + " FROM facts ORDER BY recorded_at DESC"
             ).fetchall()
 
     # ---- GDPR surface ------------------------------------------------------

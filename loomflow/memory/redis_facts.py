@@ -35,6 +35,7 @@ from ._embedding_util import cosine as _cosine
 from ._embedding_util import pack_float32, unpack_float32
 from ._user_key import decode_legacy_user_id, encode_user_id
 from .embedder import HashEmbedder
+from .facts import plan_supersession
 
 DEFAULT_KEY_PREFIX = "jeeves:fact:"
 
@@ -91,12 +92,15 @@ class RedisFactStore:
         embedding = await self._embedder.embed(triple)
 
         async with self._lock:
-            await self._supersede(fact)
+            fact = await self._supersede(fact)
             await self._write_fact(fact, embedding)
         return fact.id
 
-    async def _supersede(self, fact: Fact) -> None:
-        ts = str(fact.valid_from.timestamp()).encode("utf-8")
+    async def _supersede(self, fact: Fact) -> Fact:
+        """Valid-time supersession (``plan_supersession``); returns
+        ``fact``, closed itself if it is the older claim."""
+        keys: dict[str, Any] = {}
+        candidates: list[Fact] = []
         async for key, data in self._scan_facts():
             # Namespace-scoped supersession: alice's facts never
             # invalidate bob's. Anonymous bucket (sentinel, or legacy
@@ -110,17 +114,20 @@ class RedisFactStore:
                 continue
             if _decode_field(data.get(b"predicate", b"")) != fact.predicate:
                 continue
-            if data.get(b"currently_valid", b"0") != b"1":
-                continue
-            if _decode_field(data.get(b"object", b"")) == fact.object:
-                continue
+            existing = _hash_to_fact(data)
+            if existing is not None:
+                keys[existing.id] = key
+                candidates.append(existing)
+        closes, until = plan_supersession(fact, candidates)
+        for existing_id, valid_until in closes.items():
             await self._client.hset(
-                key,
+                keys[existing_id],
                 mapping={
                     b"currently_valid": b"0",
-                    b"valid_until_ts": ts,
+                    b"valid_until_ts": str(valid_until.timestamp()).encode("utf-8"),
                 },
             )
+        return fact.model_copy(update={"valid_until": until})
 
     async def _write_fact(
         self, fact: Fact, embedding: list[float]

@@ -11,6 +11,7 @@ skip them when that's not set so CI without a Postgres can still run.
 from __future__ import annotations
 
 import os
+import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -351,8 +352,13 @@ async def test_recall_scored_empty_query_neutral_scores() -> None:
     reason="JEEVES_TEST_PG_DSN env var not set",
 )
 async def test_live_postgres_remember_and_recall() -> None:  # pragma: no cover
+    pytest.importorskip("asyncpg")
     dsn = os.environ["JEEVES_TEST_PG_DSN"]
-    mem = await PostgresMemory.connect(dsn, embedder=HashEmbedder())
+    # A namespace per run: earlier runs' rows in the same database
+    # would otherwise compete for the top result.
+    mem = await PostgresMemory.connect(
+        dsn, embedder=HashEmbedder(), namespace=f"live-{uuid.uuid4().hex[:8]}"
+    )
     try:
         await mem.init_schema()
         eid = await mem.remember(

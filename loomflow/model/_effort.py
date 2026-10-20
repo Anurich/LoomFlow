@@ -3,18 +3,27 @@ each provider's native shape.
 
 Providers have not converged on a single API:
 
-* **OpenAI** (o1/o3/o4/GPT-5) — ``reasoning_effort: "minimal" |
-  "low" | "medium" | "high"`` on ``chat.completions.create``.
-* **Anthropic** Claude 4.6+ — ``output_config.effort`` + adaptive
-  ``thinking`` block. Opus 4.7 added ``xhigh`` and ``max``.
-* **Anthropic** Claude 3.7 / 4 / 4.5 — ``thinking.budget_tokens``
-  integer (min 1024). No string enum.
+* **OpenAI** (o-series, GPT-5.x, GPT-6.x) — ``reasoning_effort`` on
+  ``chat.completions.create``; each family accepts its own subset of
+  ``minimal`` / ``low`` / ``medium`` / ``high`` / ``xhigh`` / ``max``.
+* **Anthropic**, adaptive-thinking models (Claude 4.6 and later) —
+  ``thinking: {"type": "adaptive"}`` plus ``output_config.effort``
+  (``low`` / ``medium`` / ``high``, and ``xhigh`` / ``max`` where the
+  model has them). Opus 4.5 takes ``output_config.effort`` together
+  with a ``thinking.budget_tokens`` budget.
+* **Anthropic**, extended-thinking-only models (Haiku / Sonnet 4.5,
+  Claude 4.0 / 4.1, Sonnet 3.7) — ``thinking.budget_tokens`` only.
 * **LiteLLM** — normalises to OpenAI shape.
+
+A level a model doesn't accept is clamped to the nearest one it does
+(``minimal`` → ``low`` on Claude). Sources: the Anthropic effort and
+thinking docs, and the OpenAI reasoning guide and model pages.
 
 This module centralises the mapping so each adapter stays small.
 Adapters that don't support reasoning effort log a one-time
 warning per ``(model, effort)`` pair and drop the kwarg, unless
-the agent passed ``strict_effort=True`` (then we raise).
+the agent passed ``strict_effort=True`` (then we raise). An effort
+string that isn't one of :data:`EFFORT_LEVELS` is a ``ValueError``.
 """
 
 from __future__ import annotations
@@ -25,6 +34,38 @@ from typing import Any
 # ---------------------------------------------------------------------------
 # Shared warning + raise helper
 # ---------------------------------------------------------------------------
+
+
+#: The effort levels loomflow accepts, lowest first.
+EFFORT_LEVELS: tuple[str, ...] = ("minimal", "low", "medium", "high", "xhigh", "max")
+
+
+def validate_effort(effort: str | None) -> None:
+    """Raise ``ValueError`` unless ``effort`` is ``None`` or one of
+    :data:`EFFORT_LEVELS` (a typo like ``"hgih"`` must not be dropped
+    silently)."""
+    if effort is not None and effort not in EFFORT_LEVELS:
+        raise ValueError(
+            f"unknown effort {effort!r}; expected one of {', '.join(EFFORT_LEVELS)}"
+        )
+
+
+def _clamp(effort: str, allowed: tuple[str, ...]) -> str:
+    """The highest level in ``allowed`` not above ``effort`` (or the
+    lowest allowed level when ``effort`` is below all of them)."""
+    rank = EFFORT_LEVELS.index(effort)
+    below = [lvl for lvl in allowed if EFFORT_LEVELS.index(lvl) <= rank]
+    if below:
+        return max(below, key=EFFORT_LEVELS.index)
+    return min(allowed, key=EFFORT_LEVELS.index)
+
+
+def _prefix_lookup(table: dict[str, Any], name: str) -> Any:
+    best = None
+    for key in table:
+        if name.startswith(key) and (best is None or len(key) > len(best)):
+            best = key
+    return None if best is None else table[best]
 
 
 class EffortNotSupportedError(ValueError):
@@ -71,15 +112,23 @@ def _unsupported(
 # OpenAI
 # ---------------------------------------------------------------------------
 
-# Models that accept ``reasoning_effort``. Prefix-matched against
-# ``model.startswith(prefix)`` so future minor versions land
-# automatically (e.g. "o3-mini-2025-01-01" still matches "o3-").
-_OPENAI_REASONING_PREFIXES = (
-    "o1",
-    "o3",
-    "o4",
-    "gpt-5",
-)
+# The reasoning-effort levels each OpenAI family accepts (OpenAI model
+# pages), matched by longest prefix so dated snapshots land.
+_OPENAI_LEVELS: dict[str, tuple[str, ...]] = {
+    "o1": ("low", "medium", "high"),
+    "o3": ("low", "medium", "high"),
+    "o4": ("low", "medium", "high"),
+    "gpt-5": ("minimal", "low", "medium", "high"),
+    "gpt-5.1": ("low", "medium", "high"),
+    "gpt-5.2": ("low", "medium", "high", "xhigh"),
+    "gpt-5.3": ("low", "medium", "high", "xhigh"),
+    "gpt-5.4": ("low", "medium", "high", "xhigh"),
+    "gpt-5.5": ("low", "medium", "high", "xhigh"),
+    "gpt-5.6": ("low", "medium", "high", "xhigh", "max"),
+    "gpt-6": ("low", "medium", "high", "xhigh", "max"),
+}
+# Older name kept for importers.
+_OPENAI_REASONING_PREFIXES = tuple(_OPENAI_LEVELS)
 
 
 def openai_kwargs(
@@ -92,70 +141,70 @@ def openai_kwargs(
 
     Returns ``{}`` when effort is None or when the model doesn't
     support reasoning effort. Returns ``{"reasoning_effort": ...}``
-    otherwise. The caller merges the dict into its create() call.
+    otherwise, clamped to a level the model accepts. The caller
+    merges the dict into its create() call.
     """
+    validate_effort(effort)
     if effort is None:
         return {}
-    if not _model_supports_openai_effort(model_name):
+    levels = _prefix_lookup(_OPENAI_LEVELS, model_name.lower())
+    if levels is None:
         _unsupported(
             model_name, effort,
             strict=strict,
-            reason="OpenAI accepts reasoning_effort only on o1/o3/o4/GPT-5",
+            reason="OpenAI accepts reasoning_effort only on o-series, GPT-5.x and GPT-6.x models",
         )
         return {}
-    # Loom's ``xhigh`` and ``max`` don't exist on OpenAI — clamp
-    # them to ``high`` (the highest legal OpenAI value).
-    mapped = {
-        "minimal": "minimal",
-        "low": "low",
-        "medium": "medium",
-        "high": "high",
-        "xhigh": "high",
-        "max": "high",
-    }.get(effort, "medium")
-    return {"reasoning_effort": mapped}
+    return {"reasoning_effort": _clamp(effort, levels)}
 
 
 def _model_supports_openai_effort(model_name: str) -> bool:
-    name = model_name.lower()
-    return any(name.startswith(p) for p in _OPENAI_REASONING_PREFIXES)
+    return _prefix_lookup(_OPENAI_LEVELS, model_name.lower()) is not None
 
 
 # ---------------------------------------------------------------------------
 # Anthropic
 # ---------------------------------------------------------------------------
 
-# Three regimes:
-#  1. Opus 4.7 / Mythos — adaptive-only; supports xhigh + max.
-#  2. Opus 4.6 / Sonnet 4.6 — adaptive + output_config.effort enum.
-#  3. Sonnet 3.7 / 4 / 4.5 — thinking={enabled, budget_tokens=N}.
-#
-# Anything else (Haiku, older Claudes) — drop with warning.
+# Per-model effort support (Anthropic effort + thinking docs):
+# ``(thinking mode, effort levels or None)``. "adaptive" models take
+# ``thinking: {"type": "adaptive"}`` + ``output_config.effort``;
+# "extended" models only ``thinking: {"type": "enabled",
+# "budget_tokens": N}`` (Opus 4.5 also takes ``output_config.effort``).
+# Longest-prefix match on the model name.
+_ALL = ("low", "medium", "high", "xhigh", "max")
+_NO_XHIGH = ("low", "medium", "high", "max")
+_ANTHROPIC_MODELS: dict[str, tuple[str, tuple[str, ...] | None]] = {
+    "claude-fable": ("adaptive", _ALL),
+    "claude-mythos-preview": ("adaptive", _NO_XHIGH),
+    "claude-mythos": ("adaptive", _ALL),
+    "claude-opus-5": ("adaptive", _ALL),
+    "claude-opus-4-8": ("adaptive", _ALL),
+    "claude-opus-4-7": ("adaptive", _ALL),
+    "claude-opus-4-6": ("adaptive", _NO_XHIGH),
+    "claude-opus-4-5": ("extended", ("low", "medium", "high")),
+    "claude-opus-4": ("extended", None),
+    "claude-sonnet-5": ("adaptive", _ALL),
+    "claude-sonnet-4-6": ("adaptive", _NO_XHIGH),
+    "claude-sonnet-4": ("extended", None),
+    "claude-sonnet-3-7": ("extended", None),
+    "claude-3-7-sonnet": ("extended", None),
+    "claude-haiku-5": ("adaptive", _ALL),
+    "claude-haiku-4-5": ("extended", None),
+}
 
 
 def _anthropic_regime(model_name: str) -> str | None:
-    """Return ``"4.7"`` / ``"4.6"`` / ``"legacy"`` / ``None``."""
-    name = model_name.lower()
-    # Opus 4.7 / Mythos — adaptive-only.
-    if "opus-4-7" in name or "mythos" in name:
-        return "4.7"
-    # Opus 4.6 / Sonnet 4.6 — adaptive + effort enum.
-    if "opus-4-6" in name or "sonnet-4-6" in name:
-        return "4.6"
-    # Sonnet 3.7 / 4 / 4.5 — legacy thinking-budget.
-    if any(
-        marker in name
-        for marker in ("sonnet-3-7", "sonnet-4-5", "opus-4-5", "sonnet-4")
-    ):
-        return "legacy"
-    return None
+    """``"adaptive"`` / ``"extended"`` / ``None`` (no thinking)."""
+    entry = _prefix_lookup(_ANTHROPIC_MODELS, model_name.lower())
+    return None if entry is None else str(entry[0])
 
 
-# Token-budget mapping for the legacy ``thinking.budget_tokens``
-# regime. Tuned to roughly match the effort dial — these are not
-# provider-documented constants, just defensible defaults.
+# Token-budget mapping for the extended-thinking regime. Tuned to
+# roughly match the effort dial — these are not provider-documented
+# constants, just defensible defaults (1024 is the API minimum).
 _ANTHROPIC_LEGACY_BUDGET = {
-    "minimal": 1024,    # the Anthropic minimum
+    "minimal": 1024,
     "low": 2048,
     "medium": 4096,
     "high": 8192,
@@ -175,43 +224,31 @@ def anthropic_kwargs(
     Returns the merge-into-create dict. Empty when effort is None
     or model doesn't support thinking.
     """
+    validate_effort(effort)
     if effort is None:
         return {}
-    regime = _anthropic_regime(model_name)
-    if regime is None:
+    entry = _prefix_lookup(_ANTHROPIC_MODELS, model_name.lower())
+    if entry is None:
         _unsupported(
             model_name, effort,
             strict=strict,
-            reason="Anthropic supports thinking only on Sonnet 3.7+/4+/4.5+/4.6+ and Opus 4.5/4.6/4.7",
+            reason="this Claude model supports neither effort nor thinking",
         )
         return {}
-
-    if regime == "4.7":
-        # Adaptive-only; xhigh + max are legal here.
+    mode, levels = entry
+    if mode == "adaptive":
+        assert levels is not None
         return {
             "thinking": {"type": "adaptive"},
-            "output_config": {"effort": effort},
+            "output_config": {"effort": _clamp(effort, levels)},
         }
-
-    if regime == "4.6":
-        # Adaptive + effort enum. xhigh/max → clamp to high (4.6
-        # doesn't accept them).
-        mapped = {
-            "minimal": "low",
-            "low": "low",
-            "medium": "medium",
-            "high": "high",
-            "xhigh": "high",
-            "max": "high",
-        }.get(effort, "medium")
-        return {
-            "thinking": {"type": "adaptive"},
-            "output_config": {"effort": mapped},
-        }
-
-    # regime == "legacy" — Sonnet 3.7 / 4 / 4.5: budget_tokens int.
-    budget = _ANTHROPIC_LEGACY_BUDGET.get(effort, 4096)
-    return {"thinking": {"type": "enabled", "budget_tokens": budget}}
+    budget = _ANTHROPIC_LEGACY_BUDGET[effort]
+    kwargs: dict[str, Any] = {
+        "thinking": {"type": "enabled", "budget_tokens": budget}
+    }
+    if levels is not None:  # Opus 4.5: effort composes with the budget
+        kwargs["output_config"] = {"effort": _clamp(effort, levels)}
+    return kwargs
 
 
 # ---------------------------------------------------------------------------

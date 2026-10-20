@@ -91,6 +91,7 @@ def test_openai_adapter_attaches_cost_to_usage() -> None:
     from the (input_tokens, output_tokens) pair returned by the
     API. Regression fixture for the original bug: $0.0000 even
     when tokens were non-zero."""
+    pytest.importorskip("openai")
     from loomflow.model.openai import OpenAIModel
 
     class _FakeUsage:

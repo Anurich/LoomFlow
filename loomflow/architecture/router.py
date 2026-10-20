@@ -407,6 +407,13 @@ class Router:
             return None
         match = self._routes_by_name.get(parsed_name)
         if match is None:
+            # "Billing", "tech support" / "tech-support" for "tech_support".
+            wanted = _route_key(parsed_name)
+            match = next(
+                (r for name, r in self._routes_by_name.items() if _route_key(name) == wanted),
+                None,
+            )
+        if match is None:
             if self._fallback_route is not None:
                 return self._routes_by_name[self._fallback_route]
             return None
@@ -417,18 +424,28 @@ class Router:
 # Classifier output parsing
 # ---------------------------------------------------------------------------
 
-_ROUTE_RE = re.compile(r"route\s*[:=]\s*([\w\-./]+)", re.IGNORECASE)
-_CONFIDENCE_RE = re.compile(
-    r"confidence\s*[:=]\s*([0-9]*\.?[0-9]+)", re.IGNORECASE
+# "route: billing", "**route:** billing", "Route: `tech support`".
+_ROUTE_RE = re.compile(
+    r"\broute\b[*_\s]*[:=][*_\s]*[`\"']?([^`\"'\n*]+?)[`\"']?[*_\s]*$",
+    re.IGNORECASE | re.MULTILINE,
 )
+_CONFIDENCE_RE = re.compile(
+    r"\bconfidence\b[*_\s]*[:=][*_\s]*([0-9]*\.?[0-9]+)\s*(%)?", re.IGNORECASE
+)
+
+
+def _route_key(name: str) -> str:
+    return re.sub(r"[\s\-_]+", "_", name.strip().lower())
 
 
 def _parse_classification(text: str) -> tuple[str, float | None]:
     """Extract ``(route_name, confidence)`` from classifier output.
 
     Looks for ``route: X`` and ``confidence: Y`` lines (case
-    insensitive, ``=`` accepted as separator). If the route line is
-    missing returns ``("", 0.0)``. If confidence is missing (or
+    insensitive, ``=`` accepted as separator, markdown and quotes
+    around label or value ignored, multi-word routes kept whole). A
+    confidence given as a percentage ("85%", "85") is scaled to 0-1.
+    If the route line is missing returns ``("", 0.0)``. If confidence is missing (or
     unparsable) returns ``None`` for it — the Router decides what a
     missing confidence means: 0.0 (below-threshold) when
     ``require_confidence_above`` is configured, 1.0 otherwise.
@@ -448,4 +465,6 @@ def _parse_classification(text: str) -> tuple[str, float | None]:
         confidence = float(confidence_match.group(1))
     except ValueError:
         return route, None
+    if confidence_match.group(2) or confidence >= 2:
+        confidence /= 100  # "85%" / "85"; a slight overshoot (1.5) clamps
     return route, max(0.0, min(1.0, confidence))

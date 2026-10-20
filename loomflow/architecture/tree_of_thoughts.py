@@ -22,11 +22,14 @@ Pattern (BFS beam search)
    d. **Early exit:** if any candidate scores ``>= solved_threshold``,
       we stop early and use that branch.
 
-3. **Best leaf wins, then synthesis.** The highest-scoring leaf
-   across the whole tree selects the winning root→leaf reasoning
-   chain; a closing model call (``synthesize_final=True``, the
-   default) turns that chain into the actual final answer written
-   to ``session.output``. With ``synthesize_final=False`` the raw
+3. **Best of the last level wins, then synthesis.** As in the
+   paper's BFS (Alg. 1, argmax over the final frontier), the
+   highest-scoring node of the deepest level reached — the solved
+   node on an early exit — selects the winning root→leaf reasoning
+   chain, so an interior step never wins over the steps built on it.
+   A closing model call (``synthesize_final=True``, the default)
+   turns that chain into the actual final answer written to
+   ``session.output``. With ``synthesize_final=False`` the raw
    winning thought is the output (legacy behaviour).
 
 This is the "BFS-with-beam" variant — DFS with backtracking is a
@@ -49,8 +52,9 @@ Strengths
   observable through ``architecture_event`` events.
 * **Composable.** Wrap inside :class:`Reflexion` to learn which
   evaluation patterns predict real success.
-* **Replay-correct.** Each proposer / evaluator call is a named
-  ``runtime.step``, so journaled runtimes replay deterministically.
+* **Replay-correct.** Node ids are tree paths (``n``, ``n.1``,
+  ``n.1.2``) and each proposer / evaluator call is a ``runtime.step``
+  named after its node, so journaled runtimes replay deterministically.
 
 Weaknesses
 ----------
@@ -71,7 +75,6 @@ from typing import TYPE_CHECKING, Any
 import anyio
 from pydantic import BaseModel
 
-from ..core.ids import new_id
 from ..core.types import Event, Message, Role, Usage
 from .base import AgentSession, Dependencies
 from .helpers import (
@@ -149,7 +152,8 @@ class ThoughtNode(BaseModel):
 
     Children are stored implicitly (each node has a ``parent_id``).
     The full tree is reconstructable from the node list ToT keeps in
-    its session metadata.
+    its session metadata. ``id`` is the node's path from the root:
+    ``n`` for the root, ``n.2`` for its second thought, ``n.2.1``...
     """
 
     id: str
@@ -257,7 +261,7 @@ class TreeOfThoughts:
     ) -> AsyncIterator[Event]:
         # Root represents the problem itself; depth 0; no model call.
         root = ThoughtNode(
-            id=new_id("thot"),
+            id="n",
             parent_id=None,
             content=prompt,
             score=1.0,  # root is "perfect" by definition
@@ -265,6 +269,8 @@ class TreeOfThoughts:
         )
         all_nodes: list[ThoughtNode] = [root]
         frontier: list[ThoughtNode] = [root]
+        # The deepest evaluated level: the winner comes from here.
+        last_level: list[ThoughtNode] = []
 
         yield Event.architecture_event(
             session.id,
@@ -346,9 +352,9 @@ class TreeOfThoughts:
                 thoughts = _parse_numbered_thoughts(
                     text, self._branch_factor
                 )
-                for thought in thoughts:
+                for k, thought in enumerate(thoughts, start=1):
                     candidate = ThoughtNode(
-                        id=new_id("thot"),
+                        id=f"{parent.id}.{k}",
                         parent_id=parent.id,
                         content=thought,
                         depth=depth,
@@ -437,7 +443,10 @@ class TreeOfThoughts:
             # below the min_score floor. The floor lets a clearly-
             # losing branch die immediately even if the beam has
             # room — saves the next level's compute. ===
+            # Stable sort: equal scores keep proposal order.
             candidates.sort(key=lambda n: n.score, reverse=True)
+            if candidates:
+                last_level = candidates
             survivors = [
                 c for c in candidates if c.score >= self._min_score
             ]
@@ -473,9 +482,10 @@ class TreeOfThoughts:
                 )
                 break
 
-        # Pick the best non-root node we've seen across the whole tree.
-        non_root = [n for n in all_nodes if n.parent_id is not None]
-        if not non_root:
+        # The best node of the deepest level reached (Yao et al.,
+        # Alg. 1: argmax over the final frontier). ``last_level`` is
+        # sorted best-first; the surviving frontier is its prefix.
+        if not last_level:
             session.output = ""
             yield Event.architecture_event(
                 session.id,
@@ -483,7 +493,7 @@ class TreeOfThoughts:
                 total_nodes=len(all_nodes),
             )
             return
-        best = max(non_root, key=lambda n: n.score)
+        best = frontier[0] if frontier and frontier[0] in last_level else last_level[0]
         session.output = best.content
 
         # === Final synthesis over the winning root→leaf chain ===

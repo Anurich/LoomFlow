@@ -34,13 +34,18 @@ For each attempt up to ``max_attempts``:
 2. **Run base architecture** (default
    :class:`~loomflow.architecture.ReAct`).
 3. **Evaluate.** A text-only model call scores the output (0-1).
+   An attempt that ran out of turns (the base's ``max_turns``) is a
+   failed trial — score 0, no evaluator call — and goes on to
+   reflection like any other failure, as in the paper; one stopped
+   by the budget or a guardrail ends the run.
 4. **Threshold check.** If ``score >= threshold``, terminate.
 5. **Max-attempts check.** If we've hit the cap, terminate.
 6. **Reflect.** A text-only model call produces a single sentence
-   identifying what went wrong.
-7. **Persist.** Append (legacy) or add to ``lesson_store``
-   (selective-recall) — keyed by the failing prompt so future
-   recall can find it.
+   identifying what went wrong, from the attempt's trajectory (its
+   tool calls and observations, most recent last) and output.
+7. **Persist.** Append (legacy: the block keeps the last
+   ``max_lessons``) or add to ``lesson_store`` (selective-recall) —
+   keyed by the failing prompt so future recall can find it.
 8. **Reset.** Clear ``session.messages`` so the base re-seeds its
    context. Cumulative usage carries across attempts. The TURN
    COUNTER does not: each attempt gets a fresh per-attempt turn
@@ -69,6 +74,7 @@ Weaknesses
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
@@ -144,8 +150,15 @@ class Reflexion:
       chunks and only the top-``top_k_lessons`` most relevant
       lessons are surfaced on each attempt (instead of all past
       lessons). Avoids context bloat as lessons accumulate.
+      Lessons are tagged with the run's ``user_id`` (``""`` when
+      anonymous) and a run recalls only its own user's lessons plus
+      any tagged ``user_id="*"`` (:data:`SHARED_LESSON`), so seed
+      curated lessons for everyone with that tag.
     * ``top_k_lessons`` — how many lessons to recall per attempt
       (selective-recall mode only). Default 5.
+    * ``max_lessons`` — how many lessons the working block keeps
+      (legacy mode, oldest dropped first) so the prompt doesn't grow
+      without bound. Default 10.
     """
 
     name = "reflexion"
@@ -163,6 +176,7 @@ class Reflexion:
         top_k_lessons: int = 5,
         evaluator_model: str | Model | None = None,
         reflector_model: str | Model | None = None,
+        max_lessons: int = 10,
     ) -> None:
         if max_attempts < 1:
             raise ValueError("max_attempts must be >= 1")
@@ -170,6 +184,9 @@ class Reflexion:
             raise ValueError("threshold must be in [0.0, 1.0]")
         if top_k_lessons < 1:
             raise ValueError("top_k_lessons must be >= 1")
+        if max_lessons < 1:
+            raise ValueError("max_lessons must be >= 1")
+        self._max_lessons = max_lessons
         self._base: Architecture = base if base is not None else ReAct()
         self._max_attempts = max_attempts
         self._threshold = threshold
@@ -236,15 +253,26 @@ class Reflexion:
                 # rewritten (not appended) so the agent only sees the
                 # top-k relevant lessons, not the full lesson history.
                 if self._lesson_store is not None:
+                    # Lessons quote the failing prompt, so they stay
+                    # with the user whose run produced them; lessons
+                    # tagged ``user_id="*"`` are shared with everyone.
                     hits = await self._lesson_store.search(
-                        prompt, k=self._top_k
+                        prompt,
+                        k=self._top_k,
+                        filter={
+                            "user_id": {
+                                "$in": [_lesson_owner(deps), SHARED_LESSON]
+                            }
+                        },
                     )
                     if hits:
                         bullets = "\n".join(
                             f"- {r.chunk.content}" for r in hits
                         )
                         await deps.memory.update_block(
-                            self._lessons_block, bullets
+                            self._lessons_block,
+                            bullets,
+                            user_id=deps.context.user_id,
                         )
                         yield Event.architecture_event(
                             session.id,
@@ -269,20 +297,29 @@ class Reflexion:
                 async for event in self._base.run(session, deps, prompt):
                     yield event
 
-                if session.interrupted:
-                    # Base architecture interrupted itself (max_turns,
-                    # budget). Don't reflect on a partial output.
+                ran_out = session.interrupted and session.interruption_reason in _OUT_OF_TURNS
+                if session.interrupted and not (ran_out and attempt < self._max_attempts):
+                    # Stopped by the budget, a guardrail, ... — or out
+                    # of turns on the last attempt: nothing to retry.
                     return
 
                 # --- Evaluate ---
-                score = await self._evaluate(
-                    deps, session, prompt, attempt
-                )
+                if ran_out:
+                    # A trial that ran out of turns failed; reflect and
+                    # retry (Shinn et al. treat stuck trials so).
+                    session.interrupted = False
+                    session.interruption_reason = None
+                    score = 0.0
+                else:
+                    score = await self._evaluate(
+                        deps, session, prompt, attempt
+                    )
                 yield Event.architecture_event(
                     session.id,
                     "reflexion.evaluated",
                     attempt=attempt,
                     score=score,
+                    **({"reason": "out_of_turns"} if ran_out else {}),
                 )
 
                 if score >= self._threshold:
@@ -331,15 +368,14 @@ class Reflexion:
                                     "attempt": attempt,
                                     "score": score,
                                     "prompt_excerpt": prompt[:200],
+                                    "user_id": _lesson_owner(deps),
                                 },
                             )
                         ]
                     )
                     persist_target = "lesson_store"
                 else:
-                    await deps.memory.append_block(
-                        self._lessons_block, f"- {lesson}"
-                    )
+                    await self._append_lesson(deps, lesson)
                     persist_target = self._lessons_block
                 yield Event.architecture_event(
                     session.id,
@@ -382,6 +418,20 @@ class Reflexion:
         await consume_usage(deps, session, usage)
         return parse_score(text)
 
+    async def _append_lesson(self, deps: Dependencies, lesson: str) -> None:
+        """Add a lesson line to the working block, keeping the last
+        ``max_lessons``."""
+        user_id = deps.context.user_id
+        blocks = await deps.memory.working(user_id=user_id)
+        current = next((b.content for b in blocks if b.name == self._lessons_block), "")
+        lines = [line for line in current.splitlines() if line.strip()]
+        lines.append(f"- {' '.join(lesson.split())}")
+        await deps.memory.update_block(
+            self._lessons_block,
+            "\n".join(lines[-self._max_lessons :]) + "\n",
+            user_id=user_id,
+        )
+
     async def _reflect(
         self,
         deps: Dependencies,
@@ -396,7 +446,12 @@ class Reflexion:
                 role=Role.USER,
                 content=(
                     f"Task:\n{prompt}\n\n"
-                    f"Failed attempt (score {score:.2f}):\n{session.output}\n\n"
+                    + (
+                        f"Trajectory of the attempt:\n{trajectory}\n\n"
+                        if (trajectory := _trajectory(session.messages))
+                        else ""
+                    )
+                    + f"Failed attempt (score {score:.2f}):\n{session.output or '(no answer)'}\n\n"
                     f"Produce one sentence of advice for the next attempt."
                 ),
             ),
@@ -417,3 +472,37 @@ class Reflexion:
 # ---------------------------------------------------------------------------
 
 _parse_score = parse_score
+
+#: Interruption reasons that mean an attempt ran out of turns.
+_OUT_OF_TURNS = frozenset({"max_turns_exceeded", "max_turns"})
+
+#: Most recent trajectory text the reflector sees.
+_TRAJECTORY_CHARS = 6000
+
+
+def _trajectory(messages: list[Message]) -> str:
+    """The attempt's actions and observations as text (the latest
+    ``_TRAJECTORY_CHARS``), for the reflector."""
+    lines: list[str] = []
+    for m in messages:
+        if m.role == Role.ASSISTANT:
+            for call in m.tool_calls or ():
+                lines.append(f"Action: {call.tool}({json.dumps(call.args, default=str)[:300]})")
+            if m.content:
+                lines.append(f"Assistant: {str(m.content)[:500]}")
+        elif m.role == Role.TOOL:
+            lines.append(f"Observation: {str(m.content)[:500]}")
+    text = "\n".join(lines)
+    return text[-_TRAJECTORY_CHARS:]
+
+
+#: ``user_id`` metadata value for a lesson every user may recall
+#: (e.g. curated lessons seeded into a ``lesson_store``).
+SHARED_LESSON = "*"
+
+
+def _lesson_owner(deps: Dependencies) -> str:
+    """The ``user_id`` metadata lessons are stored and recalled under
+    (``""`` for anonymous runs: not every vector store accepts None)."""
+    user = deps.context.user_id
+    return "" if user is None else str(user)

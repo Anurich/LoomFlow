@@ -176,23 +176,17 @@ def hybrid_rank(
 
     ``alpha`` ∈ ``[0, 1]`` controls the lexical-vs-vector weighting:
     ``0`` = pure BM25, ``1`` = pure vector cosine, ``0.5`` = balanced.
-    Implemented by *replicating* the favoured ranking when ``alpha``
-    is near an extreme — RRF treats each occurrence as another vote.
-    Crude but matches the public hybrid behaviour in
-    ``loomflow.vectorstore.InMemoryVectorStore`` so users get
-    consistent ranking semantics across the two surfaces.
+    It is the vector stores' :func:`~loomflow.vectorstore._bm25.fuse_weighted`,
+    so the two surfaces rank alike (an extreme ``alpha`` really drops
+    the other ranking; it used to keep one vote).
 
     Per-component raw scores ride along so the caller can populate
     :class:`EpisodeMatch` ``bm25_score`` / ``vector_score`` fields
     for downstream consumers (rerankers, A/B experiments).
     """
-    alpha = max(0.0, min(1.0, alpha))
-    bm25_weight = max(1, int(round((1 - alpha) * 4)))
-    vector_weight = max(1, int(round(alpha * 4)))
-    rankings: list[list[tuple[int, float]]] = []
-    rankings.extend([bm25_ranking] * bm25_weight)
-    rankings.extend([vector_ranking] * vector_weight)
-    fused = reciprocal_rank_fusion(rankings, k=k)
+    from ..vectorstore._bm25 import fuse_weighted
+
+    fused = fuse_weighted(vector_ranking, bm25_ranking, alpha)
 
     bm25_lookup = {idx: s for idx, s in bm25_ranking}
     vec_lookup = {idx: s for idx, s in vector_ranking}

@@ -15,12 +15,11 @@ takes a :class:`~loomflow.core.protocols.Model` and a list of
    wrapping, etc.) we use it — exact byte-accurate counts.
 
 2. **tiktoken.** If tiktoken is installed (it is under the
-   ``loader`` extra), we tokenize via ``cl100k_base`` — the
-   encoding GPT-4-class and Claude-3+ models use, accurate
-   enough for budgeting decisions. Same encoding both major
-   providers' tokenizers approximate, so the answer is the
-   right order of magnitude regardless of which provider runs
-   the actual completion.
+   ``loader`` extra), we tokenize with the model's encoding:
+   ``o200k_base`` for GPT-4o and later OpenAI models (GPT-4.1,
+   GPT-5.x, GPT-6.x, o-series), ``cl100k_base`` for everything
+   else — accurate enough for budgeting decisions, and the right
+   order of magnitude for other providers.
 
 3. **Char-based estimate.** Last resort, no deps. ``len(text)
    // 4`` is the rule-of-thumb token count for English-ish
@@ -37,7 +36,10 @@ don't implement it inherit the fallback automatically.
 Tools are included in the estimate: serialised ``ToolDef``
 JSON-schema bytes count toward the prompt under both Anthropic
 and OpenAI tokenizers, so omitting them would systematically
-under-count by 200-1000 tokens for tool-heavy agents.
+under-count by 200-1000 tokens for tool-heavy agents. So are the
+tool calls in assistant messages (name + JSON arguments) and
+images (:data:`IMAGE_TOKEN_ESTIMATE` each — the encoded bytes
+aren't what the provider bills).
 """
 
 from __future__ import annotations
@@ -61,6 +63,20 @@ if TYPE_CHECKING:
 # over-estimating just leaves headroom). Tune via
 # ``count_tokens(..., chars_per_token=N)`` if your traffic skews.
 DEFAULT_CHARS_PER_TOKEN = 4
+
+# Tokens per attached image. Anthropic bills about width*height/750
+# (~1,600 for a 1.15-megapixel image, its resize target); OpenAI's
+# high-detail tiles land in the same range. Without decoding the
+# image this is the honest middle.
+IMAGE_TOKEN_ESTIMATE = 1_600
+
+# OpenAI models tokenised with o200k_base (tiktoken's model map).
+_O200K_PREFIXES = ("gpt-4o", "gpt-4.1", "gpt-4.5", "gpt-5", "gpt-6", "o1", "o3", "o4", "chat-latest")
+
+
+def _encoding_name(model_name: str) -> str:
+    name = model_name.lower().rsplit("/", 1)[-1]
+    return "o200k_base" if name.startswith(_O200K_PREFIXES) else "cl100k_base"
 
 
 async def count_tokens(
@@ -113,7 +129,7 @@ async def count_tokens(
     # thread. The cheap char-based tier below stays inline.
     try:
         estimate = await anyio.to_thread.run_sync(
-            _tiktoken_estimate, messages, tools
+            _tiktoken_estimate, messages, tools, str(getattr(model, "name", "") or "")
         )
         return max(1, estimate)
     except Exception:  # noqa: BLE001 — tiktoken absent or borked
@@ -125,9 +141,9 @@ async def count_tokens(
 
 
 def _tiktoken_estimate(
-    messages: list[Message], tools: list[ToolDef] | None
+    messages: list[Message], tools: list[ToolDef] | None, model_name: str = ""
 ) -> int:
-    """Count via ``tiktoken`` using ``cl100k_base``.
+    """Count via ``tiktoken`` with the model's encoding.
 
     Raises if ``tiktoken`` isn't installed or the encoding can't
     be fetched — the caller catches and falls through to the
@@ -135,10 +151,13 @@ def _tiktoken_estimate(
     # Lazy import — tiktoken is an extra, not a base dep.
     import tiktoken  # type: ignore[import-not-found, import-untyped]
 
-    enc = tiktoken.get_encoding("cl100k_base")
+    enc = tiktoken.get_encoding(_encoding_name(model_name))
     total = 0
     for m in messages:
         total += len(enc.encode(m.content or ""))
+        if m.tool_calls:
+            total += len(enc.encode(_tool_calls_text(m)))
+        total += IMAGE_TOKEN_ESTIMATE * len(m.images)
         # The provider wire format adds 3-5 tokens of role
         # markers per message. ``4`` is the standard estimate
         # used by tiktoken's own ``num_tokens_from_messages``
@@ -168,6 +187,9 @@ def _char_estimate(
     per_message_overhead = 8
     for m in messages:
         total_chars += len(m.content or "") + per_message_overhead
+        if m.tool_calls:
+            total_chars += len(_tool_calls_text(m))
+        total_chars += IMAGE_TOKEN_ESTIMATE * chars_per_token * len(m.images)
     if tools:
         # Same JSON-serialisation logic as the tiktoken path so
         # the two estimates stay in the same ballpark.
@@ -176,6 +198,15 @@ def _char_estimate(
         )
         total_chars += len(tools_payload)
     return max(1, total_chars // chars_per_token)
+
+
+def _tool_calls_text(message: Message) -> str:
+    """An assistant message's tool calls as the provider sends them."""
+    return json.dumps(
+        [{"name": c.tool, "arguments": c.args} for c in message.tool_calls],
+        separators=(",", ":"),
+        default=str,
+    )
 
 
 def _tool_dict(tool: ToolDef) -> dict[str, object]:

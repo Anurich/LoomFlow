@@ -3,10 +3,13 @@
 from .audit import (
     AuditLog,
     AuditLogSpec,
+    AuditProblem,
+    AuditVerification,
     FileAuditLog,
     FullTranscriptAuditLog,
     InMemoryAuditLog,
     resolve_audit_log,
+    verify_chain,
     verify_signature,
 )
 from .hooks import HookRegistry, PostToolHook, PreToolHook
@@ -25,6 +28,8 @@ __all__ = [
     "AllowAll",
     "AuditLog",
     "AuditLogSpec",
+    "AuditProblem",
+    "AuditVerification",
     "DictSecrets",
     "EnvSecrets",
     "FileAuditLog",
@@ -43,5 +48,6 @@ __all__ = [
     "SubprocessSandbox",
     "resolve_audit_log",
     "resolve_permissions",
+    "verify_chain",
     "verify_signature",
 ]

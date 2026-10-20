@@ -34,6 +34,7 @@ the caller's event loop. Index rebuilds diff old vs. new and emit
 from __future__ import annotations
 
 import logging
+import re
 import threading
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass
@@ -44,6 +45,7 @@ from anyio.streams.memory import MemoryObjectSendStream
 
 from ..core.errors import MCPError
 from ..core.types import ToolDef, ToolEvent, ToolResult
+from ._fields import mcp_field
 from .client import MCPClient
 from .spec import MCPServerSpec
 
@@ -364,7 +366,7 @@ class MCPRegistry:
         except Exception as exc:  # noqa: BLE001 — surface as ToolResult.error_
             return ToolResult.error_(call_id=call_id, message=str(exc))
 
-        is_error = bool(getattr(sdk_result, "isError", False))
+        is_error = bool(mcp_field(sdk_result, "isError", False))
         output = _extract_output(sdk_result)
         if is_error:
             return ToolResult.error_(
@@ -515,7 +517,7 @@ class MCPRegistry:
                         "server": server_name,
                         "name": getattr(resource, "name", "") or "",
                         "description": getattr(resource, "description", "") or "",
-                        "mime_type": getattr(resource, "mimeType", None),
+                        "mime_type": mcp_field(resource, "mimeType"),
                     }
                 )
         self._resource_owners = owners
@@ -715,9 +717,7 @@ def _annotated_destructive(t: Any) -> bool:
         return False
 
     def _get(key: str) -> Any:
-        if isinstance(ann, Mapping):
-            return ann.get(key)
-        return getattr(ann, key, None)
+        return mcp_field(ann, key)
 
     destructive_hint = _get("destructiveHint")
     if destructive_hint is not None:
@@ -750,21 +750,37 @@ def _build_index(
             if not tname:
                 continue
             unique = counts.get(tname, 0) == 1
-            display = tname if unique else f"{server_name}.{tname}"
+            # The name the model sees must satisfy the providers' tool
+            # name rule (^[a-zA-Z0-9_-]{1,128}$), so a clash is
+            # qualified as ``server__tool``, not ``server.tool``.
+            display = _provider_safe(tname if unique else f"{server_name}__{tname}")
             tool_def = ToolDef(
                 name=display,
                 description=getattr(t, "description", "") or "",
-                input_schema=getattr(t, "inputSchema", None) or {"type": "object"},
+                input_schema=mcp_field(t, "inputSchema") or {"type": "object"},
                 server=server_name,
                 destructive=_annotated_destructive(t),
             )
             entry = _IndexEntry(
                 server=server_name, mcp_name=tname, tool_def=tool_def
             )
+            # The dotted form stays accepted at call time for callers
+            # that learnt it from earlier releases.
             index[f"{server_name}.{tname}"] = entry
+            index[f"{server_name}__{tname}"] = entry
+            index[display] = entry
             if unique:
                 index[tname] = entry
     return index
+
+
+_UNSAFE_NAME_CHARS = re.compile(r"[^a-zA-Z0-9_-]")
+
+
+def _provider_safe(name: str) -> str:
+    """``name`` with characters outside ``[a-zA-Z0-9_-]`` replaced and
+    the length capped at 128, the rule Anthropic and OpenAI enforce."""
+    return _UNSAFE_NAME_CHARS.sub("_", name)[:128] or "_"
 
 
 def _defs_by_display_name(
@@ -798,7 +814,7 @@ def _blob_placeholder(content: Any) -> dict[str, Any] | None:
         size = _base64_size(blob)
     else:
         return None
-    return {"mime": getattr(content, "mimeType", None), "size": size}
+    return {"mime": mcp_field(content, "mimeType"), "size": size}
 
 
 def _extract_resource_contents(sdk_result: Any) -> Any:
@@ -860,9 +876,9 @@ def _describe_binary_block(block: Any) -> str | None:
         data = getattr(resource, "blob", None)
     if data is None:
         return None
-    mime = getattr(block, "mimeType", None)
+    mime = mcp_field(block, "mimeType")
     if mime is None and resource is not None:
-        mime = getattr(resource, "mimeType", None)
+        mime = mcp_field(resource, "mimeType")
     block_type = getattr(block, "type", None) or "binary"
     if isinstance(data, (bytes, bytearray)):
         size = len(data)
@@ -885,7 +901,7 @@ def _extract_output(sdk_result: Any) -> Any:
        by a minimal ``[image: image/png, N bytes]`` placeholder.
     3. The raw ``content`` list if nothing representable was found.
     """
-    structured = getattr(sdk_result, "structuredContent", None)
+    structured = mcp_field(sdk_result, "structuredContent")
     if structured is not None:
         return structured
 
@@ -895,6 +911,16 @@ def _extract_output(sdk_result: Any) -> Any:
         text = getattr(block, "text", None)
         if isinstance(text, str):
             pieces.append(text)
+            continue
+        # Embedded text resources and resource links are part of the
+        # result too (spec: tool results may carry "resource links,
+        # and embedded resources"); they used to be dropped.
+        resource_text = getattr(getattr(block, "resource", None), "text", None)
+        if isinstance(resource_text, str):
+            pieces.append(resource_text)
+            continue
+        if getattr(block, "type", None) == "resource_link":
+            pieces.append(f"[resource_link: {_uri_of(block)}]")
             continue
         placeholder = _describe_binary_block(block)
         if placeholder is not None:

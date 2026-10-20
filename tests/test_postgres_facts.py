@@ -9,6 +9,7 @@ pool so we don't need a live database. Live integration is gated on
 from __future__ import annotations
 
 import os
+import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -118,11 +119,23 @@ def _fact(
 
 async def test_append_emits_supersede_then_insert() -> None:
     store_state = _FakeStore()
+    earlier = datetime(2020, 1, 1, tzinfo=UTC)
+    # A stored, contradicting claim from before the new fact.
+    store_state.next_rows = [
+        {
+            "id": "fact_old", "user_id": None, "subject": "user", "predicate": "name_is",
+            "object": "Bob", "confidence": 1.0, "valid_from": earlier, "valid_until": None,
+            "recorded_at": earlier, "sources": [], "embedding": None,
+        }
+    ]
     pool = _FakePool(store_state)
     store = PostgresFactStore(pool=pool)
 
     await store.append(_fact())
 
+    # The contradicting rows are read first, then closed, then the
+    # new fact is inserted.
+    assert store_state.queried and store_state.queried[0][0].startswith("SELECT")
     sqls = [sql for sql, _ in store_state.executed]
     assert any("UPDATE facts SET valid_until" in s for s in sqls)
     assert any("INSERT INTO facts" in s for s in sqls)
@@ -277,6 +290,7 @@ async def test_postgres_memory_init_schema_runs_fact_store_schema_too() -> None:
     reason="JEEVES_TEST_PG_DSN env var not set",
 )
 async def test_live_postgres_fact_store_roundtrip() -> None:  # pragma: no cover
+    pytest.importorskip("asyncpg")
     dsn = os.environ["JEEVES_TEST_PG_DSN"]
     store = await PostgresFactStore.connect(
         dsn, embedder=HashEmbedder(dimensions=16)
@@ -284,17 +298,19 @@ async def test_live_postgres_fact_store_roundtrip() -> None:  # pragma: no cover
     try:
         await store.init_schema()
         base = datetime(2026, 1, 1, tzinfo=UTC)
-        await store.append(_fact(predicate="lives_in", object_="Tokyo", valid_from=base))
+        # A predicate per run, so earlier runs' rows don't interfere.
+        predicate = f"lives_in_{uuid.uuid4().hex[:8]}"
+        await store.append(_fact(predicate=predicate, object_="Tokyo", valid_from=base))
         await store.append(
             _fact(
-                predicate="lives_in",
+                predicate=predicate,
                 object_="Paris",
                 valid_from=base + timedelta(days=30),
             )
         )
         # supersession applied
         on_feb = base + timedelta(days=45)
-        facts = await store.query(predicate="lives_in", valid_at=on_feb)
+        facts = await store.query(predicate=predicate, valid_at=on_feb)
         assert {f.object for f in facts} == {"Paris"}
     finally:
         await store.aclose()

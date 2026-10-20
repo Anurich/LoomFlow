@@ -1,8 +1,11 @@
 """User-registered lifecycle callbacks.
 
 Hooks run in a timeout-shielded scope so a buggy callback can't hang
-the loop. Pre-tool hooks can deny a call (first deny wins); post-tool
-hooks are best-effort and can never affect the result.
+the loop. Pre-tool hooks can deny a call (first deny wins), and a
+pre-tool hook that raises or times out denies it too: a policy check
+that never answered hasn't approved anything (set
+``timeout_denies=False`` to let timed-out calls through instead). Post-tool hooks are best-effort and can
+never affect the result.
 """
 
 from __future__ import annotations
@@ -28,6 +31,7 @@ class HookRegistry:
     event_hooks: list[EventHook] = field(default_factory=list)
 
     hook_timeout_s: float = 5.0
+    timeout_denies: bool = True
 
     # ---- registration ----------------------------------------------------
 
@@ -60,8 +64,20 @@ class HookRegistry:
         """
         for hook in self.pre_tool_hooks:
             decision: PermissionDecision | None = None
-            with anyio.move_on_after(self.hook_timeout_s):
-                decision = await hook(call)
+            name = getattr(hook, "__name__", type(hook).__name__)
+            with anyio.move_on_after(self.hook_timeout_s) as scope:
+                try:
+                    decision = await hook(call)
+                except Exception as exc:  # noqa: BLE001 — a broken check denies
+                    return PermissionDecision.deny_(
+                        f"{call.tool}: pre-tool hook {name!r} raised "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+            if scope.cancelled_caught and self.timeout_denies:
+                return PermissionDecision.deny_(
+                    f"{call.tool}: pre-tool hook {name!r} timed out "
+                    f"after {self.hook_timeout_s}s"
+                )
             if decision is not None and decision.deny:
                 return decision
         return PermissionDecision.allow_()

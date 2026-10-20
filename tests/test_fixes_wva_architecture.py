@@ -5,10 +5,10 @@ Pins:
 
 1. Cross-tenant worker reuse — every persistent-worker spawn site
    (Supervisor, Swarm, Router, Blackboard, Debate) goes through the
-   shared :func:`acquire_worker_session` helper: cross-user mismatch
-   is rejected, the handle lock is held for the worker's run, and
-   the run's REAL user_id is pinned (Debate previously touched with
-   a hard-coded ``None``).
+   shared :func:`acquire_worker_session` helper: each user runs in
+   their own session of a shared worker (Debate previously used a
+   hard-coded ``None``), calls into one session are serialised, and
+   a spawned worker refuses every user but its owner.
 2. Fail-closed destructive backstop — when ``list_tools()`` raises
    while stamping the destructive flag, the call is treated as
    destructive (routed through the ask gate) instead of sailing
@@ -188,39 +188,78 @@ def _make_deps(model: ScriptedModel, **overrides: Any) -> Dependencies:
 # ---------------------------------------------------------------------------
 
 
-async def test_acquire_worker_session_pins_locks_and_rejects() -> None:
+class _CtxSpy(ScriptedModel):
+    """Records the (user_id, session_id) each model call runs under."""
+
+    def __init__(self, turns: list[ScriptedTurn]) -> None:
+        super().__init__(turns)
+        self.seen: list[tuple[str | None, str | None]] = []
+
+    def _record(self) -> None:
+        from loomflow.core.context import get_run_context
+
+        ctx = get_run_context()
+        self.seen.append((ctx.user_id, ctx.session_id))
+
+    async def complete(self, messages: Any, **kwargs: Any) -> Any:
+        self._record()
+        return await super().complete(messages, **kwargs)
+
+    async def stream(self, messages: Any, **kwargs: Any) -> Any:
+        self._record()
+        async for chunk in super().stream(messages, **kwargs):
+            yield chunk
+
+
+async def test_acquire_worker_session_isolates_users_and_locks() -> None:
+    import anyio
+
     registry, role_map = build_worker_registry(
         {"coder": Agent("coder", model="echo")}
     )
     handle = registry[role_map["coder"]]
-    assert handle.user_id is None
 
-    # First touch pins the caller's user_id (under the lock).
+    # A registered worker is shared by every user, each in their own
+    # session; it is never pinned to whoever touched it first.
+    entered: list[str] = []
+
+    async def call(user: str) -> None:
+        async with acquire_worker_session(handle, user):
+            entered.append(user)
+
     async with acquire_worker_session(handle, "alice"):
-        assert handle.user_id == "alice"
-        assert handle.lock.locked()
-    assert not handle.lock.locked()
+        assert handle.user_id is None
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(call, "alice")
+            tg.start_soon(call, "bob")
+            await anyio.sleep(0.05)
+            # bob is not blocked by alice's call; a second call into
+            # alice's own session waits for hers to finish.
+            assert entered == ["bob"]
+            tg.cancel_scope.cancel()
     assert handle.last_used_at is not None
+    assert handle._user_locks == {}  # idle per-user locks are dropped
+    async with acquire_worker_session(handle, None):
+        assert handle.lock.locked()
 
-    # Same user again is fine; a DIFFERENT user is rejected before
-    # the lock is taken.
+    # A spawned worker belongs to its owner alone; anonymous callers
+    # are refused too (``None`` used to slip through as "no mismatch").
+    handle.owner_only = True
+    handle.user_id = "alice"
     async with acquire_worker_session(handle, "alice"):
         pass
-    with pytest.raises(CrossUserWorkerError, match="Cross-tenant"):
-        async with acquire_worker_session(handle, "bob"):
-            pass
+    for intruder in ("bob", None):
+        with pytest.raises(CrossUserWorkerError, match="Cross-tenant"):
+            async with acquire_worker_session(handle, intruder):
+                pass
     assert not handle.lock.locked()
-    # Anonymous callers (None) are not a mismatch.
-    async with acquire_worker_session(handle, None):
-        pass
 
 
-async def test_swarm_rejects_cross_user_worker() -> None:
-    peer_model = ScriptedModel([ScriptedTurn(text="peer answer")])
+async def test_swarm_runs_each_user_in_their_own_worker_session() -> None:
+    peer_model = _CtxSpy([ScriptedTurn(text="peer answer")] * 2)
     peer = Agent("a", model=peer_model)
     registry, role_map = build_worker_registry({"a": peer})
-    registry[role_map["a"]].touch(user_id="alice")
-
+    handle = registry[role_map["a"]]
     agent = Agent(
         "host",
         model="echo",
@@ -231,29 +270,26 @@ async def test_swarm_rejects_cross_user_worker() -> None:
             role_to_worker_id=role_map,
         ),
     )
-    events = [e async for e in agent.stream("go", user_id="bob")]
-    rejected = [
-        e
-        for e in events
-        if e.kind == "architecture_event"
-        and e.payload.get("name") == "swarm.cross_user_rejected"
+    for user in ("alice", "bob"):
+        events = [e async for e in agent.stream("go", user_id=user)]
+        assert not any(
+            e.payload.get("name") == "swarm.cross_user_rejected" for e in events
+        )
+    assert peer_model.seen == [
+        ("alice", handle.session_for("alice")),
+        ("bob", handle.session_for("bob")),
     ]
-    assert len(rejected) == 1
-    assert "Cross-tenant" in rejected[0].payload["error"]
-    # The peer never ran — its script is untouched.
-    assert peer_model.remaining == 1
 
 
-async def test_router_rejects_cross_user_specialist() -> None:
-    spec_model = ScriptedModel([ScriptedTurn(text="specialist answer")])
+async def test_router_serves_a_second_user_from_its_own_session() -> None:
+    spec_model = _CtxSpy([ScriptedTurn(text="specialist answer")] * 2)
     spec = Agent("s", model=spec_model)
     registry, role_map = build_worker_registry({"s": spec})
-    registry[role_map["s"]].touch(user_id="alice")
-
+    handle = registry[role_map["s"]]
     agent = Agent(
         "router-host",
         model=ScriptedModel(
-            [ScriptedTurn(text="route: s\nconfidence: 0.9")]
+            [ScriptedTurn(text="route: s\nconfidence: 0.9")] * 2
         ),
         architecture=Router(
             routes=[RouterRoute(name="s", agent=spec)],
@@ -261,19 +297,21 @@ async def test_router_rejects_cross_user_specialist() -> None:
             role_to_worker_id=role_map,
         ),
     )
-    result = await agent.run("go", user_id="bob")
-    assert result.interrupted
-    assert "cross_user_worker" in (result.interruption_reason or "")
-    assert "Could not route" in result.output
-    assert spec_model.remaining == 1
+    for user in ("alice", "bob"):
+        result = await agent.run("go", user_id=user)
+        assert not result.interrupted
+        assert result.output == "specialist answer"
+    assert spec_model.seen == [
+        ("alice", handle.session_for("alice")),
+        ("bob", handle.session_for("bob")),
+    ]
 
 
-async def test_blackboard_skips_cross_user_contributor() -> None:
-    writer_model = ScriptedModel([ScriptedTurn(text="a contribution")])
+async def test_blackboard_runs_each_user_in_their_own_contributor_session() -> None:
+    writer_model = _CtxSpy([ScriptedTurn(text="a contribution")] * 2)
     writer = Agent("writer", model=writer_model)
     registry, role_map = build_worker_registry({"writer": writer})
-    registry[role_map["writer"]].touch(user_id="alice")
-
+    handle = registry[role_map["writer"]]
     agent = Agent(
         "host",
         model="echo",
@@ -286,26 +324,23 @@ async def test_blackboard_skips_cross_user_contributor() -> None:
             role_to_worker_id=role_map,
         ),
     )
-    events = [e async for e in agent.stream("solve", user_id="bob")]
-    rejected = [
-        e
-        for e in events
-        if e.kind == "architecture_event"
-        and e.payload.get("name") == "blackboard.cross_user_rejected"
+    for user in ("alice", "bob"):
+        events = [e async for e in agent.stream("solve", user_id=user)]
+        assert not any(
+            e.payload.get("name") == "blackboard.cross_user_rejected"
+            for e in events
+        )
+    assert writer_model.seen == [
+        ("alice", handle.session_for("alice")),
+        ("bob", handle.session_for("bob")),
     ]
-    assert len(rejected) == 1
-    assert writer_model.remaining == 1  # contributor never ran
 
 
-async def test_debate_pins_real_user_id_on_handles() -> None:
-    """Pre-fix, debaters touched with ``user_id=None`` — handles were
-    never pinned, so the cross-tenant guard could never fire."""
-    d0 = Agent(
-        "d0", model=ScriptedModel([ScriptedTurn(text="same answer")])
-    )
-    d1 = Agent(
-        "d1", model=ScriptedModel([ScriptedTurn(text="same answer")])
-    )
+async def test_debate_runs_debaters_under_the_real_user() -> None:
+    """Pre-fix, debaters were touched with a hard-coded ``None``."""
+    m0 = _CtxSpy([ScriptedTurn(text="same answer")])
+    m1 = _CtxSpy([ScriptedTurn(text="same answer")])
+    d0, d1 = Agent("d0", model=m0), Agent("d1", model=m1)
     registry, role_map = build_worker_registry(
         {"debater_0": d0, "debater_1": d1}
     )
@@ -320,86 +355,50 @@ async def test_debate_pins_real_user_id_on_handles() -> None:
         ),
     )
     await agent.run("question", user_id="carol")
-    assert registry[role_map["debater_0"]].user_id == "carol"
-    assert registry[role_map["debater_1"]].user_id == "carol"
-
-
-async def test_debate_rejects_cross_user_debater_gracefully() -> None:
-    d0_model = ScriptedModel([ScriptedTurn(text="pinned answer")])
-    d0 = Agent("d0", model=d0_model)
-    d1 = Agent(
-        "d1", model=ScriptedModel([ScriptedTurn(text="free answer")])
-    )
-    registry, role_map = build_worker_registry(
-        {"debater_0": d0, "debater_1": d1}
-    )
-    registry[role_map["debater_0"]].touch(user_id="alice")
-
-    agent = Agent(
-        "moderator",
-        model="echo",
-        architecture=MultiAgentDebate(
-            debaters=[d0, d1],
-            rounds=1,
-            convergence_check=False,
-            worker_registry=registry,
-            role_to_worker_id=role_map,
-        ),
-    )
-    events = [e async for e in agent.stream("question", user_id="bob")]
-    rejected = [
-        e
-        for e in events
-        if e.kind == "architecture_event"
-        and e.payload.get("name") == "debate.cross_user_rejected"
+    assert m0.seen == [
+        ("carol", registry[role_map["debater_0"]].session_for("carol"))
     ]
-    assert rejected  # d0 rejected each round, run didn't crash
-    assert d0_model.remaining == 1
+    assert m1.seen == [
+        ("carol", registry[role_map["debater_1"]].session_for("carol"))
+    ]
 
 
-async def test_supervisor_cross_user_delegate_returns_error_string() -> None:
-    """Supervisor's pre-existing behaviour — the model sees an error
-    string — is preserved through the shared helper."""
-    worker_model = ScriptedModel([ScriptedTurn(text="worker out")])
+async def test_supervisor_delegates_each_user_to_their_own_worker_session() -> None:
+    worker_model = _CtxSpy([ScriptedTurn(text="worker out")] * 2)
     worker = Agent("w", model=worker_model)
     registry, role_map = build_worker_registry({"w": worker})
-    registry[role_map["w"]].touch(user_id="alice")
+    handle = registry[role_map["w"]]
 
-    model = ScriptedModel(
-        [
-            ScriptedTurn(
-                tool_calls=[
-                    ToolCall(
-                        id="c1",
-                        tool="delegate",
-                        args={"worker": "w", "instructions": "go"},
-                    )
-                ]
-            ),
-            ScriptedTurn(text="done"),
+    delegate = ScriptedTurn(
+        tool_calls=[
+            ToolCall(
+                id="c1",
+                tool="delegate",
+                args={"worker": "w", "instructions": "go"},
+            )
         ]
     )
     agent = Agent(
         "boss",
-        model=model,
+        model=ScriptedModel([delegate, ScriptedTurn(text="done")] * 2),
         architecture=Supervisor(
             workers={"w": worker},
             worker_registry=registry,
             role_to_worker_id=role_map,
         ),
     )
-    events = [e async for e in agent.stream("task", user_id="bob")]
-    delegate_results = [
-        str(e.payload["result"].get("output", ""))
-        for e in events
-        if e.kind == "tool_result"
+    for user in ("alice", "bob"):
+        events = [e async for e in agent.stream("task", user_id=user)]
+        outs = [
+            str(e.payload["result"].get("output", ""))
+            for e in events
+            if e.kind == "tool_result"
+        ]
+        assert outs and not any(o.startswith("Error:") for o in outs)
+    assert worker_model.seen == [
+        ("alice", handle.session_for("alice")),
+        ("bob", handle.session_for("bob")),
     ]
-    assert any(
-        out.startswith("Error:")
-        and "Cross-tenant delegation is rejected" in out
-        for out in delegate_results
-    )
-    assert worker_model.remaining == 1  # worker never ran
 
 
 # ---------------------------------------------------------------------------

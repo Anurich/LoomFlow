@@ -250,7 +250,7 @@ async def test_retrying_model_respects_rate_limit_retry_after() -> None:
             ),
         )
         policy = RetryPolicy(
-            max_attempts=2, initial_delay_s=0.1, jitter=0.0,
+            max_attempts=2, initial_delay_s=0.1, jitter=0.0, max_delay_s=60.0,
         )
         wrapped = RetryingModel(inner, policy)
         await wrapped.complete([])

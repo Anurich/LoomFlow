@@ -21,17 +21,25 @@ Pattern
 
        {"id": "E1", "tool": "<tool_name>", "args": {...}}
 
-   Args may reference prior steps via ``{{En}}`` placeholders —
-   ``{"args": {"url": "{{E1}}"}}`` will use E1's output as the
-   ``url`` arg when E2 runs.
+   Args may reference prior steps via ``{{En}}`` placeholders (or
+   the paper's ``#En``) — ``{"args": {"url": "{{E1}}"}}`` will use
+   E1's output as the ``url`` arg when E2 runs.
 
 2. **Worker.** Compute topological levels from the plan's
    placeholder dependencies. For each level, dispatch all steps
    in parallel via ``deps.tools.call(...)``. Substitute
    ``{{En}}`` placeholders in args from prior step outputs first.
 
-3. **Solver.** ONE LLM call. Given the original task and the
-   step→output map, produce the final answer.
+3. **Solver.** ONE LLM call. Given the original task and each
+   step's tool, inputs and output (capped at
+   ``tool_result_max_chars``), produce the final answer.
+
+A step whose input step failed, or that references a step the plan
+doesn't have, is skipped (its error names why) rather than run on
+an error message or a literal placeholder. Repeated step ids get
+fresh ones. Each executed step emits ``tool_call`` / ``tool_result``
+events like a ReAct turn, and the planner and solver calls are
+budget-gated.
 
 Strengths
 ---------
@@ -46,8 +54,8 @@ Strengths
 Weaknesses
 ---------
 * **Planner must predict accurately upfront.** No replanning on
-  failure in v1. If a step fails, the worker logs the error and
-  the solver sees it as the step's "output."
+  failure in v1. If a step fails, the worker logs the error, skips
+  the steps that need its output, and the solver sees the errors.
 * **Limited to known tool names.** A planner that hallucinates a
   tool name produces a step that errors at dispatch time.
 * **Placeholder substitution is string-typed.** Tool outputs get
@@ -57,6 +65,7 @@ Weaknesses
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any
@@ -69,6 +78,7 @@ from .base import AgentSession, Dependencies
 from .helpers import (
     budget_gate,
     consume_usage,
+    fill_template,
     parse_fenced_json,
     resolve_role_model,
     run_gated_tool,
@@ -180,6 +190,11 @@ class ReWOO:
         prompt: str,
     ) -> AsyncIterator[Event]:
         # === 1. Planner ===
+        blocked, gate_events = await budget_gate(deps, session)
+        for gate_event in gate_events:
+            yield gate_event
+        if blocked:
+            return
         yield Event.architecture_event(
             session.id, "rewoo.planner_started"
         )
@@ -238,6 +253,7 @@ class ReWOO:
                 step_ids=[s.id for s in level],
             )
 
+            executed: dict[str, tuple[ToolCall, ToolResult]] = {}
             level_results = await _execute_level(
                 deps,
                 session,
@@ -245,8 +261,15 @@ class ReWOO:
                 results,
                 self._parallel_levels,
                 destructive_map,
+                executed,
+                {s.id for s in plan.steps},
             )
             results.update(level_results)
+            for step in level:
+                if step.id in executed:
+                    call, tool_result = executed[step.id]
+                    yield Event.tool_call(session.id, call)
+                    yield Event.tool_result(session.id, tool_result)
             for step_id, sr in level_results.items():
                 yield Event.architecture_event(
                     session.id,
@@ -258,6 +281,11 @@ class ReWOO:
                 )
 
         # === 3. Solver ===
+        blocked, gate_events = await budget_gate(deps, session)
+        for gate_event in gate_events:
+            yield gate_event
+        if blocked:
+            return
         yield Event.architecture_event(
             session.id, "rewoo.solver_started"
         )
@@ -291,8 +319,8 @@ class ReWOO:
             )
             or "  (no tools registered)"
         )
-        planner_text = self._planner_prompt.format(
-            tool_descriptions=tool_descriptions
+        planner_text = fill_template(
+            self._planner_prompt, tool_descriptions=tool_descriptions
         )
         msgs = [
             Message(role=Role.SYSTEM, content=planner_text),
@@ -312,15 +340,20 @@ class ReWOO:
         plan: ReWOOPlan,
         results: dict[str, ReWOOStepResult],
     ) -> str:
+        max_chars = deps.tool_result_max_chars
+
+        def _evidence(step: ReWOOStep) -> str:
+            result = results[step.id]
+            if result.error:
+                body = f"ERROR: {result.error}"
+            else:
+                body = result.output
+                if len(body) > max_chars:
+                    body = body[:max_chars] + f"\n…[truncated {len(body) - max_chars} chars]"
+            return f"Step {step.id}: {step.tool}({json.dumps(step.args, default=str)})\n{body}"
+
         results_text = "\n\n".join(
-            f"Step {sid} ({results[sid].tool}):\n"
-            + (
-                f"ERROR: {results[sid].error}"
-                if results[sid].error
-                else results[sid].output
-            )
-            for sid in [s.id for s in plan.steps]
-            if sid in results
+            _evidence(step) for step in plan.steps if step.id in results
         )
         user_content = (
             f"Original task:\n{prompt}\n\n"
@@ -350,7 +383,12 @@ class ReWOO:
 # ---------------------------------------------------------------------------
 
 
-_PLACEHOLDER_RE = re.compile(r"\{\{(E\d+)\}\}")
+# ``{{E1}}`` (our planner format) or ``#E1`` (the paper's).
+_PLACEHOLDER_RE = re.compile(r"\{\{(E\d+)\}\}|(?<![\w#])#(E\d+)\b")
+
+
+def _placeholder_id(match: re.Match[str]) -> str:
+    return match.group(1) or match.group(2)
 
 
 def _extract_placeholders(value: Any) -> list[str]:
@@ -362,7 +400,7 @@ def _extract_placeholders(value: Any) -> list[str]:
     def _walk(v: Any) -> None:
         if isinstance(v, str):
             for m in _PLACEHOLDER_RE.finditer(v):
-                found.add(m.group(1))
+                found.add(_placeholder_id(m))
         elif isinstance(v, dict):
             for sub in v.values():
                 _walk(sub)
@@ -382,7 +420,7 @@ def _substitute_placeholders(
     substitution; non-string types are returned unchanged."""
     if isinstance(value, str):
         def _replace(match: re.Match[str]) -> str:
-            sid = match.group(1)
+            sid = _placeholder_id(match)
             if sid in results:
                 return results[sid].output
             return match.group(0)  # leave unresolved as-is
@@ -448,10 +486,15 @@ async def _execute_level(
     prior_results: dict[str, ReWOOStepResult],
     parallel: bool,
     destructive_map: dict[str, bool] | None = None,
+    executed: dict[str, tuple[ToolCall, ToolResult]] | None = None,
+    plan_ids: set[str] | None = None,
 ) -> dict[str, ReWOOStepResult]:
     """Run every step in ``level`` (parallel or sequential) and
-    return the new step results keyed by step id."""
+    return the new step results keyed by step id. The tool call and
+    result of each step that ran land in ``executed``."""
     new_results: dict[str, ReWOOStepResult] = {}
+    executed = executed if executed is not None else {}
+    known = plan_ids if plan_ids is not None else set(prior_results) | {s.id for s in level}
 
     if parallel and len(level) > 1:
         async with anyio.create_task_group() as tg:
@@ -465,6 +508,8 @@ async def _execute_level(
                     new_results,
                     slot,
                     destructive_map,
+                    executed,
+                    known,
                 )
     else:
         for slot, step in enumerate(level):
@@ -476,6 +521,8 @@ async def _execute_level(
                 new_results,
                 slot,
                 destructive_map,
+                executed,
+                known,
             )
     return new_results
 
@@ -488,6 +535,8 @@ async def _run_one_step(
     out_results: dict[str, ReWOOStepResult],
     slot: int = 0,
     destructive_map: dict[str, bool] | None = None,
+    executed: dict[str, tuple[ToolCall, ToolResult]] | None = None,
+    plan_ids: set[str] | None = None,
 ) -> None:
     """Resolve placeholders, dispatch the tool call through the
     SHARED gated executor (hooks → permissions → approval handler →
@@ -501,6 +550,18 @@ async def _run_one_step(
     ReAct turn. Pre-fix, ReWOO called ``deps.tools.call`` directly
     and bypassed all of it.
     """
+    unknown = [d for d in step.depends_on if plan_ids is not None and d not in plan_ids]
+    failed = [d for d in step.depends_on if d in prior_results and prior_results[d].error]
+    if unknown or failed:
+        reason = (
+            f"skipped: references unknown step(s) {', '.join(unknown)}"
+            if unknown
+            else f"skipped: input step(s) {', '.join(failed)} failed"
+        )
+        out_results[step.id] = ReWOOStepResult(
+            step_id=step.id, tool=step.tool, output="", error=reason
+        )
+        return
     resolved_args = _substitute_placeholders(
         step.args, prior_results
     )
@@ -527,6 +588,8 @@ async def _run_one_step(
     # ToolResult.error in the prior turn message will steer it).
     from ..tools.plan import record_tool_call
     record_tool_call(str(tool_result.call_id))
+    if executed is not None:
+        executed[step.id] = (call, tool_result)
 
     if tool_result.ok:
         out_results[step.id] = ReWOOStepResult(
@@ -555,20 +618,34 @@ def _parse_rewoo_plan(text: str) -> ReWOOPlan:
     fences. Returns an empty plan on parse failure (caller's
     ``empty_plan`` branch handles termination)."""
     parsed = parse_fenced_json(text)
+    if isinstance(parsed, dict):
+        # {"steps": [...]} / {"plan": [...]}
+        parsed = next(
+            (v for k in ("steps", "plan") if isinstance(v := parsed.get(k), list)),
+            None,
+        )
     if not isinstance(parsed, list):
         return ReWOOPlan(steps=[])
 
     steps: list[ReWOOStep] = []
+    used: set[str] = set()
     for i, item in enumerate(parsed):
         if not isinstance(item, dict):
             continue
-        sid = str(item.get("id") or f"E{i + 1}")
+        sid = str(item.get("id") or f"E{i + 1}").lstrip("#")
+        if sid in used:
+            # A repeated id: references keep meaning the first one.
+            n = len(parsed) + 1
+            while f"E{n}" in used:
+                n += 1
+            sid = f"E{n}"
         tool = item.get("tool")
         if not isinstance(tool, str) or not tool:
             continue
         args = item.get("args", {})
         if not isinstance(args, dict):
             args = {}
+        used.add(sid)
         steps.append(ReWOOStep(id=sid, tool=tool, args=args))
 
     return ReWOOPlan(steps=steps)

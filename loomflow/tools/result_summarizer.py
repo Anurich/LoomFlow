@@ -158,15 +158,16 @@ async def summarize_tool_result(
     ]
     # Aggregate via ``stream()`` (the only method the :class:`Model`
     # protocol requires — ``complete()`` is an adapter-specific
-    # convenience). Low temperature for deterministic compression.
-    # ``max_tokens=512`` caps the summary at ~2KB so it stays well
+    # convenience). No temperature override: current Claude models
+    # reject non-default values with a 400, which made every summary
+    # fall back to the raw text. ``max_tokens=512`` caps the summary
+    # at ~2KB so it stays well
     # under the threshold to be re-summarisation-eligible itself.
     parts: list[str] = []
     try:
         async for chunk in summarizer.stream(
             messages,
             tools=None,
-            temperature=0.0,
             max_tokens=512,
         ):
             text = getattr(chunk, "text", None)

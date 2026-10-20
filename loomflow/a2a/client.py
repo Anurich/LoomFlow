@@ -11,6 +11,13 @@
     # ...or hand the remote agent to a local Agent as a delegate:
     agent = Agent("You coordinate.", tools=[remote.as_tool(name="ticket_bot")])
 
+The client speaks A2A v1.0 (``SendMessage``, ``A2A-Version: 1.0``)
+and, by default, falls back to v0.3 (``message/send``) when the remote
+doesn't know the v1.0 method or version — so it works with v1.0
+servers, v0.3 servers and earlier loomflow releases. Pass
+``protocol_version="1.0"`` or ``"0.3"`` to pin one (spec 3.6.3: a
+client that needs v1.0 features shouldn't silently fall back).
+
 httpx is imported lazily on first use — the client works without it as
 long as an ``http=`` object is injected (the pattern the tests use).
 """
@@ -18,16 +25,37 @@ long as an ``http=`` object is injected (the pattern the tests use).
 from __future__ import annotations
 
 import inspect
-from typing import Any
+from typing import Any, Literal
 
 from ..core.ids import new_id
 from ..tools.registry import Tool
-from .types import A2AError, AgentCard, Message, Task, message_text, text_message
+from .types import (
+    METHOD_NOT_FOUND,
+    VERSION_NOT_SUPPORTED,
+    A2AError,
+    AgentCard,
+    Message,
+    Task,
+    from_v1,
+    message_text,
+    text_message,
+    to_v1,
+)
 
 __all__ = ["A2AClient"]
 
 _CARD_PATH = "/.well-known/agent-card.json"
 _LEGACY_CARD_PATH = "/.well-known/agent.json"
+
+
+def _accepts_headers(method: Any) -> bool:
+    try:
+        params = inspect.signature(method).parameters
+    except (TypeError, ValueError):
+        return True
+    return "headers" in params or any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+    )
 
 
 async def _maybe_await(value: Any) -> Any:
@@ -58,10 +86,20 @@ class A2AClient:
     it, or use the client as an async context manager.
     """
 
-    def __init__(self, base_url: str, *, http: Any | None = None) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        http: Any | None = None,
+        protocol_version: Literal["auto", "1.0", "0.3"] = "auto",
+    ) -> None:
+        if protocol_version not in ("auto", "1.0", "0.3"):
+            raise ValueError("protocol_version must be 'auto', '1.0' or '0.3'")
         self._base_url = base_url.rstrip("/")
         self._http = http
         self._owns_http = False
+        self._pinned = protocol_version != "auto"
+        self._version = "1.0" if protocol_version == "auto" else protocol_version
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -107,11 +145,23 @@ class A2AClient:
             raise A2AError(f"agent card fetch failed: HTTP {response.status_code}")
         return AgentCard.model_validate(await _maybe_await(response.json()))
 
+    @property
+    def protocol_version(self) -> str:
+        """The A2A version this client is speaking (after any fallback)."""
+        return self._version
+
     async def _call(self, method: str, params: dict[str, Any]) -> Any:
         """POST one JSON-RPC request; return ``result`` or raise A2AError."""
         http = self._ensure_http()
         payload = {"jsonrpc": "2.0", "id": new_id("rpc"), "method": method, "params": params}
-        response = await _maybe_await(http.post(self._base_url + "/", json=payload))
+        post = http.post
+        if _accepts_headers(post):
+            request = post(
+                self._base_url + "/", json=payload, headers={"A2A-Version": self._version}
+            )
+        else:  # a minimal injected http object: post(url, json=...)
+            request = post(self._base_url + "/", json=payload)
+        response = await _maybe_await(request)
         if response.status_code != 200:
             raise A2AError(f"{method} failed: HTTP {response.status_code}")
         data = await _maybe_await(response.json())
@@ -126,23 +176,35 @@ class A2AClient:
         return data.get("result")
 
     async def send(self, text: str, *, context_id: str | None = None) -> str:
-        """``message/send`` and return the agent's text reply.
+        """Send a message (``SendMessage`` / ``message/send``) and
+        return the agent's text reply.
 
         Pass the same ``context_id`` across calls to hold one remote
         conversation (the server maps it to its session). Raises
         :class:`A2AError` on JSON-RPC errors, malformed results, and
         tasks that come back ``failed``.
         """
-        message = text_message("user", text, contextId=context_id)
-        result = await self._call(
-            "message/send", {"message": message.model_dump(exclude_none=True)}
-        )
+        message = text_message("user", text, contextId=context_id).model_dump(exclude_none=True)
+        try:
+            result = await self._send(message)
+        except A2AError as exc:
+            if self._pinned or self._version != "1.0" or exc.code not in (
+                METHOD_NOT_FOUND,
+                VERSION_NOT_SUPPORTED,
+            ):
+                raise
+            self._version = "0.3"  # a v0.3-only remote: speak its dialect
+            result = await self._send(message)
         if not isinstance(result, dict):
-            raise A2AError("message/send: result is not an object")
-        # The spec allows either a Task or a bare Message as the result.
+            raise A2AError("send: result is not an object")
+        # The spec allows either a Task or a bare Message as the result
+        # (v1.0 wraps it as {"task": ...} / {"message": ...}).
+        if "message" in result and "task" not in result and "status" not in result:
+            return message_text(Message.model_validate(from_v1(result["message"], kind="message")))
         if result.get("kind") == "message":
             return message_text(Message.model_validate(result))
-        task = Task.model_validate(result)
+        raw_task = result.get("task", result)
+        task = Task.model_validate(from_v1(raw_task, kind="task"))
         if task.status.state == "failed":
             detail = message_text(task.status.message) if task.status.message else ""
             raise A2AError(f"remote task failed{': ' + detail if detail else ''}")
@@ -153,6 +215,11 @@ class A2AClient:
             if part.kind == "text" and isinstance(part.text, str)
         ]
         return "\n".join(texts)
+
+    async def _send(self, message: dict[str, Any]) -> Any:
+        if self._version == "1.0":
+            return await self._call("SendMessage", {"message": to_v1(message)})
+        return await self._call("message/send", {"message": message})
 
     # -- loomflow integration ------------------------------------------------
 

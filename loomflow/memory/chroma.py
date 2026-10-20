@@ -29,13 +29,14 @@ from ..core.types import (
     Message,
     Role,
 )
+from ..vectorstore.chroma import get_or_create_cosine_collection
 from ._user_key import (
     decode_legacy_user_id,
     encode_user_id,
     user_id_where_clause,
 )
 from .embedder import HashEmbedder, warn_hash_embedder_fallback
-from .facts import count_facts, delete_facts
+from .facts import count_facts, delete_blocks, delete_facts
 from .inmemory import _DEFAULT_MAX_USERS, _DEFAULT_USER_TTL_SECONDS
 
 DEFAULT_COLLECTION = "jeeves_episodes"
@@ -145,8 +146,8 @@ class ChromaMemory:
             return self._collection
         # ``get_or_create_collection`` is sync; dispatch to thread.
         coll = await anyio.to_thread.run_sync(
-            lambda: self._client.get_or_create_collection(
-                name=self._collection_name
+            lambda: get_or_create_cosine_collection(
+                self._client, self._collection_name
             )
         )
         self._collection = coll
@@ -218,6 +219,9 @@ class ChromaMemory:
             "input": episode.input,
             "output": episode.output,
             "occurred_at": episode.occurred_at.isoformat(),
+            # Numeric twin of ``occurred_at``: Chroma range-filters
+            # numbers only, so ``time_range`` can go into the query.
+            "occurred_ts": episode.occurred_at.timestamp(),
         }
         # Tool transcript — Chroma metadata only accepts scalar
         # values (str/int/float/bool), so we serialise the list of
@@ -264,19 +268,57 @@ class ChromaMemory:
         # other users' rows.
         where_filter = user_id_where_clause(user_id)
 
-        result = await anyio.to_thread.run_sync(
+        if time_range is None:
+            result = await anyio.to_thread.run_sync(
+                lambda: coll.query(
+                    query_embeddings=[query_embedding],
+                    n_results=limit,
+                    where=where_filter,
+                )
+            )
+            return [ep for ep, _ in _decode_query_result_pairs(result)]
+
+        # Filtering after a ``limit``-sized query missed matching older
+        # episodes: push the range into the query on ``occurred_ts``.
+        lo, hi = time_range
+        timed = {
+            "$and": [
+                where_filter,
+                {"occurred_ts": {"$gte": lo.timestamp()}},
+                {"occurred_ts": {"$lte": hi.timestamp()}},
+            ]
+        }
+        primary = await anyio.to_thread.run_sync(
             lambda: coll.query(
-                query_embeddings=[query_embedding],
-                n_results=limit,
-                where=where_filter,
+                query_embeddings=[query_embedding], n_results=limit, where=timed
             )
         )
-        episodes = [ep for ep, _ in _decode_query_result_pairs(result)]
-
-        if time_range is not None:
-            lo, hi = time_range
-            episodes = [e for e in episodes if lo <= e.occurred_at <= hi]
-        return episodes
+        # Episodes stored before ``occurred_ts`` existed only carry the
+        # ISO string; over-fetch and post-filter those.
+        legacy = await anyio.to_thread.run_sync(
+            lambda: coll.query(
+                query_embeddings=[query_embedding],
+                n_results=limit * 8,
+                where=where_filter,
+                include=["metadatas", "documents", "distances"],
+            )
+        )
+        legacy_ids = {
+            eid
+            for eid, meta in zip(
+                (legacy.get("ids") or [[]])[0],
+                (legacy.get("metadatas") or [[]])[0],
+                strict=False,
+            )
+            if "occurred_ts" not in (meta or {})
+        }
+        pairs = _decode_query_result_pairs(primary) + [
+            (ep, score)
+            for ep, score in _decode_query_result_pairs(legacy)
+            if ep.id in legacy_ids and lo <= ep.occurred_at <= hi
+        ]
+        pairs.sort(key=lambda p: p[1] if p[1] is not None else -1.0, reverse=True)
+        return [ep for ep, _ in pairs[:limit]]
 
     async def recall_scored(
         self,
@@ -503,6 +545,12 @@ class ChromaMemory:
             deleted += await delete_facts(
                 self.facts, user_id=user_id, before=before
             )
+        if session_id is None:
+            # Working blocks are per user too (no session).
+            async with self._lock:
+                deleted += delete_blocks(
+                    self._blocks, user_id=user_id, before=before
+                )
         return deleted
 
     async def export(
@@ -525,6 +573,7 @@ class ChromaMemory:
             user_id=user_id,
             episodes=sorted(episodes, key=lambda e: e.occurred_at),
             facts=sorted(facts, key=lambda f: f.recorded_at),
+            blocks=await self.working(user_id=user_id),
         )
 
     async def consolidate(self) -> None:

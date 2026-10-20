@@ -127,7 +127,9 @@ def test_openai_model_uses_secrets_for_api_key(
     captured: dict[str, str | None] = {}
 
     class _FakeAsyncOpenAI:
-        def __init__(self, *, api_key: str | None, base_url: str | None) -> None:
+        def __init__(
+            self, *, api_key: str | None, base_url: str | None, max_retries: int = 2
+        ) -> None:
             captured["api_key"] = api_key
             captured["base_url"] = base_url
 
@@ -154,7 +156,9 @@ def test_explicit_api_key_takes_precedence_over_secrets(
     captured: dict[str, str | None] = {}
 
     class _FakeAsyncOpenAI:
-        def __init__(self, *, api_key: str | None, base_url: str | None) -> None:
+        def __init__(
+            self, *, api_key: str | None, base_url: str | None, max_retries: int = 2
+        ) -> None:
             captured["api_key"] = api_key
 
     import sys

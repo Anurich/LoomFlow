@@ -30,22 +30,22 @@ completed sessions (by ``session_id``) or old entries (by ``before``
 timestamp) — nothing prunes automatically except the per-session
 checkpoint retention cap applied on ``put_checkpoint``.
 
-.. warning:: **Pickle wire format.**
+Step values are stored as tagged JSON (:mod:`loomflow.runtime._codec`):
+JSON types, tuples, sets, bytes, datetimes, enums, Pydantic models and
+dataclasses round-trip; decoding never imports a module or runs a
+constructor. A value the codec can't store (an arbitrary object) is not
+journaled — that step re-executes on resume — with a one-time warning.
 
-    All stores serialise journal values with :mod:`pickle`.
-    ``pickle.loads`` executes arbitrary code embedded in the payload:
-    anyone who can WRITE to the journal store (the sqlite file, the
-    Postgres tables) can achieve code execution in every process that
-    replays from it. Treat the journal store with the same trust level
-    as your codebase — never point a runtime at a journal writable by
-    untrusted parties. Pickled payloads are also fragile across
-    library/Python upgrades: a value pickled under one version of a
-    class may fail to unpickle after an upgrade, in which case the
-    affected sessions must be pruned rather than resumed.
+.. warning:: **Pickle is opt-in.**
 
-    TODO: switch the default wire format to JSON via Pydantic
-    ``model_dump`` (with a registry/fallback for non-Pydantic values)
-    and keep pickle as an opt-in for arbitrary objects.
+    ``serializer="pickle"`` stores (and reads) values with
+    :mod:`pickle`, for steps that return arbitrary objects.
+    ``pickle.loads`` executes code embedded in the payload: anyone who
+    can WRITE to the journal store can then run code in every process
+    that replays from it. Only use it for a store no untrusted party
+    can write. With the default ``serializer="json"``, pickled values
+    written by earlier releases are not loaded; those steps re-execute
+    (a one-time warning says so).
 """
 
 from __future__ import annotations
@@ -54,20 +54,96 @@ import pickle
 import sqlite3
 import threading
 import time
+import warnings
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 import anyio
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..core.ids import new_id
 from ..core.types import Message, Usage
+from . import _codec
+
+#: How a durable store writes step values: tagged JSON (the default)
+#: or pickle (opt-in; see the module docstring).
+Serializer = Literal["json", "pickle"]
+
+_warned: set[str] = set()
+
+
+def _warn_once(key: str, message: str) -> None:
+    if key in _warned:
+        return
+    _warned.add(key)
+    warnings.warn(message, UserWarning, stacklevel=4)
+
+
+def _check_serializer(serializer: str) -> Serializer:
+    if serializer not in ("json", "pickle"):
+        raise ValueError(f'serializer must be "json" or "pickle", not {serializer!r}')
+    return serializer  # type: ignore[return-value]
+
+
+def _dump_value(value: Any, serializer: Serializer) -> bytes | None:
+    """``value`` as stored bytes, or ``None`` when it can't be stored."""
+    if serializer == "pickle":
+        return pickle.dumps(value)
+    try:
+        return _codec.dumps(value)
+    except TypeError as exc:
+        _warn_once(
+            f"dump:{exc}",
+            f"journal: {exc}; the step is not journaled and re-executes on "
+            'resume. Return JSON-able values, Pydantic models or dataclasses, '
+            'or (for a store no untrusted party can write) pass serializer="pickle".',
+        )
+        return None
+
+
+def _load_value(blob: bytes, serializer: Serializer) -> tuple[bool, Any]:
+    """``(True, value)``, or ``(False, None)`` for a value that won't be
+    loaded (a pickle under the JSON serializer, an unknown class)."""
+    blob = bytes(blob)
+    if blob.startswith(_codec.MAGIC):
+        try:
+            return True, _codec.loads(blob)
+        except _codec.UndecodableValue as exc:
+            _warn_once(f"load:{exc}", f"journal: skipping a stored value ({exc}); the step re-executes.")
+            return False, None
+    if serializer == "pickle":
+        return True, pickle.loads(blob)
+    _warn_once(
+        "pickle",
+        "journal: skipping pickled values written by an earlier release (pickle "
+        'is not loaded by default); those steps re-execute. Pass serializer="pickle" '
+        "to read them, only if no untrusted party can write the store.",
+    )
+    return False, None
 
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+def journal_scope(session_id: str, user_id: str | None) -> str:
+    """The key a session's journal steps and checkpoints are stored under.
+
+    A run without a ``user_id`` uses the bare ``session_id``, the layout
+    earlier versions wrote. A run with one gets its own scope, so two
+    users who reuse a session id never replay each other's steps or
+    resume each other's checkpoints. The encoding is injective: no
+    ``(session_id, user_id)`` pair maps onto another pair's key. To
+    prune one user's entries, pass this key as ``session_id``.
+    """
+    if user_id is None:
+        if session_id.startswith(("user:", "anon:")):
+            return f"anon:{session_id}"
+        return session_id
+    user = str(user_id)
+    return f"user:{len(user)}:{user}:{session_id}"
 
 
 @dataclass(frozen=True)
@@ -427,7 +503,9 @@ class SqliteJournalStore:
         path: str | Path,
         *,
         max_checkpoints_per_session: int = 20,
+        serializer: Serializer = "json",
     ) -> None:
+        self._serializer = _check_serializer(serializer)
         self._path = Path(path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
@@ -438,6 +516,9 @@ class SqliteJournalStore:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA synchronous=NORMAL")
             self._conn.execute("PRAGMA busy_timeout=5000")
+            # Pruned steps (tool results, transcripts) are zeroed on
+            # disk rather than left in free pages.
+            self._conn.execute("PRAGMA secure_delete = ON")
             self._conn.execute(_STEP_DDL)
             self._conn.execute(_STREAM_DDL)
             self._conn.execute(_CHECKPOINT_DDL)
@@ -468,7 +549,8 @@ class SqliteJournalStore:
             ).fetchone()
         if row is None:
             return None
-        return JournalEntry(value=pickle.loads(row[0]), created_at=row[1])
+        ok, value = _load_value(row[0], self._serializer)
+        return JournalEntry(value=value, created_at=row[1]) if ok else None
 
     async def put_step(
         self, session_id: str, step_name: str, value: Any
@@ -480,12 +562,15 @@ class SqliteJournalStore:
     def _put_step_sync(
         self, session_id: str, step_name: str, value: Any
     ) -> None:
+        blob = _dump_value(value, self._serializer)
+        if blob is None:
+            return
         with self._lock:
             self._conn.execute(
                 "INSERT OR REPLACE INTO journal_steps "
                 "(session_id, step_name, value, created_at) "
                 "VALUES (?, ?, ?, ?)",
-                (session_id, step_name, pickle.dumps(value), time.time()),
+                (session_id, step_name, blob, time.time()),
             )
             self._conn.commit()
 
@@ -509,7 +594,9 @@ class SqliteJournalStore:
             ).fetchone()
         if row is None:
             return None
-        loaded = pickle.loads(row[0])
+        ok, loaded = _load_value(row[0], self._serializer)
+        if not ok:
+            return None
         return list(loaded) if loaded is not None else []
 
     async def put_stream(
@@ -522,12 +609,15 @@ class SqliteJournalStore:
     def _put_stream_sync(
         self, session_id: str, step_name: str, chunks: list[Any]
     ) -> None:
+        blob = _dump_value(chunks, self._serializer)
+        if blob is None:
+            return
         with self._lock:
             self._conn.execute(
                 "INSERT OR REPLACE INTO journal_streams "
                 "(session_id, step_name, chunks, created_at) "
                 "VALUES (?, ?, ?, ?)",
-                (session_id, step_name, pickle.dumps(chunks), time.time()),
+                (session_id, step_name, blob, time.time()),
             )
             self._conn.commit()
 
@@ -689,10 +779,15 @@ class PostgresJournalStore:
     """
 
     def __init__(
-        self, pool: Any, *, max_checkpoints_per_session: int = 20
+        self,
+        pool: Any,
+        *,
+        max_checkpoints_per_session: int = 20,
+        serializer: Serializer = "json",
     ) -> None:
         self._pool = pool
         self._max_checkpoints = max_checkpoints_per_session
+        self._serializer = _check_serializer(serializer)
 
     @classmethod
     async def connect(
@@ -702,6 +797,7 @@ class PostgresJournalStore:
         min_size: int = 1,
         max_size: int = 10,
         max_checkpoints_per_session: int = 20,
+        serializer: Serializer = "json",
     ) -> PostgresJournalStore:
         """Open an asyncpg pool and return the store rooted at it."""
         try:
@@ -717,7 +813,9 @@ class PostgresJournalStore:
             max_size=max_size,
         )
         return cls(
-            pool, max_checkpoints_per_session=max_checkpoints_per_session
+            pool,
+            max_checkpoints_per_session=max_checkpoints_per_session,
+            serializer=serializer,
         )
 
     async def aclose(self) -> None:
@@ -758,14 +856,17 @@ class PostgresJournalStore:
             )
         if row is None:
             return None
-        return JournalEntry(
-            value=pickle.loads(row["value"]),
-            created_at=row["created_at"],
-        )
+        ok, value = _load_value(row["value"], self._serializer)
+        if not ok:
+            return None
+        return JournalEntry(value=value, created_at=row["created_at"])
 
     async def put_step(
         self, session_id: str, step_name: str, value: Any
     ) -> None:
+        blob = _dump_value(value, self._serializer)
+        if blob is None:
+            return
         async with self._pool.acquire() as conn:
             await conn.execute(
                 "INSERT INTO journal_steps "
@@ -776,7 +877,7 @@ class PostgresJournalStore:
                 "    created_at = EXCLUDED.created_at",
                 session_id,
                 step_name,
-                pickle.dumps(value),
+                blob,
                 time.time(),
             )
 
@@ -794,12 +895,17 @@ class PostgresJournalStore:
             )
         if row is None:
             return None
-        loaded = pickle.loads(row["chunks"])
+        ok, loaded = _load_value(row["chunks"], self._serializer)
+        if not ok:
+            return None
         return list(loaded) if loaded is not None else []
 
     async def put_stream(
         self, session_id: str, step_name: str, chunks: list[Any]
     ) -> None:
+        blob = _dump_value(list(chunks), self._serializer)
+        if blob is None:
+            return
         async with self._pool.acquire() as conn:
             await conn.execute(
                 "INSERT INTO journal_streams "
@@ -810,7 +916,7 @@ class PostgresJournalStore:
                 "    created_at = EXCLUDED.created_at",
                 session_id,
                 step_name,
-                pickle.dumps(list(chunks)),
+                blob,
                 time.time(),
             )
 

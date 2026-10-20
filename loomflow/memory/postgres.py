@@ -33,6 +33,8 @@ from ..core.types import (
     Message,
     Role,
 )
+from ..vectorstore._pgvector import hnsw_scan
+from ._embedding_util import vector_to_list
 from ._user_key import ANON_USER_ID, decode_user_id, encode_user_id
 from .embedder import HashEmbedder, warn_hash_embedder_fallback
 from .facts import count_facts, delete_facts
@@ -92,12 +94,17 @@ class PostgresMemory:
         min_size: int = 1,
         max_size: int = 10,
         with_facts: bool = False,
+        init_schema: bool = False,
     ) -> PostgresMemory:
         """Open an asyncpg pool and register the pgvector codec.
 
         When ``with_facts=True`` a :class:`PostgresFactStore` rooted at
         the same pool is attached as ``self.facts`` so the agent loop's
         memory.facts integration just works.
+
+        ``init_schema=True`` creates the ``vector`` extension and the
+        tables if they don't exist (idempotent): the default when the
+        store comes from a ``memory="postgres://..."`` URL.
         """
         try:
             import asyncpg  # type: ignore[import-not-found, import-untyped]
@@ -119,6 +126,13 @@ class PostgresMemory:
         async def _setup(conn: Any) -> None:
             await register_vector(conn)
 
+        if init_schema:
+            # The pool's codec setup needs the ``vector`` type to exist.
+            bootstrap = await asyncpg.connect(dsn=dsn)
+            try:
+                await bootstrap.execute("CREATE EXTENSION IF NOT EXISTS vector")
+            finally:
+                await bootstrap.close()
         pool = await asyncpg.create_pool(
             dsn=dsn,
             min_size=min_size,
@@ -130,6 +144,8 @@ class PostgresMemory:
             from .postgres_facts import PostgresFactStore
 
             instance.facts = PostgresFactStore(pool, embedder=embedder)
+        if init_schema:
+            await instance.init_schema()
         return instance
 
     async def aclose(self) -> None:
@@ -408,7 +424,9 @@ class PostgresMemory:
         # Hard namespace partition by ``user_id``: NULL filter matches
         # only NULL rows; a string filter matches exactly. ``IS NOT
         # DISTINCT FROM`` makes ``NULL = NULL`` work correctly.
-        async with self._pool.acquire() as conn:
+        # The namespace / user / time filter applies to an HNSW scan:
+        # ``hnsw_scan`` keeps it from returning fewer rows than exist.
+        async with self._pool.acquire() as conn, hnsw_scan(conn, fetch=limit, filtered=True):
             rows = await conn.fetch(
                 "SELECT id, session_id, user_id, occurred_at, input, output, embedding "
                 "FROM episodes "
@@ -462,7 +480,9 @@ class PostgresMemory:
         hi = time_range[1] if time_range is not None else None
         fetch_limit = max(limit * 8, 40)
 
-        async with self._pool.acquire() as conn:
+        async with self._pool.acquire() as conn, hnsw_scan(
+            conn, fetch=fetch_limit, filtered=True
+        ):
             rows = await conn.fetch(
                 "SELECT id, session_id, user_id, occurred_at, input, output, embedding "
                 "FROM episodes "
@@ -661,8 +681,24 @@ class PostgresMemory:
         sql = "DELETE FROM episodes WHERE " + " AND ".join(clauses)
         async with self._pool.acquire() as conn:
             result = await conn.execute(sql, *params)
-        # asyncpg returns "DELETE <n>" — parse the count.
-        deleted = _parse_delete_count(result)
+            # asyncpg returns "DELETE <n>" — parse the count.
+            deleted = _parse_delete_count(result)
+            if session_id is None:
+                # Working blocks are per user too (no session).
+                block_sql = (
+                    "DELETE FROM memory_blocks "
+                    "WHERE namespace = $1 AND user_id = $2"
+                )
+                block_params: list[Any] = [
+                    self._namespace,
+                    _encode_user_id(user_id),
+                ]
+                if before is not None:
+                    block_sql += " AND updated_at < $3"
+                    block_params.append(before)
+                deleted += _parse_delete_count(
+                    await conn.execute(block_sql, *block_params)
+                )
 
         # Facts are user-scoped, not session-scoped — erase them via
         # the FactStore's own delete surface (not raw SQL against its
@@ -695,6 +731,7 @@ class PostgresMemory:
             user_id=user_id,
             episodes=episodes,
             facts=sorted(facts, key=lambda f: f.recorded_at),
+            blocks=await self.working(user_id=user_id),
         )
 
     async def consolidate(self) -> None:
@@ -726,9 +763,8 @@ def _parse_delete_count(asyncpg_result: str) -> int:
 def _rows_to_episodes(rows: list[Any]) -> list[Episode]:
     out: list[Episode] = []
     for r in rows:
-        emb = r["embedding"]
-        # asyncpg + pgvector returns numpy array or list; coerce.
-        emb_list = list(emb) if emb is not None else None
+        # pgvector returns a Vector / numpy array / text; coerce.
+        emb_list = vector_to_list(r["embedding"])
         # ``user_id`` may not be present on rows fetched from a legacy
         # SELECT that doesn't list it. Treat absence as ``None``.
         try:

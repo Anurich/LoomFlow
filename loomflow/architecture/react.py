@@ -20,10 +20,12 @@ from __future__ import annotations
 
 import contextlib
 from collections.abc import AsyncIterator
+from itertools import zip_longest
 from typing import TYPE_CHECKING, Any
 
 import anyio
 
+from ..core.streaming import relay
 from ..core.types import (
     Event,
     Image,
@@ -35,6 +37,7 @@ from ..core.types import (
 )
 from ..observability.semconv import (
     chat_attrs,
+    inference_metrics,
     set_span_attributes,
     usage_attrs,
 )
@@ -173,6 +176,14 @@ class ReAct:
             except Exception:  # noqa: BLE001 — steering is best-effort
                 pass
 
+            # Auto-compact before the call, when the agent opted in:
+            # this run's own tool results (or a long rehydrated
+            # history) may have pushed the context past its threshold.
+            if deps.compact_context is not None:
+                compacted = await deps.compact_context(session)
+                if compacted is not None:
+                    yield compacted
+
             session.turns += 1
 
             turn_trace: contextlib.AbstractAsyncContextManager[Any] = (
@@ -239,6 +250,7 @@ class ReAct:
                 }
                 tool_calls: list[ToolCall] = []
                 usage = Usage()
+                model_started = anyio.current_time()
 
                 if not deps.streaming and hasattr(deps.model, "complete"):
                     model_trace: contextlib.AbstractAsyncContextManager[Any] = (
@@ -293,6 +305,8 @@ class ReAct:
                                     usage.input_tokens,
                                     usage.output_tokens,
                                     finish_reason,
+                                    cache_read_tokens=usage.cached_input_tokens,
+                                    cache_write_tokens=usage.cache_write_tokens,
                                 ),
                             )
                 else:
@@ -356,6 +370,8 @@ class ReAct:
                                     usage.input_tokens,
                                     usage.output_tokens,
                                     stream_finish_reason,
+                                    cache_read_tokens=usage.cached_input_tokens,
+                                    cache_write_tokens=usage.cache_write_tokens,
                                 ),
                             )
                     text = "".join(text_parts)
@@ -367,25 +383,28 @@ class ReAct:
                     deps, session, usage, count_turn=False
                 )
                 if not deps.fast_telemetry:
+                    # No session id on metrics: it's unbounded
+                    # cardinality (it lives on the spans instead).
                     await deps.telemetry.emit_metric(
                         "loom.tokens.input",
                         usage.input_tokens,
-                        session_id=session.id,
                         model=deps.model.name,
                     )
                     await deps.telemetry.emit_metric(
                         "loom.tokens.output",
                         usage.output_tokens,
-                        session_id=session.id,
                         model=deps.model.name,
                     )
                     if usage.cost_usd:
                         await deps.telemetry.emit_metric(
                             "loom.cost.usd",
                             usage.cost_usd,
-                            session_id=session.id,
                             model=deps.model.name,
                         )
+                    for name, value, attrs in inference_metrics(
+                        deps.model, usage, anyio.current_time() - model_started
+                    ):
+                        await deps.telemetry.emit_metric(name, value, **attrs)
                 session.output = text
 
                 session.messages.append(
@@ -563,6 +582,11 @@ class ReAct:
 # ---------------------------------------------------------------------------
 
 
+def _rank_relevance(rank: int, k: int = 60) -> float:
+    """Reciprocal-rank relevance (Cormack et al.'s RRF term)."""
+    return 1.0 / (k + rank + 1)
+
+
 async def _build_seed_messages(
     deps: Dependencies, instructions: str, prompt: str
 ) -> list[Message]:
@@ -623,31 +647,37 @@ async def _build_seed_messages(
     # legacy plain-recall path below runs unchanged (byte-identical
     # seed messages).
     episode_scores: dict[str, float] = {}
+    # Same-session hits are dropped below (that conversation is
+    # rehydrated as real turns), so over-fetch: recalling exactly 3
+    # lost the cross-session answer whenever this session's own turns
+    # ranked first.
+    episode_limit = 3
+    fetch = episode_limit * 4 if session_id is not None else episode_limit
     if deps.memory_token_budget is not None:
         try:
             matches = await deps.memory.recall_scored(
-                prompt, kind="episodic", limit=3, user_id=user_id
+                prompt, kind="episodic", limit=fetch, user_id=user_id
             )
             episodes = [m.episode for m in matches]
             episode_scores = {m.episode.id: m.score for m in matches}
         except (AttributeError, TypeError):
             try:
                 episodes = await deps.memory.recall(
-                    prompt, kind="episodic", limit=3, user_id=user_id
+                    prompt, kind="episodic", limit=fetch, user_id=user_id
                 )
             except TypeError:
                 episodes = await deps.memory.recall(
-                    prompt, kind="episodic", limit=3
+                    prompt, kind="episodic", limit=fetch
                 )
     else:
         try:
             episodes = await deps.memory.recall(
-                prompt, kind="episodic", limit=3, user_id=user_id
+                prompt, kind="episodic", limit=fetch, user_id=user_id
             )
         except TypeError:
             # Backends that haven't picked up the user_id kwarg yet.
             episodes = await deps.memory.recall(
-                prompt, kind="episodic", limit=3
+                prompt, kind="episodic", limit=fetch
             )
 
     # Cross-session recall only — drop any episode that belongs to
@@ -655,6 +685,7 @@ async def _build_seed_messages(
     # real chat turn below).
     if session_id is not None:
         episodes = [e for e in episodes if e.session_id != session_id]
+    episodes = episodes[:episode_limit]
 
     recall_parts: list[str] = []
     if deps.memory_token_budget is None:
@@ -678,24 +709,33 @@ async def _build_seed_messages(
         # (uniform treatment; the partitioned "Known facts /
         # Relevant past episodes" headers only apply to the legacy
         # path). Facts decay on ``recorded_at``, episodes on
-        # ``occurred_at``; plain-recall items carry relevance 1.0.
+        # ``occurred_at``. Facts and episodes are ranked by different
+        # scorers (a fixed 1.0 for facts beat every episode's RRF
+        # score), so each list's relevance is its reciprocal rank, as
+        # in RRF: the best fact and the best episode count the same.
         from datetime import UTC, datetime
 
         from ..memory._injection import budget_items, estimate_tokens
 
         block_cost = sum(estimate_tokens(b.format()) for b in blocks)
         remaining = deps.memory_token_budget - block_cost
-        items: list[tuple[str, float, datetime | None]] = [
-            (f"- {f.format()}", 1.0, getattr(f, "recorded_at", None))
-            for f in facts
+        ranked_episodes = sorted(
+            episodes, key=lambda e: episode_scores.get(e.id, 0.0), reverse=True
+        ) if episode_scores else episodes
+        fact_items = [
+            (f"- {f.format()}", _rank_relevance(rank), getattr(f, "recorded_at", None))
+            for rank, f in enumerate(facts)
         ]
-        items += [
-            (
-                f"- {e.format()}",
-                episode_scores.get(e.id, 1.0),
-                getattr(e, "occurred_at", None),
-            )
-            for e in episodes
+        episode_items = [
+            (f"- {e.format()}", _rank_relevance(rank), getattr(e, "occurred_at", None))
+            for rank, e in enumerate(ranked_episodes)
+        ]
+        # Interleaved, so equal relevance alternates fact / episode.
+        items: list[tuple[str, float, datetime | None]] = [
+            item
+            for pair in zip_longest(fact_items, episode_items)
+            for item in pair
+            if item is not None
         ]
         if items and remaining > 0:
             selected = budget_items(
@@ -792,13 +832,17 @@ async def _dispatch_streaming(
             results[slot] = result
             await sender.send(Event.tool_result(session.id, result))
 
-    async with anyio.create_task_group() as tg:
+    async def _dispatch_all() -> None:
         async with send:
-            for i, call in enumerate(tool_calls):
-                tg.start_soon(_stream_one, i, call, send.clone())
-        async with receive:
-            async for ev in receive:
-                yield ev
+            async with anyio.create_task_group() as tg:
+                for i, call in enumerate(tool_calls):
+                    tg.start_soon(_stream_one, i, call, send.clone())
+
+    # The workers' task group lives in its own task (core/streaming.py),
+    # so no cancel scope is held across ``yield``.
+    async with contextlib.aclosing(relay(_dispatch_all, receive)) as events:
+        async for ev in events:
+            yield ev
 
 
 async def _run_one_tool(

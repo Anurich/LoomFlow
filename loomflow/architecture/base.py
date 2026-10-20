@@ -281,6 +281,13 @@ class Dependencies:
     react, instead of the whole run hanging on one stuck tool.
     ``None`` disables the backstop."""
 
+    compact_context: Callable[[AgentSession], Awaitable[Event | None]] | None = None
+    """Called by ReAct before each model call; compacts
+    ``session.messages`` when past the agent's
+    ``auto_compact_at_tokens`` and returns the ``auto_compacted``
+    event (``None`` when nothing was done). ``None`` (the default)
+    when auto-compact is off."""
+
     tool_result_max_chars: int = 50_000
     """Unconditional ceiling on the formatted tool-result text that
     enters conversation history. Applied AFTER the optional LLM

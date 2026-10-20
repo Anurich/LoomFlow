@@ -290,6 +290,8 @@ def _build_postgres_lazy(
             embedder=embedder,
             namespace=namespace,
             with_facts=with_facts,
+            # A URL is all the user gave us: create the tables too.
+            init_schema=True,
         )
         return result
 

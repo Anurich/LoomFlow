@@ -10,20 +10,19 @@ last N turn groups verbatim.
 Where it fires
 --------------
 
-Inside :meth:`Agent._loop`, after every ``architecture.run()`` pass —
-the first pass of a default (no-stop-hook) agent included, so opting
-into ``auto_compact_at_tokens=`` works without also registering stop
-hooks. After each pass we count tokens in ``session.messages`` via
-the 0.10.17 token-counting helper. If the count exceeds
-``auto_compact_at_tokens``, we compact in place: the older messages
-are replaced with a single summary system message, the most recent N
-user-anchored turn groups stay verbatim.
-
-Why not fire BEFORE the first architecture pass? Because at that
-point ``session.messages`` is fresh (or rehydrated from memory — and
-there snip + memory's own limits are the right defence). Auto-
-compact's job is "the conversation grew while running, prune it
-before the next model call" — that moment is after a pass finishes.
+Before every model call of a ReAct turn (``Dependencies.compact_context``)
+— so a run whose own tool results pile up is compacted while it is
+running, and a session whose rehydrated history has grown past the
+threshold is compacted before its first call — and after an
+architecture pass when a checkpoint is written or a stop-hook pass
+follows. Tokens are counted with the token-counting helper (only once
+the transcript is long enough that it could be over the threshold, so
+short conversations cost nothing). Past ``auto_compact_at_tokens`` the
+older messages are replaced with a single summary system message; the
+most recent N user-anchored turn groups stay verbatim.
+:class:`CachingSummariser` remembers summaries by the transcript they
+cover, so the same rehydrated history isn't summarised again on every
+run.
 
 What survives the compact
 -------------------------
@@ -57,11 +56,14 @@ level token optimisations must NEVER kill a turn.
 
 from __future__ import annotations
 
+import hashlib
 import re
 import warnings
-from typing import TYPE_CHECKING
+from collections import OrderedDict
+from collections.abc import AsyncIterator
+from typing import TYPE_CHECKING, Any
 
-from ..core.types import Message, Role
+from ..core.types import Message, ModelChunk, Role
 
 if TYPE_CHECKING:
     from ..core.protocols import Model
@@ -78,17 +80,27 @@ if TYPE_CHECKING:
 # "claude-sonnet-4-6" before "claude-sonnet", "gpt-5.4" before
 # "gpt-5").
 _KNOWN_CONTEXT_WINDOWS: dict[str, int] = {
-    # Claude family — Opus 4.6/4.7 + Sonnet 4.6 expanded to 1M; older
-    # Opus (4.5/4.1/4.0), Sonnet 4.5/4, and Haiku stay at 200k.
+    # Claude (platform.claude.com context-windows): every model from
+    # Opus / Sonnet 4.6 on, Haiku 5.5, Fable and Mythos has 1M by
+    # default; Opus 4.5 and earlier, Sonnet 4.5 / 4 and Haiku 4.5 200k.
+    "claude-fable": 1_000_000,
+    "claude-mythos": 1_000_000,
+    "claude-opus-5": 1_000_000,
+    "claude-opus-4-8": 1_000_000,
     "claude-opus-4-7": 1_000_000,
     "claude-opus-4-6": 1_000_000,
     "claude-opus-4": 200_000,
+    "claude-sonnet-5": 1_000_000,
     "claude-sonnet-4-6": 1_000_000,
     "claude-sonnet": 200_000,
+    "claude-haiku-5": 1_000_000,
     "claude-haiku": 200_000,
     "claude-3-5": 200_000,
-    # OpenAI family — GPT-5.x: 5.5 = 1M, 5.4 = 1.05M, 5/codex = 400k.
-    "gpt-5.5": 1_000_000,
+    # OpenAI (developers.openai.com model pages): GPT-6.x, GPT-5.6,
+    # 5.5 and 5.4 = 1.05M; GPT-5.3 / 5.x / codex = 400k.
+    "gpt-6": 1_050_000,
+    "gpt-5.6": 1_050_000,
+    "gpt-5.5": 1_050_000,
     "gpt-5.4": 1_050_000,
     "gpt-5.3": 400_000,
     "gpt-5": 400_000,
@@ -100,6 +112,10 @@ _KNOWN_CONTEXT_WINDOWS: dict[str, int] = {
     "o3": 200_000,
     "o4": 200_000,
     "o1": 200_000,
+    # DeepSeek V4 (api-docs.deepseek.com) = 1M; V3.x chat/reasoner 128k.
+    "deepseek-flash": 1_000_000,
+    "deepseek-v4": 1_000_000,
+    "deepseek": 128_000,
     # Gemini
     "gemini-1.5": 1_000_000,
     "gemini-2": 1_000_000,
@@ -215,6 +231,24 @@ def _split_at_user_anchor(
     return list(messages[:cut_at]), list(messages[cut_at:])
 
 
+def _split_within_turn(
+    messages: list[Message], keep_last_n_exchanges: int
+) -> tuple[list[Message], list[Message], list[Message]]:
+    """``(lead, to_summarise, to_keep)`` for a body whose last turn is
+    one long tool loop (too few user messages to cut at): ``lead`` is
+    everything up to and including the turn's user message, ``to_keep``
+    the last ``keep_last_n_exchanges`` assistant exchanges (an
+    assistant message and the tool results after it — never split),
+    and ``to_summarise`` the exchanges in between."""
+    users = [i for i, m in enumerate(messages) if m.role == Role.USER]
+    start = users[-1] + 1 if users else 0
+    exchanges = [i for i in range(start, len(messages)) if messages[i].role == Role.ASSISTANT]
+    if len(exchanges) <= keep_last_n_exchanges:
+        return list(messages), [], []
+    cut = exchanges[-keep_last_n_exchanges]
+    return list(messages[:start]), list(messages[start:cut]), list(messages[cut:])
+
+
 async def maybe_auto_compact(
     messages: list[Message],
     *,
@@ -237,7 +271,10 @@ async def maybe_auto_compact(
     * One new ``Role.SYSTEM`` message: ``"[auto-compacted
       summary] " + summary``.
     * The last ``keep_recent_turns`` user-anchored turn groups
-      from the input, verbatim.
+      from the input, verbatim — or, when the context grew inside
+      one turn's tool loop (too few user messages to cut at), that
+      turn's user message, then the summary of its older exchanges,
+      then its last ``keep_recent_turns`` exchanges.
     """
     if current_token_count <= at_tokens:
         return None, ""
@@ -258,9 +295,13 @@ async def maybe_auto_compact(
     body = messages[body_start:]
 
     older, recent = _split_at_user_anchor(body, keep_recent_turns)
+    lead: list[Message] = []
     if not older:
-        # No anchor to slice at — nothing to compact.
-        return None, ""
+        # Too few turns to cut at: a run whose context grew inside one
+        # long tool loop. Summarise that loop's older exchanges.
+        lead, older, recent = _split_within_turn(body, keep_recent_turns)
+        if not older:
+            return None, ""
 
     transcript = _render_transcript(older)
     if not transcript:
@@ -275,10 +316,11 @@ async def maybe_auto_compact(
     # being implemented.
     parts: list[str] = []
     try:
+        # No temperature: current Claude models reject non-default
+        # values with a 400, which silently disabled compaction.
         async for chunk in summariser.stream(
             summariser_msgs,
             tools=None,
-            temperature=0.0,
             max_tokens=2048,
         ):
             text = getattr(chunk, "text", None)
@@ -315,5 +357,43 @@ async def maybe_auto_compact(
         content=f"[auto-compacted summary of {len(older)} dropped "
         f"messages]\n{summary}",
     )
-    new_messages = head + [summary_msg] + recent
+    new_messages = head + lead + [summary_msg] + recent
     return new_messages, summary
+
+
+class CachingSummariser:
+    """A summariser model that remembers its last ``max_entries``
+    summaries by the exact messages it was given."""
+
+    def __init__(self, inner: Model, *, max_entries: int = 64) -> None:
+        self._inner = inner
+        self._max = max_entries
+        self._cache: OrderedDict[str, str] = OrderedDict()
+
+    @property
+    def name(self) -> str:
+        return str(getattr(self._inner, "name", "summariser"))
+
+    def __getattr__(self, attr: str) -> Any:
+        return getattr(self._inner, attr)
+
+    async def stream(self, messages: list[Message], **kwargs: Any) -> AsyncIterator[ModelChunk]:
+        key = hashlib.sha256(
+            "\x00".join(f"{m.role}\x01{m.content}" for m in messages).encode("utf-8", "replace")
+        ).hexdigest()
+        cached = self._cache.get(key)
+        if cached is not None:
+            self._cache.move_to_end(key)
+            yield ModelChunk(kind="text", text=cached)
+            yield ModelChunk(kind="finish", finish_reason="stop")
+            return
+        parts: list[str] = []
+        async for chunk in self._inner.stream(messages, **kwargs):
+            if chunk.kind == "text" and chunk.text:
+                parts.append(chunk.text)
+            yield chunk
+        text = "".join(parts)
+        if text.strip():
+            self._cache[key] = text
+            while len(self._cache) > self._max:
+                self._cache.popitem(last=False)

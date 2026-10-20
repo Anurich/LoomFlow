@@ -17,15 +17,31 @@ keyword arguments: Pydantic values via ``model_dump_json``, containers
 recursively (mappings key-sorted), scalars via ``repr``, and a
 ``repr``-with-memory-addresses-stripped fallback for everything else.
 
-When :meth:`step` is passed an ``idempotency_key`` — as the ReAct loop
-does for every tool call, deriving it from the tool name + args — that
-key takes over as the whole journal key, namespaced under ``idem:`` so
-a content-hash can never collide with a positional step name like
-``tool_call_<turn>_<slot>``. This is what makes two *identical* tool
-calls in different turns (or retried calls that differ only in a fresh
-per-attempt ``call_id``) dedupe to a single side-effecting execution
-within a session, rather than re-running because their positional
-names differ.
+When :meth:`step` is passed an ``idempotency_key`` it takes over as
+the whole journal key, namespaced under ``idem:``. The ReAct loop
+passes the call's position and content (``tool_call_<turn>_<slot>``
+plus a hash of the tool name and args), so on resume the same call
+replays — even when its ``call_id`` differs because the model was
+asked again — while a retry in a later turn, or an intentional second
+identical call, runs.
+
+Runs and epochs:
+    A run's steps replay only into that same run resumed: re-running
+    with the same session and inputs after a crash. When a run ends
+    (its outermost ``session`` context exits without an exception)
+    the session's *epoch* advances, and later runs on the session key
+    their steps under the new epoch — so a finished run's results are
+    never replayed into the next request, even an identical one.
+    :func:`resuming_last_run` (what ``Agent.resume`` uses without a
+    checkpoint) continues the most recent run instead, finished or not.
+    A run opened inside another run — a sub-agent, a debater, an
+    Agent node of a Workflow (see :func:`journal_container`) — keys its
+    steps under the enclosing run (and how
+    many times that run has opened the sub-session), so resuming the
+    outer run replays the sub-runs' work as well, and two calls to one
+    persistent worker in a run stay distinct.
+    Each ``(session, user)`` runs one outermost run at a time in this
+    process: a second concurrent run waits for the first to end.
 
 Delivery semantics — **at-least-once**, not exactly-once:
     A step's side effect completes *before* its journal entry is
@@ -57,24 +73,121 @@ from __future__ import annotations
 import contextvars
 import hashlib
 import re
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
+from contextlib import asynccontextmanager, contextmanager
 from typing import Any
 
+import anyio
 from pydantic import BaseModel
 
-from ._signals import SignalMailbox
+from ..core.context import get_run_context
+from ._signals import DEFAULT_MAX_PENDING, DEFAULT_PENDING_TTL_S, SessionTable, SignalMailbox
 from .journal import (
     Checkpoint,
     CheckpointMeta,
     InMemoryJournalStore,
     JournalStore,
+    journal_scope,
 )
 
 _current_session_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "_jeeves_runtime_session",
     default=None,
 )
+
+#: Journal key holding a scope's current run epoch.
+EPOCH_KEY = "__run_epoch__"
+#: Journal key holding the epoch of the scope's most recent run.
+LAST_RUN_KEY = "__last_run_epoch__"
+
+_resume_last_run_var: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "_loom_resume_last_run", default=False
+)
+
+
+@contextmanager
+def resuming_last_run() -> Iterator[None]:
+    """Sessions opened inside this context continue the scope's most
+    recent run — replaying its steps even if it finished — instead of
+    starting a new one. ``Agent.resume`` uses it when it has no
+    checkpoint to resume from."""
+    token = _resume_last_run_var.set(True)
+    try:
+        yield
+    finally:
+        _resume_last_run_var.reset(token)
+
+
+class _OpenRun:
+    """A run in progress: the key namespace its steps use."""
+
+    def __init__(
+        self,
+        scope: str,
+        session_id: str,
+        ns: str,
+        parent: _OpenRun | None,
+        *,
+        epoch: int = 0,
+        next_epoch: int = 0,
+        container: bool = False,
+    ) -> None:
+        self.scope = scope
+        self.session_id = session_id
+        self.ns = ns
+        self.parent = parent
+        self.epoch = epoch
+        self.next_epoch = next_epoch
+        # A container (a Workflow run) only groups the runs opened
+        # inside it: each becomes a child run, even on its own session.
+        self.container = container
+        self.children: dict[str, int] = {}
+        self.touched = False
+
+    def ancestors(self) -> Iterator[_OpenRun]:
+        run: _OpenRun | None = self
+        while run is not None:
+            yield run
+            run = run.parent
+
+
+#: The innermost run open in this context (any runtime instance).
+_open_run_var: contextvars.ContextVar[_OpenRun | None] = contextvars.ContextVar(
+    "_loom_open_run", default=None
+)
+
+
+@contextmanager
+def journal_container(
+    session_id: str, user_id: str | None, *, label: str, run_id: str
+) -> Iterator[None]:
+    """Group the runs opened inside this context — a Workflow's Agent
+    nodes — as child runs of one parent: each keys its steps under its
+    own namespace (siblings never replay each other's tool calls), they
+    don't wait on each other, and inside an outer run (a workflow used
+    as a tool) the group nests under it so resuming that run replays
+    them. A top-level group is keyed by ``run_id``: a workflow is not
+    itself durable, so a later workflow run replays nothing."""
+    parent = _open_run_var.get()
+    scope = journal_scope(session_id, user_id)
+    if parent is not None:
+        k = parent.children.get(label, 0) + 1
+        parent.children[label] = k
+        ns = hashlib.sha256(f"{parent.ns}|{label}|{k}".encode()).hexdigest()[:16]
+    else:
+        ns = f"c-{run_id}"
+    token = _open_run_var.set(_OpenRun(scope, session_id, ns, parent, container=True))
+    try:
+        yield
+    finally:
+        _open_run_var.reset(token)
+
+
+class _ScopeLock:
+    def __init__(self) -> None:
+        self.lock = anyio.Lock()
+        self.users = 0
+
 
 # CPython default reprs embed the object's memory address
 # ("<Foo object at 0x104f3b010>"), which changes every process. Strip
@@ -98,6 +211,11 @@ def _stable_token(value: Any) -> str:
     if value is None or isinstance(value, str | bytes | bool | int | float):
         return repr(value)
     return _MEM_ADDR_RE.sub("", repr(value))
+
+
+def _scope(session_id: str) -> str:
+    """Journal scope for ``session_id`` under the current run's user."""
+    return journal_scope(session_id, get_run_context().user_id)
 
 
 def _step_key(
@@ -167,6 +285,8 @@ class JournaledRuntime:
         store: JournalStore | None = None,
         *,
         max_checkpoints_per_session: int = 20,
+        max_pending_signal_sessions: int | None = DEFAULT_MAX_PENDING,
+        pending_signal_ttl_s: float | None = DEFAULT_PENDING_TTL_S,
     ) -> None:
         self._store: JournalStore = (
             store
@@ -175,8 +295,12 @@ class JournaledRuntime:
                 max_checkpoints_per_session=max_checkpoints_per_session
             )
         )
-        self._sessions: dict[str, JournaledSession] = {}
-        self._session_refs: dict[str, int] = {}
+        self._sessions: SessionTable[JournaledSession] = SessionTable(
+            JournaledSession,
+            max_pending=max_pending_signal_sessions,
+            pending_ttl_s=pending_signal_ttl_s,
+        )
+        self._scope_locks: dict[str, _ScopeLock] = {}
 
     @property
     def store(self) -> JournalStore:
@@ -186,44 +310,124 @@ class JournaledRuntime:
 
     @asynccontextmanager
     async def session(self, session_id: str) -> AsyncIterator[JournaledSession]:
-        """Open (or re-enter) a session; in-memory session state — the
-        signal mailbox — is discarded when the last open context for
-        this ``session_id`` exits. Journal/checkpoint data lives in
-        the store and is unaffected."""
+        """Open (or re-enter) a session for one run.
+
+        The outermost run on a ``(session, current user)`` scope waits
+        for any other run on it, and on a clean exit advances the
+        scope's epoch. A run opened inside another run (a sub-agent)
+        keys its steps under the parent run instead — so resuming the
+        parent replays the sub-agent's work too — and doesn't advance
+        anything. See the module docstring. In-memory session state —
+        the signal mailbox — is discarded when the last open context
+        for this ``session_id`` exits. Journal/checkpoint data lives
+        in the store and is unaffected."""
+        scope = _scope(session_id)
+        parent = _open_run_var.get()
+        if (
+            parent is not None
+            and not parent.container
+            and parent.scope == scope
+            and parent.session_id == session_id
+        ):
+            # Re-entering the open run (nested contexts on one session).
+            async with self._enter(session_id) as sess:
+                yield sess
+            return
+        if parent is not None:
+            k = parent.children.get(scope, 0) + 1
+            parent.children[scope] = k
+            ns = hashlib.sha256(f"{parent.ns}|{scope}|{k}".encode()).hexdigest()[:16]
+            run = _OpenRun(scope, session_id, ns, parent)
+            if any(r.scope == scope for r in parent.ancestors()):
+                # An ancestor holds this scope's lock: don't wait on it.
+                async with self._run(run, session_id) as sess:
+                    yield sess
+                return
+
+        holder = self._scope_locks.setdefault(scope, _ScopeLock())
+        holder.users += 1
+        try:
+            async with holder.lock:
+                if parent is None:
+                    entry = await self._store.get_step(scope, EPOCH_KEY)
+                    next_epoch = entry.value if entry is not None else 0
+                    epoch = next_epoch
+                    if _resume_last_run_var.get():
+                        last = await self._store.get_step(scope, LAST_RUN_KEY)
+                        if last is not None:
+                            epoch = last.value
+                    run = _OpenRun(
+                        scope,
+                        session_id,
+                        str(epoch) if epoch else "",
+                        None,
+                        epoch=epoch,
+                        next_epoch=next_epoch,
+                    )
+                async with self._run(run, session_id) as sess:
+                    yield sess
+        finally:
+            holder.users -= 1
+            if holder.users == 0:
+                self._scope_locks.pop(scope, None)
+
+    @asynccontextmanager
+    async def _run(self, run: _OpenRun, session_id: str) -> AsyncIterator[JournaledSession]:
+        token = _open_run_var.set(run)
+        clean = False
+        try:
+            async with self._enter(session_id) as sess:
+                yield sess
+            clean = True
+        finally:
+            _open_run_var.reset(token)
+            if clean and run.touched and run.parent is None:
+                with anyio.CancelScope(shield=True):
+                    await self._store.put_step(
+                        run.scope, EPOCH_KEY, max(run.next_epoch, run.epoch + 1)
+                    )
+
+    @asynccontextmanager
+    async def _enter(self, session_id: str) -> AsyncIterator[JournaledSession]:
         token = _current_session_var.set(session_id)
-        sess = self._get_session(session_id)
-        self._session_refs[session_id] = (
-            self._session_refs.get(session_id, 0) + 1
-        )
+        sess = self._sessions.acquire(session_id)
         try:
             yield sess
         finally:
             _current_session_var.reset(token)
-            remaining = self._session_refs.get(session_id, 1) - 1
-            if remaining <= 0:
-                self._session_refs.pop(session_id, None)
-                self._sessions.pop(session_id, None)
-            else:
-                self._session_refs[session_id] = remaining
+            self._sessions.release(session_id, keep_signals=False)
 
-    def _get_session(self, session_id: str) -> JournaledSession:
-        return self._sessions.setdefault(
-            session_id, JournaledSession(session_id)
-        )
+    async def _run_key(self, scope: str, key: str) -> str:
+        """``key`` within the open run's namespace (an outermost run's
+        epoch 0 is unprefixed, so journals written before epochs
+        existed still resume)."""
+        run = _open_run_var.get()
+        if run is None or run.scope != scope:
+            return key
+        if not run.touched:
+            run.touched = True
+            if run.parent is None and not run.container:
+                await self._store.put_step(scope, LAST_RUN_KEY, run.epoch)
+        return f"{run.ns}/{key}" if run.ns else key
 
     # ---- signals ----------------------------------------------------------
 
     async def signal(self, session_id: str, name: str, payload: Any) -> None:
         """Deliver a named signal to a session's FIFO mailbox.
 
-        Signals sent before the session is opened are queued and
-        survive until the session's last open context exits.
+        Signals sent while the session isn't open are queued for it —
+        up to ``max_pending_signal_sessions`` sessions, for
+        ``pending_signal_ttl_s`` — and dropped when its last open
+        context exits.
         """
-        await self._get_session(session_id).deliver(name, payload)
+        await self._sessions.for_signal(session_id).deliver(name, payload)
 
-    async def wait_for_signal(self, session_id: str, name: str) -> Any:
-        """Park until a matching signal arrives; return its payload."""
-        return await self._get_session(session_id).wait_signal(name)
+    async def wait_for_signal(
+        self, session_id: str, name: str, *, timeout_s: float | None = None
+    ) -> Any:
+        """Park until a matching signal arrives; return its payload.
+        ``TimeoutError`` after ``timeout_s`` seconds (default: wait)."""
+        return await self._sessions.wait(session_id, name, timeout_s)
 
     def poll_signal(self, session_id: str, name: str) -> Any | None:
         """Pop a queued signal if present; never blocks."""
@@ -262,7 +466,11 @@ class JournaledRuntime:
         idempotency_key: str | None = None,
         **kwargs: Any,
     ) -> Any:
-        """Run ``fn`` once per ``(session, journal_key)`` and journal it.
+        """Run ``fn`` once per ``(session, user, journal_key)`` and journal it.
+
+        Steps are stored under :func:`~loomflow.runtime.journal.journal_scope`
+        of the open session and the current run's ``user_id``, so one
+        user's results never replay into another user's run.
 
         The journal key is ``name`` plus a fingerprint of
         ``args``/``kwargs``: same session + name + inputs ⇒ cached
@@ -271,15 +479,10 @@ class JournaledRuntime:
         ``idempotency_key`` is supplied it becomes the whole key
         (under the ``idem:`` namespace) so two calls with the same key
         dedupe to a single execution regardless of their positional
-        ``name``.
+        ``name``. Either way the key is scoped to the current run
+        (see the module docstring): a finished run never replays into
+        a later one.
 
-        Caveat — this is the *defined* meaning of an idempotency key
-        here: a tool whose result varies per call with identical args
-        (a clock, a counter, ``random()``, a live API read) will
-        **replay** its first recorded result within the session rather
-        than re-execute. That determinism is exactly what a durable,
-        crash-resumable runtime requires; pass no ``idempotency_key``
-        for steps that must genuinely re-run on every distinct call.
         At-least-once: a crash after ``fn`` completes but before the
         journal write re-executes ``fn`` on resume.
         """
@@ -287,13 +490,14 @@ class JournaledRuntime:
         if session_id is None:
             return await fn(*args, **kwargs)
 
-        key = _step_key(name, args, kwargs, idempotency_key)
-        cached = await self._store.get_step(session_id, key)
+        scope = _scope(session_id)
+        key = await self._run_key(scope, _step_key(name, args, kwargs, idempotency_key))
+        cached = await self._store.get_step(scope, key)
         if cached is not None:
             return cached.value
 
         result = await fn(*args, **kwargs)
-        await self._store.put_step(session_id, key, result)
+        await self._store.put_step(scope, key, result)
         return result
 
     # ---- stream_step -----------------------------------------------------
@@ -329,8 +533,9 @@ class JournaledRuntime:
                 yield chunk
             return
 
-        key = _step_key(name, args, kwargs)
-        cached = await self._store.get_stream(session_id, key)
+        scope = _scope(session_id)
+        key = await self._run_key(scope, _step_key(name, args, kwargs))
+        cached = await self._store.get_stream(scope, key)
         if cached is not None:
             for chunk in cached:
                 yield chunk
@@ -340,4 +545,4 @@ class JournaledRuntime:
         async for chunk in fn(*args, **kwargs):
             recorded.append(chunk)
             yield chunk
-        await self._store.put_stream(session_id, key, recorded)
+        await self._store.put_stream(scope, key, recorded)

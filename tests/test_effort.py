@@ -35,11 +35,10 @@ class TestOpenAIMapping:
     @pytest.mark.parametrize(
         "effort,expected",
         [
-            ("minimal", "minimal"),
             ("low", "low"),
             ("medium", "medium"),
             ("high", "high"),
-            ("xhigh", "high"),  # clamped — OpenAI tops out at high
+            ("xhigh", "high"),  # clamped — these top out at high
             ("max", "high"),    # clamped
         ],
     )
@@ -48,6 +47,30 @@ class TestOpenAIMapping:
     ) -> None:
         out = openai_kwargs(effort, model_name, strict=False)
         assert out == {"reasoning_effort": expected}
+
+    @pytest.mark.parametrize(
+        "model_name,effort,expected",
+        [
+            # Only GPT-5 (and its mini / nano) has "minimal".
+            ("gpt-5", "minimal", "minimal"),
+            ("gpt-5-mini", "minimal", "minimal"),
+            ("o3", "minimal", "low"),
+            ("gpt-5.1", "minimal", "low"),
+            # xhigh from GPT-5.2; max from GPT-5.6 / GPT-6.
+            ("gpt-5.2", "xhigh", "xhigh"),
+            ("gpt-5.5", "max", "xhigh"),
+            ("gpt-5.6-terra", "max", "max"),
+            ("gpt-6-sol", "max", "max"),
+            ("gpt-6.1-sol", "minimal", "low"),
+            ("gpt-6-astra-2026-09-01", "xhigh", "xhigh"),
+        ],
+    )
+    def test_levels_follow_each_familys_documented_set(
+        self, model_name: str, effort: str, expected: str
+    ) -> None:
+        assert openai_kwargs(effort, model_name, strict=False) == {
+            "reasoning_effort": expected
+        }
 
     def test_none_effort_is_a_noop(self) -> None:
         assert openai_kwargs(None, "o3-mini", strict=False) == {}
@@ -89,7 +112,7 @@ class TestOpenAIMapping:
 
 class TestAnthropicMapping:
     @pytest.mark.parametrize(
-        "model_name", ["claude-opus-4-7", "claude-opus-mythos"]
+        "model_name", ["claude-opus-4-7", "claude-mythos-5"]
     )
     def test_opus_4_7_is_adaptive_only(self, model_name: str) -> None:
         out = anthropic_kwargs("high", model_name, strict=False)
@@ -99,7 +122,6 @@ class TestAnthropicMapping:
         }
 
     def test_opus_4_7_keeps_xhigh_and_max(self) -> None:
-        # 4.7 / Mythos is the ONLY regime that accepts xhigh / max.
         for value in ("xhigh", "max"):
             out = anthropic_kwargs(value, "claude-opus-4-7", strict=False)
             assert out["output_config"]["effort"] == value

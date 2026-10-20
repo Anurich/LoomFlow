@@ -28,12 +28,14 @@ import anyio
 
 from ..core.protocols import Embedder
 from ..core.types import Fact, _normalize_predicate
+from ..vectorstore.chroma import get_or_create_cosine_collection
 from ._user_key import (
     decode_legacy_user_id,
     encode_user_id,
     user_id_where_clause,
 )
 from .embedder import HashEmbedder
+from .facts import plan_supersession
 
 DEFAULT_FACTS_COLLECTION = "jeeves_facts"
 
@@ -97,8 +99,8 @@ class ChromaFactStore:
         if self._collection is not None:
             return self._collection
         coll = await anyio.to_thread.run_sync(
-            lambda: self._client.get_or_create_collection(
-                name=self._collection_name
+            lambda: get_or_create_cosine_collection(
+                self._client, self._collection_name
             )
         )
         self._collection = coll
@@ -113,8 +115,9 @@ class ChromaFactStore:
         coll = await self._get_collection()
 
         async with self._lock:
-            # Namespace-scoped supersession: only invalidate prior
-            # facts in the same ``user_id`` partition.
+            # Valid-time supersession (``plan_supersession``) over the
+            # facts in this user's partition with the same subject +
+            # predicate.
             existing = await anyio.to_thread.run_sync(
                 lambda: coll.get(
                     where={
@@ -122,25 +125,29 @@ class ChromaFactStore:
                             user_id_where_clause(fact.user_id),
                             {"subject": fact.subject},
                             {"predicate": fact.predicate},
-                            {"currently_valid": True},
                         ]
                     },
                     include=["metadatas"],
                 )
             )
-
+            stored = {
+                eid: dict(meta or {})
+                for eid, meta in zip(
+                    existing.get("ids") or [],
+                    existing.get("metadatas") or [],
+                    strict=False,
+                )
+            }
+            closes, until = plan_supersession(
+                fact, [_metadata_to_fact(eid, meta) for eid, meta in stored.items()]
+            )
+            fact = fact.model_copy(update={"valid_until": until})
             ids_to_close: list[str] = []
             metas_to_close: list[dict[str, Any]] = []
-            for eid, meta in zip(
-                existing.get("ids") or [],
-                existing.get("metadatas") or [],
-                strict=False,
-            ):
-                meta = dict(meta or {})
-                if meta.get("object") == fact.object:
-                    continue  # same triple — don't supersede
+            for eid, valid_until in closes.items():
+                meta = stored[eid]
                 meta["currently_valid"] = False
-                meta["valid_until_ts"] = fact.valid_from.timestamp()
+                meta["valid_until_ts"] = valid_until.timestamp()
                 ids_to_close.append(eid)
                 metas_to_close.append(meta)
 
@@ -178,19 +185,12 @@ class ChromaFactStore:
         coll = await self._get_collection()
         where = _build_where(subject, predicate, object_, valid_at, user_id)
 
-        # Chroma's ``get`` accepts ``limit`` only in newer releases;
-        # fall back to slicing in Python if it raises.
-        def _do_get() -> Any:
-            try:
-                return coll.get(
-                    where=where,
-                    limit=limit,
-                    include=["metadatas"],
-                )
-            except TypeError:
-                return coll.get(where=where, include=["metadatas"])
-
-        result = await anyio.to_thread.run_sync(_do_get)
+        # Chroma's ``get`` can't order its results, and with ``limit``
+        # it returns the *first inserted* rows: fetch every match, sort
+        # newest-first, then slice.
+        result = await anyio.to_thread.run_sync(
+            lambda: coll.get(where=where, include=["metadatas"])
+        )
         facts = _decode_get(result)
         # Sort by recorded_at desc; tie-break by valid_from desc.
         facts.sort(

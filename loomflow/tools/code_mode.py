@@ -23,12 +23,13 @@ Two execution modes
   The code runs via ``exec`` inside the agent process with restricted
   builtins (no ``open``/``eval``/``exec``; imports limited to ``json``,
   ``re``, ``math``, ``datetime``) and each tool bound to
-  ``host.call(...)``. BE HONEST about the trust model: this restriction
-  is an accident guard, **not** a security boundary — in-process code
-  is exactly as trusted as any direct tool call (same process, same
+  the host. BE HONEST about the trust model: this restriction is an
+  accident guard, **not** a security boundary — in-process code is
+  exactly as trusted as any direct tool call (same process, same
   memory; a determined payload can escape a builtins allowlist).
-  Permission/hook layers wrapped around the host still see every
-  inner ``host.call``.
+  Inside an agent run, every tool call the code makes goes through
+  the run's hooks, permissions, approval handler and audit log, like
+  a call the model made directly.
 * **Data-transform mode (out-of-process).** Pass ``executor=`` (e.g.
   :class:`~loomflow.tools.executor.SubprocessExecutor`). The code runs
   in the executor **without tool bindings** — use it to let the model
@@ -60,8 +61,10 @@ from typing import Any, cast
 
 import anyio
 
+from ..core.context import current_tool_gate
+from ..core.ids import new_id
 from ..core.protocols import ToolHost
-from ..core.types import ToolDef
+from ..core.types import ToolCall, ToolDef
 from .executor import CodeExecutor
 from .registry import InProcessToolHost, Tool
 
@@ -329,7 +332,14 @@ def _make_inprocess_run_code(
 
     def _make_shim(tool_name: str) -> Callable[..., Any]:
         async def _shim(**kwargs: Any) -> Any:
-            result = await host.call(tool_name, kwargs, call_id=f"code_mode:{tool_name}")
+            gate = current_tool_gate()
+            if gate is not None:
+                call = ToolCall(id=new_id("code_mode"), tool=tool_name, args=kwargs)
+                result = await gate(call, host)
+            else:  # called outside an agent run: no policy to apply
+                result = await host.call(
+                    tool_name, kwargs, call_id=f"code_mode:{tool_name}"
+                )
             if not result.ok:
                 raise RuntimeError(
                     f"tool {tool_name!r} failed: {result.error or result.reason or 'denied'}"

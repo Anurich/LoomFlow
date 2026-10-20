@@ -18,10 +18,15 @@ Routes:
 * ``POST /run``    — JSON ``{prompt, user_id?, session_id?, tone?}`` →
   the :class:`~loomflow.RunResult` as JSON.
 * ``POST /stream`` — same body → ``text/event-stream`` of agent
-  :class:`~loomflow.Event`\\ s, terminated by an ``event: done`` frame
-  carrying the final result payload. A client disconnect cancels the
-  underlying run (the stream generator is closed, which triggers the
-  agent's break-to-cancel contract).
+  :class:`~loomflow.Event`\\ s (each frame's ``event:`` is the event
+  kind, e.g. ``model_chunk`` or ``error``), terminated by an
+  ``event: done`` frame carrying the final result payload. If the run
+  fails after the stream started, an ``event: stream_error`` frame
+  (``{"error": <type>, "message": ...}``) precedes ``done``; it's
+  named apart from agent ``error`` events, whose payload is an Event.
+  A client disconnect cancels the underlying run (the stream
+  generator is closed, which triggers the agent's break-to-cancel
+  contract).
 * ``POST /resume`` — ``{session_id, prompt?, from_checkpoint?}`` →
   same shape as ``/run``, via ``agent.resume(...)``.
 * ``GET /health``  — liveness + version.
@@ -370,7 +375,7 @@ def create_app(agent: ServableAgent, *, require_user_id: bool = False) -> ASGIAp
             cause = _unwrap_exception(exc)
             with suppress(Exception):
                 await _frame(
-                    "error",
+                    "stream_error",
                     json.dumps({"error": type(cause).__name__, "message": str(cause)}),
                 )
         if disconnected:

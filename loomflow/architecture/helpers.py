@@ -43,16 +43,19 @@ circular re-implementation:
 from __future__ import annotations
 
 import contextlib
+import itertools
 import json
 import logging
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import anyio
 
 from ..core._deprecation import warn_legacy_protocol
-from ..core.context import RunContext, get_run_context
+from ..core.context import RunContext, _tool_gate_var, get_run_context
+from ..core.streaming import stream_from
 from ..core.types import (
     Event,
     Message,
@@ -62,7 +65,7 @@ from ..core.types import (
     Usage,
 )
 from ..guardrails.base import apply_guardrails
-from ..observability.semconv import tool_attrs
+from ..observability.semconv import set_span_attributes, tool_attrs
 from ..security.audit import AuditLog, wants_full_transcripts
 from .base import ApprovalDecision, Dependencies
 
@@ -93,14 +96,50 @@ def resolve_role_model(spec: str | Model | None) -> Model | None:
     convention as the ``run_until`` checker), or ``None`` meaning
     "use the agent's main model".
 
-    The import is lazy to avoid the agent<->architecture module
-    cycle (same pattern as the worker_registry imports below).
+    A spec string is resolved here (so a bad spec fails at
+    construction) and remembered: the Agent that owns the architecture
+    rebuilds it with its ``secrets=`` backend (see
+    :func:`bind_role_model_secrets`), so the role model authenticates
+    like the main model instead of falling back to the environment.
+    The import is lazy to avoid the agent<->architecture module cycle.
     """
     if spec is None or not isinstance(spec, str):
         return spec
     from ..agent.api import _resolve_model  # lazy, cycle-safe
 
-    return _resolve_model(spec)
+    model = _resolve_model(spec)
+    try:
+        model._loom_role_spec = spec  # type: ignore[attr-defined]
+    except (AttributeError, TypeError):  # slotted / frozen model classes
+        pass
+    return model
+
+
+def bind_role_model_secrets(architecture: Any, secrets: Any) -> None:
+    """Rebuild the role models ``architecture`` resolved from spec
+    strings (and those of architectures it wraps, such as
+    ``SelfRefine(base=...)``) with the owning Agent's secrets."""
+    from ..agent.api import _resolve_model  # lazy, cycle-safe
+
+    seen: set[int] = set()
+
+    def visit(obj: Any) -> None:
+        if id(obj) in seen or not hasattr(obj, "__dict__"):
+            return
+        seen.add(id(obj))
+        for name, value in list(vars(obj).items()):
+            spec = getattr(value, "_loom_role_spec", None)
+            if isinstance(spec, str):
+                rebuilt = _resolve_model(spec, secrets=secrets)
+                try:
+                    rebuilt._loom_role_spec = spec  # type: ignore[attr-defined]
+                except (AttributeError, TypeError):
+                    pass
+                setattr(obj, name, rebuilt)
+            elif hasattr(value, "run") and hasattr(value, "declared_workers"):
+                visit(value)
+
+    visit(architecture)
 
 
 async def text_only_model_call(
@@ -236,7 +275,6 @@ async def budget_gate(
             await deps.telemetry.emit_metric(
                 "loom.budget.exceeded",
                 1,
-                session_id=session.id,
                 reason=status.reason,
             )
         return True, [Event.budget_exceeded(session.id, status)]
@@ -370,17 +408,53 @@ def strip_markdown_fences(text: str) -> str:
     return cleaned
 
 
-def parse_fenced_json(text: str) -> Any | None:
-    """``json.loads`` tolerant of markdown code fences.
+def fill_template(template: str, **values: Any) -> str:
+    """``template.format(**values)``, or — when the template has other
+    braces, such as a JSON example a user put in a custom prompt —
+    just its ``{name}`` placeholders replaced, other text untouched."""
+    try:
+        return template.format(**values)
+    except (KeyError, IndexError, ValueError):
+        out = template
+        for name, value in values.items():
+            out = out.replace("{" + name + "}", str(value))
+        return out
 
-    Returns the parsed object, or ``None`` on parse failure —
-    callers decide what a failed parse means (empty plan, no-op
+
+_FENCE_RE = re.compile(r"```[\w+-]*[ \t]*\n(.*?)```", re.DOTALL)
+# Candidate start positions tried when JSON sits inside prose; bounds
+# the work on long replies full of braces.
+_MAX_JSON_STARTS = 64
+
+
+def parse_fenced_json(text: str) -> Any | None:
+    """The JSON value a model reply carries, or ``None``.
+
+    Tries the whole reply (with a wrapping code fence stripped), then
+    each fenced code block, then the first ``{`` / ``[`` in the prose
+    that starts a complete JSON value — so "Here is my review:
+    ```json {...}```" and "{...} Let me know if ..." both parse.
+    Callers decide what a failed parse means (empty plan, no-op
     coordinator decision, zero-score critique, ...).
     """
     try:
         return json.loads(strip_markdown_fences(text))
     except (json.JSONDecodeError, ValueError):
-        return None
+        pass
+    for block in _FENCE_RE.findall(text):
+        try:
+            return json.loads(block)
+        except (json.JSONDecodeError, ValueError):
+            continue
+    decoder = json.JSONDecoder()
+    starts = (i for i, ch in enumerate(text) if ch in "{[")
+    for _, i in zip(range(_MAX_JSON_STARTS), starts, strict=False):
+        try:
+            value, _end = decoder.raw_decode(text, i)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        return value
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -448,6 +522,11 @@ async def audit(
         )
 
 
+_APPROVAL_ACTIONS = frozenset(
+    {"allow", "deny", "edit", "remember_allow", "remember_deny"}
+)
+
+
 async def _resolve_ask_decision(
     call: ToolCall,
     handler: Any,  # ApprovalHandler | None — Any keeps the import flat
@@ -468,6 +547,8 @@ async def _resolve_ask_decision(
     Handler return shapes (G8):
 
     * ``bool`` — legacy allow/deny, 100% back-compat.
+    * an action name (``"allow"``, ``"deny"``, ...) — same as the
+      matching :class:`~loomflow.architecture.base.ApprovalDecision`.
     * :class:`~loomflow.architecture.base.ApprovalDecision` — rich
       actions: ``allow`` / ``deny`` / ``edit`` (swap args, proceed as
       allowed) / ``remember_allow`` / ``remember_deny`` (decide and
@@ -506,8 +587,21 @@ async def _resolve_ask_decision(
         )
         return False, call, None
 
+    if isinstance(decision, bool):
+        return decision, call, None
+    if isinstance(decision, str) and decision in _APPROVAL_ACTIONS:
+        decision = ApprovalDecision(action=decision)  # type: ignore[arg-type]
     if not isinstance(decision, ApprovalDecision):
-        return bool(decision), call, None
+        # ``"deny"`` or ``{"approved": False}`` are truthy: reading
+        # them with ``bool()`` approved the call. Only ``True``, an
+        # action name or an ApprovalDecision can allow.
+        log.warning(
+            "approval_handler returned %r for tool=%s (expected bool, "
+            "action name or ApprovalDecision); treating as deny",
+            decision,
+            call.tool,
+        )
+        return False, call, None
 
     # Widen to ``str``: the Literal annotation on the dataclass is not
     # enforced at runtime, so a handler CAN hand back a bogus action —
@@ -590,7 +684,7 @@ async def run_single_tool(
         )
     )
 
-    async with tool_trace:
+    async with tool_trace as tool_span:
         run_user_id = deps.context.user_id
         # Stamp ``call.destructive`` from the tool host BEFORE any
         # permission check. Background: ``ToolCall.destructive``
@@ -751,6 +845,11 @@ async def run_single_tool(
                     if timeout_s is not None
                     else contextlib.nullcontext()
                 )
+                # Tool calls this tool makes itself (code mode) go
+                # through the same gates as this one.
+                gate_token = _tool_gate_var.set(
+                    _nested_tool_gate(deps, turn=turn, parent_step=resolved_step)
+                )
                 try:
                     with timeout_cm:
                         if deps.fast_runtime:
@@ -766,7 +865,11 @@ async def run_single_tool(
                                 call.tool,
                                 call.args,
                                 call_id=call.id,
-                                idempotency_key=call.idempotency_key(),
+                                # Position + content: replays on resume,
+                                # runs again for a retry in a later turn.
+                                idempotency_key=(
+                                    f"{resolved_step}:{call.idempotency_key()}"
+                                ),
                             )
                 except TimeoutError:
                     result = ToolResult.error_(
@@ -775,6 +878,8 @@ async def run_single_tool(
                     )
                 except Exception as exc:  # noqa: BLE001
                     result = ToolResult.error_(call.id, str(exc))
+                finally:
+                    _tool_gate_var.reset(gate_token)
 
                 if not deps.fast_hooks:
                     try:
@@ -785,14 +890,28 @@ async def run_single_tool(
                         warn_legacy_protocol("HookHost", "post_tool")
                         await deps.hooks.post_tool(call, result)
 
+        # A failed or refused call marks its span as an error.
+        error_type = _tool_error_type(result)
+        if error_type is not None and tool_span is not None:
+            set_span_attributes(tool_span, {"error.type": error_type})
+
     if not deps.fast_telemetry:
-        elapsed_ms = (anyio.current_time() - started) * 1000
+        elapsed = anyio.current_time() - started
         await deps.telemetry.emit_metric(
             "loom.tool.duration_ms",
-            elapsed_ms,
+            elapsed * 1000,
             tool=call.tool,
             ok=result.ok,
             denied=result.denied,
+        )
+        await deps.telemetry.emit_metric(
+            "gen_ai.execute_tool.duration",
+            elapsed,
+            **{
+                "gen_ai.operation.name": "execute_tool",
+                "gen_ai.tool.name": call.tool,
+                "error.type": _tool_error_type(result),
+            },
         )
     # G13 — tool_result-stage guardrails. Applied HERE (at the shared
     # gated executor, where the ToolResult is finalised) so every
@@ -804,6 +923,17 @@ async def run_single_tool(
     if not deps.fast_guardrails and result.ok and result.output is not None:
         result = await _guard_tool_result(deps, result)
     return result
+
+
+def _tool_error_type(result: ToolResult) -> str | None:
+    """``error.type`` for a tool call that didn't succeed."""
+    if result.ok:
+        return None
+    if result.denied:
+        return "permission_denied"
+    if result.error and "timed out" in result.error:
+        return "timeout"
+    return "tool_error"
 
 
 async def _guard_tool_result(
@@ -850,6 +980,58 @@ async def _guard_tool_result(
     if outcome.text != original:
         return result.model_copy(update={"output": outcome.text})
     return result
+
+
+def _nested_tool_gate(
+    deps: Dependencies, *, turn: int, parent_step: str
+) -> Callable[[ToolCall, Any], Awaitable[ToolResult]]:
+    """Gate for tool calls a running tool makes on ``host`` (code mode).
+
+    Each call gets the full treatment a model-issued call gets: the
+    destructive stamp from ``host``'s defs, hooks, permissions, the
+    approval handler, the timeout, guardrails and audit entries.
+    """
+    counter = itertools.count()
+
+    async def gate(call: ToolCall, host: Any) -> ToolResult:
+        slot = next(counter)
+        session_id = deps.context.session_id or ""
+        if not deps.fast_audit:
+            await audit(
+                deps.audit_log,
+                session_id,
+                "model",
+                "tool_call",
+                {
+                    "tool": call.tool,
+                    "call_id": call.id,
+                    "args": dict(call.args),
+                    "turn": turn,
+                    "via": parent_step,
+                },
+                user_id=deps.context.user_id,
+            )
+        result = await run_single_tool(
+            replace(deps, tools=host),
+            call,
+            turn=turn,
+            slot=slot,
+            step_name=f"{parent_step}.{slot}",
+        )
+        if not deps.fast_audit:
+            await audit(
+                deps.audit_log,
+                session_id,
+                "system",
+                "tool_result",
+                tool_result_payload(
+                    call=call, result=result, turn=turn, audit_log=deps.audit_log
+                ),
+                user_id=deps.context.user_id,
+            )
+        return result
+
+    return gate
 
 
 async def run_gated_tool(
@@ -966,8 +1148,18 @@ def add_usage(a: Usage, b: Usage) -> Usage:
     )
 
 
+# "score: 0.7", "**Score:** 7/10", "Score (0-1): 0.3", "rating = 40%",
+# "Score: 2 out of 10". Group 1 is the number, then an optional
+# percent sign or denominator (groups 2 / 3).
 _SCORE_LINE_RE = re.compile(
-    r"score\s*[:=]\s*([0-9]*\.?[0-9]+)", re.IGNORECASE
+    r"\b(?:score|rating)\b[*_\s]*(?:\([^)\n]{0,20}\))?[*_\s]*[:=][*_\s]*"
+    r"(-?\d*\.?\d+)\s*(?:(%)|(?:/|\bout\s+of\b)\s*(\d+(?:\.\d+)?))?",
+    re.IGNORECASE,
+)
+# An unlabelled "8/10" or "2 out of 10".
+_FRACTION_RE = re.compile(
+    r"(?<![\d/.])(\d*\.?\d+)\s*(?:/|\bout\s+of\b)\s*(\d+(?:\.\d+)?)(?![\d/])",
+    re.IGNORECASE,
 )
 # Prose fallback: DECIMAL forms only (``0.85``, ``1.0``). Bare
 # integers are deliberately excluded — "0 errors found" or "1 issue
@@ -1086,48 +1278,56 @@ class SubagentInvocation:
         ``turns``, ``tokens_in``, ``tokens_out``, ``cost_usd``,
         ``interrupted``, ``interruption_reason``).
         """
-        send, receive = anyio.create_memory_object_stream[Event](
-            max_buffer_size=self._buffer_size
-        )
+        async def _run_worker(send: Callable[[Event], Awaitable[None]]) -> None:
+            async def _capture(ev: Event) -> None:
+                if ev.kind.value == "completed":
+                    # Capture the result dict; don't forward — parent
+                    # emits its own COMPLETED at the end of its own loop.
+                    result = ev.payload.get("result", {}) or {}
+                    self.result.update(result)
+                    # Roll worker usage into the parent session so the
+                    # parent's RunResult.cost_usd / tokens reflect work
+                    # the sub-agent did (field-name swap handled by
+                    # ``usage_from_result_dict``).
+                    if self._rollup_into is not None:
+                        sub_usage = usage_from_result_dict(result)
+                        self._rollup_into.cumulative_usage = add_usage(
+                            self._rollup_into.cumulative_usage, sub_usage
+                        )
+                elif ev.kind.value == "started":
+                    # Suppress sub-agent's STARTED; parent owns framing.
+                    return
+                else:
+                    await send(ev)
 
-        async def _capture(ev: Event) -> None:
-            if ev.kind.value == "completed":
-                # Capture the result dict; don't forward — parent
-                # emits its own COMPLETED at the end of its own loop.
-                result = ev.payload.get("result", {}) or {}
-                self.result.update(result)
-                # Roll worker usage into the parent session so the
-                # parent's RunResult.cost_usd / tokens reflect work
-                # the sub-agent did (field-name swap handled by
-                # ``usage_from_result_dict``).
-                if self._rollup_into is not None:
-                    sub_usage = usage_from_result_dict(result)
-                    self._rollup_into.cumulative_usage = add_usage(
-                        self._rollup_into.cumulative_usage, sub_usage
-                    )
-            elif ev.kind.value == "started":
-                # Suppress sub-agent's STARTED; parent owns framing.
-                return
-            else:
-                await send.send(ev)
+            await self._agent.run(
+                self._prompt,
+                session_id=self._session_id,
+                context=self._context,
+                extra_tools=self._extra_tools,
+                emit=_capture,
+            )
 
-        async def _run_worker() -> None:
-            try:
-                await self._agent.run(
-                    self._prompt,
-                    session_id=self._session_id,
-                    context=self._context,
-                    extra_tools=self._extra_tools,
-                    emit=_capture,
-                )
-            finally:
-                await send.aclose()
+        # The worker runs as its own task (core/streaming.py), so no
+        # cancel scope is held across ``yield``.
+        async with contextlib.aclosing(
+            stream_from(_run_worker, buffer_size=self._buffer_size)
+        ) as events:
+            async for ev in events:
+                yield ev
 
-        async with anyio.create_task_group() as tg:
-            tg.start_soon(_run_worker)
-            async with receive:
-                async for ev in receive:
-                    yield ev
+
+def _scaled(value: float, denominator: float | None = None, percent: bool = False) -> float:
+    """``value`` on a 0-1 scale: ``7/10`` → 0.7, ``40%`` → 0.4, and a
+    bare value from 2 up read as out of 10 (``8`` → 0.8) or, above 10,
+    out of 100. A slight overshoot (``1.5``) clamps to 1.0."""
+    if percent:
+        value /= 100
+    elif denominator is not None:
+        value = value / denominator if denominator > 0 else 0.0
+    elif value >= 2:
+        value = value / 10 if value <= 10 else value / 100
+    return max(0.0, min(1.0, value))
 
 
 def parse_score(text: str) -> float:
@@ -1135,29 +1335,48 @@ def parse_score(text: str) -> float:
 
     Parsing order:
 
-    1. The ``score: X`` (or ``score=X``) pattern anywhere in the
-       text — the documented evaluator format.
-    2. A line that consists of NOTHING but a 0-1 number (``"0.7"``,
+    1. A ``"score"`` field of a JSON object in the reply.
+    2. The ``score: X`` (or ``score=X``, ``rating: X``) pattern
+       anywhere in the text — the documented evaluator format —
+       including markdown (``**Score:** 0.3``), a parenthetical
+       (``Score (0-1): 0.3``), and a scale: ``7/10``, ``2 out of
+       10``, ``40%``.
+    3. An unlabelled fraction (``"8/10"``, ``"2 out of 10"``).
+    4. A line that consists of NOTHING but a 0-1 number (``"0.7"``,
        ``"1"``) — unambiguous even for bare integers.
-    3. A decimal-form number in prose (``"scored 0.6 overall"``).
+    5. A decimal-form number in prose (``"scored 0.6 overall"``).
        Bare integers in prose are deliberately NOT matched — a
        critique like ``"0 errors found"`` or ``"1 issue remains"``
        is not a score and previously parsed as 0.0 / 1.0.
 
-    Clamps to ``[0.0, 1.0]``. Returns 0.0 on parse failure (treated
+    A value of 2 or more with no scale is read as out of 10 (or 100),
+    so "score: 7" is 0.7, not a perfect score. Clamps to ``[0.0, 1.0]``
+    (negative values are 0.0). Returns 0.0 on parse failure (treated
     as a failed evaluation — let the caller decide what that means).
 
     Used by :class:`~loomflow.architecture.Reflexion` (attempt
-    score) and :class:`~loomflow.architecture.TreeOfThoughts`
-    (per-thought evaluation).
+    score), :class:`~loomflow.architecture.TreeOfThoughts`
+    (per-thought evaluation) and the ActorCritic fallback.
     """
+    if "{" in text:
+        parsed = parse_fenced_json(text)
+        value = parsed.get("score") if isinstance(parsed, dict) else None
+        if isinstance(value, int | float) and not isinstance(value, bool):
+            return _scaled(float(value))
+        if isinstance(value, str) and value.strip():
+            # "7/10", "40%": read it as a labelled score line.
+            return parse_score(f"score: {value.strip()}")
     match = _SCORE_LINE_RE.search(text)
     if match is not None:
         try:
             value = float(match.group(1))
+            denominator = float(match.group(3)) if match.group(3) else None
         except ValueError:
             return 0.0
-        return max(0.0, min(1.0, value))
+        return _scaled(value, denominator, percent=match.group(2) is not None)
+    fraction = _FRACTION_RE.search(text)
+    if fraction is not None:
+        return _scaled(float(fraction.group(1)), float(fraction.group(2)))
     for line in text.strip().splitlines():
         if _WHOLE_LINE_NUMBER_RE.fullmatch(line.strip()):
             return max(0.0, min(1.0, float(line.strip())))

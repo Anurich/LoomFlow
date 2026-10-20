@@ -465,6 +465,15 @@ class Fact(BaseModel):
     recorded_at: datetime = Field(default_factory=_utcnow)
     sources: list[str] = Field(default_factory=list)
 
+    @field_validator("valid_from", "valid_until", "recorded_at")
+    @classmethod
+    def _utc(cls, v: datetime | None) -> datetime | None:
+        """Naive datetimes are read as UTC (every store does the same),
+        so mixing naive and aware values can't raise."""
+        if v is not None and v.tzinfo is None:
+            return v.replace(tzinfo=UTC)
+        return v
+
     @field_validator("predicate")
     @classmethod
     def _canonicalise_predicate(cls, v: str) -> str:
@@ -525,6 +534,7 @@ class MemoryExport(BaseModel):
     user_id: str | None
     episodes: list[Episode] = Field(default_factory=list)
     facts: list[Fact] = Field(default_factory=list)
+    blocks: list[MemoryBlock] = Field(default_factory=list)
     exported_at: datetime = Field(default_factory=_utcnow)
 
 
@@ -855,6 +865,11 @@ class AuditEntry(BaseModel):
     action: str
     payload: dict[str, Any]
     signature: str
+    #: The previous entry's ``signature`` (``GENESIS_HASH`` for the
+    #: first entry), covered by this entry's own signature, so the
+    #: entries form a hash chain: deleting or reordering entries
+    #: breaks it. Empty on entries written before the chain existed.
+    prev_hash: str = ""
 
 
 class Span(BaseModel):

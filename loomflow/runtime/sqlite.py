@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .journal import SqliteJournalStore
+from .journal import Serializer, SqliteJournalStore
 from .journaled import JournaledRuntime
 
 
@@ -29,9 +29,12 @@ class SqliteRuntime(JournaledRuntime):
         path: str | Path,
         *,
         max_checkpoints_per_session: int = 20,
+        serializer: Serializer = "json",
     ) -> None:
         store = SqliteJournalStore(
-            path, max_checkpoints_per_session=max_checkpoints_per_session
+            path,
+            max_checkpoints_per_session=max_checkpoints_per_session,
+            serializer=serializer,
         )
         super().__init__(store=store)
         self._path = store.path
