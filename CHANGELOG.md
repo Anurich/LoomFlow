@@ -130,6 +130,29 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
   session-scoped forget still leaves them, since blocks aren't per
   session. ``MemoryExport`` now includes the user's ``blocks``.
 
+### Fixed — A2A speaks v1.0 (and still v0.3)
+
+* **The server implements the A2A v1.0 JSON-RPC binding.** The card said
+  protocolVersion 1.0 but only v0.3 methods existed, so official v1.0
+  clients (a2a-sdk 1.x) got "unknown method: SendMessage". It now serves
+  ``SendMessage``, ``SendStreamingMessage``, ``GetTask``, ``CancelTask``
+  and ``ListTasks`` with v1.0 shapes (ProtoJSON enums such as
+  ``TASK_STATE_COMPLETED``, untagged parts, ``{"task": ...}`` results).
+  The v0.3 methods keep their v0.3 shapes. The ``A2A-Version`` header
+  selects the version (an unsupported one is ``-32009``); without it
+  the method name decides. Verified both ways against a2a-sdk 1.2.3.
+* **Cancelling works:** a running task can be cancelled. A finished one
+  answers ``TaskNotCancelableError`` (``-32002``). Subscribing, push
+  notifications and the extended card answer with their spec error
+  codes.
+* **The card** lists v1.0 and v0.3 JSON-RPC interfaces in
+  ``supportedInterfaces``, keeps the v0.3 fields, defaults ``url`` to
+  the address it was fetched from, and gives every skill its required
+  ``tags``.
+* **``A2AClient`` speaks v1.0** and falls back to v0.3 when the remote
+  doesn't know the v1.0 method (``protocol_version="auto"``, the
+  default). Pass ``"1.0"`` or ``"0.3"`` to pin one.
+
 ### Fixed — models (checked against the provider docs, October 2026)
 
 * **Pricing** updated to the official tables: Opus 5.5 $4/$20, Sonnet
