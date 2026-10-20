@@ -23,6 +23,7 @@ constructor needs to build a default client.
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 from collections.abc import AsyncIterator
@@ -188,12 +189,40 @@ def _reconcile_thinking_kwargs(kwargs: dict[str, Any]) -> None:
         return
     # Temperature must be unset (or exactly 1) with thinking on.
     kwargs.pop("temperature", None)
+    extra = kwargs.get("extra_body")
+    if isinstance(extra, dict):
+        extra.pop("temperature", None)
+        if not extra:
+            kwargs.pop("extra_body")
     budget = thinking.get("budget_tokens")
     if isinstance(budget, int):
         floor = budget + _THINKING_MAX_TOKENS_HEADROOM
         current = kwargs.get("max_tokens")
         if not isinstance(current, int) or current < floor:
             kwargs["max_tokens"] = floor
+
+
+def _temperature_kwargs(method: Any, temperature: float) -> dict[str, Any]:
+    """Request kwargs carrying ``temperature``, or nothing at the default.
+
+    1.0 is the API default and means "not set": we never send it, as
+    current models reject any non-default value and anthropic SDK 1.x
+    removed ``temperature`` from ``messages.create`` / ``stream``
+    (passing it is a ``TypeError``). A caller who sets another value
+    gets it as a keyword where the SDK still has one, else in
+    ``extra_body``.
+    """
+    if temperature == 1.0:
+        return {}
+    try:
+        params = inspect.signature(method).parameters
+    except (TypeError, ValueError):
+        return {"temperature": temperature}
+    if "temperature" in params or any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+    ):
+        return {"temperature": temperature}
+    return {"extra_body": {"temperature": temperature}}
 
 
 @dataclass
@@ -406,11 +435,12 @@ class AnthropicModel:
                 anth_tools.append(synthetic)
                 synthetic_tool_name = synthetic["name"]
 
+        create = getattr(getattr(self._client, "messages", None), "create", None)
         kwargs: dict[str, Any] = {
             "model": self.name,
             "messages": anth_messages,
             "max_tokens": max_tokens or self._max_tokens,
-            "temperature": temperature,
+            **_temperature_kwargs(create, temperature),
         }
         if system_parts:
             # Default: join into one string (caching-off shape).
@@ -454,20 +484,11 @@ class AnthropicModel:
         if timeout_s is not None:
             kwargs["timeout"] = timeout_s
 
-        try:
-            if timeout_s is not None:
-                with anyio.fail_after(timeout_s):
-                    response = await self._client.messages.create(**kwargs)
-            else:
-                response = await self._client.messages.create(**kwargs)
-        except TimeoutError as exc:
-            raise timeout_error(self.name, timeout_s, exc) from exc
-        except (AttributeError, TypeError):
-            # Duck-typing fallback ONLY: fake / non-conforming
-            # clients without a usable ``messages.create``. Real SDK
-            # errors (rate limit, auth, 4xx/5xx) propagate to the
-            # retry layer instead of being swallowed and re-issued
-            # as a second API call.
+        if create is None:
+            # Clients without ``messages.create`` (stream-only fakes)
+            # go through the streaming path. Anything a real call
+            # raises propagates to the retry layer: catching
+            # TypeError here once hid an SDK signature break.
             return await _consume_anthropic_stream(
                 self.stream(
                     messages,
@@ -480,6 +501,14 @@ class AnthropicModel:
                     prompt_caching=prompt_caching,
                 )
             )
+        try:
+            if timeout_s is not None:
+                with anyio.fail_after(timeout_s):
+                    response = await create(**kwargs)
+            else:
+                response = await create(**kwargs)
+        except TimeoutError as exc:
+            raise timeout_error(self.name, timeout_s, exc) from exc
 
         # If the SDK actually returned a stream object instead of a
         # Message (some test fakes), drain the stream path.
@@ -637,7 +666,7 @@ class AnthropicModel:
             "model": self.name,
             "messages": anth_messages,
             "max_tokens": max_tokens or self._max_tokens,
-            "temperature": temperature,
+            **_temperature_kwargs(self._client.messages.stream, temperature),
         }
         if system_parts:
             # Default: caching-off shape (single joined string). The

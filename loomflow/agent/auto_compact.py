@@ -275,10 +275,11 @@ async def maybe_auto_compact(
     # being implemented.
     parts: list[str] = []
     try:
+        # No temperature: current Claude models reject non-default
+        # values with a 400, which silently disabled compaction.
         async for chunk in summariser.stream(
             summariser_msgs,
             tools=None,
-            temperature=0.0,
             max_tokens=2048,
         ):
             text = getattr(chunk, "text", None)
