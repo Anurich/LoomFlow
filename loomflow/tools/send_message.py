@@ -96,20 +96,14 @@ def make_send_message_tool(
                 f"Known workers: {known}"
             )
 
-        # 2. Multi-tenant safety check. ``get_run_context()``
-        #    reads the contextvar Agent._loop installed at the
-        #    top of the current run. ``user_id=None`` is the
-        #    single-tenant case (REPL with no explicit user_id);
-        #    we don't reject those — but a server running multi-
-        #    user must surface a clear refusal when user_ids
-        #    disagree.
+        # 2. Multi-tenant safety. ``get_run_context()`` reads the
+        #    contextvar Agent._loop installed at the top of the
+        #    current run. Each user talks to their own session of a
+        #    registered worker; a spawned worker refuses anyone but
+        #    the user whose run created it.
         run_ctx = get_run_context()
         caller_user = run_ctx.user_id
-        if (
-            handle.user_id is not None
-            and caller_user is not None
-            and handle.user_id != caller_user
-        ):
+        if handle.owner_only and handle.user_id != caller_user:
             return (
                 f"Error: worker {to!r} belongs to user_id "
                 f"{handle.user_id!r} but the current run is "
@@ -133,12 +127,12 @@ def make_send_message_tool(
             except Exception:  # noqa: BLE001 — telemetry is best-effort
                 pass
 
-        # 4. Per-handle lock — serialise concurrent invocations
-        #    targeting the SAME worker. Different workers stay
-        #    parallel. anyio.Lock cooperates with cancellation
-        #    via the surrounding task group.
-        async with handle.lock:
-            handle.touch(user_id=caller_user)
+        # 4. Per-session lock — serialise concurrent invocations
+        #    targeting the SAME worker session. Different workers
+        #    (and different users) stay parallel.
+        from ..agent.worker_registry import acquire_worker_session
+
+        async with acquire_worker_session(handle, caller_user):
 
             # Lazy import: helpers.SubagentInvocation pulls in the
             # whole architecture package; doing the import at
@@ -151,7 +145,7 @@ def make_send_message_tool(
                 invocation = SubagentInvocation(
                     handle.agent,
                     content,
-                    session_id=handle.session_id,
+                    session_id=handle.session_for(caller_user),
                     rollup_into=session,  # type: ignore[arg-type]
                 )
                 # Drain the events into the sink so token-level

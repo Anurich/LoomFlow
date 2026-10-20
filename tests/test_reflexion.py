@@ -431,7 +431,8 @@ async def test_reflexion_recalls_top_k_from_store() -> None:
     await store.add(
         [
             Chunk(
-                content=f"lesson #{i} about topic {i}", metadata={}
+                content=f"lesson #{i} about topic {i}",
+                metadata={"user_id": "*"},  # shared with every user
             )
             for i in range(5)
         ]
@@ -462,6 +463,72 @@ async def test_reflexion_recalls_top_k_from_store() -> None:
     assert block is not None
     bullet_count = block.content.count("- ")
     assert bullet_count <= 2
+
+
+async def test_reflexion_lessons_stay_with_their_user() -> None:
+    """A lesson learned in alice's run (it quotes her prompt) is never
+    recalled into another user's or an anonymous run; the lesson
+    block is written to the run's own user."""
+    from loomflow import HashEmbedder
+    from loomflow.vectorstore import InMemoryVectorStore
+
+    store = InMemoryVectorStore(embedder=HashEmbedder(dimensions=64))
+    memory = InMemoryMemory()
+    alice = Agent(
+        "test",
+        model=ScriptedModel(
+            [
+                ScriptedTurn(text="v1"),
+                ScriptedTurn(text="score: 0.1"),
+                ScriptedTurn(text="Account 4242 needs the EU rule."),
+                ScriptedTurn(text="v2"),
+                ScriptedTurn(text="score: 0.95"),
+            ]
+        ),
+        memory=memory,
+        architecture=Reflexion(lesson_store=store, max_attempts=2),
+    )
+    await alice.run("tax for account 4242", user_id="alice")
+    assert any("4242" in b.content for b in await memory.working(user_id="alice"))
+
+    for other in ("bob", None):
+        agent = Agent(
+            "test",
+            model=ScriptedModel(
+                [ScriptedTurn(text="ok"), ScriptedTurn(text="score: 0.95")]
+            ),
+            memory=memory,
+            architecture=Reflexion(lesson_store=store),
+        )
+        await agent.run("tax for account 4242", user_id=other)
+        assert not any(
+            "4242" in b.content for b in await memory.working(user_id=other)
+        )
+
+
+async def test_reflexion_legacy_lessons_one_per_line_per_user() -> None:
+    memory = InMemoryMemory()
+    agent = Agent(
+        "test",
+        model=ScriptedModel(
+            [
+                ScriptedTurn(text="v1"),
+                ScriptedTurn(text="score: 0.1"),
+                ScriptedTurn(text="Cite the source."),
+                ScriptedTurn(text="v2"),
+                ScriptedTurn(text="score: 0.1"),
+                ScriptedTurn(text="Check the units."),
+                ScriptedTurn(text="v3"),
+                ScriptedTurn(text="score: 0.95"),
+            ]
+        ),
+        memory=memory,
+        architecture=Reflexion(max_attempts=3),
+    )
+    await agent.run("q", user_id="alice")
+    assert await memory.working(user_id=None) == []
+    [block] = await memory.working(user_id="alice")
+    assert block.content == "- Cite the source.\n- Check the units.\n"
 
 
 def test_reflexion_rejects_invalid_top_k() -> None:

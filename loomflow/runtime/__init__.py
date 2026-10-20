@@ -20,6 +20,7 @@ from .journal import (
     JournalStore,
     PostgresJournalStore,
     SqliteJournalStore,
+    journal_scope,
 )
 from .journaled import JournaledRuntime, JournaledSession
 from .postgres import PostgresRuntime
@@ -40,5 +41,6 @@ __all__ = [
     "PostgresRuntime",
     "SqliteJournalStore",
     "SqliteRuntime",
+    "journal_scope",
     "resolve_runtime",
 ]

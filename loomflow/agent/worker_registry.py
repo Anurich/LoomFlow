@@ -10,12 +10,14 @@ feel for the project built up in earlier turns.
 This module provides the concrete primitives:
 
 * :class:`_WorkerHandle` — one registered worker. Carries the
-  worker's :class:`Agent`, a STABLE ``session_id`` reused across
-  every delegate/send_message touching it, the ``user_id`` the
-  worker was pinned to on first touch (multi-tenant safety), and
-  an :class:`anyio.Lock` for serialising concurrent calls to the
-  same worker (concurrent delegate + send_message races would
-  otherwise corrupt the worker's session).
+  worker's :class:`Agent`, a STABLE session per user reused across
+  every delegate/send_message touching it (so one shared coordinator
+  serves many users, each with their own worker conversation), and
+  a lock per user for serialising concurrent calls to the same
+  worker session (concurrent delegate + send_message races would
+  otherwise corrupt the worker's session). Workers spawned mid-run
+  are instead owned by the spawning run's user and refuse everyone
+  else.
 
 * :func:`new_worker_id` — produces ``worker_<role>_<ULID>`` IDs.
   Universal ``worker_`` prefix makes audit/observability grep
@@ -42,6 +44,7 @@ stale state).
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -51,6 +54,7 @@ from typing import TYPE_CHECKING
 
 import anyio
 
+from ..core.context import get_run_context
 from ..core.ids import new_id
 
 if TYPE_CHECKING:
@@ -58,8 +62,8 @@ if TYPE_CHECKING:
 
 
 class CrossUserWorkerError(RuntimeError):
-    """A persistent worker pinned to one ``user_id`` was invoked by
-    a run belonging to a different ``user_id``.
+    """A worker owned by one ``user_id`` (one spawned mid-run) was
+    invoked by a run belonging to a different ``user_id``.
 
     Raised by :func:`acquire_worker_session` BEFORE the worker's
     lock is taken or its session touched — cross-tenant reuse of a
@@ -102,17 +106,18 @@ def new_worker_id(role: str) -> str:
 
 @dataclass(slots=True)
 class _WorkerHandle:
-    """One registered worker — owns its ID, session, and lock.
+    """One registered worker — owns its ID, sessions, and locks.
 
-    Mutable (NOT frozen) because:
+    A registered worker keeps one stable session per user:
+    :meth:`session_for` derives it from ``session_id``, so alice and
+    bob each get their own conversation with the same worker, and an
+    anonymous run (``user_id=None``) gets the base ``session_id``.
+    Calls are serialised per user session, not across users.
 
-    * ``user_id`` is pinned at first-touch (we don't know the
-      run's user_id until ``Agent.run()`` starts; pre-pinning at
-      construction would lock workers to the wrong user in
-      multi-tenant servers where the coordinator is shared).
-    * ``last_used_at`` ticks on every invocation.
-    * ``lock`` is set in ``__post_init__`` (default-factory on
-      ``anyio.Lock`` is awkward to express cleanly).
+    A spawned worker (``owner_only=True``) belongs to the run that
+    created it: ``user_id`` is that run's user and every other caller,
+    anonymous or not, is refused (its instructions came from that
+    user's conversation).
 
     The registry's analogue isn't :class:`LivingPlan` (per-run
     state via contextvar) — it's :class:`Memory` itself
@@ -130,19 +135,20 @@ class _WorkerHandle:
     created_at: datetime
     last_used_at: datetime | None = None
     lock: anyio.Lock = field(default_factory=anyio.Lock)
+    owner_only: bool = False
+    _user_locks: dict[str, anyio.Lock] = field(default_factory=dict)
 
-    def touch(self, *, user_id: str | None) -> None:
-        """Update ``last_used_at`` + pin ``user_id`` on first touch.
+    def session_for(self, user_id: str | None) -> str:
+        """The worker's stable session id for ``user_id``'s runs."""
+        if self.owner_only or user_id is None:
+            return self.session_id
+        digest = hashlib.sha256(str(user_id).encode("utf-8")).hexdigest()
+        return f"{self.session_id}__u{digest[:16]}"
 
-        First-touch pinning is the multi-tenant safety primitive:
-        once a handle has been used by user X, subsequent calls
-        from user Y must be rejected (by the caller — we just
-        record the pin here). Touch-after-touch with the SAME
-        user_id is the common path; the caller checks the mismatch
-        case before invoking the worker.
-        """
-        if self.user_id is None:
-            self.user_id = user_id
+    def touch(self, *, user_id: str | None = None) -> None:
+        """Tick ``last_used_at``. (``user_id`` is accepted for
+        backwards compatibility; workers are no longer pinned on
+        first touch.)"""
         self.last_used_at = datetime.now(UTC)
 
 
@@ -150,40 +156,47 @@ class _WorkerHandle:
 async def acquire_worker_session(
     handle: _WorkerHandle, caller_user: str | None
 ) -> AsyncIterator[_WorkerHandle]:
-    """Cross-user check → lock → touch, in ONE place.
+    """Ownership check → per-user lock → touch, in ONE place.
 
     Every architecture that invokes a persistent worker MUST enter
-    the worker's session through this helper (Supervisor previously
-    inlined this dance; Swarm / Router / Blackboard / Debate touched
-    with no check and no lock — the cross-tenant reuse bug).
+    the worker's session through this helper, and run the worker
+    under ``handle.session_for(caller_user)``.
 
     Semantics:
 
-    * **Mismatch check** — when the handle is already pinned to a
-      user and the current run belongs to a DIFFERENT user, raise
-      :class:`CrossUserWorkerError` before taking the lock. A
-      ``None`` on either side is not a mismatch (anonymous runs and
-      first-touch pinning keep working).
+    * **Ownership** — an ``owner_only`` (spawned) worker raises
+      :class:`CrossUserWorkerError` for any caller whose ``user_id``
+      differs from its owner's, ``None`` included, before taking the
+      lock.
     * **Lock** — held for the duration of the ``async with`` body so
-      concurrent invocations of the same worker serialise instead of
-      interleaving writes into the worker's session.
-    * **Touch** — pins ``user_id`` on first touch and ticks
-      ``last_used_at``, under the lock.
+      concurrent invocations of the same worker session serialise
+      instead of interleaving writes into it. Different users don't
+      wait on each other.
+    * **Touch** — ticks ``last_used_at``, under the lock.
     """
-    if (
-        handle.user_id is not None
-        and caller_user is not None
-        and handle.user_id != caller_user
-    ):
+    if handle.owner_only and caller_user != handle.user_id:
         raise CrossUserWorkerError(
             f"worker {handle.role!r} ({handle.worker_id}) belongs "
             f"to user_id {handle.user_id!r} but the current run is "
             f"user_id {caller_user!r}. Cross-tenant delegation is "
             "rejected."
         )
-    async with handle.lock:
-        handle.touch(user_id=caller_user)
-        yield handle
+    if handle.owner_only or caller_user is None:
+        async with handle.lock:
+            handle.touch()
+            yield handle
+        return
+    key = str(caller_user)
+    lock = handle._user_locks.setdefault(key, anyio.Lock())
+    try:
+        async with lock:
+            handle.touch()
+            yield handle
+    finally:
+        # Drop idle locks so a long-lived server doesn't keep one per
+        # user it has ever seen.
+        if not lock.locked() and lock.statistics().tasks_waiting == 0:
+            handle._user_locks.pop(key, None)
 
 
 def resolve_persistent_session(
@@ -192,13 +205,14 @@ def resolve_persistent_session(
     fallback: str,
     registry: dict[str, _WorkerHandle] | None,
     role_to_id: dict[str, str] | None,
+    user_id: str | None = None,
 ) -> tuple[str, _WorkerHandle | None]:
     """Pick a worker's ``session_id`` — persistent or per-run.
 
     Used at every architecture spawn site. When a worker has a
-    handle in the registry, return the handle's stable
-    ``session_id`` (and the handle, so the caller can acquire the
-    lock + check user_id). Otherwise return ``fallback`` (the
+    handle in the registry, return the handle's stable session for
+    ``user_id`` (default: the current run's user) and the handle, so
+    the caller can acquire it. Otherwise return ``fallback`` (the
     pre-existing per-run deterministic ID the architecture would
     have used) and ``None`` for the handle.
 
@@ -218,7 +232,8 @@ def resolve_persistent_session(
         and role in role_to_id
     ):
         handle = registry[role_to_id[role]]
-        return handle.session_id, handle
+        user = user_id if user_id is not None else get_run_context().user_id
+        return handle.session_for(user), handle
     return fallback, None
 
 

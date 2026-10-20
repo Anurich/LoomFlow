@@ -34,6 +34,35 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
   wrapped in an ``ExceptionGroup``. On trio, close streams with
   ``contextlib.aclosing`` before abandoning them.
 
+### Fixed — tenant isolation
+
+* **Journals and checkpoints are kept per user.** They were keyed by
+  session id alone, so a second user who reused a session id replayed
+  the first user's journaled results, and ``resume()`` restored the
+  first user's transcript. Both are now stored under
+  ``journal_scope(session_id, user_id)``. Runs without a ``user_id``
+  keep the bare session id, so single-user data written by earlier
+  versions still resumes. **Behaviour change:** a run *with* a
+  ``user_id`` won't replay journal entries or resume checkpoints that
+  earlier versions wrote for it. ``Agent.list_checkpoints`` takes
+  ``user_id=``.
+* **Persistent sub-agents keep one session per user.** A registered
+  worker used to be pinned to the first user who touched it. Anonymous
+  runs then got into that user's worker session (and replayed their
+  tool results), and every other user was refused, so a shared
+  ``Team`` coordinator served only one user. Each user now gets their
+  own stable session of the worker (``handle.session_for(user_id)``).
+  Workers spawned mid-run by ``spawn_worker`` belong to the spawning
+  user and refuse everyone else, anonymous callers included.
+* **Reflexion lessons stay with their user.** Lessons (which quote the
+  failing prompt) were recalled into every user's runs and written to
+  the anonymous memory bucket. They are now tagged with the run's
+  ``user_id``. A run recalls its own lessons plus any tagged
+  ``user_id="*"`` (``SHARED_LESSON``), which is how to seed curated
+  lessons for everyone; untagged lessons from earlier versions are no
+  longer recalled. Legacy-mode lessons go to the run's own memory
+  block, one per line (they used to run together).
+
 ## [0.16.0] — 2026-10-20
 
 ### Changed — `Swarm` handoffs now behave like the reference swarms

@@ -63,12 +63,14 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from ..core.context import get_run_context
 from ._signals import SignalMailbox
 from .journal import (
     Checkpoint,
     CheckpointMeta,
     InMemoryJournalStore,
     JournalStore,
+    journal_scope,
 )
 
 _current_session_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
@@ -98,6 +100,11 @@ def _stable_token(value: Any) -> str:
     if value is None or isinstance(value, str | bytes | bool | int | float):
         return repr(value)
     return _MEM_ADDR_RE.sub("", repr(value))
+
+
+def _scope(session_id: str) -> str:
+    """Journal scope for ``session_id`` under the current run's user."""
+    return journal_scope(session_id, get_run_context().user_id)
 
 
 def _step_key(
@@ -262,7 +269,11 @@ class JournaledRuntime:
         idempotency_key: str | None = None,
         **kwargs: Any,
     ) -> Any:
-        """Run ``fn`` once per ``(session, journal_key)`` and journal it.
+        """Run ``fn`` once per ``(session, user, journal_key)`` and journal it.
+
+        Steps are stored under :func:`~loomflow.runtime.journal.journal_scope`
+        of the open session and the current run's ``user_id``, so one
+        user's results never replay into another user's run.
 
         The journal key is ``name`` plus a fingerprint of
         ``args``/``kwargs``: same session + name + inputs ⇒ cached
@@ -287,13 +298,14 @@ class JournaledRuntime:
         if session_id is None:
             return await fn(*args, **kwargs)
 
+        scope = _scope(session_id)
         key = _step_key(name, args, kwargs, idempotency_key)
-        cached = await self._store.get_step(session_id, key)
+        cached = await self._store.get_step(scope, key)
         if cached is not None:
             return cached.value
 
         result = await fn(*args, **kwargs)
-        await self._store.put_step(session_id, key, result)
+        await self._store.put_step(scope, key, result)
         return result
 
     # ---- stream_step -----------------------------------------------------
@@ -329,8 +341,9 @@ class JournaledRuntime:
                 yield chunk
             return
 
+        scope = _scope(session_id)
         key = _step_key(name, args, kwargs)
-        cached = await self._store.get_stream(session_id, key)
+        cached = await self._store.get_stream(scope, key)
         if cached is not None:
             for chunk in cached:
                 yield chunk
@@ -340,4 +353,4 @@ class JournaledRuntime:
         async for chunk in fn(*args, **kwargs):
             recorded.append(chunk)
             yield chunk
-        await self._store.put_stream(session_id, key, recorded)
+        await self._store.put_stream(scope, key, recorded)

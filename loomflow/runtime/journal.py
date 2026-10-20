@@ -70,6 +70,24 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+def journal_scope(session_id: str, user_id: str | None) -> str:
+    """The key a session's journal steps and checkpoints are stored under.
+
+    A run without a ``user_id`` uses the bare ``session_id``, the layout
+    earlier versions wrote. A run with one gets its own scope, so two
+    users who reuse a session id never replay each other's steps or
+    resume each other's checkpoints. The encoding is injective: no
+    ``(session_id, user_id)`` pair maps onto another pair's key. To
+    prune one user's entries, pass this key as ``session_id``.
+    """
+    if user_id is None:
+        if session_id.startswith(("user:", "anon:")):
+            return f"anon:{session_id}"
+        return session_id
+    user = str(user_id)
+    return f"user:{len(user)}:{user}:{session_id}"
+
+
 @dataclass(frozen=True)
 class JournalEntry:
     """A single recorded step result with a creation timestamp."""

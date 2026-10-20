@@ -562,7 +562,7 @@ def _make_delegate_tool(
                 async with acquire_worker_session(
                     handle, caller_user
                 ):
-                    worker_session_id = handle.session_id
+                    worker_session_id = handle.session_for(caller_user)
                     # Memory propagation: install the coordinator's
                     # memory as ambient so a worker constructed
                     # without an explicit ``memory=`` inherits it.
@@ -930,12 +930,12 @@ def _make_spawn_worker_tool(
             # so unlike ``persistent_*`` sessions this one is never
             # revisited by a later run.
             session_id=f"{session.id}__spawned_{worker_id}",
-            # Pin to the spawning run's user immediately: a spawned
-            # worker belongs to the caller from birth (first-touch
-            # pinning would leave a None window). ``None`` for
-            # anonymous runs keeps first-touch semantics.
+            # Owned by the spawning run's user from birth: its
+            # instructions came from that user's conversation, so
+            # every other caller (anonymous included) is refused.
             user_id=get_run_context().user_id,
             created_at=datetime.now(UTC),
+            owner_only=True,
         )
 
         run_workers[role] = worker_agent

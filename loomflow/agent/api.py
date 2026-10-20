@@ -48,7 +48,7 @@ from ..architecture import (
     resolve_architecture,
 )
 from ..architecture.tool_host_wrappers import ExtendedToolHost
-from ..core.context import RunContext, set_run_context
+from ..core.context import RunContext, get_run_context, set_run_context
 from ..core.errors import OutputValidationError, RunTimeout
 from ..core.ids import new_id
 from ..core.protocols import (
@@ -79,7 +79,7 @@ from ..guardrails.base import Guardrail, apply_guardrails
 from ..model.echo import EchoModel
 from ..observability.tracing import NoTelemetry
 from ..runtime.inproc import InProcRuntime
-from ..runtime.journal import Checkpoint, CheckpointMeta
+from ..runtime.journal import Checkpoint, CheckpointMeta, journal_scope
 from ..security.audit import AuditLog
 from ..security.hooks import HookRegistry, PostToolHook, PreToolHook
 from ..security.permissions import AllowAll
@@ -1816,16 +1816,19 @@ class Agent:
 
         cp: Checkpoint | None = None
         run_session_id = session_id
+        # Checkpoints are stored per (session, user): one user can't
+        # resume from another's transcript by reusing a session id.
+        scope = journal_scope(session_id, user_id)
         get_latest = getattr(self._runtime, "get_latest_checkpoint", None)
         get_by_id = getattr(self._runtime, "get_checkpoint", None)
         if get_latest is not None and get_by_id is not None:
             try:
                 if from_checkpoint == "latest":
-                    cp = await get_latest(session_id)
+                    cp = await get_latest(scope)
                 else:
-                    cp = await get_by_id(session_id, from_checkpoint)
+                    cp = await get_by_id(scope, from_checkpoint)
                     if cp is not None:
-                        latest = await get_latest(session_id)
+                        latest = await get_latest(scope)
                         if (
                             latest is None
                             or latest.checkpoint_id != cp.checkpoint_id
@@ -1874,18 +1877,21 @@ class Agent:
         )
 
     async def list_checkpoints(
-        self, session_id: str, limit: int = 50
+        self, session_id: str, limit: int = 50, *, user_id: str | None = None
     ) -> list[CheckpointMeta]:
         """Newest-first checkpoint metadata for a session (G4).
 
         Convenience delegate to the runtime's duck-typed
         ``list_checkpoints`` extension. Returns ``[]`` when the
-        runtime has no checkpoint support.
+        runtime has no checkpoint support. Pass the ``user_id`` the
+        run used: checkpoints are stored per (session, user).
         """
         lister = getattr(self._runtime, "list_checkpoints", None)
         if lister is None:
             return []
-        result: list[CheckpointMeta] = await lister(session_id, limit=limit)
+        result: list[CheckpointMeta] = await lister(
+            journal_scope(session_id, user_id), limit=limit
+        )
         return result
 
     async def signal(
@@ -2065,7 +2071,10 @@ class Agent:
         try:
             await put(
                 Checkpoint(
-                    session_id=session.id,
+                    # Stored per (session, user); see ``resume``.
+                    session_id=journal_scope(
+                        session.id, get_run_context().user_id
+                    ),
                     turn=session.turns,
                     messages=list(session.messages),
                     cumulative_usage=session.cumulative_usage,

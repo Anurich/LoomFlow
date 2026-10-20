@@ -144,6 +144,10 @@ class Reflexion:
       chunks and only the top-``top_k_lessons`` most relevant
       lessons are surfaced on each attempt (instead of all past
       lessons). Avoids context bloat as lessons accumulate.
+      Lessons are tagged with the run's ``user_id`` (``""`` when
+      anonymous) and a run recalls only its own user's lessons plus
+      any tagged ``user_id="*"`` (:data:`SHARED_LESSON`), so seed
+      curated lessons for everyone with that tag.
     * ``top_k_lessons`` — how many lessons to recall per attempt
       (selective-recall mode only). Default 5.
     """
@@ -236,15 +240,26 @@ class Reflexion:
                 # rewritten (not appended) so the agent only sees the
                 # top-k relevant lessons, not the full lesson history.
                 if self._lesson_store is not None:
+                    # Lessons quote the failing prompt, so they stay
+                    # with the user whose run produced them; lessons
+                    # tagged ``user_id="*"`` are shared with everyone.
                     hits = await self._lesson_store.search(
-                        prompt, k=self._top_k
+                        prompt,
+                        k=self._top_k,
+                        filter={
+                            "user_id": {
+                                "$in": [_lesson_owner(deps), SHARED_LESSON]
+                            }
+                        },
                     )
                     if hits:
                         bullets = "\n".join(
                             f"- {r.chunk.content}" for r in hits
                         )
                         await deps.memory.update_block(
-                            self._lessons_block, bullets
+                            self._lessons_block,
+                            bullets,
+                            user_id=deps.context.user_id,
                         )
                         yield Event.architecture_event(
                             session.id,
@@ -331,6 +346,7 @@ class Reflexion:
                                     "attempt": attempt,
                                     "score": score,
                                     "prompt_excerpt": prompt[:200],
+                                    "user_id": _lesson_owner(deps),
                                 },
                             )
                         ]
@@ -338,7 +354,11 @@ class Reflexion:
                     persist_target = "lesson_store"
                 else:
                     await deps.memory.append_block(
-                        self._lessons_block, f"- {lesson}"
+                        self._lessons_block,
+                        # append_block concatenates as-is: one lesson
+                        # per line.
+                        f"- {lesson}\n",
+                        user_id=deps.context.user_id,
                     )
                     persist_target = self._lessons_block
                 yield Event.architecture_event(
@@ -417,3 +437,15 @@ class Reflexion:
 # ---------------------------------------------------------------------------
 
 _parse_score = parse_score
+
+
+#: ``user_id`` metadata value for a lesson every user may recall
+#: (e.g. curated lessons seeded into a ``lesson_store``).
+SHARED_LESSON = "*"
+
+
+def _lesson_owner(deps: Dependencies) -> str:
+    """The ``user_id`` metadata lessons are stored and recalled under
+    (``""`` for anonymous runs: not every vector store accepts None)."""
+    user = deps.context.user_id
+    return "" if user is None else str(user)
