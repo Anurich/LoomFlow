@@ -90,6 +90,7 @@ from ..core.protocols import Memory, Telemetry
 from ..core.streaming import stream_from
 from ..core.types import Event, EventKind
 from ..observability.tracing import NoTelemetry
+from ..runtime.journaled import journal_container
 from ..tools.registry import Tool
 
 if TYPE_CHECKING:
@@ -908,6 +909,13 @@ class Workflow:
             metadata=run_meta,
         )
         token = _ctx_var.set(ctx)
+        # Agent nodes run as child runs of this workflow run on a
+        # journaled runtime: separate journal namespaces, no waiting
+        # on each other (see ``journal_container``).
+        container = journal_container(
+            sid, user_id, label=f"workflow:{self.name}", run_id=ctx.run_id or new_id("wfrun")
+        )
+        container.__enter__()
         # Install the workflow's ``memory=`` (if any) as the
         # ambient memory for this run. Nested ``Agent`` steps that
         # didn't get their own ``memory=`` at construction read
@@ -1218,6 +1226,7 @@ class Workflow:
             _ambient_workspace_var.reset(workspace_token)
             _ambient_response_tone_var.reset(tone_token)
             _ambient_memory_var.reset(memory_token)
+            container.__exit__(None, None, None)
             _ctx_var.reset(token)
 
     # ---- visualisation ----------------------------------------------------

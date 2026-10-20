@@ -34,8 +34,9 @@ Runs and epochs:
     never replayed into the next request, even an identical one.
     :func:`resuming_last_run` (what ``Agent.resume`` uses without a
     checkpoint) continues the most recent run instead, finished or not.
-    A run opened inside another run — a sub-agent, a debater, a
-    workflow node — keys its steps under the enclosing run (and how
+    A run opened inside another run — a sub-agent, a debater, an
+    Agent node of a Workflow (see :func:`journal_container`) — keys its
+    steps under the enclosing run (and how
     many times that run has opened the sub-session), so resuming the
     outer run replays the sub-runs' work as well, and two calls to one
     persistent worker in a run stay distinct.
@@ -129,6 +130,7 @@ class _OpenRun:
         *,
         epoch: int = 0,
         next_epoch: int = 0,
+        container: bool = False,
     ) -> None:
         self.scope = scope
         self.session_id = session_id
@@ -136,6 +138,9 @@ class _OpenRun:
         self.parent = parent
         self.epoch = epoch
         self.next_epoch = next_epoch
+        # A container (a Workflow run) only groups the runs opened
+        # inside it: each becomes a child run, even on its own session.
+        self.container = container
         self.children: dict[str, int] = {}
         self.touched = False
 
@@ -150,6 +155,32 @@ class _OpenRun:
 _open_run_var: contextvars.ContextVar[_OpenRun | None] = contextvars.ContextVar(
     "_loom_open_run", default=None
 )
+
+
+@contextmanager
+def journal_container(
+    session_id: str, user_id: str | None, *, label: str, run_id: str
+) -> Iterator[None]:
+    """Group the runs opened inside this context — a Workflow's Agent
+    nodes — as child runs of one parent: each keys its steps under its
+    own namespace (siblings never replay each other's tool calls), they
+    don't wait on each other, and inside an outer run (a workflow used
+    as a tool) the group nests under it so resuming that run replays
+    them. A top-level group is keyed by ``run_id``: a workflow is not
+    itself durable, so a later workflow run replays nothing."""
+    parent = _open_run_var.get()
+    scope = journal_scope(session_id, user_id)
+    if parent is not None:
+        k = parent.children.get(label, 0) + 1
+        parent.children[label] = k
+        ns = hashlib.sha256(f"{parent.ns}|{label}|{k}".encode()).hexdigest()[:16]
+    else:
+        ns = f"c-{run_id}"
+    token = _open_run_var.set(_OpenRun(scope, session_id, ns, parent, container=True))
+    try:
+        yield
+    finally:
+        _open_run_var.reset(token)
 
 
 class _ScopeLock:
@@ -292,7 +323,12 @@ class JournaledRuntime:
         in the store and is unaffected."""
         scope = _scope(session_id)
         parent = _open_run_var.get()
-        if parent is not None and parent.scope == scope and parent.session_id == session_id:
+        if (
+            parent is not None
+            and not parent.container
+            and parent.scope == scope
+            and parent.session_id == session_id
+        ):
             # Re-entering the open run (nested contexts on one session).
             async with self._enter(session_id) as sess:
                 yield sess
@@ -370,7 +406,7 @@ class JournaledRuntime:
             return key
         if not run.touched:
             run.touched = True
-            if run.parent is None:
+            if run.parent is None and not run.container:
                 await self._store.put_step(scope, LAST_RUN_KEY, run.epoch)
         return f"{run.ns}/{key}" if run.ns else key
 

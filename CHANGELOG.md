@@ -554,6 +554,11 @@ reproduced, fixed and given a regression test.
 * Nested Workflow nodes, Agent nodes and ``as_tool`` run with the
   outer run's ``user_id``, ``session_id`` and ``metadata`` (a nested
   workflow got none of them; Agent nodes lost the metadata).
+* Agent nodes on a durable runtime run as child runs of the workflow
+  run: each journals under its own namespace (one node's tool result
+  is never replayed into another), parallel nodes sharing a runtime
+  and session run together instead of taking turns, and a workflow
+  used as a tool inside a durable agent run is replayed with it.
 * A failing node emits an ``ERROR`` event after
   ``WORKFLOW_STEP_FAILED``, as the ``stream()`` docstring promised.
 * ``Workflow.parallel`` raises a failing branch's exception itself, not

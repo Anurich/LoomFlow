@@ -237,3 +237,41 @@ async def test_an_interrupted_agent_node_stops_the_run() -> None:
     assert result.interrupted
     assert result.interruption_reason is not None and "max_turns" in result.interruption_reason
     assert result.output == "draft0"
+
+
+async def test_parallel_agent_nodes_on_one_durable_runtime_run_together(tmp_path: Any) -> None:
+    from loomflow.runtime import SqliteRuntime
+
+    active: list[int] = []
+    peak = {"n": 0}
+    calls: list[str] = []
+
+    @tool
+    async def fetch_price(sym: str) -> str:
+        """Fetch a price."""
+        active.append(1)
+        peak["n"] = max(peak["n"], len(active))
+        calls.append(sym)
+        await anyio.sleep(0.05)
+        active.pop()
+        return "100"
+
+    runtime = SqliteRuntime(tmp_path / "j.db")
+
+    def node(name: str) -> Agent:
+        turns = [
+            ScriptedTurn(tool_calls=[ToolCall(tool="fetch_price", args={"sym": "ACME"})]),
+            ScriptedTurn(text=f"{name} done"),
+        ]
+        return Agent(name, model=ScriptedModel(turns), tools=[fetch_price], runtime=runtime)
+
+    wf = Workflow("fan")
+    wf.add_node("start", _echo)
+    wf.add_node("a", node("a"))
+    wf.add_node("b", node("b"))
+    wf.set_start("start")
+    wf.add_edge("start", "a")
+    wf.add_edge("start", "b")
+    await wf.run("go", session_id="wf-1")
+    assert calls == ["ACME", "ACME"]  # neither replayed the other's call
+    assert peak["n"] == 2  # and they ran at the same time
