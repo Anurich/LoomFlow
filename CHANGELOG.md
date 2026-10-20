@@ -433,6 +433,38 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
   run) and ``"next_agent": "null"`` as none, and a run stopped by the
   budget keeps the board's latest contribution as its output.
 
+### Fixed — Workflow
+
+* Edges, router routes and defaults that name an unregistered node
+  fail when the run starts (``ValueError`` listing them), before any
+  node runs; a typo used to end the run silently after the source
+  node.
+* A fan-out inside a loop runs its branches concurrently and its join
+  fires once per iteration: the join rule now follows the graph's
+  forward edges (a loop's edge back to its head no longer counts), so
+  branches neither ran one at a time nor, with another declaration
+  order, fired the join early with half its inputs.
+* ``result.output`` no longer depends on which branch finished last:
+  when several branches end separately it is the deepest one, then
+  the one declared last. A branch that ends early (routes to END)
+  doesn't become the output of a run that went on elsewhere.
+* An Agent (or nested Workflow) node that comes back interrupted —
+  its ``max_turns``, a budget, a guardrail — stops the run:
+  ``WorkflowResult.interrupted`` / ``interruption_reason``
+  (``"<node>:<reason>"``) are set and ``output`` is the last value
+  completed before it. Downstream nodes used to run on ``''``.
+* Nested Workflow nodes, Agent nodes and ``as_tool`` run with the
+  outer run's ``user_id``, ``session_id`` and ``metadata`` (a nested
+  workflow got none of them; Agent nodes lost the metadata).
+* A failing node emits an ``ERROR`` event after
+  ``WORKFLOW_STEP_FAILED``, as the ``stream()`` docstring promised.
+* ``Workflow.parallel`` raises a failing branch's exception itself, not
+  an ``ExceptionGroup``, and takes ``max_concurrency``.
+* ``@step`` writes ``step_started`` / ``step_completed`` /
+  ``step_failed`` audit entries naming the step when the workflow has
+  an ``audit_log``, as documented; the docs no longer claim it
+  journals the step.
+
 ### Packaging
 
 * Removed the ``dbos`` and ``temporal`` extras: nothing in loomflow

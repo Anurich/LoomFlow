@@ -16,8 +16,8 @@ of both."
 Three ways to use it, ordered by ceremony:
 
 1. **Plain Python with ``@step``.** Decorate any ``async def`` and
-   it picks up telemetry + audit + (optional) journal hooks
-   automatically. Control flow stays as ``if/await/return``::
+   it picks up telemetry + audit hooks automatically when it runs
+   inside a workflow. Control flow stays as ``if/await/return``::
 
        @step
        async def classify(text: str) -> str: ...
@@ -67,6 +67,7 @@ were LLM-driven, tagged via the ``pattern`` span attribute.
 
 from __future__ import annotations
 
+import contextlib
 import inspect
 import math
 from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
@@ -163,11 +164,35 @@ class WorkflowResult:
       node produced. With cycles, intermediate values for revisits
       are NOT preserved here (the event stream from ``stream()``
       has the full per-iteration history if you need it).
+    * ``interrupted`` / ``interruption_reason`` — set when an Agent
+      (or nested Workflow) node came back interrupted (its
+      ``max_turns``, budget, a guardrail): the run stops there, the
+      reason reads ``"<node>:<reason>"``, and ``output`` is the last
+      value a node completed before it — not the interrupted node's
+      partial answer, which downstream nodes never see.
     """
 
     output: Any
     visited: list[str] = field(default_factory=list)
     per_step: dict[str, Any] = field(default_factory=dict)
+    interrupted: bool = False
+    interruption_reason: str | None = None
+
+
+@dataclass
+class _Interrupted:
+    """An Agent / nested Workflow node's interrupted result."""
+
+    output: Any
+    reason: str
+
+
+def _node_kwargs() -> dict[str, Any]:
+    """The live run's user, session and metadata, for a nested Agent /
+    Workflow run (framework keys — ``_workflow*`` — stay behind)."""
+    ctx = get_run_context()
+    metadata = {k: v for k, v in (ctx.metadata or {}).items() if not str(k).startswith("_")}
+    return {"user_id": ctx.user_id, "session_id": ctx.session_id, "metadata": metadata}
 
 
 # ---------------------------------------------------------------------------
@@ -196,24 +221,30 @@ def _coerce_step(s: StepLike) -> _StepFn:
       * ``Workflow`` — calls ``await s.run(input, **ctx).output``
       * ``async def`` — awaited directly with the previous output
       * ``def`` — dispatched to a worker thread via anyio
+
+    Agent and Workflow nodes run with the live run's ``user_id``,
+    ``session_id`` and ``metadata``; an interrupted result comes back
+    as :class:`_Interrupted` so the scheduler stops the run.
     """
     # Avoid circular import: Agent lives in loomflow.agent.api
     from ..agent.api import Agent
 
     if isinstance(s, Workflow):
         async def _run_wf(inp: Any) -> Any:
-            res = await s.run(inp)
+            res = await s.run(inp, **_node_kwargs())
+            if res.interrupted:
+                return _Interrupted(res.output, res.interruption_reason or "interrupted")
             return res.output
         return _run_wf
 
     if isinstance(s, Agent):
         async def _run_agent(inp: Any) -> Any:
-            ctx = get_run_context()
             res = await s.run(
                 str(inp) if not isinstance(inp, str) else inp,
-                user_id=ctx.user_id,
-                session_id=ctx.session_id,
+                **_node_kwargs(),
             )
+            if res.interrupted:
+                return _Interrupted(res.output, res.interruption_reason or "interrupted")
             return res.output
         return _run_agent
 
@@ -278,13 +309,14 @@ def step(
 ) -> Any:
     """Decorator that adds telemetry + audit hooks to an async step.
 
-    When called inside a live :class:`~loomflow.RunContext` (set
-    by :meth:`Workflow.run` or by an enclosing
-    :meth:`~loomflow.Agent.run`), the step opens a
-    ``jeeves.workflow.step`` span tagged with the step name and
-    writes ``step_started`` / ``step_completed`` audit entries
-    attributed to the current ``user_id``. Outside any context the
-    decorator is transparent — the function runs with no overhead.
+    When called inside a running :class:`Workflow`, the step opens a
+    ``loom.workflow.step`` span tagged with the step name (when the
+    workflow has ``telemetry=``) and writes ``step_started`` /
+    ``step_completed`` / ``step_failed`` audit entries carrying
+    ``{"step": <name>}`` and the current ``user_id`` (when it has
+    ``audit_log=``). It does not journal or replay the step. Outside
+    a workflow the decorator is transparent — the function runs with
+    no overhead.
 
     Use either as ``@step`` (uses the function's name) or as
     ``@step(name="custom-step-name")``.
@@ -316,7 +348,7 @@ def step(
                 f"{qualname} is synchronous. Either:\n"
                 f"  • Add 'async' to the def: "
                 f"`async def {fname}(...)` — gives this step "
-                f"telemetry / audit / journaling.\n"
+                f"telemetry and audit entries.\n"
                 f"  • Drop @step and pass the plain function "
                 f"directly (Workflow.chain / .route accept "
                 f"sync callables; they're dispatched to a "
@@ -328,25 +360,43 @@ def step(
 
         async def _wrapped(*args: Any, **kwargs: Any) -> Any:
             ctx = get_run_context()
-            telemetry: Telemetry | None = ctx.metadata.get(
-                "_workflow_telemetry"
-            ) if ctx.metadata else None
-            if telemetry is None or isinstance(telemetry, NoTelemetry):
-                # Outside a live workflow / no telemetry wired —
-                # run the function without overhead. This is the
+            meta = ctx.metadata or {}
+            telemetry: Telemetry | None = meta.get("_workflow_telemetry")
+            workflow: Workflow | None = meta.get("_workflow")
+            audited = workflow is not None and workflow._audit_log is not None
+            traced = telemetry is not None and not isinstance(telemetry, NoTelemetry)
+            if not traced and not audited:
+                # Outside a live workflow / nothing wired — run the
+                # function without overhead. This is the
                 # graceful-fallback property: ``@step`` is safe to
                 # leave on functions that may be called from a unit
                 # test or directly by a user.
                 return await f(*args, **kwargs)
 
-            async with telemetry.trace(
-                "loom.workflow.step",
-                step=step_name,
-                user_id=ctx.user_id,
-                session_id=ctx.session_id,
-                pattern="workflow",
-            ):
-                return await f(*args, **kwargs)
+            async def _audit(action: str, **extra: Any) -> None:
+                if audited and workflow is not None:
+                    await workflow._audit(ctx, action, {"step": step_name, **extra})
+
+            trace: contextlib.AbstractAsyncContextManager[Any] = (
+                telemetry.trace(
+                    "loom.workflow.step",
+                    step=step_name,
+                    user_id=ctx.user_id,
+                    session_id=ctx.session_id,
+                    pattern="workflow",
+                )
+                if traced and telemetry is not None
+                else contextlib.nullcontext()
+            )
+            async with trace:
+                await _audit("step_started")
+                try:
+                    out = await f(*args, **kwargs)
+                except Exception as exc:
+                    await _audit("step_failed", error=str(exc))
+                    raise
+                await _audit("step_completed")
+                return out
 
         # Preserve the original name for introspection helpers.
         # ``__qualname__`` may be missing on partial / lambdas; coerce
@@ -472,9 +522,19 @@ class Workflow:
       scheduler task that owns all counters, so the caps are
       race-free under concurrency. Join buffering is per wave: on a
       later loop iteration where only one in-edge delivers, the
-      join receives that bare value.
+      join receives that bare value. "Can still deliver" follows the
+      graph's forward edges (a loop's edge back to its head doesn't
+      count), so a fan-out inside a loop runs concurrently and its
+      join fires once per iteration.
     * A failing node cancels in-flight siblings and fails the run
-      with the original exception.
+      with the original exception. An interrupted Agent / Workflow
+      node stops the run (see :class:`WorkflowResult`).
+    * ``result.output`` is the output of the node the run ended on.
+      When several branches end without meeting, it is the deepest
+      one (longest path from the entry), then the one declared last
+      — never whichever finished last.
+    * Every edge, router route and default must name a registered
+      node; a typo fails when the run starts, before any node runs.
 
     Purely sequential graphs (chains, routers) execute exactly as
     they did under the sequential walker — same events, same order.
@@ -723,8 +783,8 @@ class Workflow:
     ) -> WorkflowResult:
         """Execute the graph. Each node receives its upstream
         node's return value (an AND-join with several delivered
-        inputs receives a list — see the class docstring); the last
-        completed node's return is ``result.output``.
+        inputs receives a list — see the class docstring); the final
+        node's return is ``result.output``.
 
         ``user_id`` / ``session_id`` / ``metadata`` populate the
         live :class:`RunContext` for the duration of the run. Any
@@ -748,22 +808,25 @@ class Workflow:
         visited: list[str] = []
         per_step: dict[str, Any] = {}
         output: Any = None
+        interrupted = False
+        reason: str | None = None
         for ev in events:
             if ev.kind == EventKind.WORKFLOW_STEP_COMPLETED:
                 node = ev.payload["node"]
                 visited.append(node)
                 per_step[node] = ev.payload["output"]
-                output = ev.payload["output"]
             elif ev.kind == EventKind.WORKFLOW_COMPLETED:
-                # Cover the zero-step case (e.g. ``add_router(START,
-                # ...)`` with ``default=END`` taking the unmatched
-                # path): no STEP_COMPLETED ever fires, so the
-                # workflow's output is whatever ``stream`` carries
-                # forward — the original input.
-                if not visited:
-                    output = ev.payload.get("output")
+                # The scheduler picks the output (see the class
+                # docstring); with zero steps it is the input.
+                output = ev.payload.get("output")
+                interrupted = bool(ev.payload.get("interrupted", False))
+                reason = ev.payload.get("interruption_reason")
         return WorkflowResult(
-            output=output, visited=visited, per_step=per_step
+            output=output,
+            visited=visited,
+            per_step=per_step,
+            interrupted=interrupted,
+            interruption_reason=reason,
         )
 
     async def stream(
@@ -779,7 +842,9 @@ class Workflow:
 
         Yields ``WORKFLOW_STARTED``, one ``WORKFLOW_STEP_STARTED`` /
         ``WORKFLOW_STEP_COMPLETED`` pair per visited node, and
-        finally ``WORKFLOW_COMPLETED`` (or ``ERROR`` on failure).
+        finally ``WORKFLOW_COMPLETED`` — or, when a node fails,
+        ``WORKFLOW_STEP_FAILED`` and ``ERROR`` before the exception
+        is raised.
         Consumers can break out of the iterator early to cancel.
 
         When the graph fans out, events from concurrently running
@@ -828,6 +893,7 @@ class Workflow:
         # Auto-generate a session_id if the caller didn't supply
         # one. Every Event needs one (for trace correlation), and
         # downstream consumers expect a stable id per workflow run.
+        self._validate_graph()
         sid = session_id if session_id is not None else new_id("wf_session")
 
         # Install a RunContext so @step decorators and nested agent
@@ -835,6 +901,7 @@ class Workflow:
         run_meta = dict(metadata or {})
         if self._telemetry is not None:
             run_meta["_workflow_telemetry"] = self._telemetry
+        run_meta["_workflow"] = self  # for @step's audit entries
         ctx = RunContext(
             user_id=user_id,
             session_id=sid,
@@ -900,7 +967,12 @@ class Workflow:
             total_steps = 0
             last_value: Any = input
 
-            decl_order, reach = self._edge_topology()
+            decl_order, reach, rank = self._edge_topology()
+            # Outputs of nodes that ended a path since the last node
+            # that passed its output on: the run's output is picked
+            # from these by graph position, not completion timing.
+            ended: dict[str, Any] = {}
+            interrupted_at: tuple[str, str] | None = None
             # Buffered deliveries per node: (declaration index of
             # the in-edge, arrival sequence, value). Sorted at fire
             # time so an AND-join's input list follows edge
@@ -1061,6 +1133,23 @@ class Workflow:
                             else:  # completed
                                 inflight -= 1
                                 active[node] -= 1
+                                if isinstance(data, _Interrupted):
+                                    yield Event(
+                                        kind=EventKind.WORKFLOW_STEP_COMPLETED,
+                                        session_id=sid,
+                                        payload={
+                                            "workflow": self.name,
+                                            "node": node,
+                                            "output": data.output,
+                                            "interrupted": True,
+                                            "interruption_reason": data.reason,
+                                        },
+                                    )
+                                    # Stop: nothing downstream runs on
+                                    # a partial answer.
+                                    interrupted_at = (node, data.reason)
+                                    tg.cancel_scope.cancel()
+                                    break
                                 last_value = data
                                 yield Event(
                                     kind=EventKind.WORKFLOW_STEP_COMPLETED,
@@ -1071,9 +1160,12 @@ class Workflow:
                                         "output": data,
                                     },
                                 )
-                                for dst in await self._taken_targets(
-                                    node, data
-                                ):
+                                taken = await self._taken_targets(node, data)
+                                if taken:
+                                    ended.clear()
+                                else:
+                                    ended[node] = data
+                                for dst in taken:
                                     _deliver(
                                         dst,
                                         decl_order[(node, dst)],
@@ -1094,12 +1186,33 @@ class Workflow:
                         tg.cancel_scope.cancel()
 
             if run_failure is not None:
+                if isinstance(run_failure, Exception):
+                    yield Event.error(sid, run_failure)
                 raise run_failure
 
+            if interrupted_at is not None:
+                yield Event(
+                    kind=EventKind.WORKFLOW_COMPLETED,
+                    session_id=sid,
+                    payload={
+                        "workflow": self.name,
+                        "output": last_value,
+                        "interrupted": True,
+                        "interruption_reason": f"{interrupted_at[0]}:{interrupted_at[1]}",
+                    },
+                )
+                return
+
+            node_order = {n: i for i, n in enumerate(self._nodes)}
+            final = (
+                ended[max(ended, key=lambda n: (rank.get(n, 0), node_order.get(n, 0)))]
+                if ended
+                else last_value
+            )
             yield Event(
                 kind=EventKind.WORKFLOW_COMPLETED,
                 session_id=sid,
-                payload={"workflow": self.name, "output": last_value},
+                payload={"workflow": self.name, "output": final},
             )
         finally:
             _ambient_workspace_var.reset(workspace_token)
@@ -1324,10 +1437,7 @@ class Workflow:
 
         async def _call(**kwargs: Any) -> Any:
             value = kwargs.get(input_arg, "")
-            ctx = get_run_context()
-            res = await self.run(
-                value, user_id=ctx.user_id, session_id=ctx.session_id
-            )
+            res = await self.run(value, **_node_kwargs())
             return res.output
 
         return Tool(
@@ -1502,6 +1612,7 @@ class Workflow:
         *,
         merge: Callable[[list[Any]], Any] | None = None,
         return_exceptions: bool = False,
+        max_concurrency: int | None = None,
         name: str = "parallel",
         telemetry: Telemetry | None = None,
         audit_log: AuditLog | str | Path | dict[str, Any] | None = None,
@@ -1523,8 +1634,9 @@ class Workflow:
         index in the results list handed to ``merge``, and the
         workflow completes normally with the partial results. With
         the default ``False``, the first branch exception cancels
-        the remaining branches and propagates (grouped by the anyio
-        task group).
+        the remaining branches and propagates as itself (not wrapped
+        in an ``ExceptionGroup``). ``max_concurrency`` caps how many
+        branches run at once (default: all).
 
         Each branch runs under its own ``loom.workflow.step``
         telemetry span (``step="fan_out.<branch>"``, named after the
@@ -1539,6 +1651,8 @@ class Workflow:
         """
         if not steps:
             raise ValueError("parallel requires at least one step")
+        if max_concurrency is not None and max_concurrency < 1:
+            raise ValueError("max_concurrency must be >= 1")
         coerced = [_coerce_step(s) for s in steps]
         merge_fn = merge if merge is not None else (lambda xs: xs)
         # Stable, disambiguated branch names for per-branch spans.
@@ -1561,9 +1675,14 @@ class Workflow:
                 ctx.metadata.get("_workflow_telemetry") or NoTelemetry()
             )
 
-            async def _one(i: int, fn: _StepFn) -> None:
+            limiter = anyio.CapacityLimiter(
+                max_concurrency if max_concurrency is not None else len(coerced)
+            )
+            failures: list[BaseException] = []
+
+            async def _one(i: int, fn: _StepFn, scope: anyio.CancelScope) -> None:
                 try:
-                    async with tel.trace(
+                    async with limiter, tel.trace(
                         "loom.workflow.step",
                         step=f"fan_out.{branch_names[i]}",
                         user_id=ctx.user_id,
@@ -1573,7 +1692,11 @@ class Workflow:
                         results[i] = await fn(value)
                 except Exception as exc:  # noqa: BLE001
                     if not return_exceptions:
-                        raise
+                        # First failure wins; cancel the siblings and
+                        # re-raise it unwrapped below.
+                        failures.append(exc)
+                        scope.cancel()
+                        return
                     # Gather-style: record the failure at this
                     # branch's slot; siblings keep running. (The
                     # span above already recorded the exception.)
@@ -1581,7 +1704,9 @@ class Workflow:
 
             async with anyio.create_task_group() as tg:
                 for i, fn in enumerate(coerced):
-                    tg.start_soon(_one, i, fn)
+                    tg.start_soon(_one, i, fn, tg.cancel_scope)
+            if failures:
+                raise failures[0]
             return merge_fn(results)
 
         wf = cls(
@@ -1600,6 +1725,30 @@ class Workflow:
         return wf
 
     # ---- internals --------------------------------------------------------
+
+    def _validate_graph(self) -> None:
+        """Every edge, route and default must name a registered node."""
+        unknown: list[str] = []
+        for src, targets in self._edges.items():
+            for target in targets:
+                if isinstance(target, _Router):
+                    names = [t for t in target.routes.values() if t != "__END__"]
+                    if isinstance(target.default, str):
+                        names.append(target.default)
+                elif isinstance(target, _Sentinel):
+                    continue
+                else:
+                    names = [target]
+                unknown += [f"{src} -> {n}" for n in names if n not in self._nodes]
+        entry = self._entry_router
+        if entry is not None and isinstance(entry.default, str) and entry.default not in self._nodes:
+            unknown.append(f"START -> {entry.default}")
+        if unknown:
+            raise ValueError(
+                f"workflow {self.name!r} has edges to unregistered nodes: "
+                + ", ".join(unknown)
+                + ". add_node() them or fix the names."
+            )
 
     def _validate_source(self, source: str) -> None:
         if source not in self._nodes:
@@ -1639,10 +1788,10 @@ class Workflow:
 
     def _edge_topology(
         self,
-    ) -> tuple[dict[tuple[str, str], int], dict[str, set[str]]]:
+    ) -> tuple[dict[tuple[str, str], int], dict[str, set[str]], dict[str, int]]:
         """Precompute static edge metadata for one scheduler run.
 
-        Returns ``(decl_order, reach)``:
+        Returns ``(decl_order, reach, rank)``:
 
         * ``decl_order`` — ``(source, target) -> declaration index``
           across ALL potential edges (plain targets, every router
@@ -1650,13 +1799,16 @@ class Workflow:
           this index so the joined list follows edge declaration
           order.
         * ``reach`` — per node, the set of nodes reachable from it
-          through any static edge (routers over-approximated as
-          "could take any branch"). Used by the readiness rule: a
-          join must not fire while an in-flight or pending node
-          could still deliver to it.
+          through static *forward* edges (routers over-approximated
+          as "could take any branch"; a loop's back edges — found by
+          a depth-first search from the entry — left out). Used by
+          the readiness rule: a join must not fire while an in-flight
+          or pending node could still deliver to it in this pass.
+        * ``rank`` — each node's depth along the forward edges, for
+          picking the output among branches that end separately.
         """
         decl: dict[tuple[str, str], int] = {}
-        succ: dict[str, set[str]] = {}
+        succ: dict[str, list[str]] = {}
         idx = 0
         for src, targets in self._edges.items():
             for target in targets:
@@ -1677,19 +1829,68 @@ class Workflow:
                     if (src, dst) not in decl:
                         decl[(src, dst)] = idx
                         idx += 1
-                    succ.setdefault(src, set()).add(dst)
+                    if dst not in succ.setdefault(src, []):
+                        succ[src].append(dst)
+
+        # Back edges: an edge to a node still on the DFS stack. Roots
+        # are the entry points first, then every node (declaration
+        # order) so unreachable parts are covered deterministically.
+        roots: list[str] = []
+        if self._start is not None:
+            roots.append(self._start)
+        if self._entry_router is not None:
+            roots += [t for t in self._entry_router.routes.values() if t != "__END__"]
+            if isinstance(self._entry_router.default, str):
+                roots.append(self._entry_router.default)
+        roots += list(self._nodes)
+        back: set[tuple[str, str]] = set()
+        state: dict[str, int] = {}  # 1 = on the stack, 2 = finished
+        postorder: list[str] = []
+        for root in roots:
+            if root in state or root not in self._nodes:
+                continue
+            state[root] = 1
+            stack: list[tuple[str, int]] = [(root, 0)]
+            while stack:
+                node, i = stack[-1]
+                children = succ.get(node, [])
+                if i < len(children):
+                    stack[-1] = (node, i + 1)
+                    child = children[i]
+                    if state.get(child) == 1:
+                        back.add((node, child))
+                    elif child not in state and child in self._nodes:
+                        state[child] = 1
+                        stack.append((child, 0))
+                else:
+                    state[node] = 2
+                    postorder.append(node)
+                    stack.pop()
+        forward = {
+            src: [d for d in dsts if (src, d) not in back]
+            for src, dsts in succ.items()
+        }
+        # Depth along the forward edges (longest path from an entry):
+        # branches that don't depend on each other tie, and the tie
+        # goes to declaration order.
+        rank: dict[str, int] = {}
+        for node in reversed(postorder):  # a topological order
+            rank.setdefault(node, 0)
+            for d in forward.get(node, ()):
+                rank[d] = max(rank.get(d, 0), rank[node] + 1)
+
         reach: dict[str, set[str]] = {}
         for node in self._nodes:
             seen: set[str] = set()
-            stack = list(succ.get(node, ()))
-            while stack:
-                nxt = stack.pop()
+            todo = list(forward.get(node, ()))
+            while todo:
+                nxt = todo.pop()
                 if nxt in seen:
                     continue
                 seen.add(nxt)
-                stack.extend(succ.get(nxt, ()))
+                todo.extend(forward.get(nxt, ()))
             reach[node] = seen
-        return decl, reach
+        return decl, reach, rank
 
     async def _audit(
         self, ctx: RunContext, action: str, payload: dict[str, Any]
