@@ -45,6 +45,7 @@ from ..core.types import (
     MemoryProfile,
     Message,
 )
+from . import _extractions
 from ._hybrid import default_recall_scored
 
 __all__ = ["LazyMemory"]
@@ -237,6 +238,11 @@ class LazyMemory:
         session_id: str | None = None,
         before: datetime | None = None,
     ) -> int:
+        # A background extraction of an erased episode would write
+        # its facts back after this returns.
+        await _extractions.stop_extractions(
+            self, user_id=user_id, session_id=session_id, before=before
+        )
         inner = await self._resolve()
         result: int = await inner.forget(
             user_id=user_id, session_id=session_id, before=before

@@ -54,7 +54,7 @@ def main() -> None:
         print(f"      session_id = {handle.session_id}")
         print(
             f"      user_id    = {handle.user_id} "
-            "(pinned on first delegate / send_message)"
+            "(None: shared, one session per user via session_for)"
         )
     print()
     print(

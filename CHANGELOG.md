@@ -7,6 +7,61 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 For development-history detail (per-slice notes, file maps, gate
 counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 
+## [Unreleased]
+
+### Fixed
+
+Found while checking the docs against the code; all but the ReWOO
+prompt bug came with 0.17.0 - 0.17.2.
+
+* **Workspace and living-plan tools work under a process sandbox.**
+  With ``tools=OSSandbox(...)`` or ``SubprocessSandbox(...)`` plus
+  ``workspace=`` or ``living_plan=True``, every notebook and plan call
+  failed ("not picklable"): since sandboxes gained ``register()`` in
+  0.17.0 these framework tools were registered inside the sandbox,
+  which can't ship their closures to its child. They run on an
+  in-process layer beside the sandbox again, as in 0.16.
+* **A skill's ``tools.py`` runs under a process sandbox.** Its tools
+  failed with ``ModuleNotFoundError``: the module is loaded under a
+  name the child can't import. The child now loads it from its file
+  (and Seatbelt / Bubblewrap let it read the skill's directory).
+  ``build_tools(ctx)`` closures still can't cross a process boundary;
+  under ``SubprocessSandbox`` such a tool now gets an error result on
+  every Python (on 3.12 and 3.13 the pickling ``AttributeError``
+  escaped ``call()``).
+* **Seatbelt starts the child in its first root**, as Bubblewrap does.
+  It inherited the parent's working directory, and when the profile
+  didn't let it read that directory Python failed to start
+  (``PermissionError``), so every call failed. Relative paths in a
+  tool now resolve in the root.
+* **``agent.memory.forget()`` stops background extraction.**
+  ``agent.memory`` is your backend, not the auto-extract wrapper, so
+  the 0.17.0 fix only applied inside the agent: an extraction still
+  running when you called ``agent.memory.forget(user_id=...)`` wrote
+  the erased facts back. Every backend's ``forget`` now stops those
+  extractions first.
+* **An interrupted branch stops ``Workflow.parallel``.** An Agent
+  branch that ran out of turns (or hit a budget or guardrail) reached
+  ``merge`` as a private object and the run reported
+  ``interrupted=False``. It now stops the run like an interrupted
+  graph node: ``WorkflowResult.interrupted`` is set,
+  ``interruption_reason`` is ``"fan_out:<branch>:<reason>"`` and
+  ``merge`` isn't called.
+* **Role-model strings can take their key from the Agent's secrets.**
+  ``Reflexion(evaluator_model="gpt-4.1-mini")`` (or any OpenAI /
+  DeepSeek id) raised a missing-credentials error in the
+  architecture's constructor when the key was only in
+  ``Tuning(secrets=...)``: an OpenAI client needs its key when it is
+  built, before the Agent could pass its secrets. The spec is now
+  checked with a stand-in key and the Agent builds the model with its
+  secrets, as 0.17.0 intended; a bad spec still fails at construction.
+* **ReWOO's default planner prompt shows the reference it reads.** Its
+  prose went through ``str.format`` and told the model to write
+  ``{En}``, which the executor didn't recognise, so a step following it
+  got the literal text instead of the earlier step's output. The prose
+  now says ``{{En}}``, and ``{En}`` is read as a reference too (a
+  custom prompt's ``{{En}}`` becomes ``{En}`` once formatted).
+
 ## [0.17.2] — 2026-10-20
 
 ### Added
@@ -325,7 +380,8 @@ reproduced, fixed and given a regression test.
   boundaries. ``loom.*`` metrics get units. **Behaviour change:**
   metrics no longer carry ``session_id``, ``turns`` or ``user_id``
   attributes, since per-session or per-user series are unbounded
-  cardinality. Those ids stay on the spans.
+  cardinality. ``session_id`` stays on the agent spans; ``user_id``
+  is on workflow step spans and in every audit entry.
 * **``/stream``:** a failure after the stream started is sent as
   ``event: stream_error`` (it reused ``error``, the name of agent
   error events, with a different payload).

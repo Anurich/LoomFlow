@@ -49,6 +49,7 @@ from ..core.types import (
     MemoryProfile,
     Message,
 )
+from . import _extractions
 from ._hybrid import default_recall_scored
 from .consolidator import Consolidator
 
@@ -140,6 +141,8 @@ class AutoExtractMemory:
         # Which episode each pending task is extracting, so ``forget``
         # can stop the ones it erases before they write facts back.
         self._pending_episodes: dict[asyncio.Task[None], Episode] = {}
+        # So the backend's own ``forget`` can stop them too.
+        _extractions.track(self)
         if auto_picked:
             _maybe_emit_default_on_notice()
 
@@ -406,11 +409,30 @@ class AutoExtractMemory:
     ) -> int:
         """Erase from the wrapped memory, after stopping any background
         extraction of an erased episode: otherwise it would write the
-        erased facts back once ``forget`` returned."""
+        erased facts back once ``forget`` returned. (The backend's own
+        ``forget`` does the same, for callers that reach it directly.)"""
+        await self.stop_extractions(
+            user_id=user_id, session_id=session_id, before=before
+        )
+        result: int = await self._inner.forget(
+            user_id=user_id, session_id=session_id, before=before
+        )
+        return result
+
+    async def stop_extractions(
+        self,
+        *,
+        user_id: str | None,
+        session_id: str | None = None,
+        before: datetime | None = None,
+    ) -> None:
+        """Cancel, and wait out, the background extractions of the
+        episodes a ``forget`` with these arguments erases."""
         doomed = [
             task
             for task, ep in list(self._pending_episodes.items())
-            if ep.user_id == user_id
+            if not task.done()
+            and ep.user_id == user_id
             and (session_id is None or ep.session_id == session_id)
             and (before is None or ep.occurred_at < before)
         ]
@@ -418,10 +440,6 @@ class AutoExtractMemory:
             task.cancel()
         if doomed:
             await asyncio.wait(doomed)
-        result: int = await self._inner.forget(
-            user_id=user_id, session_id=session_id, before=before
-        )
-        return result
 
     async def export(
         self, *, user_id: str | None = None

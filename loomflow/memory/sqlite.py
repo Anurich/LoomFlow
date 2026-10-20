@@ -58,6 +58,7 @@ from ..core.types import (
     Message,
     Role,
 )
+from . import _extractions
 from ._embedding_util import cosine, pack_float32, unpack_float32
 from .embedder import HashEmbedder, warn_hash_embedder_fallback
 from .facts import FactStore, count_facts, delete_facts
@@ -776,6 +777,11 @@ class SqliteMemory:
         session_id: str | None = None,
         before: datetime | None = None,
     ) -> int:
+        # A background extraction of an erased episode would write
+        # its facts back after this returns.
+        await _extractions.stop_extractions(
+            self, user_id=user_id, session_id=session_id, before=before
+        )
         async with self._async_lock:
             deleted = await anyio.to_thread.run_sync(
                 self._forget_episodes_sync,

@@ -508,12 +508,12 @@ class Agent:
         if self._workspace is not None:
             author = self._workspace_name or "agent"
             ws_tools = _make_ws_tools(self._workspace, author=author)
-            if not isinstance(host, InProcessToolHost) and not hasattr(
-                host, "register"
-            ):
-                # Non-register-capable host (raw MCP, etc.) — wrap so
-                # we can add the workspace tools alongside its native
-                # ones. Mirrors the skills branch above.
+            if not isinstance(host, (InProcessToolHost, ExtendedToolHost)):
+                # The workspace tools are framework closures over the
+                # notebook: they go on an in-process layer beside the
+                # host's own tools, never inside a sandbox (a process
+                # sandbox can't ship a closure to its child). Mirrors
+                # ``load_skill`` above.
                 host = ExtendedToolHost(host, [])
             for t in ws_tools:
                 host.register(t)  # type: ignore[union-attr]
@@ -573,9 +573,8 @@ class Agent:
                     *plan_tools,
                     _make_recall_past_plans(plan_workspace, author=plan_author),
                 ]
-            if not isinstance(host, InProcessToolHost) and not hasattr(
-                host, "register"
-            ):
+            if not isinstance(host, (InProcessToolHost, ExtendedToolHost)):
+                # In-process layer, as for the workspace tools.
                 host = ExtendedToolHost(host, [])
             for t in plan_tools:
                 host.register(t)  # type: ignore[union-attr]
@@ -1243,11 +1242,11 @@ class Agent:
         give the model up to ``retries`` follow-up turns to fix it.
 
         ``schema`` may be a single ``BaseModel`` subclass or a tagged
-        union (``A | B`` / ``Union[A, B]``). For unions we try each
-        member in order and accept the first that validates — letting
-        an agent return one of several shapes per call (e.g. a
-        ``Receipt`` on success or a structured ``Error`` on
-        failure).
+        union (``A | B`` / ``Union[A, B]``). For unions the output
+        validates as the member it fills best (most fields set), not
+        the first that accepts it — letting an agent return one of
+        several shapes per call (e.g. a ``Receipt`` on success or a
+        structured ``Error`` on failure).
 
         Retry turns are single-shot model calls (no tools, no full
         ReAct loop) because the architecture has already terminated

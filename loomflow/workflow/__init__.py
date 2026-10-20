@@ -1644,8 +1644,12 @@ class Workflow:
         workflow completes normally with the partial results. With
         the default ``False``, the first branch exception cancels
         the remaining branches and propagates as itself (not wrapped
-        in an ``ExceptionGroup``). ``max_concurrency`` caps how many
-        branches run at once (default: all).
+        in an ``ExceptionGroup``). An Agent or Workflow branch that
+        comes back interrupted stops the run the same way, without
+        calling ``merge``: ``WorkflowResult.interrupted`` is set and
+        ``interruption_reason`` names the branch
+        (``"fan_out:<branch>:<reason>"``). ``max_concurrency`` caps how
+        many branches run at once (default: all).
 
         Each branch runs under its own ``loom.workflow.step``
         telemetry span (``step="fan_out.<branch>"``, named after the
@@ -1688,6 +1692,7 @@ class Workflow:
                 max_concurrency if max_concurrency is not None else len(coerced)
             )
             failures: list[BaseException] = []
+            interrupts: dict[int, _Interrupted] = {}
 
             async def _one(i: int, fn: _StepFn, scope: anyio.CancelScope) -> None:
                 try:
@@ -1699,6 +1704,15 @@ class Workflow:
                         pattern="workflow",
                     ):
                         results[i] = await fn(value)
+                    if isinstance(results[i], _Interrupted):
+                        # An interrupted Agent / Workflow branch stops
+                        # the run, as an interrupted node does: merge
+                        # never sees a partial answer. Like a failure,
+                        # it cancels the siblings unless
+                        # ``return_exceptions``.
+                        interrupts[i] = results[i]
+                        if not return_exceptions:
+                            scope.cancel()
                 except Exception as exc:  # noqa: BLE001
                     if not return_exceptions:
                         # First failure wins; cancel the siblings and
@@ -1716,6 +1730,12 @@ class Workflow:
                     tg.start_soon(_one, i, fn, tg.cancel_scope)
             if failures:
                 raise failures[0]
+            if interrupts:
+                first = min(interrupts)
+                return _Interrupted(
+                    interrupts[first].output,
+                    f"{branch_names[first]}:{interrupts[first].reason}",
+                )
             return merge_fn(results)
 
         wf = cls(

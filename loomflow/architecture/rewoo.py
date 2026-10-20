@@ -99,8 +99,8 @@ Output ONLY a JSON array of step objects. Each step has:
 - "tool": the name of one of the available tools
 - "args": a dict of arguments to pass to the tool
 
-You may reference a prior step's output in args using `{{En}}`. The
-worker will substitute `{{En}}` with the actual output of step En
+You may reference a prior step's output in args using `{{{{En}}}}`. The
+worker will substitute `{{{{En}}}}` with the actual output of step En
 before invoking the tool.
 
 Available tools:
@@ -383,12 +383,16 @@ class ReWOO:
 # ---------------------------------------------------------------------------
 
 
-# ``{{E1}}`` (our planner format) or ``#E1`` (the paper's).
-_PLACEHOLDER_RE = re.compile(r"\{\{(E\d+)\}\}|(?<![\w#])#(E\d+)\b")
+# ``{{E1}}`` (our planner format), ``{E1}`` (what ``{{E1}}`` in a
+# custom prompt becomes once ``str.format`` has filled it) or ``#E1``
+# (the paper's).
+_PLACEHOLDER_RE = re.compile(
+    r"\{\{(E\d+)\}\}|(?<!\{)\{(E\d+)\}(?!\})|(?<![\w#])#(E\d+)\b"
+)
 
 
 def _placeholder_id(match: re.Match[str]) -> str:
-    return match.group(1) or match.group(2)
+    return match.group(1) or match.group(2) or match.group(3)
 
 
 def _extract_placeholders(value: Any) -> list[str]:

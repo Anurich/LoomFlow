@@ -83,6 +83,18 @@ if TYPE_CHECKING:
 _NULL_CTX: contextlib.AbstractAsyncContextManager[None] = contextlib.nullcontext()
 
 
+class _StandInKey:
+    """A secrets backend that answers every lookup with a placeholder,
+    so a role-model spec can be checked before the Agent's own secrets
+    are bound."""
+
+    def lookup_sync(self, ref: str) -> str | None:
+        return "unbound-role-model-key"
+
+    async def lookup(self, ref: str) -> str | None:
+        return self.lookup_sync(ref)
+
+
 def resolve_role_model(spec: str | Model | None) -> Model | None:
     """Resolve a per-role model kwarg (``planner_model=`` etc.).
 
@@ -107,7 +119,14 @@ def resolve_role_model(spec: str | Model | None) -> Model | None:
         return spec
     from ..agent.api import _resolve_model  # lazy, cycle-safe
 
-    model = _resolve_model(spec)
+    try:
+        model = _resolve_model(spec)
+    except Exception:  # noqa: BLE001 — a bad spec raises again below
+        # The provider key may live only in the Agent's secrets backend,
+        # which isn't bound yet (an OpenAI client needs its key when it
+        # is built). Check the spec with a stand-in key; the Agent
+        # rebuilds the model with its real secrets.
+        model = _resolve_model(spec, secrets=_StandInKey())
     try:
         model._loom_role_spec = spec  # type: ignore[attr-defined]
     except (AttributeError, TypeError):  # slotted / frozen model classes

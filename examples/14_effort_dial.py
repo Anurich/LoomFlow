@@ -83,8 +83,8 @@ async def main() -> None:
     # ------------------------------------------------------------------
     #
     # We sweep effort across "low → medium → high → xhigh" on
-    # ``claude-opus-4-7``, the only regime that accepts the full
-    # enum unclamped. The dict form keeps the model + dial in one
+    # ``claude-opus-4-7``, which accepts the full enum unclamped
+    # (as do Claude 5.x and Opus 4.8). The dict form keeps the model + dial in one
     # place; ``run(..., effort=)`` overrides it per call.
 
     agent = Agent(

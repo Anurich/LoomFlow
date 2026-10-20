@@ -35,6 +35,7 @@ from ..core.types import (
     Message,
     Role,
 )
+from . import _extractions
 from ._embedding_util import cosine, pack_float32, unpack_float32
 from ._user_key import decode_legacy_user_id, encode_user_id
 from .embedder import HashEmbedder, warn_hash_embedder_fallback
@@ -623,6 +624,11 @@ class RedisMemory:
         session_id: str | None = None,
         before: datetime | None = None,
     ) -> int:
+        # A background extraction of an erased episode would write
+        # its facts back after this returns.
+        await _extractions.stop_extractions(
+            self, user_id=user_id, session_id=session_id, before=before
+        )
         # Scan all episode keys, filter Python-side, then remove the
         # matches in ONE batched UNLINK (non-blocking delete) instead
         # of a round-trip per key. Faster than maintaining a
