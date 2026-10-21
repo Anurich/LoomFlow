@@ -401,13 +401,13 @@ def trace_page(
     agent_labels: Mapping[str, str],
     structure: Mapping[str, Any] | None = None,
     token: str | None = None,
-    notice: tuple[str, str] | None = None,
+    notice: str | None = None,
     score_keys: Sequence[str] = (),
     datasets: Sequence[str] = (),
 ) -> str:
-    """The trace page. With a form ``token`` it has forms to score the
-    run and add it to a dataset; ``notice`` is ``(panel, html)``, a
-    confirmation shown in the ``"scores"`` or ``"datasets"`` panel."""
+    """The trace page. With a form ``token`` its review bar can score
+    the run and add it to a dataset (``datasets``, most recently used
+    first); ``notice`` is HTML confirming what was just saved."""
     spans = trace["spans"]
     ordered = _ordered(spans)
     by_id = {s["span_id"]: s for s in spans}
@@ -435,7 +435,8 @@ def trace_page(
         weight = "font-weight:700;" if depth == 0 else ""
         status = "" if span.get("status") in (None, "ok") else f" {status_html(span.get('status'))}"
         rows.append(
-            f'<a class="tl-row" href="{href(base, span=span["span_id"])}#detail"{current}>'
+            f'<a class="tl-row" id="s-{e(span["span_id"])}" href="{href(base, span=span["span_id"])}'
+            f'#s-{e(span["span_id"])}"{current}>'
             f'<span class="tl-name" style="padding-left:{depth * 16}px">'
             f'<span class="dot {css}" aria-hidden="true"></span>'
             f'<span class="label {label_cls}" style="{weight}">{e(span["name"])}</span>{status}</span>'
@@ -446,7 +447,7 @@ def trace_page(
         f'<span style="position:absolute;left:{p * 100 - (3 if p else 0):.1f}%">{e(fmt_ms(window * p * 1000))}</span>'
         for p in (0.0, 1 / 3, 2 / 3)
     )
-    timeline = f"""<section class="panel scroll wide" aria-label="Timeline">
+    timeline = f"""<section class="panel scroll" aria-label="Timeline">
 <div class="tl">
 <div class="panel-head"><h2>Timeline</h2><div class="legend">
 <span><span class="swatch k-model" aria-hidden="true"></span>Model call</span>
@@ -509,14 +510,15 @@ def trace_page(
 <a class="btn" href="{href(base + ".json")}">JSON</a></div></div>
 <dl class="meta">{meta_html}</dl>
 {error}
-<div class="split">
+{_review_bar(trace, token=token, keys=score_keys, datasets=datasets, notice=notice)}
+<div class="trace-split">
+<div class="col">
 {timeline}
-<div class="side">
+{architecture}
+</div>
+<div class="detail">
 {detail}
-{_scores_panel(trace, token=token, keys=score_keys, notice=_notice(notice, "scores"))}
-{_dataset_panel(trace, token=token, datasets=datasets, notice=_notice(notice, "datasets")) if token else ""}
-</div></div>
-{architecture}"""
+</div></div>"""
 
 
 def _attr(attrs: Mapping[str, Any], *keys: str) -> Any:
@@ -631,77 +633,90 @@ def _block(title: str, text: str) -> str:
     return f'<div style="display:flex;flex-direction:column;gap:6px">{heading}<pre class="code">{e(text)}</pre></div>'
 
 
-def _notice(notice: tuple[str, str] | None, panel: str) -> str:
-    if notice is None or notice[0] != panel:
-        return ""
-    return f'<div class="notice ok" role="status">{notice[1]}</div>'
+def _score_chip(score: Mapping[str, Any], token: str | None) -> str:
+    note = " · ".join(str(x) for x in (score.get("source"), score.get("comment")) if x)
+    remove = (
+        f'<form class="inline" method="post" action="/scores/{e(score["id"])}/delete">{_token_field(token)}'
+        f'<button class="chip-x" type="submit" aria-label="Remove the {e(score["key"])} score" '
+        f'title="Remove">×</button></form>'
+        if token and score.get("id") is not None
+        else ""
+    )
+    return (f'<span class="score-chip" title="{e(note)}"><span class="mono">{e(score["key"])}</span>'
+            f'<strong>{e(fmt_score(score))}</strong>'
+            f'{f"<span class=note>{e(note)}</span>" if note else ""}{remove}</span>')
 
 
-def _scores_panel(trace: Mapping[str, Any], *, token: str | None, keys: Sequence[str], notice: str = "") -> str:
-    scores = trace.get("scores") or []
-    if not scores:
-        hint = "Score it below, or" if token else "Add one with"
-        body = (f'<p class="soft">No scores yet. {hint} <span class="mono">'
-                "loomflow.studio.score(result, key, value)</span> in code.</p>")
-    else:
-        parts = []
-        for s in scores:
-            remove = (
-                f'<form class="inline" method="post" action="/scores/{e(s["id"])}/delete">{_token_field(token)}'
-                f'<button class="link-btn" type="submit" aria-label="Remove the {e(s["key"])} score">Remove</button>'
-                "</form>"
-                if token and s.get("id") is not None
-                else "<span></span>"
-            )
-            parts.append(
-                f'<div class="score-row"><span class="mono" style="font-size:13px">{e(s["key"])}</span>'
-                f'<span><strong>{e(fmt_score(s))}</strong></span>{remove}<span></span>'
-                f'<span class="faint" style="font-size:13px">{e(s.get("source"))}'
-                f'{" · " + e(s["comment"]) if s.get("comment") else ""}</span></div>'
-            )
-        body = "".join(parts)
-    form = ""
-    if token:
-        suggestions = list(dict.fromkeys(["review", *keys]))
-        form = f"""<form class="stack" method="post" action="/traces/{e(quote(trace["trace_id"]))}/scores">
-{_token_field(token)}
-<label for="s-key">Score</label>
-<input id="s-key" type="text" name="key" value="review" list="s-keys" maxlength="64" required>
-{_options("s-keys", suggestions)}
-<div class="choices" role="radiogroup" aria-label="Verdict">
-<label><input type="radio" name="verdict" value="good"> Good</label>
-<label><input type="radio" name="verdict" value="bad"> Bad</label>
-<label for="s-value">or a value</label>
-<input id="s-value" type="text" name="value" maxlength="200" placeholder="4, 0.8 or a label" style="width:auto;flex:1 1 140px">
-</div>
-<label for="s-comment">Comment</label>
-<input id="s-comment" type="text" name="comment" maxlength="2000" placeholder="Optional">
-<div><button class="btn primary" type="submit">Save score</button></div>
-</form>"""
-    return (f'<section class="panel pad" id="scores" aria-label="Scores"><h2>Scores</h2>{notice}<div>{body}</div>'
-            f"{form}</section>")
-
-
-def _dataset_panel(
-    trace: Mapping[str, Any], *, token: str | None, datasets: Sequence[str], notice: str = ""
+def _review_bar(
+    trace: Mapping[str, Any],
+    *,
+    token: str | None,
+    keys: Sequence[str],
+    datasets: Sequence[str],
+    notice: str | None,
 ) -> str:
+    """Scores as chips, one-click Good / Bad, and two drawers (opened
+    by their links, no script): another score, and adding the run to
+    a dataset."""
+    scores = trace.get("scores") or []
+    chips = "".join(_score_chip(s, token) for s in scores) or (
+        '<span class="soft">None yet.</span>' if token else
+        '<span class="soft">None yet. Add them with <span class="mono">loomflow.studio.score(result, key, '
+        "value)</span>.</span>"
+    )
+    status = f'<div class="notice ok" role="status">{notice}</div>' if notice else ""
+    head = f'<div class="review-row"><span class="review-label">Scores</span><div class="chips">{chips}</div>'
+    if not token:
+        return f'<section class="panel review" id="scores" aria-label="Scores">{head}</div>{status}</section>'
+    action = f"/traces/{e(quote(trace['trace_id']))}"
+
     def text(value: Any) -> str:
         return value if isinstance(value, str) else pretty(value) if value is not None else ""
 
-    return f"""<section class="panel pad" id="datasets" aria-label="Add to a dataset"><h2>Add to a dataset</h2>
-{notice}
-<form class="stack" method="post" action="/traces/{e(quote(trace["trace_id"]))}/datasets">
-{_token_field(token or "")}
+    suggestions = list(dict.fromkeys(["review", *keys]))
+    last = datasets[0] if datasets else ""
+    return f"""<section class="panel review" id="scores" aria-label="Scores">
+{head}
+<div class="review-actions">
+<form class="inline" method="post" action="{action}/scores">{_token_field(token)}<input type="hidden" name="key" value="review">
+<button class="btn small" type="submit" name="verdict" value="good">Good</button>
+<button class="btn small" type="submit" name="verdict" value="bad">Bad</button></form>
+<a class="btn small" href="#other-score">Other score…</a>
+<a class="btn small" href="#add-to-dataset">Add to dataset…</a>
+</div></div>
+{status}
+<form class="drawer stack" id="other-score" method="post" action="{action}/scores">
+{_token_field(token)}
+<div class="pair">
+<div><label for="s-key">Score</label>
+<input id="s-key" type="text" name="key" value="review" list="s-keys" maxlength="64" required>
+{_options("s-keys", suggestions)}</div>
+<div><label for="s-value">Value</label>
+<div class="choices" role="radiogroup" aria-label="Verdict">
+<label><input type="radio" name="verdict" value="good"> Good</label>
+<label><input type="radio" name="verdict" value="bad"> Bad</label>
+<span class="soft">or</span>
+<input id="s-value" type="text" name="value" maxlength="200" placeholder="4, 0.8 or a label" style="width:auto;flex:1 1 140px">
+</div></div></div>
+<label for="s-comment">Comment</label>
+<input id="s-comment" type="text" name="comment" maxlength="2000" placeholder="Optional">
+<div class="row-gap"><button class="btn primary small" type="submit">Save score</button><a href="#">Cancel</a></div>
+</form>
+<form class="drawer stack" id="add-to-dataset" method="post" action="{action}/datasets">
+{_token_field(token)}
 <label for="d-name">Dataset</label>
-<input id="d-name" type="text" name="dataset" list="d-names" maxlength="100" required placeholder="billing-regressions">
+<input id="d-name" type="text" name="dataset" value="{e(last)}" list="d-names" maxlength="100" required placeholder="Name a new or existing dataset">
 {_options("d-names", datasets)}
-<label for="d-input">Input</label>
-<textarea id="d-input" name="input" rows="3" required>{e(text(trace.get("input")))}</textarea>
-<label for="d-expected">Expected output</label>
-<textarea id="d-expected" name="expected" rows="4">{e(text(trace.get("output")))}</textarea>
-<p class="hint">Edit it into the answer the agent should give: evals compare outputs with it.</p>
-<div><button class="btn" type="submit">Add to dataset</button></div>
-</form></section>"""
+<div class="pair">
+<div><label for="d-input">Input</label>
+<textarea id="d-input" name="input" rows="6" required>{e(text(trace.get("input")))}</textarea></div>
+<div><label for="d-expected">Expected output</label>
+<textarea id="d-expected" name="expected" rows="6">{e(text(trace.get("output")))}</textarea></div>
+</div>
+<p class="hint">Edit the output into the answer the agent should give: evals compare outputs with it.</p>
+<div class="row-gap"><button class="btn primary small" type="submit">Add to dataset</button><a href="#">Cancel</a></div>
+</form>
+</section>"""
 
 
 def added_notice(dataset: Mapping[str, Any]) -> str:

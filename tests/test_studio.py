@@ -620,6 +620,7 @@ async def test_the_pages_draw_the_architecture(tmp_path: Path) -> None:
     router = Workflow.route(classify, {"billing": _agent([ScriptedTurn(text="paid")]),
                                        "tech": _agent([], name="tech")}, name="router")
     await router.run("invoice?")
+    assert studio.flush()
     app = create_app(db)
     status, _, body = await _get(app, "/agents/billing?project=web")
     assert status == 200 and "Architecture of billing v3" in body and "<svg" in body and "tools: lookup" not in body
@@ -651,7 +652,7 @@ async def test_the_web_app_is_read_only_and_404s(tmp_path: Path) -> None:
     app = create_app(db, read_only=True)
     assert (await _get(app, "/traces", method="POST"))[0] == 405
     status, _, body = await _get(app, f"/traces/{trace_id}")
-    assert status == 200 and 'name="token"' not in body and "Add to a dataset" not in body
+    assert status == 200 and 'name="token"' not in body and "add-to-dataset" not in body
     assert (await _get(app, "/traces", method="DELETE"))[0] == 405
     assert (await _get(create_app(db), "/traces", method="PUT"))[0] == 405
     assert (await _get(app, "/traces/nope"))[0] == 404
@@ -795,7 +796,7 @@ async def test_scoring_a_run_from_its_page(tmp_path: Path) -> None:
     token = _token(body)
     status, headers, _ = await _get(app, f"/traces/{trace_id}/scores", "POST",
                                     form={"token": token, "key": "review", "verdict": "bad", "comment": "too long"})
-    assert status == 303 and headers["location"] == f"/traces/{trace_id}?saved=score#scores"
+    assert status == 303 and headers["location"] == f"/traces/{trace_id}?saved=score"
     await _get(app, f"/traces/{trace_id}/scores", "POST", form={"token": token, "key": "stars", "value": "4"})
     await _get(app, f"/traces/{trace_id}/scores", "POST", form={"token": token, "key": "tone", "value": "curt"})
     rows = {r["key"]: dict(r) for r in _db(db).execute("SELECT * FROM scores WHERE source = 'ui'")}
@@ -805,7 +806,7 @@ async def test_scoring_a_run_from_its_page(tmp_path: Path) -> None:
     assert "Score saved." in body and "too long" in body and "Remove" in body
     assert '<option value="resolved">' in body  # keys already in use are suggested
     status, headers, _ = await _get(app, f"/scores/{rows['review']['id']}/delete", "POST", form={"token": token})
-    assert status == 303 and headers["location"] == f"/traces/{trace_id}#scores"
+    assert status == 303 and headers["location"] == f"/traces/{trace_id}"
     assert _db(db).execute("SELECT COUNT(*) FROM scores WHERE key = 'review'").fetchone()[0] == 0
     status, _, body = await _get(app, f"/traces/{trace_id}/scores", "POST", form={"token": token, "key": "x"})
     assert status == 400 and "Enter a value" in body
@@ -849,13 +850,13 @@ async def test_building_a_dataset_from_runs(tmp_path: Path) -> None:
     app = create_app(db)
     _, _, body = await _get(app, f"/traces/{trace_id}")
     token = _token(body)
-    assert "Add to a dataset" in body and "charged twice</textarea>" in body  # the input, ready to edit
+    assert 'id="add-to-dataset"' in body and "charged twice</textarea>" in body  # the input, ready to edit
     status, headers, _ = await _get(app, f"/traces/{trace_id}/datasets", "POST", form={
         "token": token, "dataset": "billing regressions", "input": "Was I charged twice?",
         "expected": "Yes; refunded"})
     assert status == 303
-    dataset_id = headers["location"].split("added=")[1].split("#")[0]
-    _, _, body = await _get(app, headers["location"].split("#")[0])
+    dataset_id = headers["location"].split("added=")[1]
+    _, _, body = await _get(app, headers["location"])
     assert "Added to" in body and "billing regressions" in body and "1 case." in body
     status, _, body = await _get(app, "/datasets")
     assert status == 200 and "billing regressions" in body

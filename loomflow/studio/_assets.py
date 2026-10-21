@@ -132,6 +132,35 @@ details summary { cursor: pointer; font-size: 13px; color: var(--soft); }
 .choices { display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: center; }
 .choices label { font-weight: 400; color: var(--body); font-size: 14px; display: inline-flex; gap: 6px; align-items: center; }
 .inline { display: inline; margin: 0; }
+.trace-split { display: grid; gap: 20px; grid-template-columns: minmax(0, 1fr); align-items: start; }
+.trace-split > .col { display: flex; flex-direction: column; gap: 20px; min-width: 0; }
+.trace-split > .detail { min-width: 0; }
+.trace-split > .detail pre.code { max-height: 320px; }
+@media (min-width: 1180px) {
+  .trace-split { grid-template-columns: minmax(0, 3fr) minmax(360px, 2fr); }
+  /* The selected step stays in view while you scroll the timeline. */
+  .trace-split > .detail { position: sticky; top: 16px; max-height: calc(100vh - 32px); overflow-y: auto;
+    border-radius: 10px; }
+}
+.tl-row { scroll-margin-top: 30vh; }
+.review { padding: 10px 14px; display: flex; flex-direction: column; gap: 12px; }
+.review-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; }
+.review-label { font-weight: 700; font-size: 15px; }
+.chips { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; flex: 1 1 260px; min-width: 0; font-size: 14px; }
+.score-chip { display: inline-flex; align-items: center; gap: 6px; min-height: 30px; padding: 2px 4px 2px 10px;
+  border: 1px solid var(--line-strong); border-radius: 999px; font-size: 13px; max-width: 100%; }
+.score-chip .note { color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
+.chip-x { border: 0; background: none; color: var(--faint); cursor: pointer; font: inherit; font-size: 16px; line-height: 1;
+  min-width: 24px; min-height: 24px; border-radius: 999px; }
+.chip-x:hover { background: var(--hover); color: var(--ink); }
+.review-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.btn.small { min-height: 34px; padding: 0 12px; }
+/* Opening a drawer keeps the page header and the bar in view. */
+.drawer { border-top: 1px solid var(--hairline); padding-top: 12px; scroll-margin-top: 280px; }
+.drawer:not(:target) { display: none; }
+.pair { display: grid; gap: 12px; grid-template-columns: minmax(0, 1fr); }
+.pair > div { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+@media (min-width: 900px) { .pair { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
 .link-btn { padding: 0; border: 0; background: none; color: var(--link); font: inherit; font-size: 13px; cursor: pointer; text-decoration: underline; }
 .link-btn:hover { color: var(--indigo); }
 .empty { padding: 28px; text-align: left; display: flex; flex-direction: column; gap: 10px; }
