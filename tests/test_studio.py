@@ -12,6 +12,7 @@ import pytest
 
 import loomflow.studio as studio
 from loomflow import Agent, Mode, StandardPermissions, Workflow, tool
+from loomflow.architecture import Supervisor
 from loomflow.core.types import ToolCall, Usage
 from loomflow.eval import Contains, EvalHarness
 from loomflow.eval.dataset import Case, Dataset
@@ -342,6 +343,82 @@ async def test_unnamed_agents_are_keyed_by_their_first_line(tmp_path: Path) -> N
 
 
 # ---------------------------------------------------------------------------
+# Architecture
+# ---------------------------------------------------------------------------
+
+
+async def test_each_version_records_its_team_structure(tmp_path: Path) -> None:
+    from loomflow.studio._store import StudioStore
+
+    db = tmp_path / "s.db"
+    studio.enable(db, project="arch")
+
+    def team(*, refunds: bool, fraud_tools: tuple[Any, ...] = ()) -> Agent:
+        workers = {"fraud": _agent([], name="fraud-analyst", tools=list(fraud_tools))}
+        if refunds:
+            workers["refunds"] = _agent([], name="refund-specialist")
+        return _agent([ScriptedTurn(text="done")], name="escalations", architecture=Supervisor(workers=workers))
+
+    await team(refunds=False).run("1")
+    await team(refunds=True).run("2")
+    await team(refunds=True, fraud_tools=(lookup,)).run("3")
+    rows = [dict(r) for r in _db(db).execute(
+        "SELECT version, changes FROM agent_versions WHERE agent_key = 'escalations' ORDER BY version")]
+    assert [r["changes"] for r in rows] == ["First seen.", "Team or routing changed.", "A team member's tools changed."]
+    structure = StudioStore(db, readonly=True).version_definition("arch", "escalations", 2)["structure"]  # type: ignore[index]
+    nodes = {n["label"]: n for n in structure["nodes"]}
+    assert nodes["escalations"]["detail"] == "supervisor"
+    assert nodes["refund-specialist"]["keys"] == ["refund-specialist"]
+    assert {e["label"] for e in structure["edges"]} >= {"delegate: fraud", "delegate: refunds"}
+
+
+def _structure() -> dict[str, Any]:
+    return {
+        "nodes": [{"id": "a", "label": "lead <b>", "kind": "agent", "keys": ["lead"]},
+                  {"id": "w", "label": "worker", "kind": "subagent", "keys": ["worker"]},
+                  {"id": "t", "label": "lookup", "kind": "tool", "keys": ["lookup"]}],
+        "edges": [{"source": "a", "target": "w", "label": "delegate: worker"},
+                  {"source": "a", "target": "w", "label": "forward: worker", "style": "dashed"},
+                  {"source": "w", "target": "t", "label": "uses"},
+                  {"source": "w", "target": "a", "label": "critique"}],
+        "subgraphs": [{"id": "g", "label": "workers", "members": ["w"]}],
+    }
+
+
+def test_the_diagram_folds_tools_merges_edges_and_draws_loops() -> None:
+    from loomflow.studio._diagram import render
+
+    out = render(_structure(), uid="x", title="lead")
+    assert out.startswith('<div class="diagram-box"><svg') and "<script" not in out
+    assert "lead &lt;b&gt;" in out and "<b>" not in out
+    assert "tools: lookup" in out and out.count('<g class="dg-node') == 2  # the tool sits inside its agent
+    assert ">delegate, forward<" in out  # two edges, one line; the target already names the worker
+    assert 'class="dg-edge dashed"' in out  # the edge back up the graph
+    assert "dg-on" not in out and "dg-off" not in out
+    assert "No architecture" in render(None, uid="x", title="t")
+
+
+def test_the_diagram_highlights_what_a_run_used() -> None:
+    from loomflow.studio._diagram import render
+
+    out = render(_structure(), uid="x", title="lead", active={"lead"})
+    assert '<g class="dg-node dg-agent dg-on"><title>lead &lt;b&gt;</title>' in out
+    assert '<g class="dg-node dg-subagent dg-off"><title>worker</title>' in out
+    assert "lead &lt;b&gt; (used in this run)" in out
+
+
+def test_a_swarm_becomes_a_note_on_its_group() -> None:
+    from loomflow.studio._diagram import render
+
+    peers = [{"id": p, "label": p, "kind": "subagent"} for p in "abc"]
+    handoffs = [{"source": s, "target": t, "label": "handoff", "style": "dashed"}
+                for s in "abc" for t in "abc" if s != t]
+    out = render({"nodes": peers, "edges": handoffs, "subgraphs": [{"id": "g", "label": "swarm", "members": list("abc")}]},
+                 uid="s", title="swarm")
+    assert "swarm (any can hand off to any other)" in out and "dg-edge" not in out
+
+
+# ---------------------------------------------------------------------------
 # Privacy
 # ---------------------------------------------------------------------------
 
@@ -509,6 +586,35 @@ async def test_the_web_app_pages(tmp_path: Path) -> None:
     assert status == 200 and "1 improved, 1 regressed" in body
     status, _, body = await _get(app, f"/experiments/{exps[1]['id']}")
     assert status == 200 and "two" in body
+
+
+async def test_the_pages_draw_the_architecture(tmp_path: Path) -> None:
+    from loomflow.studio.web import create_app
+
+    db = tmp_path / "s.db"
+    studio.enable(db, project="web")
+    await _agent(_tool_turns(), tools=[lookup]).run("charged twice")
+    await _agent([ScriptedTurn(text="ok")], instructions="You handle billing. Be brief.").run("hi")
+
+    async def classify(text: str) -> str:
+        return "billing"
+
+    router = Workflow.route(classify, {"billing": _agent([ScriptedTurn(text="paid")]),
+                                       "tech": _agent([], name="tech")}, name="router")
+    await router.run("invoice?")
+    app = create_app(db)
+    status, _, body = await _get(app, "/agents/billing?project=web")
+    assert status == 200 and "Architecture of billing v3" in body and "<svg" in body and "tools: lookup" not in body
+    status, _, body = await _get(app, "/agents/billing?project=web&version=1")
+    assert "Architecture of billing v1" in body and "tools: lookup" in body
+    first, *_, last = _traces(db)
+    status, _, body = await _get(app, f"/traces/{first['trace_id']}")
+    assert status == 200 and "Highlighted: the agents" in body and "dg-on" in body
+    status, _, body = await _get(app, f"/traces/{last['trace_id']}")
+    assert '<g class="dg-node dg-subagent dg-on"><title>billing</title>' in body
+    assert '<g class="dg-node dg-subagent dg-off"><title>tech</title>' in body
+    status, _, body = await _get(app, "/agents/workflow%3Arouter?project=web")
+    assert status == 200 and "Architecture of router v1" in body and ">start<" in body
 
 
 async def test_the_web_app_without_a_database(tmp_path: Path) -> None:

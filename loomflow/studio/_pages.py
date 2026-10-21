@@ -12,6 +12,8 @@ from datetime import datetime
 from typing import Any
 from urllib.parse import quote, urlencode
 
+from ._diagram import render as render_diagram
+
 KIND_LABELS = {
     "agent": "Agent run",
     "workflow": "Workflow run",
@@ -359,7 +361,26 @@ def _ordered(spans: Sequence[Mapping[str, Any]]) -> list[tuple[Mapping[str, Any]
     return out
 
 
-def trace_page(trace: Mapping[str, Any], *, selected: str | None, agent_labels: Mapping[str, str]) -> str:
+def _used(spans: Sequence[Mapping[str, Any]]) -> set[str]:
+    """The names a trace's steps go by: agents (and their catalog
+    keys), workflow nodes, tools. These light up in the diagram."""
+    used: set[str] = set()
+    for span in spans:
+        if span["kind"] in ("agent", "workflow", "step", "tool"):
+            used.add(span["name"])
+        key = (span.get("attributes") or {}).get("agent_key")
+        if key:
+            used.add(key)
+    return used
+
+
+def trace_page(
+    trace: Mapping[str, Any],
+    *,
+    selected: str | None,
+    agent_labels: Mapping[str, str],
+    structure: Mapping[str, Any] | None = None,
+) -> str:
     spans = trace["spans"]
     ordered = _ordered(spans)
     by_id = {s["span_id"]: s for s in spans}
@@ -443,6 +464,18 @@ def trace_page(trace: Mapping[str, Any], *, selected: str | None, agent_labels: 
         error = f'<div class="notice"><strong>Interrupted:</strong> {e(trace["interruption_reason"])}</div>'
     title = first_line(trace.get("input"), 140) or name
     detail = _span_detail(chosen) if chosen is not None else ""
+    architecture = ""
+    if structure:
+        agents_link = href("/agents/" + quote(trace["agent_key"]), project=trace["project"],
+                           version=trace.get("agent_version"))
+        architecture = (
+            '<section class="panel pad" aria-label="Architecture"><div class="row-gap" '
+            'style="justify-content:space-between"><h2>Architecture</h2>'
+            '<span class="faint" style="font-size:13px">Highlighted: the agents, steps and tools this run used. '
+            f'<a href="{agents_link}">All versions</a></span></div>'
+            + render_diagram(structure, uid="trace", title=f"{name} architecture", active=_used(spans))
+            + "</section>"
+        )
     return f"""<div class="crumbs"><a href="{href("/traces", project=trace["project"])}">Traces</a>
 <span aria-hidden="true">/</span><span class="mono">{e(trace["trace_id"][:12])}</span></div>
 <div class="head"><h1>{e(title)}</h1><div class="row-gap">
@@ -454,7 +487,8 @@ def trace_page(trace: Mapping[str, Any], *, selected: str | None, agent_labels: 
 <div class="side">
 {detail}
 {_scores_panel(trace.get("scores") or [])}
-</div></div>"""
+</div></div>
+{architecture}"""
 
 
 def _attr(attrs: Mapping[str, Any], *keys: str) -> Any:
@@ -595,10 +629,12 @@ def agents_page(
     selected: Mapping[str, Any] | None,
     versions: Sequence[Mapping[str, Any]],
     project: str | None,
+    shown_version: int | None = None,
 ) -> str:
     intro = ('<div class="head"><div class="row-gap" style="flex-direction:column;align-items:flex-start">'
-             '<h1>Agents</h1><p class="lede">Every agent and workflow that has run. A new version is recorded '
-             "automatically whenever its instructions, model, tools or settings change.</p></div></div>")
+             '<h1>Agents</h1><p class="lede">Every agent and workflow that has run, how it\'s put together, '
+             "and its versions. A new version is recorded automatically whenever its instructions, model, "
+             "tools, team or settings change.</p></div></div>")
     if not agents:
         return intro + '<div class="panel empty"><p>No agents have run yet.</p></div>'
     chosen = (selected["project"], selected["agent_key"]) if selected else None
@@ -635,11 +671,11 @@ def agents_page(
             f"<td>{e(v['changes'])}</td></tr>"
         )
     rows = "".join(row_parts)
-    latest = versions[0]
+    latest = next((v for v in versions if v["version"] == shown_version), versions[0])
     definition = latest["definition"] or {}
     if definition.get("kind") == "workflow":
         pairs = [("Nodes", ", ".join(definition.get("nodes") or [])), ("Max steps", definition.get("max_steps"))]
-        text_title, text = "Graph", definition.get("edges") or ""
+        text_title, text = "", ""
     else:
         tools = ", ".join(
             t["name"] + (" (destructive)" if t.get("destructive") else "") for t in definition.get("tools") or []
@@ -656,9 +692,23 @@ def agents_page(
         ]
         text_title, text = "Instructions", definition.get("instructions") or ""
     pairs_html = "".join(f"<div><dt>{e(k)}</dt><dd>{e(v)}</dd></div>" for k, v in pairs if v not in (None, ""))
+    base = "/agents/" + quote(selected["agent_key"])
+    tabs = "".join(
+        f'<a class="chip" href="{href(base, project=selected["project"], version=v["version"])}"'
+        f'{current(v["version"] == latest["version"])}>v{e(v["version"])}</a>'
+        for v in versions
+    )
+    diagram = render_diagram(
+        definition.get("structure"), uid=f"a{latest['version']}", title=f"{selected['name']} v{latest['version']}"
+    )
     return intro + f"""<div class="split">
 <section class="panel list" aria-label="Agent list">{picks}</section>
 <div class="wide" style="display:flex;flex-direction:column;gap:20px">
+<section class="panel pad" aria-label="Architecture">
+<div class="row-gap" style="justify-content:space-between"><h2>Architecture of {e(selected["name"])} v{e(latest["version"])}</h2>
+<div class="ver-tabs" aria-label="Versions">{tabs if len(versions) > 1 else ""}</div></div>
+{diagram}
+</section>
 <section class="panel scroll" aria-label="Versions">
 <div class="panel-head"><h2>{e(selected["name"])} versions</h2></div>
 <table><thead><tr><th>Version</th><th>First seen</th><th class="num">Runs</th><th class="num">Errors</th>

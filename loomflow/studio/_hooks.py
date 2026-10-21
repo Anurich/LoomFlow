@@ -166,7 +166,7 @@ async def workflow_run(
         from ._catalog import describe_workflow
         from ._recorder import SpanRecord, _new_id
 
-        record = describe_workflow(workflow)
+        record = await describe_workflow(workflow)
         state.agents[record["key"] + record["fingerprint"]] = record
         span = SpanRecord(
             span_id=_new_id()[:16],

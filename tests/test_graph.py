@@ -28,7 +28,7 @@ from unittest.mock import patch
 
 import pytest
 
-from loomflow import Agent, HashEmbedder, ScriptedModel, ScriptedTurn, tool
+from loomflow import Agent, HashEmbedder, ScriptedModel, ScriptedTurn, Workflow, tool
 from loomflow.architecture import Reflexion, RouterRoute, Supervisor
 from loomflow.graph import _Builder, _escape, build_graph, write_graph
 from loomflow.team import Team
@@ -428,3 +428,93 @@ async def test_write_graph_top_level(tmp_path: Path) -> None:
     text = await write_graph(agent, out)
     assert "solo" in text
     assert out.exists()
+
+
+# ---------------------------------------------------------------------------
+# Workflows, names and plain data (what Studio draws)
+# ---------------------------------------------------------------------------
+
+
+def _node(graph: Any, label: str) -> Any:
+    return next(n for n in graph.nodes if n.label == label)
+
+
+def _edges(graph: Any) -> set[tuple[str, str, str]]:
+    labels = {n.id: n.label for n in graph.nodes}
+    return {(labels[e.source], labels[e.target], e.label) for e in graph.edges}
+
+
+async def test_agent_names_label_nodes_and_key_them() -> None:
+    @tool
+    async def lookup(order_id: str) -> str:
+        return order_id
+
+    agent = Agent("You handle billing.", model="echo", name="billing", tools=[lookup])
+    graph = await build_graph(agent)
+    node = _node(graph, "billing")
+    assert node.keys == ("billing",) and node.detail == ""
+    assert _node(graph, "lookup").keys == ("lookup",)
+    graph = await build_graph(agent, key_for=lambda a: f"key:{a.name}")
+    assert _node(graph, "billing").keys == ("key:billing",)
+
+
+async def test_workflow_route_graph_has_start_routes_and_end() -> None:
+    async def classify(text: str) -> str:
+        return "billing"
+
+    billing = Agent("You handle billing.", model="echo", name="billing")
+    tech = Agent("You fix tech issues.", model="echo", name="tech-support")
+    flow = Workflow.route(classify, {"billing": billing, "tech": tech}, name="router")
+    graph = await build_graph(flow, title="router")
+    kinds = {n.label: n.kind for n in graph.nodes}
+    assert kinds["start"] == "start" and kinds["end"] == "end" and kinds["classify"] == "step"
+    assert kinds["billing"] == kinds["tech-support"] == "subagent"
+    edges = _edges(graph)
+    assert {("start", "classify", ""), ("classify", "billing", "billing"), ("classify", "tech-support", "tech"),
+            ("billing", "end", ""), ("tech-support", "end", "")} <= edges
+    # Each agent is keyed by its name and by the workflow node it runs as.
+    assert set(_node(graph, "tech-support").keys) == {"tech-support", "route_tech"}
+    assert _node(graph, "tech-support").detail == "node route_tech"
+    assert "flowchart" in graph.to_mermaid()
+
+
+async def test_workflow_parallel_graph_shows_the_branches() -> None:
+    def summarize(text: str) -> str:
+        return text
+
+    a = Agent("You research.", model="echo", name="researcher")
+    graph = await build_graph(Workflow.parallel([a, summarize], name="fan"))
+    edges = _edges(graph)
+    parallel = {(src, dst) for src, dst, label in edges if label == "in parallel"}
+    assert {dst for _, dst in parallel} == {"researcher", "summarize"}
+    assert "fan_out.researcher" in _node(graph, "researcher").keys
+
+
+async def test_nested_workflow_is_a_node_that_runs_its_own_graph() -> None:
+    inner = Workflow.chain([Agent("You draft.", model="echo", name="drafter")], name="draft")
+    outer = Workflow.chain([inner, Agent("You review.", model="echo", name="reviewer")], name="outer")
+    graph = await build_graph(outer)
+    node = next(n for n in graph.nodes if n.kind == "workflow")
+    assert "draft" in node.keys
+    assert any(e.source == node.id and e.label == "runs" for e in graph.edges)
+    assert any(sg.label == "workflow draft" for sg in graph.subgraphs)
+
+
+async def test_to_dict_is_plain_json() -> None:
+    import json
+
+    team = Team.supervisor(workers={"fraud": _agent("Assess fraud")}, instructions="Coordinate", model="echo")
+    data = (await build_graph(team, title="team")).to_dict()
+    assert data["title"] == "team"
+    assert {"id", "label", "kind", "keys", "detail"} <= set(data["nodes"][0])
+    assert data["nodes"][0]["detail"] == "supervisor"
+    assert {"source", "target", "label", "style"} <= set(data["edges"][0])
+    assert data["subgraphs"][0]["members"]
+    assert json.loads(json.dumps(data)) == data
+
+
+async def test_workflow_mermaid_avoids_the_end_keyword() -> None:
+    flow = Workflow.chain([Agent("You draft.", model="echo", name="drafter")], name="draft")
+    text = (await build_graph(flow)).to_mermaid()
+    assert '(["end"])' in text and "class e0 terminal" in text
+    assert not any(line.split()[-1] == "end" for line in text.splitlines() if line.strip().startswith("class"))

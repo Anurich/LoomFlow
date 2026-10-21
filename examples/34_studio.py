@@ -15,8 +15,8 @@ recorded whenever its instructions, model or tools change. Eval runs
 become experiments you can compare case by case.
 
 This script records a small support bot (a billing agent in two
-versions, a tech-support agent, a routing workflow, two eval runs)
-using scripted models, so it runs OFFLINE with no API key, then tells
+versions, a tech-support agent, a routing workflow, an escalations
+team, two eval runs) using scripted models, so it runs OFFLINE with no API key, then tells
 you how to browse it::
 
     python examples/34_studio.py
@@ -28,7 +28,11 @@ Open http://127.0.0.1:7600 and look at:
   the run that hit its turn limit.
 * A **refund trace**: the approval before ``refund_charge`` ran, and
   the PII guard removing a card number from the reply.
-* **Agents**: billing-agent v1 and v2, and what changed between them.
+* **Agents**: each agent's and workflow's architecture (the routing
+  workflow, the escalations team and its specialists), billing-agent
+  v1 and v2, and what changed between them.
+* An **escalations trace**: its architecture panel highlights the
+  coordinator and the specialist it delegated to.
 * **Experiments**: compare the two eval runs; v2 fixed three cases
   and broke one.
 """
@@ -42,6 +46,7 @@ import anyio
 
 import loomflow.studio
 from loomflow import Agent, Mode, StandardPermissions, Workflow, tool
+from loomflow.architecture import Supervisor
 from loomflow.core.types import ToolCall, Usage
 from loomflow.eval import Contains, EvalHarness
 from loomflow.eval.dataset import Case, Dataset
@@ -209,6 +214,28 @@ async def record_runs() -> None:
 
     await router().run("When is my next invoice charged?", user_id="fatima")
     await router().run("My phone won't connect to Wi-Fi", user_id="bob")
+
+    # An escalations team: a coordinator delegating to specialists.
+    @tool
+    def card_activity(order_id: str) -> list[dict[str, str]]:
+        """Recent card activity for an order."""
+        return [{"country": "PT", "minutes_ago": "7"}, {"country": "BR", "minutes_ago": "2"}]
+
+    fraud = Agent("You assess whether card activity is fraud.", name="fraud-analyst",
+                  model=DemoModel("claude-sonnet-5-5", [turn("Two charges from different countries five "
+                                                             "minutes apart: likely card fraud.", tin=700, tout=30)]),
+                  tools=[card_activity], auto_extract=False)
+    refunds = Agent("You issue refunds that policy allows.", name="refund-specialist",
+                    model=DemoModel("claude-haiku-5-5", []), tools=[refund_charge], auto_extract=False)
+    coordinator = DemoModel("claude-sonnet-5-5", [
+        turn(calls=[ToolCall(tool="delegate", args={"worker": "fraud", "instructions": "Check order 9921."})],
+             tin=900, tout=40),
+        turn("This looks like fraud. I've frozen the card and opened case FR-118.", tin=1100, tout=35),
+    ])
+    escalations = Agent("You handle escalated cases. Delegate to the right specialist.", name="escalations",
+                        model=coordinator, auto_extract=False,
+                        architecture=Supervisor(workers={"fraud": fraud, "refunds": refunds}))
+    await escalations.run("Two charges on order 9921 I don't recognise", user_id="ivy")
 
 
 # ---- experiments -------------------------------------------------------

@@ -1770,6 +1770,8 @@ class Workflow:
             max_visits_per_node=max_visits_per_node,
             workspace=workspace,
         )
+        # The branches, for diagrams (loomflow.graph draws them).
+        _fan_out._loom_branches = tuple(zip(branch_names, steps, strict=True))  # type: ignore[attr-defined]
         wf.add_node("fan_out", _fan_out)
         wf.set_start("fan_out")
         wf.add_edge("fan_out", END)

@@ -161,6 +161,20 @@ def _use_wal(conn: sqlite3.Connection) -> None:
             delay = min(delay * 2, 0.5)
 
 
+def _team(definition: Mapping[str, Any]) -> tuple[Any, ...]:
+    """The agents in a structure and how they're connected, tools left
+    out (the tools line covers those)."""
+    graph = definition.get("structure") or {}
+    nodes = {n["id"]: n for n in graph.get("nodes", []) if n.get("kind") != "tool"}
+    labels = sorted((n["kind"], n["label"], n.get("detail", "")) for n in nodes.values())
+    edges = sorted(
+        (nodes[e["source"]]["label"], nodes[e["target"]]["label"], e.get("label", ""))
+        for e in graph.get("edges", [])
+        if e["source"] in nodes and e["target"] in nodes
+    )
+    return tuple(labels), tuple(edges)
+
+
 def describe_changes(old: Mapping[str, Any], new: Mapping[str, Any]) -> str:
     """One readable line saying how ``new`` differs from ``old``
     (two agent definitions), e.g. ``"Model a to b. Tool added: x."``."""
@@ -178,7 +192,11 @@ def describe_changes(old: Mapping[str, Any], new: Mapping[str, Any]) -> str:
         parts.append("Instructions edited.")
     if old.get("nodes") != new.get("nodes") or old.get("edges") != new.get("edges"):
         parts.append("Graph changed.")
-    shown = {"model", "architecture", "classifier", "tools", "instructions", "nodes", "edges"}
+    elif _team(old) != _team(new):
+        parts.append("Team or routing changed.")
+    elif old.get("structure") != new.get("structure") and not (added or removed):
+        parts.append("A team member's tools changed.")
+    shown = {"model", "architecture", "classifier", "tools", "instructions", "nodes", "edges", "structure"}
     others = sorted(k for k in set(old) | set(new) if k not in shown and old.get(k) != new.get(k))
     if others:
         parts.append(f"Changed: {', '.join(others)}.")
@@ -573,6 +591,16 @@ class StudioStore:
                     "scores": {s["key"]: float(s["mean"]) for s in score_rows},
                 })
         return out
+
+    def version_definition(self, project: str, agent_key: str, version: int) -> dict[str, Any] | None:
+        """One version's recorded definition (with its ``structure``)."""
+        with self._read() as conn:
+            row = conn.execute(
+                "SELECT definition FROM agent_versions WHERE project = ? AND agent_key = ? AND version = ?",
+                (project, agent_key, version),
+            ).fetchone()
+        result: dict[str, Any] | None = _loads(row["definition"]) if row is not None else None
+        return result
 
     def list_experiments(self, project: str | None) -> list[dict[str, Any]]:
         clause, args = ("WHERE project = ?", [project]) if project else ("", [])

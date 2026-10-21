@@ -132,5 +132,34 @@ details summary { cursor: pointer; font-size: 13px; color: var(--soft); }
 .agent-pick:hover { background: var(--hover); color: var(--body); }
 .agent-pick[aria-current="true"] { background: var(--selected); box-shadow: inset 3px 0 0 var(--indigo); }
 .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.diagram-box { overflow: auto; padding: 4px 0; }
+svg.diagram { display: block; max-width: none; font-family: var(--sans); }
+.dg-node rect { fill: var(--raised); stroke: var(--line-strong); stroke-width: 1.2; }
+.dg-agent rect { stroke: var(--indigo); stroke-width: 2; }
+.dg-subagent rect { stroke: var(--indigo); }
+.dg-workflow rect { stroke: var(--indigo); stroke-dasharray: 5 4; }
+.dg-tool rect { stroke: var(--madder); }
+.dg-step rect { stroke: var(--framework); }
+.dg-memory rect, .dg-store rect, .dg-blackboard rect { fill: var(--surface); stroke: var(--framework); stroke-dasharray: 4 3; }
+.dg-start rect, .dg-end rect { fill: var(--surface); stroke: var(--line-strong); }
+.dg-node text { text-anchor: middle; fill: var(--ink); }
+.dg-title { font-size: 13px; font-weight: 700; }
+.dg-detail { font-size: 11px; fill: var(--soft) !important; }
+.dg-tools { font-size: 11px; fill: var(--madder) !important; }
+.dg-start text, .dg-end text { font-size: 12px; font-weight: 600; fill: var(--soft); }
+.dg-edge { fill: none; stroke: var(--faint); stroke-width: 1.4; }
+.dg-edge.dashed { stroke-dasharray: 5 4; }
+.dg-edge.on { stroke: var(--indigo); stroke-width: 2.2; }
+.dg-arrow { fill: var(--faint); }
+.dg-label rect { fill: var(--bg); stroke: var(--line); }
+.dg-label text { font-size: 11px; fill: var(--soft); text-anchor: middle; }
+.dg-label.on text { fill: var(--indigo); font-weight: 600; }
+.dg-group rect { fill: none; stroke: var(--line-strong); stroke-dasharray: 3 3; }
+.dg-group text { font-size: 11px; fill: var(--faint); }
+.dg-on rect { stroke: var(--indigo); stroke-width: 2.5; fill: var(--selected); }
+.dg-off { opacity: 0.42; }
+.diagram-text { font-size: 13px; color: var(--soft); }
+.diagram-text ul { margin: 6px 0 0; padding-left: 18px; }
+.ver-tabs { display: flex; flex-wrap: wrap; gap: 6px; }
 @media (max-width: 720px) { main { padding: 20px 16px 40px; } .nav { max-width: none; } dl.grid { grid-template-columns: minmax(0, 1fr); } }
 """

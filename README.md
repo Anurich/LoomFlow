@@ -1122,6 +1122,10 @@ loom studio                              # http://127.0.0.1:7600
   records a new version, with a note of what changed, so "it got worse
   on Tuesday" becomes "v3 added `refund_charge` on Tuesday". Give
   agents a `name=` to keep their history together.
+- **Architecture.** Each version is drawn as a diagram: its
+  sub-agents and how they delegate, a workflow's steps, routes and
+  parallel branches, and each agent's tools. On a trace, the parts that
+  run used are highlighted.
 - **Experiments.** `EvalHarness` runs are saved as experiments.
   Compare two runs on the same dataset to see which cases improved
   and which regressed.
@@ -1309,7 +1313,7 @@ End-to-end demo: [`examples/03_multi_user_sessions.py`](examples/03_multi_user_s
 | **Budget** | Per-token / per-cost / per-wall-clock limits with soft warnings; per-user caps via `BudgetConfig(per_user_max_*)` | `StandardBudget`, `BudgetConfig`, `NoBudget` (top-level) |
 | **Run timeout** | Wall-clock ceiling for the whole run — setup, every model + tool call (incl. parallel dispatch and sub-agents), teardown — via `anyio.fail_after`. Default `None` = unbounded, zero overhead. `run()` raises `RunTimeout` (carries `.seconds`); `stream()` consumers see an `ERROR` event. TOML-expressible (`timeout = 30.0`). | `Agent(timeout=)`, `RunTimeout` (top-level) |
 | **Run-until-done loop** | `Agent(run_until="all tests pass")` re-prompts the agent until a fast checker model confirms a measurable stop condition. Guardrails against runaway loops: `max_iterations`, `max_no_progress`, `max_cost_usd` (also honours the Agent-wide `Budget`). Exit reason in `session.metadata["run_until.exit"]`; guardrail stops set `RunResult.interrupted`. Wraps any architecture; `Team.*` builders forward it. | `Agent(run_until=)`, `GoalStopHook`, `StopHook`, `StopHookResult` (top-level) |
-| **Studio** | Local recording of every run (traces with model messages, tool calls, approvals, guardrails), an agent catalog with automatic versions, eval experiments compared case by case, and a read-only web UI (`loom studio`). One switch; SQLite; no account. | `loomflow.studio.enable/session/score`, `LOOMFLOW_STUDIO`, `loom studio`, `loomflow.studio.web.create_app` |
+| **Studio** | Local recording of every run (traces with model messages, tool calls, approvals, guardrails), an agent catalog with automatic versions and architecture diagrams, eval experiments compared case by case, and a read-only web UI (`loom studio`). One switch; SQLite; no account. | `loomflow.studio.enable/session/score`, `LOOMFLOW_STUDIO`, `loom studio`, `loomflow.studio.web.create_app` |
 | **Telemetry** | OpenTelemetry spans + metrics for every milestone | `NoTelemetry` (top-level); `from loomflow.observability import OTelTelemetry` |
 | **Audit log** | HMAC-signed, hash-chained JSONL or in-memory; tracks every tool call; entries attributed by `user_id`; `verify()` reports edited, deleted or reordered entries | `InMemoryAuditLog`, `AuditLog` (top-level); `from loomflow.security import FileAuditLog, verify_chain, verify_signature` |
 | **Certified values** | Freshness + lineage policies | `from loomflow.data import FreshnessPolicy, LineagePolicy` |

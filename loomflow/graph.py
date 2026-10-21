@@ -18,9 +18,12 @@ walk our nested architectures and surface tool attachments.
 Public surface
 --------------
 
-* :func:`build_graph` — walk an :class:`Agent` and return an
-  :class:`AgentGraph` (nodes + edges + subgraphs).
-* :meth:`AgentGraph.to_mermaid` — render the graph to Mermaid text.
+* :func:`build_graph` — walk an :class:`Agent` (or a
+  :class:`~loomflow.Workflow`) and return an :class:`AgentGraph`
+  (nodes + edges + subgraphs).
+* :meth:`AgentGraph.to_mermaid` — render the graph to Mermaid text;
+  :meth:`AgentGraph.to_dict` — the same graph as plain data (what
+  Loomflow Studio stores and draws).
 * :meth:`Agent.generate_graph` — high-level convenience that walks
   the tree, renders, and dispatches to disk by file extension:
 
@@ -53,6 +56,14 @@ What's captured
 * Recursive composition: nested architectures (Reflexion of
   Supervisor, Supervisor whose worker is itself a Supervisor)
   render as nested subgraphs.
+* Workflows: start and end, each node (an Agent node with its own
+  tools and team), plain edges, router branches, ``parallel``
+  branches, and nested workflows as subgraphs.
+
+Agents are labelled with their ``name=``, or else the first line of
+their instructions. Each node carries ``keys`` (an agent's name, a
+tool's name, a workflow node's name) so a recorded run can be matched
+to the parts of the diagram it used.
 
 Design notes
 ------------
@@ -70,7 +81,8 @@ Design notes
 from __future__ import annotations
 
 import base64
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.error import URLError
@@ -96,7 +108,14 @@ class _Node:
     # "memory" — a memory backend
     # "store" — a vector store / lesson store
     # "blackboard" — the Blackboard's shared workspace
+    # "step" — a workflow node that's a plain function
+    # "workflow" — a nested workflow
+    # "start" / "end" — a workflow's entry and exit
     kind: str
+    # Names a recorded run uses for this part (agent / tool / node).
+    keys: tuple[str, ...] = ()
+    # A second line for the drawing: the architecture, a node name.
+    detail: str = ""
 
 
 @dataclass(frozen=True)
@@ -132,6 +151,26 @@ class AgentGraph:
 
     # ---- rendering --------------------------------------------------
 
+    def to_dict(self) -> dict[str, Any]:
+        """The graph as plain, JSON-ready data: ``title``, ``nodes``
+        (``id``, ``label``, ``kind``, ``keys``, ``detail``), ``edges``
+        (``source``, ``target``, ``label``, ``style``) and
+        ``subgraphs`` (``id``, ``label``, ``members``)."""
+        return {
+            "title": self.title,
+            "nodes": [
+                {"id": n.id, "label": n.label, "kind": n.kind, "keys": list(n.keys), "detail": n.detail}
+                for n in self.nodes
+            ],
+            "edges": [
+                {"source": e.source, "target": e.target, "label": e.label, "style": e.style}
+                for e in self.edges
+            ],
+            "subgraphs": [
+                {"id": g.id, "label": g.label, "members": list(g.members)} for g in self.subgraphs
+            ],
+        }
+
     def to_mermaid(self) -> str:
         """Render to a Mermaid ``flowchart TB`` block.
 
@@ -151,6 +190,10 @@ class AgentGraph:
                 "  classDef memory fill:#f8cecc,stroke:#b85450",
                 "  classDef store fill:#e1d5e7,stroke:#9673a6",
                 "  classDef blackboard fill:#fff2cc,stroke:#d6b656,stroke-dasharray:5 5",
+                "  classDef step fill:#f5f5f5,stroke:#666666",
+                "  classDef workflow fill:#dae8fc,stroke:#6c8ebf,stroke-dasharray:5 5",
+                # One class for start and end: ``end`` is a Mermaid keyword.
+                "  classDef terminal fill:#ffffff,stroke:#666666",
             ]
         )
 
@@ -200,7 +243,8 @@ class AgentGraph:
 
         # classDef applications.
         for node in self.nodes:
-            lines.append(f"  class {node.id} {node.kind}")
+            kind = "terminal" if node.kind in ("start", "end") else node.kind
+            lines.append(f"  class {node.id} {kind}")
 
         return "\n".join(lines)
 
@@ -214,6 +258,8 @@ def _render_node(node: _Node) -> str:
         return f'{node.id}[("{label}")]'  # cylinder (database)
     if node.kind == "blackboard":
         return f'{node.id}{{{{"{label}"}}}}'  # hexagon
+    if node.kind in {"start", "end"}:
+        return f'{node.id}(["{label}"])'  # stadium
     return f'{node.id}["{label}"]'
 
 
@@ -238,10 +284,12 @@ class _Builder:
     """Walks an Agent + its architecture tree, building an
     :class:`AgentGraph`. Stateful so node ids stay unique."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, key_for: Callable[[Any], str] | None = None) -> None:
         self.graph = AgentGraph()
         self._counters: dict[str, int] = {}
         self._agent_ids: dict[int, str] = {}  # id(agent) -> node id
+        # How an agent is named in recorded runs (its ``keys``).
+        self._key_for = key_for or (lambda agent: getattr(agent, "name", None) or "")
 
     def _new_id(self, prefix: str) -> str:
         n = self._counters.get(prefix, 0)
@@ -270,9 +318,19 @@ class _Builder:
         node_id = self._new_id("a")
         self._agent_ids[id(agent)] = node_id
 
-        # Pull a short label from the agent's instructions.
-        label = _summarize(agent.instructions, fallback="agent")
-        self.graph.nodes.append(_Node(id=node_id, label=label, kind=kind))
+        # Its name, else a short label from its instructions.
+        label = getattr(agent, "name", None) or _summarize(agent.instructions, fallback="agent")
+        key = self._key_for(agent)
+        architecture = getattr(agent.architecture, "name", "") or ""
+        self.graph.nodes.append(
+            _Node(
+                id=node_id,
+                label=label,
+                kind=kind,
+                keys=(key,) if key else (),
+                detail=architecture if architecture not in ("", "react") else "",
+            )
+        )
         if parent_sg is not None:
             parent_sg.members.append(node_id)
 
@@ -286,7 +344,7 @@ class _Builder:
         for tdef in tool_defs:
             tool_id = self._new_id("t")
             self.graph.nodes.append(
-                _Node(id=tool_id, label=tdef.name, kind="tool")
+                _Node(id=tool_id, label=tdef.name, kind="tool", keys=(tdef.name,))
             )
             if parent_sg is not None:
                 parent_sg.members.append(tool_id)
@@ -545,6 +603,116 @@ class _Builder:
                 )
             )
 
+    # ---- workflows -----------------------------------------------------
+
+    async def visit_workflow(self, workflow: Any, *, parent_sg: _Subgraph | None = None) -> str:
+        """Visit a Workflow: its start, nodes, edges and end. Returns
+        the start node's id."""
+        from .agent.api import Agent
+        from .workflow import Workflow, _Router, _Sentinel
+
+        start_id = self._new_id("s")
+        self.graph.nodes.append(_Node(id=start_id, label="start", kind="start"))
+        if parent_sg is not None:
+            parent_sg.members.append(start_id)
+        end_id: str | None = None
+
+        def end() -> str:
+            nonlocal end_id
+            if end_id is None:
+                end_id = self._new_id("e")
+                self.graph.nodes.append(_Node(id=end_id, label="end", kind="end"))
+                if parent_sg is not None:
+                    parent_sg.members.append(end_id)
+            return end_id
+
+        ids: dict[str, str] = {}
+        raw_nodes: dict[str, Any] = getattr(workflow, "_raw_nodes", {})
+        for name in getattr(workflow, "_nodes", {}):
+            raw = raw_nodes.get(name)
+            if isinstance(raw, Agent):
+                agent_id = await self._visit_agent(raw, kind="subagent", parent_sg=parent_sg)
+                node = next(n for n in self.graph.nodes if n.id == agent_id)
+                detail = node.detail if node.label == name else f"node {name}"
+                self._replace(node, keys=(*node.keys, name), detail=detail)
+                ids[name] = agent_id
+            elif isinstance(raw, Workflow):
+                inner = self._make_subgraph(f"workflow {raw.name}")
+                wf_id = self._new_id("w")
+                self.graph.nodes.append(_Node(id=wf_id, label=name, kind="workflow", keys=(name, raw.name)))
+                if parent_sg is not None:
+                    parent_sg.members.append(wf_id)
+                inner_start = await self.visit_workflow(raw, parent_sg=inner)
+                self.graph.edges.append(_Edge(source=wf_id, target=inner_start, label="runs", style="dashed"))
+                ids[name] = wf_id
+            else:
+                step_id = self._new_id("n")
+                self.graph.nodes.append(_Node(id=step_id, label=name, kind="step", keys=(name,)))
+                if parent_sg is not None:
+                    parent_sg.members.append(step_id)
+                ids[name] = step_id
+                for branch_name, branch in getattr(raw, "_loom_branches", ()):
+                    branch_id = await self._visit_branch(branch_name, branch, parent_sg)
+                    self.graph.edges.append(_Edge(source=step_id, target=branch_id, label="in parallel"))
+
+        def target_id(dst: Any) -> str | None:
+            if isinstance(dst, _Sentinel) or dst == "__END__":
+                return end()
+            return ids.get(str(dst))
+
+        def add_router(src: str, router: Any) -> None:
+            for label, dst in router.routes.items():
+                tid = target_id(dst)
+                if tid is not None:
+                    self.graph.edges.append(_Edge(source=src, target=tid, label=str(label)))
+            if router.default is not None:
+                tid = target_id(router.default)
+                if tid is not None:
+                    self.graph.edges.append(_Edge(source=src, target=tid, label="default", style="dashed"))
+
+        entry = getattr(workflow, "_entry_router", None)
+        if entry is not None:
+            add_router(start_id, entry)
+        elif getattr(workflow, "_start", None) in ids:
+            self.graph.edges.append(_Edge(source=start_id, target=ids[workflow._start]))
+        for src, targets in getattr(workflow, "_edges", {}).items():
+            if src not in ids:
+                continue
+            for target in targets:
+                if isinstance(target, _Router):
+                    add_router(ids[src], target)
+                else:
+                    tid = target_id(target)
+                    if tid is not None:
+                        self.graph.edges.append(_Edge(source=ids[src], target=tid))
+        return start_id
+
+    async def _visit_branch(self, name: str, branch: Any, parent_sg: _Subgraph | None) -> str:
+        """One ``Workflow.parallel`` branch: an Agent, a Workflow or a
+        function."""
+        from .agent.api import Agent
+        from .workflow import Workflow
+
+        if isinstance(branch, Agent):
+            branch_id = await self._visit_agent(branch, kind="subagent", parent_sg=parent_sg)
+            node = next(n for n in self.graph.nodes if n.id == branch_id)
+            self._replace(node, keys=(*node.keys, name, f"fan_out.{name}"))
+            return branch_id
+        if isinstance(branch, Workflow):
+            inner = self._make_subgraph(f"workflow {branch.name}")
+            return await self.visit_workflow(branch, parent_sg=inner)
+        step_id = self._new_id("n")
+        self.graph.nodes.append(_Node(id=step_id, label=name, kind="step", keys=(name, f"fan_out.{name}")))
+        if parent_sg is not None:
+            parent_sg.members.append(step_id)
+        return step_id
+
+    def _replace(self, node: _Node, **changes: Any) -> None:
+        if "keys" in changes:
+            changes["keys"] = tuple(dict.fromkeys(changes["keys"]))
+        index = self.graph.nodes.index(node)
+        self.graph.nodes[index] = replace(node, **changes)
+
     def _make_subgraph(self, label: str) -> _Subgraph:
         sg = _Subgraph(id=self._new_id("sg"), label=label)
         self.graph.subgraphs.append(sg)
@@ -566,11 +734,26 @@ def _summarize(text: str, *, fallback: str = "agent") -> str:
 # ---------------------------------------------------------------------------
 
 
-async def build_graph(agent: Agent, *, title: str = "Agent") -> AgentGraph:
-    """Walk an :class:`Agent` and return its renderable
-    :class:`AgentGraph`."""
-    builder = _Builder()
-    await builder.visit_root(agent, title=title)
+async def build_graph(
+    agent: Any,
+    *,
+    title: str = "Agent",
+    key_for: Callable[[Any], str] | None = None,
+) -> AgentGraph:
+    """Walk an :class:`Agent` or a :class:`~loomflow.Workflow` and
+    return its renderable :class:`AgentGraph`.
+
+    ``key_for(agent)`` names each agent in the nodes' ``keys`` (default:
+    its ``name=``); Studio passes its catalog key.
+    """
+    from .workflow import Workflow
+
+    builder = _Builder(key_for=key_for)
+    if isinstance(agent, Workflow):
+        builder.graph.title = title
+        await builder.visit_workflow(agent)
+    else:
+        await builder.visit_root(agent, title=title)
     return builder.graph
 
 

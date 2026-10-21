@@ -111,7 +111,11 @@ def create_app(path: str | Path | None = None) -> ASGIApp:
                 return _Response(page("Not found", "traces", pages.not_found("Trace"), project, store), status=404)
             if as_json:
                 return _Response(json.dumps(trace, indent=2, default=str), content_type="application/json")
-            body = pages.trace_page(trace, selected=arg("span"), agent_labels=labels)
+            structure = None
+            if trace.get("agent_key") and trace.get("agent_version"):
+                definition = store.version_definition(trace["project"], trace["agent_key"], trace["agent_version"])
+                structure = (definition or {}).get("structure")
+            body = pages.trace_page(trace, selected=arg("span"), agent_labels=labels, structure=structure)
             return _Response(page(pages.first_line(trace.get("input"), 60) or "Trace", "traces", body,
                                   trace["project"], store))
         if path_info == "/agents" or path_info.startswith("/agents/"):
@@ -121,7 +125,9 @@ def create_app(path: str | Path | None = None) -> ASGIApp:
             if key and selected is None:
                 return _Response(page("Not found", "agents", pages.not_found("Agent"), project, store), status=404)
             versions = store.agent_versions(selected["project"], selected["agent_key"]) if selected else []
-            body = pages.agents_page(agents, selected=selected, versions=versions, project=project)
+            body = pages.agents_page(
+                agents, selected=selected, versions=versions, project=project, shown_version=_int(arg("version"))
+            )
             return _Response(page("Agents", "agents", body, project, store))
         if path_info == "/experiments":
             body = pages.experiments_page(store.list_experiments(project), project=project)
@@ -178,6 +184,13 @@ def create_app(path: str | Path | None = None) -> ASGIApp:
         await send({"type": "http.response.body", "body": b"" if method == "HEAD" else response.body})
 
     return app
+
+
+def _int(value: str | None) -> int | None:
+    try:
+        return int(value) if value else None
+    except ValueError:
+        return None
 
 
 def _traces(

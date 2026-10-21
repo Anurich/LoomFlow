@@ -28,8 +28,13 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
     ``session_id`` as a thread.
   * **Agents and versions**: each agent and workflow is catalogued by
     its definition (instructions, model, tools, architecture, limits,
-    guards). A changed definition is recorded as the next version,
-    with a note of what changed.
+    guards, team). A changed definition is recorded as the next
+    version, with a note of what changed.
+  * **Architecture**: each version's structure (its sub-agents and how
+    they delegate or hand off, a workflow's steps, routes and parallel
+    branches, the tools each agent holds) is drawn as a diagram on its
+    Agents page, one tab per version. A trace shows the same diagram
+    with the agents, steps and tools that run used highlighted.
   * **Experiments**: ``EvalHarness`` runs are saved with each case's
     trace and scores; compare two runs on the same dataset case by
     case (improved / regressed / unchanged, cost and latency).
@@ -48,6 +53,11 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
   on its run span, as its node name in a ``Workflow``, and as its key
   in Studio (also ``name`` in ``Agent.from_config``).
 * ``RunResult.run_id``.
+* ``build_graph`` / ``write_graph`` accept a ``Workflow`` as well as an
+  ``Agent`` (start, steps, routes with their keys, parallel branches,
+  nested workflows, end), and ``AgentGraph.to_dict()`` returns the
+  graph as JSON-ready data, each node with the ``keys`` recorded runs
+  use for it.
 * ``Dataset(name=...)`` (``Dataset.from_jsonl`` uses the file name) and
   ``EvalHarness.run(dataset, experiment=...)``; ``loom eval --studio``.
 * Tool spans carry ``loom.permission`` (``allow`` / ``deny`` /
@@ -63,6 +73,9 @@ counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
   (``interruption_reason`` ``"fan_out:billing:..."``). Unnamed agents
   keep the generated names; ``Workflow.route`` still names its nodes
   ``route_<key>``.
+* Agent graphs label an agent with its ``name=`` when it has one
+  (instead of the first line of its instructions), and note a team's
+  architecture (``supervisor``, ``router``, ...) under its name.
 
 ## [0.17.3] — 2026-10-20
 

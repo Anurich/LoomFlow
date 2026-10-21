@@ -1,8 +1,10 @@
 """What Studio records about an agent or workflow: its definition.
 
 A definition is the part of an agent that changes its behaviour —
-instructions, model, tools, architecture, limits, guards — gathered
-from the running object, so nothing has to be declared. Its
+instructions, model, tools, architecture, limits, guards, and its
+structure (sub-agents, routes, workflow graph, as drawn by
+:mod:`loomflow.graph`) — gathered from the running object, so nothing
+has to be declared. Its
 fingerprint (a hash of the definition) identifies a version: the
 store gives each new fingerprint the next version number.
 
@@ -48,6 +50,18 @@ def _permissions(permissions: Any) -> str:
     return f"{kind} ({mode_name})" if mode_name else kind
 
 
+async def structure(target: Any, title: str) -> dict[str, Any] | None:
+    """The agent's or workflow's structure as plain data (nodes keyed
+    by the names runs record), or ``None`` if it can't be walked."""
+    from ..graph import build_graph
+
+    try:
+        graph = await build_graph(target, title=title, key_for=lambda agent: agent_identity(agent)[0])
+    except Exception:  # noqa: BLE001 — a diagram must never break a run
+        return None
+    return graph.to_dict()
+
+
 def _schema_name(schema: Any) -> str | None:
     if schema is None:
         return None
@@ -84,6 +98,7 @@ async def describe_agent(agent: Any) -> dict[str, Any]:
         "runtime": type(getattr(agent, "_runtime", None)).__name__,
         "output_schema": _schema_name(getattr(agent, "_default_output_schema", None)),
         "effort": getattr(agent, "_default_effort", None),
+        "structure": await structure(agent, label),
     }
     return {
         "key": key,
@@ -94,7 +109,7 @@ async def describe_agent(agent: Any) -> dict[str, Any]:
     }
 
 
-def describe_workflow(workflow: Any) -> dict[str, Any]:
+async def describe_workflow(workflow: Any) -> dict[str, Any]:
     """The catalog record for a Workflow: its nodes and graph."""
     name = str(getattr(workflow, "name", "") or "workflow")
     try:
@@ -106,6 +121,7 @@ def describe_workflow(workflow: Any) -> dict[str, Any]:
         "nodes": sorted(getattr(workflow, "_nodes", {})),
         "edges": graph,
         "max_steps": getattr(workflow, "_max_steps", None),
+        "structure": await structure(workflow, name),
         "runtime": type(getattr(workflow, "_runtime", None)).__name__
         if getattr(workflow, "_runtime", None) is not None
         else None,
