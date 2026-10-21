@@ -50,6 +50,8 @@ MAX_MESSAGES = 60
 MAX_SPANS = 5_000
 """Spans kept per trace; later ones are counted, not stored."""
 QUEUE_SIZE = 10_000
+PRUNE_EVERY = 3600.0
+"""Seconds between deletions of old runs, when ``keep_days`` is set."""
 
 _KINDS = {
     "loom.run": "agent",
@@ -609,6 +611,11 @@ class Recorder:
 
     def _write_loop(self) -> None:
         conn = self.store.writer()
+        try:
+            StudioStore.prepare_search(conn)
+        except Exception as exc:  # noqa: BLE001 — search falls back to a scan
+            self._warn_once("search", f"Studio couldn't build its search index: {exc!r}")
+        last_prune = self._prune(conn)
         stop = False
         while not stop:
             op = self._queue.get()
@@ -629,7 +636,19 @@ class Recorder:
             finally:
                 for _ in batch:
                     self._queue.task_done()
+            if time.monotonic() - last_prune >= PRUNE_EVERY:
+                last_prune = self._prune(conn)
         conn.close()
+
+    def _prune(self, conn: Any) -> float:
+        """Delete runs older than ``keep_days``, if set; returns when."""
+        days = self.settings.keep_days
+        if days is not None:
+            try:
+                StudioStore.prune(conn, time.time() - days * 86400)
+            except Exception as exc:  # noqa: BLE001 — keep the writer alive
+                self._warn_once("prune", f"Studio couldn't delete old runs from {self.settings.path}: {exc!r}")
+        return time.monotonic()
 
     @staticmethod
     def _apply(conn: Any, op: tuple[Any, ...]) -> None:

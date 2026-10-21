@@ -2,8 +2,14 @@
 
 The recording process writes it from a single background thread
 (:class:`~loomflow.studio._recorder.Recorder`); the ``loom studio``
-web app opens it read-only. WAL mode lets both run at once, in one
+web app reads it, and writes only what people add from its pages
+(scores, dataset cases). WAL mode lets them run at once, in one
 process or several.
+
+Search goes through an FTS5 full-text index (the ``search`` table,
+with ``search_docs`` mapping each finished trace to its row there)
+that the writer keeps up to date, when the SQLite build has FTS5;
+otherwise it scans the recorded text.
 
 Times are stored as UTC epoch seconds (``REAL``); JSON columns hold
 compact ``json.dumps`` text.
@@ -12,6 +18,7 @@ compact ``json.dumps`` text.
 from __future__ import annotations
 
 import json
+import secrets
 import sqlite3
 import statistics
 import time
@@ -20,7 +27,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -133,7 +140,37 @@ CREATE TABLE IF NOT EXISTS experiment_cases (
     error TEXT,
     PRIMARY KEY (experiment_id, case_key)
 );
+CREATE TABLE IF NOT EXISTS datasets (
+    id TEXT PRIMARY KEY,
+    project TEXT NOT NULL,
+    name TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    UNIQUE (project, name)
+);
+CREATE TABLE IF NOT EXISTS dataset_cases (
+    id TEXT PRIMARY KEY,
+    dataset_id TEXT NOT NULL,
+    input TEXT NOT NULL,
+    expected TEXT,
+    trace_id TEXT,
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS dataset_cases_by_dataset ON dataset_cases (dataset_id, created_at);
 """
+
+_SEARCH_TABLE = (
+    "CREATE VIRTUAL TABLE IF NOT EXISTS search USING fts5(body, tokenize = 'unicode61 remove_diacritics 2')"
+)
+# A trace's row in ``search``, so it can be replaced or deleted without
+# scanning the index.
+_SEARCH_DOCS = "CREATE TABLE IF NOT EXISTS search_docs (trace_id TEXT PRIMARY KEY, doc INTEGER NOT NULL)"
+# Text indexed per trace, at most.
+_SEARCH_MAX = 100_000
+
+
+class _Connection(sqlite3.Connection):
+    # Whether this (writer) connection keeps the search index up to date.
+    search_ready = False
 
 
 def _dumps(value: Any) -> str | None:
@@ -159,6 +196,75 @@ def _use_wal(conn: sqlite3.Connection) -> None:
                 raise
             time.sleep(delay)
             delay = min(delay * 2, 0.5)
+
+
+def _strings(value: Any, out: list[str]) -> None:
+    """Every string and number in ``value``, and its mappings' keys."""
+    if isinstance(value, str):
+        out.append(value)
+    elif isinstance(value, Mapping):
+        for key, item in value.items():
+            out.append(str(key))
+            _strings(item, out)
+    elif isinstance(value, list | tuple):
+        for item in value:
+            _strings(item, out)
+    elif isinstance(value, int | float) and not isinstance(value, bool):
+        out.append(str(value))
+
+
+def search_body(trace: Mapping[str, Any], spans: Sequence[Mapping[str, Any]]) -> str:
+    """The text a trace is found by: its ids, input, output and error,
+    and each step's name and content. Model messages are left out:
+    each call repeats the conversation so far, which the other steps
+    already hold."""
+    out = [
+        str(trace[key])
+        for key in ("trace_id", "run_id", "name", "user_id", "session_id", "input", "output", "error")
+        if trace.get(key)
+    ]
+    for span in spans:
+        out.extend(str(span[key]) for key in ("name", "run_id", "error") if span.get(key))
+        content = span.get("content") or {}
+        if isinstance(content, str):
+            content = _loads(content) or {}
+        for key, value in content.items():
+            if key != "messages":
+                _strings(value, out)
+    return "\n".join(out)[:_SEARCH_MAX]
+
+
+def _fts_query(text: str) -> str | None:
+    """``text`` as an FTS5 query: every word has to appear, matching
+    the start of a word (``refund`` finds "refunded")."""
+    terms = [t for t in text.split() if any(c.isalnum() for c in t)]
+    if not terms:
+        return None
+    return " ".join('"' + t.replace('"', '""') + '"*' for t in terms)
+
+
+def _index(conn: sqlite3.Connection, trace_id: str, body: str) -> None:
+    row = conn.execute("SELECT doc FROM search_docs WHERE trace_id = ?", (trace_id,)).fetchone()
+    if row is not None:
+        conn.execute("UPDATE search SET body = ? WHERE rowid = ?", (body, row[0]))
+    else:
+        doc = conn.execute("INSERT INTO search (body) VALUES (?)", (body,)).lastrowid
+        conn.execute("INSERT INTO search_docs (trace_id, doc) VALUES (?, ?)", (trace_id, doc))
+
+
+def _meta(conn: sqlite3.Connection, key: str) -> str | None:
+    row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+    return None if row is None else str(row[0])
+
+
+def _has_table(conn: sqlite3.Connection, name: str) -> bool:
+    # A file an older loomflow wrote lacks the newer tables until a
+    # writer opens it; the read-only web app mustn't fail on that.
+    return conn.execute("SELECT 1 FROM sqlite_master WHERE name = ?", (name,)).fetchone() is not None
+
+
+def _set_meta(conn: sqlite3.Connection, key: str, value: str) -> None:
+    conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, value))
 
 
 def _team(definition: Mapping[str, Any]) -> tuple[Any, ...]:
@@ -207,8 +313,8 @@ class StudioStore:
     """The Studio database at ``path``.
 
     A store opened for writing creates the file and schema; a
-    read-only store (``readonly=True``, what the web app uses) never
-    creates or changes anything. Every method opens its own short
+    read-only store (``readonly=True``, what the web app reads with)
+    never creates or changes anything. Every method opens its own short
     connection, except :meth:`writer`, which the recorder's thread
     holds for its lifetime.
     """
@@ -224,29 +330,123 @@ class StudioStore:
                     "INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', ?)",
                     (str(SCHEMA_VERSION),),
                 )
+                conn.execute(
+                    "UPDATE meta SET value = ? WHERE key = 'schema_version' AND CAST(value AS INTEGER) < ?",
+                    (str(SCHEMA_VERSION), SCHEMA_VERSION),
+                )
 
     # ---- connections ---------------------------------------------------
 
-    def _connect(self) -> sqlite3.Connection:
+    def _connect(self) -> _Connection:
         # ``timeout`` waits out another process's lock (several
         # processes may record to one file), including while the
         # first of them switches the file to WAL.
+        conn: _Connection
         if self.readonly:
             conn = sqlite3.connect(
-                f"file:{self.path}?mode=ro", uri=True, timeout=10.0, check_same_thread=False
+                f"file:{self.path}?mode=ro", uri=True, timeout=10.0, check_same_thread=False,
+                factory=_Connection,
             )
         else:
-            conn = sqlite3.connect(self.path, timeout=10.0, check_same_thread=False)
+            conn = sqlite3.connect(self.path, timeout=10.0, check_same_thread=False, factory=_Connection)
+            if conn.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()[0] == 0:
+                # A new file: let pruning hand space back. SQLite takes
+                # this only before the first table and the switch to WAL.
+                conn.execute("PRAGMA auto_vacuum = INCREMENTAL")
             _use_wal(conn)
             conn.execute("PRAGMA synchronous=NORMAL")
         conn.row_factory = sqlite3.Row
         return conn
 
-    def writer(self) -> sqlite3.Connection:
+    def writer(self) -> _Connection:
         """A connection for the recorder's writer thread."""
         if self.readonly:
             raise RuntimeError("a read-only StudioStore can't write")
         return self._connect()
+
+    @contextmanager
+    def write(self) -> Iterator[_Connection]:
+        """One transaction on a new connection (the web app's writes)."""
+        conn = self.writer()
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
+
+    # ---- search and pruning (the writer) -------------------------------
+
+    @staticmethod
+    def prepare_search(conn: _Connection) -> bool:
+        """Get the search index ready for ``conn`` to keep up to date:
+        create it, and index the traces already recorded, unless it is
+        complete. Returns ``False`` when this SQLite has no FTS5; search
+        then scans the recorded text, for every reader of the file."""
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            state = _meta(conn, "search")
+            try:
+                conn.execute(_SEARCH_TABLE)
+            except sqlite3.OperationalError:
+                if state != "off":
+                    _set_meta(conn, "search", "off")
+                conn.commit()
+                conn.search_ready = False
+                return False
+            conn.execute(_SEARCH_DOCS)
+            if state != "fts5":
+                conn.execute("DELETE FROM search")
+                conn.execute("DELETE FROM search_docs")
+                traces = conn.execute(
+                    "SELECT trace_id, run_id, name, user_id, session_id, input, output, error FROM traces"
+                    " WHERE status != 'running'"
+                ).fetchall()
+                for trace in traces:
+                    spans = conn.execute(
+                        "SELECT name, run_id, error, content FROM spans WHERE trace_id = ?",
+                        (trace["trace_id"],),
+                    ).fetchall()
+                    _index(conn, trace["trace_id"], search_body(dict(trace), [dict(s) for s in spans]))
+                _set_meta(conn, "search", "fts5")
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        conn.search_ready = True
+        return True
+
+    @staticmethod
+    def prune(conn: _Connection, before: float, *, batch: int = 500) -> int:
+        """Delete the runs started before ``before`` (epoch seconds) with
+        their steps, scores and search entries; eval runs are kept.
+        Commits after each ``batch`` traces, so other writers aren't
+        held up. Returns how many traces were deleted."""
+        deleted = 0
+        while True:
+            ids = [
+                r[0]
+                for r in conn.execute(
+                    "SELECT trace_id FROM traces WHERE started_at < ? AND experiment_id IS NULL LIMIT ?",
+                    (before, batch),
+                ).fetchall()
+            ]
+            if not ids:
+                break
+            marks = ", ".join("?" for _ in ids)
+            with conn:
+                conn.execute(f"DELETE FROM spans WHERE trace_id IN ({marks})", ids)
+                conn.execute(f"DELETE FROM scores WHERE trace_id IN ({marks})", ids)
+                if conn.search_ready:
+                    conn.execute(
+                        f"DELETE FROM search WHERE rowid IN (SELECT doc FROM search_docs WHERE trace_id IN ({marks}))",
+                        ids,
+                    )
+                    conn.execute(f"DELETE FROM search_docs WHERE trace_id IN ({marks})", ids)
+                conn.execute(f"DELETE FROM traces WHERE trace_id IN ({marks})", ids)
+            deleted += len(ids)
+        if deleted:
+            conn.execute("PRAGMA incremental_vacuum").fetchall()
+        return deleted
 
     @contextmanager
     def _read(self) -> Iterator[sqlite3.Connection]:
@@ -340,6 +540,9 @@ class StudioStore:
                 for s in spans
             ],
         )
+        # A finished trace is indexed; its ``running`` row isn't.
+        if getattr(conn, "search_ready", False) and row["status"] != "running":
+            _index(conn, trace["trace_id"], search_body(trace, spans))
 
     @staticmethod
     def add_score(conn: sqlite3.Connection, score: Mapping[str, Any]) -> None:
@@ -412,6 +615,45 @@ class StudioStore:
             (ended_at, _dumps(summary), exp_id),
         )
 
+    @staticmethod
+    def delete_score(conn: sqlite3.Connection, score_id: int) -> None:
+        conn.execute("DELETE FROM scores WHERE id = ?", (score_id,))
+
+    @staticmethod
+    def add_dataset_case(
+        conn: sqlite3.Connection,
+        *,
+        project: str,
+        dataset: str,
+        input: str,
+        expected: str | None,
+        trace_id: str | None,
+    ) -> str:
+        """Add a case to the dataset named ``dataset`` in ``project``
+        (created if new). Returns the dataset's id."""
+        row = conn.execute(
+            "SELECT id FROM datasets WHERE project = ? AND name = ?", (project, dataset)
+        ).fetchone()
+        now = time.time()
+        if row is None:
+            dataset_id = "ds_" + secrets.token_hex(8)
+            conn.execute(
+                "INSERT INTO datasets (id, project, name, created_at) VALUES (?, ?, ?, ?)",
+                (dataset_id, project, dataset, now),
+            )
+        else:
+            dataset_id = str(row["id"])
+        conn.execute(
+            "INSERT INTO dataset_cases (id, dataset_id, input, expected, trace_id, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            ("case_" + secrets.token_hex(8), dataset_id, input, expected, trace_id, now),
+        )
+        return dataset_id
+
+    @staticmethod
+    def delete_dataset_case(conn: sqlite3.Connection, dataset_id: str, case_id: str) -> None:
+        conn.execute("DELETE FROM dataset_cases WHERE id = ? AND dataset_id = ?", (case_id, dataset_id))
+
     # ---- reads (the web app) -------------------------------------------
 
     def projects(self) -> list[str]:
@@ -434,6 +676,7 @@ class StudioStore:
         version: int | None = None,
         since: float | None = None,
         problems: bool = False,
+        unscored: bool = False,
         include_experiments: bool = False,
         limit: int = 50,
         offset: int = 0,
@@ -459,17 +702,14 @@ class StudioStore:
             args.append(since)
         if problems:
             where.append("status IN ('error', 'interrupted')")
-        if search:
-            # Root input / output, or anything any span in the trace
-            # recorded (messages, tool arguments and results).
-            where.append(
-                "(input LIKE ? OR output LIKE ? OR trace_id IN"
-                " (SELECT trace_id FROM spans WHERE content LIKE ? OR name LIKE ?))"
-            )
-            needle = f"%{search}%"
-            args.extend([needle] * 4)
-        clause = " AND ".join(where)
+        if unscored:
+            where.append("NOT EXISTS (SELECT 1 FROM scores s WHERE s.trace_id = traces.trace_id)")
         with self._read() as conn:
+            if search:
+                sql, extra = self._search_filter(conn, search)
+                where.append(sql)
+                args.extend(extra)
+            clause = " AND ".join(where)
             rows = conn.execute(
                 f"SELECT * FROM traces WHERE {clause} ORDER BY started_at DESC LIMIT ? OFFSET ?",
                 (*args, limit, offset),
@@ -649,7 +889,85 @@ class StudioStore:
         ]
         return exp
 
+    def score_keys(self, project: str | None) -> list[str]:
+        """Score keys in use, most used first (suggestions for the form)."""
+        clause, args = ("WHERE t.project = ?", [project]) if project else ("", [])
+        with self._read() as conn:
+            rows = conn.execute(
+                "SELECT s.key FROM scores s JOIN traces t ON t.trace_id = s.trace_id"
+                f" {clause} GROUP BY s.key ORDER BY COUNT(*) DESC LIMIT 50",
+                args,
+            ).fetchall()
+        return [r[0] for r in rows]
+
+    def score_trace(self, score_id: int) -> str | None:
+        with self._read() as conn:
+            row = conn.execute("SELECT trace_id FROM scores WHERE id = ?", (score_id,)).fetchone()
+        return None if row is None else row[0]
+
+    def list_datasets(self, project: str | None) -> list[dict[str, Any]]:
+        clause, args = ("WHERE d.project = ?", [project]) if project else ("", [])
+        with self._read() as conn:
+            if not _has_table(conn, "datasets"):
+                return []
+            rows = conn.execute(
+                "SELECT d.*, (SELECT COUNT(*) FROM dataset_cases c WHERE c.dataset_id = d.id) AS cases,"
+                " (SELECT MAX(created_at) FROM dataset_cases c WHERE c.dataset_id = d.id) AS updated_at"
+                f" FROM datasets d {clause} ORDER BY d.name",
+                args,
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_dataset(self, dataset_id: str) -> dict[str, Any] | None:
+        """A dataset with its cases, oldest first; ``trace_exists`` says
+        whether the run a case came from is still recorded."""
+        with self._read() as conn:
+            if not _has_table(conn, "datasets"):
+                return None
+            row = conn.execute("SELECT * FROM datasets WHERE id = ?", (dataset_id,)).fetchone()
+            if row is None:
+                return None
+            cases = conn.execute(
+                "SELECT c.*, t.trace_id IS NOT NULL AS trace_exists FROM dataset_cases c"
+                " LEFT JOIN traces t ON t.trace_id = c.trace_id"
+                " WHERE c.dataset_id = ? ORDER BY c.created_at, c.rowid",
+                (dataset_id,),
+            ).fetchall()
+        return {**dict(row), "cases": [dict(c) for c in cases]}
+
+    def find_datasets(self, name: str, project: str | None = None) -> list[dict[str, Any]]:
+        clause, args = ("AND project = ?", [project]) if project else ("", [])
+        with self._read() as conn:
+            if not _has_table(conn, "datasets"):
+                return []
+            rows = conn.execute(f"SELECT * FROM datasets WHERE name = ? {clause}", (name, *args)).fetchall()
+        return [dict(r) for r in rows]
+
     # ---- helpers -------------------------------------------------------
+
+    @staticmethod
+    def _search_filter(conn: sqlite3.Connection, text: str) -> tuple[str, list[Any]]:
+        """The WHERE clause for a search: the full-text index when the
+        file has a complete one this SQLite can read, else a scan of
+        the root input / output and everything any step recorded."""
+        query = _fts_query(text)
+        if query is not None and _meta(conn, "search") == "fts5":
+            try:
+                conn.execute("SELECT 1 FROM search LIMIT 0")
+            except sqlite3.OperationalError:
+                pass  # this SQLite has no FTS5
+            else:
+                return (
+                    "trace_id IN (SELECT trace_id FROM search_docs WHERE doc IN"
+                    " (SELECT rowid FROM search WHERE search MATCH ?))",
+                    [query],
+                )
+        needle = f"%{text}%"
+        return (
+            "(input LIKE ? OR output LIKE ? OR trace_id IN"
+            " (SELECT trace_id FROM spans WHERE content LIKE ? OR name LIKE ?))",
+            [needle] * 4,
+        )
 
     @staticmethod
     def _scores_for(conn: sqlite3.Connection, trace_ids: Sequence[str]) -> dict[str, list[dict[str, Any]]]:

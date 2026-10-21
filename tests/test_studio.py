@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 import pytest
 
@@ -27,6 +30,7 @@ pytestmark = pytest.mark.anyio
 def _clean_studio(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.delenv(studio.ENV_VAR, raising=False)
     monkeypatch.delenv(studio.PROJECT_ENV_VAR, raising=False)
+    monkeypatch.delenv(studio.KEEP_DAYS_ENV_VAR, raising=False)
     studio.disable()
     yield
     studio.disable()
@@ -529,13 +533,27 @@ async def test_aclose_waits_for_studio_writes(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def _get(app: Any, path: str, method: str = "GET") -> tuple[int, dict[str, str], str]:
+async def _get(
+    app: Any,
+    path: str,
+    method: str = "GET",
+    *,
+    form: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
+    body: bytes | None = None,
+) -> tuple[int, dict[str, str], str]:
     raw_path, _, query = path.partition("?")
-    scope = {"type": "http", "method": method, "path": raw_path, "query_string": query.encode(), "headers": []}
+    sent_headers = dict(headers or {})
+    if form is not None:
+        body = urlencode(form, doseq=True).encode()
+        sent_headers.setdefault("content-type", "application/x-www-form-urlencoded")
+    scope = {"type": "http", "method": method, "path": raw_path, "query_string": query.encode(),
+             "headers": [(k.encode(), v.encode()) for k, v in sent_headers.items()]}
     sent: list[dict[str, Any]] = []
+    messages = [{"type": "http.request", "body": body or b"", "more_body": False}]
 
     async def receive() -> dict[str, Any]:
-        return {"type": "http.request", "body": b"", "more_body": False}
+        return messages.pop(0) if messages else {"type": "http.disconnect"}
 
     async def send(message: dict[str, Any]) -> None:
         sent.append(message)
@@ -629,12 +647,263 @@ async def test_the_web_app_without_a_database(tmp_path: Path) -> None:
 async def test_the_web_app_is_read_only_and_404s(tmp_path: Path) -> None:
     from loomflow.studio.web import create_app
 
-    db, _ = await _recorded_db(tmp_path)
-    app = create_app(db)
+    db, trace_id = await _recorded_db(tmp_path)
+    app = create_app(db, read_only=True)
     assert (await _get(app, "/traces", method="POST"))[0] == 405
+    status, _, body = await _get(app, f"/traces/{trace_id}")
+    assert status == 200 and 'name="token"' not in body and "Add to a dataset" not in body
+    assert (await _get(app, "/traces", method="DELETE"))[0] == 405
+    assert (await _get(create_app(db), "/traces", method="PUT"))[0] == 405
     assert (await _get(app, "/traces/nope"))[0] == 404
     assert (await _get(app, "/nowhere"))[0] == 404
     assert (await _get(app, "/"))[0] == 302
+
+
+# ---------------------------------------------------------------------------
+# Search and cleanup
+# ---------------------------------------------------------------------------
+
+
+def _store(db: Path) -> Any:
+    from loomflow.studio._store import StudioStore
+
+    assert studio.flush()
+    return StudioStore(db, readonly=True)
+
+
+async def test_search_uses_the_full_text_index(tmp_path: Path) -> None:
+    db = tmp_path / "s.db"
+    studio.enable(db)
+    first = await _agent(_tool_turns("Refunded the duplicate."), tools=[lookup]).run("Charged twice?", user_id="ann")
+    await _agent([ScriptedTurn(text="Restart the router.")], name="tech").run("Wi-Fi is down")
+    store = _store(db)
+    assert _db(db).execute("SELECT value FROM meta WHERE key = 'search'").fetchone()[0] == "fts5"
+
+    def found(text: str) -> list[str]:
+        return [t["name"] for t in store.list_traces(search=text)["traces"]]
+
+    assert found("4471") == ["billing"]  # a tool argument
+    assert found("refund") == ["billing"]  # the start of a word
+    assert found("charges 2") == ["billing"]  # words anywhere in the trace, here a tool result
+    assert found("router") == ["tech"]
+    assert found(first.run_id or "") == ["billing"]
+    assert found("nothing like this") == []
+    assert found("Wi-Fi") == ["tech"]
+
+
+async def test_search_scans_when_there_is_no_index(tmp_path: Path) -> None:
+    db = tmp_path / "s.db"
+    studio.enable(db)
+    await _agent(_tool_turns(), tools=[lookup]).run("Charged twice?")
+    store = _store(db)
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE meta SET value = 'off' WHERE key = 'search'")
+    assert [t["name"] for t in store.list_traces(search="447")["traces"]] == ["billing"]  # any part of a word
+
+
+async def test_a_file_without_an_index_gets_one(tmp_path: Path) -> None:
+    from loomflow.studio._store import StudioStore
+
+    db = tmp_path / "s.db"
+    studio.enable(db)
+    await _agent(_tool_turns(), tools=[lookup]).run("Charged twice?")
+    assert studio.flush()
+    for recorder in _state.all_recorders():
+        recorder.close()
+    _state._recorders.clear()
+    with sqlite3.connect(db) as conn:  # as a file 0.18.0 wrote
+        conn.execute("DROP TABLE search")
+        conn.execute("DROP TABLE search_docs")
+        conn.execute("DELETE FROM meta WHERE key = 'search'")
+    conn = StudioStore(db).writer()
+    assert StudioStore.prepare_search(conn)
+    conn.close()
+    assert [t["name"] for t in _store(db).list_traces(search="4471")["traces"]] == ["billing"]
+
+
+async def test_old_runs_are_deleted_and_eval_runs_kept(tmp_path: Path) -> None:
+    db = tmp_path / "s.db"
+    studio.enable(db, project="p")
+    old = await _agent(_tool_turns(), tools=[lookup]).run("old run")
+    studio.score(old, "resolved", True)
+    await _agent([ScriptedTurn(text="new")]).run("new run")
+    await EvalHarness(_agent([ScriptedTurn(text="4"), ScriptedTurn(text="7")], name="calc"), [Contains()],
+                      concurrency=1).run(Dataset(_cases(), name="math"))
+    assert studio.flush()
+    week_ago = time.time() - 7 * 86400
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE traces SET started_at = ? WHERE input = 'old run' OR experiment_id IS NOT NULL",
+                     (week_ago,))
+    assert studio.prune(3, path=db) == 1
+    rows = _db(db).execute("SELECT input, experiment_id FROM traces").fetchall()
+    assert sorted(r["input"] for r in rows if r["experiment_id"] is None) == ["new run"]
+    assert sum(r["experiment_id"] is not None for r in rows) == 2  # eval runs stay
+    assert _db(db).execute("SELECT COUNT(*) FROM scores WHERE key = 'resolved'").fetchone()[0] == 0
+    assert _db(db).execute(
+        "SELECT COUNT(*) FROM spans WHERE trace_id NOT IN (SELECT trace_id FROM traces)").fetchone()[0] == 0
+    assert _store(db).list_traces(search="old")["total"] == 0
+    assert studio.prune(3, path=tmp_path / "missing.db") == 0
+
+
+async def test_keep_days_deletes_old_runs_as_it_records(tmp_path: Path) -> None:
+    db = tmp_path / "s.db"
+    studio.enable(db)
+    await _agent([ScriptedTurn(text="a")]).run("old run")
+    assert studio.flush()
+    for recorder in _state.all_recorders():
+        recorder.close()
+    _state._recorders.clear()
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE traces SET started_at = ?", (time.time() - 40 * 86400,))
+    studio.enable(db, keep_days=30)
+    await _agent([ScriptedTurn(text="b")]).run("new run")
+    assert [t["input"] for t in _traces(db)] == ["new run"]
+    assert _db(db).execute("PRAGMA auto_vacuum").fetchone()[0] == 2  # incremental: space goes back
+
+
+def test_keep_days_settings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    for bad in (0, -1, True, "7"):
+        with pytest.raises(ValueError, match="keep_days"):
+            studio.enable(tmp_path / "s.db", keep_days=bad)  # type: ignore[arg-type]
+    monkeypatch.setenv(studio.KEEP_DAYS_ENV_VAR, "14")
+    studio.enable(tmp_path / "s.db")
+    assert _state.get_global().keep_days == 14.0  # type: ignore[union-attr]
+    monkeypatch.setenv(studio.ENV_VAR, "1")
+    assert _state.settings_from_env().keep_days == 14.0  # type: ignore[union-attr]
+    monkeypatch.setenv(studio.KEEP_DAYS_ENV_VAR, "soon")
+    with pytest.raises(ValueError, match=studio.KEEP_DAYS_ENV_VAR):
+        _state.settings_from_env()
+
+
+# ---------------------------------------------------------------------------
+# Scoring and datasets from the web app
+# ---------------------------------------------------------------------------
+
+
+def _token(body: str) -> str:
+    match = re.search(r'name="token" value="([^"]+)"', body)
+    assert match, "no form on the page"
+    return match[1]
+
+
+async def test_scoring_a_run_from_its_page(tmp_path: Path) -> None:
+    from loomflow.studio.web import create_app
+
+    db, trace_id = await _recorded_db(tmp_path)
+    app = create_app(db)
+    _, _, body = await _get(app, f"/traces/{trace_id}")
+    token = _token(body)
+    status, headers, _ = await _get(app, f"/traces/{trace_id}/scores", "POST",
+                                    form={"token": token, "key": "review", "verdict": "bad", "comment": "too long"})
+    assert status == 303 and headers["location"] == f"/traces/{trace_id}?saved=score#scores"
+    await _get(app, f"/traces/{trace_id}/scores", "POST", form={"token": token, "key": "stars", "value": "4"})
+    await _get(app, f"/traces/{trace_id}/scores", "POST", form={"token": token, "key": "tone", "value": "curt"})
+    rows = {r["key"]: dict(r) for r in _db(db).execute("SELECT * FROM scores WHERE source = 'ui'")}
+    assert (rows["review"]["score"], rows["review"]["value"], rows["review"]["comment"]) == (0.0, "no", "too long")
+    assert (rows["stars"]["score"], rows["tone"]["value"]) == (4.0, "curt")
+    status, _, body = await _get(app, f"/traces/{trace_id}?saved=score")
+    assert "Score saved." in body and "too long" in body and "Remove" in body
+    assert '<option value="resolved">' in body  # keys already in use are suggested
+    status, headers, _ = await _get(app, f"/scores/{rows['review']['id']}/delete", "POST", form={"token": token})
+    assert status == 303 and headers["location"] == f"/traces/{trace_id}#scores"
+    assert _db(db).execute("SELECT COUNT(*) FROM scores WHERE key = 'review'").fetchone()[0] == 0
+    status, _, body = await _get(app, f"/traces/{trace_id}/scores", "POST", form={"token": token, "key": "x"})
+    assert status == 400 and "Enter a value" in body
+    status, _, body = await _get(app, "/traces?unscored=1")
+    assert status == 200 and "charged twice" not in body  # it has scores
+
+
+async def test_forms_from_elsewhere_are_refused(tmp_path: Path) -> None:
+    from loomflow.studio.web import create_app
+
+    db, trace_id = await _recorded_db(tmp_path)
+    app = create_app(db)
+    _, _, body = await _get(app, f"/traces/{trace_id}")
+    form = {"token": _token(body), "key": "review", "verdict": "good"}
+    path = f"/traces/{trace_id}/scores"
+    assert (await _get(app, path, "POST", form={**form, "token": "guess"}))[0] == 403
+    assert (await _get(create_app(db), path, "POST", form=form))[0] == 403  # another app's token
+    assert (await _get(app, path, "POST", form=form,
+                       headers={"host": "127.0.0.1:7600", "origin": "http://evil.example"}))[0] == 403
+    assert (await _get(app, path, "POST", form=form, headers={"sec-fetch-site": "cross-site"}))[0] == 403
+    assert (await _get(app, path, "POST", body=json.dumps(form).encode(),
+                       headers={"content-type": "application/json"}))[0] == 415
+    assert (await _get(app, path, "POST", form={**form, "comment": "x" * 1_100_000}))[0] == 413
+    # A name pointed at 127.0.0.1 by another site can't read it either.
+    assert (await _get(app, "/traces", headers={"host": "evil.example:7600"}))[0] == 421
+    for host in ("127.0.0.1:7600", "localhost:7600", "[::1]:7600", "studio.localhost"):
+        assert (await _get(app, "/traces", headers={"host": host}))[0] == 200, host
+    assert (await _get(create_app(db, allowed_hosts=["studio.internal"]), "/traces",
+                       headers={"host": "studio.internal"}))[0] == 200
+    assert (await _get(create_app(db, allowed_hosts=["*"]), "/traces", headers={"host": "anything"}))[0] == 200
+    ok = await _get(app, path, "POST", form=form, headers={"host": "127.0.0.1:7600", "origin": "http://127.0.0.1:7600",
+                                                            "sec-fetch-site": "same-origin"})
+    assert ok[0] == 303
+    assert _db(db).execute("SELECT COUNT(*) FROM scores WHERE source = 'ui'").fetchone()[0] == 1
+
+
+async def test_building_a_dataset_from_runs(tmp_path: Path) -> None:
+    from loomflow.studio.web import create_app
+
+    db, trace_id = await _recorded_db(tmp_path)
+    app = create_app(db)
+    _, _, body = await _get(app, f"/traces/{trace_id}")
+    token = _token(body)
+    assert "Add to a dataset" in body and "charged twice</textarea>" in body  # the input, ready to edit
+    status, headers, _ = await _get(app, f"/traces/{trace_id}/datasets", "POST", form={
+        "token": token, "dataset": "billing regressions", "input": "Was I charged twice?",
+        "expected": "Yes; refunded"})
+    assert status == 303
+    dataset_id = headers["location"].split("added=")[1].split("#")[0]
+    _, _, body = await _get(app, headers["location"].split("#")[0])
+    assert "Added to" in body and "billing regressions" in body and "1 case." in body
+    status, _, body = await _get(app, "/datasets")
+    assert status == 200 and "billing regressions" in body
+    status, _, body = await _get(app, f"/datasets/{dataset_id}")
+    assert status == 200 and "Was I charged twice?" in body and 'loomflow.studio.dataset(&quot;billing regressions&quot;)' in body
+    status, headers, body = await _get(app, f"/datasets/{dataset_id}.jsonl")
+    assert status == 200 and 'filename="billing_regressions.jsonl"' in headers["content-disposition"]
+    (tmp_path / "cases.jsonl").write_text(body)
+    from_file = Dataset.from_jsonl(tmp_path / "cases.jsonl")
+    loaded = studio.dataset("billing regressions", path=db)
+    assert [c.id for c in loaded] == [c.id for c in from_file] == [studio.dataset("billing regressions", path=db)[0].id]
+    assert (loaded[0].input, loaded[0].expected, loaded.name) == ("Was I charged twice?", "Yes; refunded",
+                                                                  "billing regressions")
+    assert loaded[0].metadata == {"studio_trace": trace_id}
+    await EvalHarness(_agent([ScriptedTurn(text="Yes; refunded")]), [Contains()]).run(loaded, experiment="check")
+    assert studio.flush()
+    exp = _db(db).execute("SELECT dataset FROM experiments WHERE name = 'check'").fetchone()
+    assert exp["dataset"] == "billing regressions"
+    case_id = loaded[0].id
+    status, headers, _ = await _get(app, f"/datasets/{dataset_id}/cases/{case_id}/delete", "POST",
+                                    form={"token": token})
+    assert status == 303 and len(studio.dataset("billing regressions", path=db)) == 0
+    with pytest.raises(LookupError, match="no Studio dataset"):
+        studio.dataset("nope", path=db)
+    status, _, body = await _get(app, f"/traces/{trace_id}/datasets", "POST", form={"token": token, "dataset": ""})
+    assert status == 400
+
+
+async def test_pages_work_on_a_file_from_0_18_0(tmp_path: Path) -> None:
+    from loomflow.studio.web import create_app
+
+    db, trace_id = await _recorded_db(tmp_path)
+    with sqlite3.connect(db) as conn:
+        conn.execute("DROP TABLE dataset_cases")
+        conn.execute("DROP TABLE datasets")
+    app = create_app(db, read_only=True)
+    for path in ("/datasets", f"/traces/{trace_id}", "/traces?q=twice"):
+        assert (await _get(app, path))[0] == 200, path
+    status, _, body = await _get(create_app(db), f"/traces/{trace_id}")
+    token = _token(body)
+    status, _, _ = await _get(create_app(db), f"/traces/{trace_id}/datasets", "POST",
+                              form={"token": token, "dataset": "d", "input": "x"})
+    assert status == 403  # a different app instance's token
+    app = create_app(db)
+    _, _, body = await _get(app, f"/traces/{trace_id}")
+    status, _, _ = await _get(app, f"/traces/{trace_id}/datasets", "POST",
+                              form={"token": _token(body), "dataset": "d", "input": "x"})
+    assert status == 303  # the first write adds the new tables
 
 
 # ---------------------------------------------------------------------------
@@ -654,10 +923,15 @@ def test_agent_name_from_config() -> None:
 
 
 def test_cli_studio_and_eval_flags() -> None:
-    from loomflow.cli import _build_parser
+    from loomflow.cli import _build_parser, _studio_hosts
 
     args = _build_parser().parse_args(["studio", "--db", "x.db", "--port", "7700"])
-    assert (args.db, args.port, args.host) == ("x.db", 7700, "127.0.0.1")
+    assert (args.db, args.port, args.host, args.read_only, args.allow_host) == ("x.db", 7700, "127.0.0.1", False, [])
+    args = _build_parser().parse_args(["studio", "--read-only", "--allow-host", "studio.internal"])
+    assert args.read_only and args.allow_host == ["studio.internal"]
+    assert _studio_hosts("127.0.0.1", ["studio.internal"]) == ["localhost", "127.0.0.1", "::1", "studio.internal"]
+    assert _studio_hosts("10.0.0.5", []) == ["localhost", "127.0.0.1", "::1", "10.0.0.5"]
+    assert _studio_hosts("0.0.0.0", []) == ["*"]
     args = _build_parser().parse_args(["eval", "cases.jsonl", "--agent", "m:a", "--studio"])
     assert args.studio == ""
     args = _build_parser().parse_args(["eval", "cases.jsonl", "--agent", "m:a"])

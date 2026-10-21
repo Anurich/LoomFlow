@@ -35,6 +35,8 @@ Open http://127.0.0.1:7600 and look at:
   coordinator and the specialist it delegated to.
 * **Experiments**: compare the two eval runs; v2 fixed three cases
   and broke one.
+* On any trace, **score** the run, or **add it to a dataset** with the
+  answer it should have given; then see it under **Datasets**.
 """
 
 from __future__ import annotations

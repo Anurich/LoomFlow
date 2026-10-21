@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 
 ENV_VAR = "LOOMFLOW_STUDIO"
 PROJECT_ENV_VAR = "LOOMFLOW_STUDIO_PROJECT"
+KEEP_DAYS_ENV_VAR = "LOOMFLOW_STUDIO_KEEP_DAYS"
 DEFAULT_PATH = Path(".loomflow") / "studio.db"
 _OFF = frozenset({"", "0", "off", "false", "no"})
 _ON = frozenset({"1", "on", "true", "yes"})
@@ -39,6 +40,8 @@ class Settings:
     sample_rate: float = 1.0
     capture_content: bool = True
     redact: Callable[[str], str] | None = None
+    # Delete runs older than this many days (eval runs are kept).
+    keep_days: float | None = None
 
 
 @dataclass(frozen=True)
@@ -82,7 +85,25 @@ def settings_from_env() -> Settings | None:
         return None
     value = raw.strip()
     path = DEFAULT_PATH if value.lower() in _ON else Path(value).expanduser()
-    return Settings(path=path, project=os.environ.get(PROJECT_ENV_VAR) or None)
+    return Settings(
+        path=path,
+        project=os.environ.get(PROJECT_ENV_VAR) or None,
+        keep_days=keep_days_from_env(),
+    )
+
+
+def keep_days_from_env() -> float | None:
+    """``LOOMFLOW_STUDIO_KEEP_DAYS`` as a number of days, or ``None``."""
+    raw = (os.environ.get(KEEP_DAYS_ENV_VAR) or "").strip()
+    if not raw:
+        return None
+    try:
+        days = float(raw)
+    except ValueError:
+        raise ValueError(f"{KEEP_DAYS_ENV_VAR} must be a number of days, not {raw!r}") from None
+    if days <= 0:
+        raise ValueError(f"{KEEP_DAYS_ENV_VAR} must be more than 0, not {raw!r}")
+    return days
 
 
 def current_settings() -> Settings | None:

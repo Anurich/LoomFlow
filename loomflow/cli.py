@@ -132,14 +132,31 @@ def _cmd_studio(args: argparse.Namespace) -> int:
 
     from .studio.web import create_app  # deferred: keep `loom version` import-light
 
+    hosts = _studio_hosts(args.host, args.allow_host)
     url = f"http://{args.host}:{args.port}"
-    print(f"Loomflow Studio: {url}  (reading {args.db})", file=sys.stderr)
+    mode = ", read-only" if args.read_only else ""
+    print(f"Loomflow Studio: {url}  (reading {args.db}{mode})", file=sys.stderr)
+    if "*" in hosts:
+        print("  Listening on every address: anyone who can reach this port can read your traces"
+              + ("" if args.read_only else " and add scores and dataset cases") + ".", file=sys.stderr)
     if args.open:
         import webbrowser  # noqa: PLC0415
 
         webbrowser.open(url)
-    uvicorn.run(create_app(args.db), host=args.host, port=args.port, log_level="warning")
+    app = create_app(args.db, read_only=args.read_only, allowed_hosts=hosts)
+    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     return 0
+
+
+def _studio_hosts(host: str, extra: list[str] | None) -> list[str]:
+    """The host names ``loom studio`` answers to: the loopback names,
+    the ``--host`` it listens on and any ``--allow-host``; any name at
+    all when it listens on every address."""
+    from .studio.web import LOOPBACK_HOSTS  # noqa: PLC0415
+
+    if host in ("0.0.0.0", "::", ""):
+        return ["*"]
+    return list(dict.fromkeys([*LOOPBACK_HOSTS, host, *(extra or [])]))
 
 
 def _cmd_eval(args: argparse.Namespace) -> int:
@@ -259,6 +276,16 @@ def _build_parser() -> argparse.ArgumentParser:
     p_studio.add_argument("--host", default="127.0.0.1")
     p_studio.add_argument("--port", type=int, default=7600)
     p_studio.add_argument("--open", action="store_true", help="open the page in your browser")
+    p_studio.add_argument(
+        "--read-only", action="store_true", help="don't allow adding scores or dataset cases from the page"
+    )
+    p_studio.add_argument(
+        "--allow-host",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="also answer to this host name, e.g. behind a proxy (repeatable)",
+    )
     p_studio.set_defaults(func=_cmd_studio)
 
     p_version = sub.add_parser("version", help="print the loomflow version")

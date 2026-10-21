@@ -1129,11 +1129,14 @@ loom studio                              # http://127.0.0.1:7600
 - **Experiments.** `EvalHarness` runs are saved as experiments.
   Compare two runs on the same dataset to see which cases improved
   and which regressed.
+- **Scores and datasets from the page.** Mark a run good or bad, and
+  add a bad one to a dataset with the answer it should have given;
+  `loomflow.studio.dataset("name")` runs your evals on it.
 
 Model messages never travel on telemetry spans, so they never reach
 an OpenTelemetry exporter. `enable(redact="pii")` scrubs text before
 it's written; `enable(capture_content=False)` keeps only timing,
-tokens and structure. See
+tokens and structure, and `enable(keep_days=30)` deletes old runs. See
 [`examples/34_studio.py`](examples/34_studio.py), which records a
 small support bot offline and tells you how to browse it.
 

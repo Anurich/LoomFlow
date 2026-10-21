@@ -26,27 +26,37 @@ recorded whenever its instructions, model, tools or settings change.
 Everything stays in the file (``.loomflow/studio.db`` by default);
 nothing is sent anywhere. Pass ``redact=`` to scrub text before it is
 written, or ``capture_content=False`` to keep timing, tokens and
-structure only.
+structure only; ``keep_days=`` deletes old runs.
+
+In the web app you can score runs and add them to **datasets**;
+:func:`dataset` loads one for the eval harness.
 """
 
 from __future__ import annotations
 
 import contextlib
+import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from . import _state
-from ._state import DEFAULT_PATH, ENV_VAR, PROJECT_ENV_VAR, Settings
+from ._state import DEFAULT_PATH, ENV_VAR, KEEP_DAYS_ENV_VAR, PROJECT_ENV_VAR, Settings
+
+if TYPE_CHECKING:
+    from ..eval.dataset import Dataset
 
 __all__ = [
     "DEFAULT_PATH",
     "ENV_VAR",
+    "KEEP_DAYS_ENV_VAR",
     "PROJECT_ENV_VAR",
+    "dataset",
     "disable",
     "enable",
     "flush",
     "is_enabled",
+    "prune",
     "score",
     "session",
 ]
@@ -65,6 +75,20 @@ def _redactor(redact: Callable[[str], str] | str | None) -> Callable[[str], str]
     raise ValueError(f"redact must be a function, 'pii' or None, not {redact!r}")
 
 
+def _days(value: float, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, int | float) or not value > 0:
+        raise ValueError(f"{name} must be a number of days more than 0, not {value!r}")
+    return float(value)
+
+
+def _file(path: str | Path | None) -> Path:
+    """``path``, else the file this process records to, else the default."""
+    if path is not None:
+        return Path(path).expanduser()
+    settings = _state.current_settings()
+    return settings.path if settings is not None else DEFAULT_PATH
+
+
 def enable(
     path: str | Path | None = None,
     *,
@@ -72,6 +96,7 @@ def enable(
     sample_rate: float = 1.0,
     capture_content: bool = True,
     redact: Callable[[str], str] | str | None = None,
+    keep_days: float | None = None,
 ) -> Path:
     """Record every run in this process to the Studio file at ``path``.
 
@@ -82,6 +107,9 @@ def enable(
     ``capture_content=False`` keeps no prompts, replies or tool
     payloads; ``redact`` (a ``str -> str`` function, or ``"pii"`` for
     loomflow's PII redaction) scrubs every piece of text first.
+    ``keep_days`` deletes runs older than that many days, when
+    recording starts and then hourly (eval runs and datasets are kept);
+    it defaults to ``LOOMFLOW_STUDIO_KEEP_DAYS``, else keeping all.
 
     Overrides ``LOOMFLOW_STUDIO``; a :func:`session` block overrides
     this. Returns the file's path.
@@ -94,6 +122,7 @@ def enable(
         sample_rate=sample_rate,
         capture_content=capture_content,
         redact=_redactor(redact),
+        keep_days=_days(keep_days, "keep_days") if keep_days is not None else _state.keep_days_from_env(),
     )
     _state.set_global(settings)
     # Create the file and schema now, so a bad path fails here.
@@ -176,3 +205,60 @@ def flush(timeout: float = 5.0) -> bool:  # noqa: ASYNC109 — blocking by desig
     """Wait until every record queued so far is written to disk.
     Returns ``False`` if ``timeout`` seconds pass first."""
     return all(r.flush(timeout=timeout) for r in _state.all_recorders())
+
+
+def prune(older_than_days: float, *, path: str | Path | None = None) -> int:
+    """Delete the runs started more than ``older_than_days`` days ago,
+    with their steps and scores, from the Studio file at ``path``
+    (default: the file this process records to, else
+    ``.loomflow/studio.db``). Eval runs and datasets are kept. Returns
+    how many runs were deleted. ``enable(keep_days=...)`` does this
+    for you as it records."""
+    from ._store import StudioStore
+
+    days = _days(older_than_days, "older_than_days")
+    target = _file(path)
+    if not target.exists():
+        return 0
+    conn = StudioStore(target).writer()
+    try:
+        StudioStore.prepare_search(conn)
+        return StudioStore.prune(conn, time.time() - days * 86400)
+    finally:
+        conn.close()
+
+
+def dataset(name: str, *, project: str | None = None, path: str | Path | None = None) -> Dataset:
+    """The Studio dataset ``name`` (runs added to it from their trace
+    pages, with the expected output you gave) as an eval
+    :class:`~loomflow.eval.dataset.Dataset`, ready for
+    ``EvalHarness.run``. Each case keeps its id, so experiments on the
+    dataset compare case by case. ``project`` picks one when several
+    projects have a dataset of that name; ``path`` is the Studio file
+    (default: the one this process records to, else
+    ``.loomflow/studio.db``). Raises ``LookupError`` if there's none."""
+    from ..eval.dataset import Case, Dataset
+    from ._store import StudioStore
+
+    target = _file(path)
+    if not target.exists():
+        raise LookupError(f"no Studio file at {target}")
+    store = StudioStore(target, readonly=True)
+    found = store.find_datasets(name, project)
+    where = f" in project {project!r}" if project else ""
+    if not found:
+        raise LookupError(f"no Studio dataset named {name!r}{where} in {target}")
+    if len(found) > 1:
+        projects = ", ".join(sorted(d["project"] for d in found))
+        raise LookupError(f"several projects have a dataset named {name!r} ({projects}); pass project=")
+    data = store.get_dataset(found[0]["id"]) or {"cases": []}
+    cases = [
+        Case(
+            id=c["id"],
+            input=c["input"],
+            expected=c["expected"],
+            metadata={"studio_trace": c["trace_id"]} if c["trace_id"] else {},
+        )
+        for c in data["cases"]
+    ]
+    return Dataset(cases, name=name)
