@@ -7,6 +7,46 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 For development-history detail (per-slice notes, file maps, gate
 counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 
+## [Unreleased]
+
+### Added
+
+* **Score runs and build datasets in Studio.** A trace's page now has
+  a form to score the run (Good / Bad, or a number or label under any
+  key, with a comment; any score can be removed) and one to add it to
+  a dataset, with the expected output edited into the answer you want.
+  A new Datasets page lists them, with a JSONL download, and
+  ``loomflow.studio.dataset("name")`` returns one as an eval
+  ``Dataset`` whose case ids stay put, so experiments on it compare
+  case by case. The traces list gains a **Not scored** filter.
+* **Old runs are deleted for you**: ``enable(keep_days=30)`` (or
+  ``LOOMFLOW_STUDIO_KEEP_DAYS``) deletes runs older than that when
+  recording starts and then hourly; ``loomflow.studio.prune(days)``
+  does it once. Eval runs and datasets are kept. New files hand the
+  space back; older ones reuse it.
+* **Fast search**: Studio keeps a full-text index (SQLite FTS5) of each
+  finished run's input, output, ids and steps, and builds it for files
+  recorded before. At 20,000 runs a search takes about 30 ms instead of
+  300 ms. Without FTS5 in your SQLite, search scans as before.
+* ``loom studio --read-only`` and ``--allow-host NAME``;
+  ``create_app(path, read_only=, allowed_hosts=)``.
+
+### Changed
+
+* The Studio web app accepts form posts (scores, dataset cases) unless
+  started with ``--read-only``. Posts need a token from the app's own
+  pages, and are refused from other sites.
+* The web app answers only to the loopback host names (``localhost``,
+  ``127.0.0.1``, ``::1``, ``*.localhost``) unless told others, so a web
+  page can't read it by pointing a name of its own at 127.0.0.1. If you
+  mount ``create_app`` in an app served under another name, pass
+  ``allowed_hosts``; ``loom studio --host`` adds the address it listens
+  on, and listening on ``0.0.0.0`` answers to any name.
+* Search matches words and the start of words (``refund`` finds
+  "refunded", ``4471`` finds "#4471"), every word anywhere in the run;
+  it no longer matches inside a word or the text of the model messages,
+  which repeat what the other steps hold.
+
 ## [0.18.0] — 2026-10-21
 
 ### Added

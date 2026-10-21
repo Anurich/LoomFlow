@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import html
 import json
+import re
 import statistics
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
@@ -184,6 +185,7 @@ def layout(
     {item("/traces", "Traces", "traces")}
     {item("/agents", "Agents", "agents")}
     {item("/experiments", "Experiments", "experiments")}
+    {item("/datasets", "Datasets", "datasets")}
   </div>
   {projects_html}
   <div class="nav-foot"><span>Reading</span><span class="mono soft">{e(db_path)}</span><span>loomflow {e(version)}</span></div>
@@ -211,6 +213,23 @@ loomflow.studio.enable()</pre>
 
 def not_found(what: str) -> str:
     return f'<div class="head"><h1>{e(what)} not found</h1></div><p><a href="/traces">Back to traces</a></p>'
+
+
+def form_error(message: str, back: str) -> str:
+    """A whole page for a form that couldn't be saved."""
+    return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Not saved · Loomflow Studio</title><link rel="stylesheet" href="/static/studio.css"></head>
+<body><main><div class="head"><h1>Not saved</h1></div>
+<div class="notice">{e(message)}</div><p><a href="{e(back)}">Go back</a></p></main></body></html>"""
+
+
+def _token_field(token: str) -> str:
+    return f'<input type="hidden" name="token" value="{e(token)}">'
+
+
+def _options(list_id: str, values: Sequence[str]) -> str:
+    return f'<datalist id="{e(list_id)}">' + "".join(f'<option value="{e(v)}">' for v in values) + "</datalist>"
 
 
 # ---------------------------------------------------------------------------
@@ -268,6 +287,7 @@ def traces_page(
   {_select("model", "Model", options.get("models", []), filters.get("model"))}
   {_select("status", "Status", ["ok", "error", "interrupted", "running"], filters.get("status"))}
   <label class="check"><input type="checkbox" name="problems" value="1"{" checked" if filters.get("problems") else ""}> Problems only</label>
+  <label class="check"><input type="checkbox" name="unscored" value="1"{" checked" if filters.get("unscored") else ""}> Not scored</label>
   <button class="btn" type="submit">Filter</button>
   <a class="btn" href="{href("/traces", project=project)}">Clear</a>
 </form>"""
@@ -380,7 +400,14 @@ def trace_page(
     selected: str | None,
     agent_labels: Mapping[str, str],
     structure: Mapping[str, Any] | None = None,
+    token: str | None = None,
+    notice: tuple[str, str] | None = None,
+    score_keys: Sequence[str] = (),
+    datasets: Sequence[str] = (),
 ) -> str:
+    """The trace page. With a form ``token`` it has forms to score the
+    run and add it to a dataset; ``notice`` is ``(panel, html)``, a
+    confirmation shown in the ``"scores"`` or ``"datasets"`` panel."""
     spans = trace["spans"]
     ordered = _ordered(spans)
     by_id = {s["span_id"]: s for s in spans}
@@ -486,7 +513,8 @@ def trace_page(
 {timeline}
 <div class="side">
 {detail}
-{_scores_panel(trace.get("scores") or [])}
+{_scores_panel(trace, token=token, keys=score_keys, notice=_notice(notice, "scores"))}
+{_dataset_panel(trace, token=token, datasets=datasets, notice=_notice(notice, "datasets")) if token else ""}
 </div></div>
 {architecture}"""
 
@@ -603,19 +631,83 @@ def _block(title: str, text: str) -> str:
     return f'<div style="display:flex;flex-direction:column;gap:6px">{heading}<pre class="code">{e(text)}</pre></div>'
 
 
-def _scores_panel(scores: Sequence[Mapping[str, Any]]) -> str:
+def _notice(notice: tuple[str, str] | None, panel: str) -> str:
+    if notice is None or notice[0] != panel:
+        return ""
+    return f'<div class="notice ok" role="status">{notice[1]}</div>'
+
+
+def _scores_panel(trace: Mapping[str, Any], *, token: str | None, keys: Sequence[str], notice: str = "") -> str:
+    scores = trace.get("scores") or []
     if not scores:
-        body = ('<p class="soft">No scores yet. Add one with <span class="mono">'
-                "loomflow.studio.score(result, key, value)</span>, or record evals and online scoring.</p>")
+        hint = "Score it below, or" if token else "Add one with"
+        body = (f'<p class="soft">No scores yet. {hint} <span class="mono">'
+                "loomflow.studio.score(result, key, value)</span> in code.</p>")
     else:
-        body = "".join(
-            f'<div class="score-row"><span class="mono" style="font-size:13px">{e(s["key"])}</span>'
-            f'<span><strong>{e(fmt_score(s))}</strong></span><span></span>'
-            f'<span class="faint" style="font-size:13px">{e(s.get("source"))}'
-            f'{" · " + e(s["comment"]) if s.get("comment") else ""}</span></div>'
-            for s in scores
-        )
-    return f'<section class="panel pad" aria-label="Scores"><h2>Scores</h2><div>{body}</div></section>'
+        parts = []
+        for s in scores:
+            remove = (
+                f'<form class="inline" method="post" action="/scores/{e(s["id"])}/delete">{_token_field(token)}'
+                f'<button class="link-btn" type="submit" aria-label="Remove the {e(s["key"])} score">Remove</button>'
+                "</form>"
+                if token and s.get("id") is not None
+                else "<span></span>"
+            )
+            parts.append(
+                f'<div class="score-row"><span class="mono" style="font-size:13px">{e(s["key"])}</span>'
+                f'<span><strong>{e(fmt_score(s))}</strong></span>{remove}<span></span>'
+                f'<span class="faint" style="font-size:13px">{e(s.get("source"))}'
+                f'{" · " + e(s["comment"]) if s.get("comment") else ""}</span></div>'
+            )
+        body = "".join(parts)
+    form = ""
+    if token:
+        suggestions = list(dict.fromkeys(["review", *keys]))
+        form = f"""<form class="stack" method="post" action="/traces/{e(quote(trace["trace_id"]))}/scores">
+{_token_field(token)}
+<label for="s-key">Score</label>
+<input id="s-key" type="text" name="key" value="review" list="s-keys" maxlength="64" required>
+{_options("s-keys", suggestions)}
+<div class="choices" role="radiogroup" aria-label="Verdict">
+<label><input type="radio" name="verdict" value="good"> Good</label>
+<label><input type="radio" name="verdict" value="bad"> Bad</label>
+<label for="s-value">or a value</label>
+<input id="s-value" type="text" name="value" maxlength="200" placeholder="4, 0.8 or a label" style="width:auto;flex:1 1 140px">
+</div>
+<label for="s-comment">Comment</label>
+<input id="s-comment" type="text" name="comment" maxlength="2000" placeholder="Optional">
+<div><button class="btn primary" type="submit">Save score</button></div>
+</form>"""
+    return (f'<section class="panel pad" id="scores" aria-label="Scores"><h2>Scores</h2>{notice}<div>{body}</div>'
+            f"{form}</section>")
+
+
+def _dataset_panel(
+    trace: Mapping[str, Any], *, token: str | None, datasets: Sequence[str], notice: str = ""
+) -> str:
+    def text(value: Any) -> str:
+        return value if isinstance(value, str) else pretty(value) if value is not None else ""
+
+    return f"""<section class="panel pad" id="datasets" aria-label="Add to a dataset"><h2>Add to a dataset</h2>
+{notice}
+<form class="stack" method="post" action="/traces/{e(quote(trace["trace_id"]))}/datasets">
+{_token_field(token or "")}
+<label for="d-name">Dataset</label>
+<input id="d-name" type="text" name="dataset" list="d-names" maxlength="100" required placeholder="billing-regressions">
+{_options("d-names", datasets)}
+<label for="d-input">Input</label>
+<textarea id="d-input" name="input" rows="3" required>{e(text(trace.get("input")))}</textarea>
+<label for="d-expected">Expected output</label>
+<textarea id="d-expected" name="expected" rows="4">{e(text(trace.get("output")))}</textarea>
+<p class="hint">Edit it into the answer the agent should give: evals compare outputs with it.</p>
+<div><button class="btn" type="submit">Add to dataset</button></div>
+</form></section>"""
+
+
+def added_notice(dataset: Mapping[str, Any]) -> str:
+    count = len(dataset.get("cases") or [])
+    return (f'Added to <a href="/datasets/{e(quote(dataset["id"]))}">{e(dataset["name"])}</a>, '
+            f'which has {count} case{"" if count == 1 else "s"}.')
 
 
 # ---------------------------------------------------------------------------
@@ -957,3 +1049,85 @@ def compare_page(a: Mapping[str, Any], b: Mapping[str, Any], *, show: str) -> st
 <div class="head"><h2>Cases</h2><div class="row-gap">{tabs}</div></div>
 <div class="panel scroll"><table><thead><tr><th>Input</th><th>Expected</th><th>Baseline</th><th>This run</th>
 <th>Change</th><th></th></tr></thead><tbody>{case_rows}</tbody></table></div>"""
+
+
+# ---------------------------------------------------------------------------
+# Datasets
+# ---------------------------------------------------------------------------
+
+
+def datasets_page(datasets: Sequence[Mapping[str, Any]], *, project: str | None, writable: bool) -> str:
+    how = ("Add a run to one from its trace page, with the answer it should have given."
+           if writable else "This Studio is read-only, so cases can't be added here.")
+    intro = ('<div class="head"><div class="row-gap" style="flex-direction:column;align-items:flex-start">'
+             f'<h1>Datasets</h1><p class="lede">Cases collected from recorded runs, to run evals on. {e(how)}</p>'
+             "</div></div>")
+    if not datasets:
+        return intro + ('<div class="panel empty"><p>No datasets yet.</p><p class="soft">Open a trace whose answer '
+                        "you want to check in future, and use <strong>Add to a dataset</strong>.</p></div>")
+    rows = "".join(
+        f'<tr><td><a href="/datasets/{e(quote(d["id"]))}"><strong>{e(d["name"])}</strong></a></td>'
+        f'{"" if project else "<td>" + e(d["project"]) + "</td>"}'
+        f'<td class="num">{fmt_int(d["cases"])}</td><td class="soft">{e(fmt_ts(d.get("updated_at")))}</td></tr>'
+        for d in datasets
+    )
+    project_head = "" if project else "<th>Project</th>"
+    return intro + f"""<div class="panel scroll"><table><thead><tr><th>Dataset</th>{project_head}
+<th class="num">Cases</th><th>Last added</th></tr></thead><tbody>{rows}</tbody></table></div>"""
+
+
+def dataset_page(dataset: Mapping[str, Any], *, token: str | None) -> str:
+    cases = dataset.get("cases") or []
+    base = f"/datasets/{quote(dataset['id'])}"
+    rows = []
+    for c in cases:
+        source = trace_link(c["trace_id"], "run") if c.get("trace_id") and c.get("trace_exists") else (
+            '<span class="faint">deleted</span>' if c.get("trace_id") else "")
+        remove = (
+            f'<form class="inline" method="post" action="{e(base)}/cases/{e(quote(c["id"]))}/delete">'
+            f'{_token_field(token)}<button class="link-btn" type="submit">Remove</button></form>'
+            if token
+            else ""
+        )
+        rows.append(
+            f'<tr><td>{e(first_line(c["input"], 140))}</td><td>{e(first_line(c.get("expected"), 140))}</td>'
+            f'<td>{source}</td><td class="soft">{e(fmt_ts(c["created_at"]))}</td><td>{remove}</td></tr>'
+        )
+    table = "".join(rows) or '<tr><td colspan="5" class="soft">No cases. Add runs from their trace pages.</td></tr>'
+    name = json.dumps(dataset["name"])
+    usage = f"""import loomflow.studio
+from loomflow.eval import Contains, EvalHarness
+
+dataset = loomflow.studio.dataset({name})
+await EvalHarness(agent, [Contains()]).run(dataset, experiment="my change")"""
+    count = len(cases)
+    return f"""<div class="crumbs"><a href="{href("/datasets", project=dataset["project"])}">Datasets</a>
+<span aria-hidden="true">/</span><span>{e(dataset["name"])}</span></div>
+<div class="head"><div class="row-gap" style="flex-direction:column;align-items:flex-start"><h1>{e(dataset["name"])}</h1>
+<p class="lede">{count} case{"" if count == 1 else "s"} in project {e(dataset["project"])}.</p></div>
+<div class="row-gap"><a class="btn" href="{e(base)}.jsonl">Download JSONL</a></div></div>
+<div class="panel scroll"><table><thead><tr><th>Input</th><th>Expected</th><th>From</th><th>Added</th><th></th></tr>
+</thead><tbody>{table}</tbody></table></div>
+<section class="panel pad" aria-label="Run an eval on it"><h2>Run an eval on it</h2>
+<pre class="code">{e(usage)}</pre>
+<p class="soft">Or download the JSONL file and run <span class="mono">loom eval {e(safe_name(dataset["name"]))}.jsonl --agent app:agent --studio</span>.
+Each case keeps its id, so experiments on this dataset compare case by case.</p></section>"""
+
+
+def dataset_jsonl(dataset: Mapping[str, Any]) -> str:
+    """The dataset as JSONL that ``Dataset.from_jsonl`` reads."""
+    lines = [
+        json.dumps({
+            "id": c["id"],
+            "input": c["input"],
+            "expected": c.get("expected"),
+            "metadata": {"studio_trace": c["trace_id"]} if c.get("trace_id") else {},
+        }, ensure_ascii=False)
+        for c in dataset.get("cases") or []
+    ]
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
+def safe_name(name: str) -> str:
+    """``name`` as a file name."""
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._") or "dataset"

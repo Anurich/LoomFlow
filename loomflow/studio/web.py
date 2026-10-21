@@ -4,30 +4,43 @@
 :func:`loomflow.serve.create_app`: no web framework, run it under any
 ASGI server. ``loom studio`` runs it with uvicorn on 127.0.0.1.
 
-The app only reads the database (it opens it read-only) and serves no
-scripts; every recorded value is HTML-escaped and the pages carry a
-Content-Security-Policy that forbids scripts. It has no login: keep it
-on localhost, or behind your own authentication, because traces hold
-prompts, replies and tool payloads.
+The app reads recorded runs and changes only what people add on its
+pages: scores, and cases in datasets (``read_only=True`` turns that
+off). It serves no scripts; every recorded value is HTML-escaped and
+the pages carry a Content-Security-Policy that forbids scripts. It has
+no login: keep it on localhost, or behind your own authentication,
+because traces hold prompts, replies and tool payloads.
 
-Routes (all ``GET``): ``/traces`` (filter with ``q``, ``agent``,
-``user``, ``model``, ``status``, ``problems``, ``session``,
+Forms post back with a token only this app's pages carry, and a
+request is refused unless its ``Host`` is a name the app answers to
+(``allowed_hosts``, default the loopback names), so another site open
+in your browser can neither post to it nor, by pointing its own name
+at 127.0.0.1, read it.
+
+Routes (``GET``): ``/traces`` (filter with ``q``, ``agent``, ``user``,
+``model``, ``status``, ``problems``, ``unscored``, ``session``,
 ``version``, ``range``, ``project``, ``page``), ``/traces/{id}``
 (``?span=`` selects a step), ``/traces/{id}.json``, ``/agents``,
 ``/agents/{key}``, ``/experiments``, ``/experiments/{id}``,
 ``/experiments/compare?a=&b=&show=all|changed|regressed``,
-``/health``.
+``/datasets``, ``/datasets/{id}``, ``/datasets/{id}.jsonl``,
+``/health``. ``POST``: ``/traces/{id}/scores``,
+``/traces/{id}/datasets``, ``/scores/{n}/delete``,
+``/datasets/{id}/cases/{case}/delete``.
 """
 
 from __future__ import annotations
 
+import hmac
 import json
 import logging
+import re
+import secrets
 import time
-from collections.abc import Awaitable, Callable, MutableMapping
+from collections.abc import Awaitable, Callable, Collection, MutableMapping
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, unquote
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 import anyio
 
@@ -47,7 +60,12 @@ Send = Callable[[Message], Awaitable[None]]
 ASGIApp = Callable[[Scope, Receive, Send], Awaitable[None]]
 
 PAGE_SIZE = 50
+MAX_FORM = 1_000_000
+"""Bytes accepted in one form post."""
+LOOPBACK_HOSTS = ("localhost", "127.0.0.1", "::1")
 _HTML = "text/html; charset=utf-8"
+_TEXT = "text/plain; charset=utf-8"
+_ID = r"[A-Za-z0-9_-]{1,80}"
 _CSP = "default-src 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; form-action 'self'; base-uri 'none'"
 
 
@@ -66,14 +84,36 @@ class _Response:
         self.headers = headers or []
 
 
-def create_app(path: str | Path | None = None) -> ASGIApp:
+def create_app(
+    path: str | Path | None = None,
+    *,
+    read_only: bool = False,
+    allowed_hosts: Collection[str] | None = None,
+) -> ASGIApp:
     """The Studio web app over the database at ``path`` (default
     ``.loomflow/studio.db``, the file :func:`loomflow.studio.enable`
-    writes by default)."""
+    writes by default).
+
+    ``read_only=True`` hides the forms and refuses every change.
+    ``allowed_hosts`` are the host names the app answers to (default:
+    ``localhost``, ``127.0.0.1``, ``::1`` and ``*.localhost``); pass
+    the name you reach it by when it runs elsewhere, or ``["*"]`` to
+    answer to any.
+    """
     from .. import __version__
 
     db_path = Path(path).expanduser() if path is not None else DEFAULT_PATH
     shown_path = str(db_path)
+    token = secrets.token_urlsafe(24)
+    form_token = None if read_only else token
+    hosts = {h.lower().strip("[]") for h in (allowed_hosts if allowed_hosts is not None else LOOPBACK_HOSTS)}
+
+    def host_ok(headers: dict[str, str]) -> bool:
+        host = headers.get("host")
+        if host is None or "*" in hosts:
+            return True
+        name = _host_name(host)
+        return name in hosts or (allowed_hosts is None and name.endswith(".localhost"))
 
     def page(title: str, active: str, body: str, project: str | None, store: StudioStore | None) -> str:
         projects = store.projects() if store is not None else []
@@ -115,7 +155,18 @@ def create_app(path: str | Path | None = None) -> ASGIApp:
             if trace.get("agent_key") and trace.get("agent_version"):
                 definition = store.version_definition(trace["project"], trace["agent_key"], trace["agent_version"])
                 structure = (definition or {}).get("structure")
-            body = pages.trace_page(trace, selected=arg("span"), agent_labels=labels, structure=structure)
+            notice = None
+            if arg("saved") == "score":
+                notice = ("scores", "Score saved.")
+            elif arg("added"):
+                added = store.get_dataset(arg("added") or "")
+                if added is not None:
+                    notice = ("datasets", pages.added_notice(added))
+            body = pages.trace_page(
+                trace, selected=arg("span"), agent_labels=labels, structure=structure, token=form_token,
+                notice=notice, score_keys=store.score_keys(trace["project"]),
+                datasets=[d["name"] for d in store.list_datasets(trace["project"])],
+            )
             return _Response(page(pages.first_line(trace.get("input"), 60) or "Trace", "traces", body,
                                   trace["project"], store))
         if path_info == "/agents" or path_info.startswith("/agents/"):
@@ -147,7 +198,88 @@ def create_app(path: str | Path | None = None) -> ASGIApp:
                 return _Response(page("Not found", "experiments", pages.not_found("Experiment"), project, store),
                                  status=404)
             return _Response(page(exp["name"], "experiments", pages.experiment_page(exp), exp["project"], store))
+        if path_info == "/datasets":
+            body = pages.datasets_page(store.list_datasets(project), project=project, writable=form_token is not None)
+            return _Response(page("Datasets", "datasets", body, project, store))
+        if path_info.startswith("/datasets/"):
+            dataset_id = path_info[len("/datasets/"):]
+            as_jsonl = dataset_id.endswith(".jsonl")
+            dataset = store.get_dataset(dataset_id.removesuffix(".jsonl"))
+            if dataset is None:
+                return _Response(page("Not found", "datasets", pages.not_found("Dataset"), project, store),
+                                 status=404)
+            if as_jsonl:
+                return _Response(
+                    pages.dataset_jsonl(dataset),
+                    content_type="application/jsonl; charset=utf-8",
+                    headers=[(b"content-disposition",
+                              f'attachment; filename="{pages.safe_name(dataset["name"])}.jsonl"'.encode("latin-1"))],
+                )
+            body = pages.dataset_page(dataset, token=form_token)
+            return _Response(page(dataset["name"], "datasets", body, dataset["project"], store))
         return _Response(page("Not found", "traces", pages.not_found("Page"), project, store), status=404)
+
+    def respond_post(path_info: str, form: dict[str, list[str]]) -> _Response:
+        def field(name: str, limit: int) -> str:
+            values = form.get(name)
+            return values[0].strip()[:limit] if values else ""
+
+        if not db_path.exists():
+            return _form_error("There's no Studio file to save to yet.", "/traces", status=404)
+        if not hmac.compare_digest(field("token", 200), token):
+            return _form_error("This page is out of date (Studio restarted since it loaded). Reload it and try "
+                               "again.", "/traces", status=403)
+        reader = StudioStore(db_path, readonly=True)
+        if match := re.fullmatch(rf"/traces/({_ID})/scores", path_info):
+            trace = reader.get_trace(match[1])
+            if trace is None:
+                return _form_error("That run isn't recorded any more.", "/traces", status=404)
+            back = f"/traces/{quote(trace['trace_id'])}"
+            key = field("key", 64) or "review"
+            verdict = field("verdict", 10)
+            value: bool | float | str
+            if verdict in ("good", "bad"):
+                value = verdict == "good"
+            else:
+                raw = field("value", 200)
+                if not raw:
+                    return _form_error("Enter a value to score with: a number or a label.", back)
+                try:
+                    value = float(raw)
+                except ValueError:
+                    value = raw
+            from ._hooks import _score_row
+
+            row = _score_row(trace.get("run_id"), key, value, field("comment", 2000) or None, "ui")
+            with StudioStore(db_path).write() as conn:
+                StudioStore.add_score(conn, {**row, "trace_id": trace["trace_id"]})
+            return _redirect(back + "?saved=score#scores")
+        if match := re.fullmatch(rf"/traces/({_ID})/datasets", path_info):
+            trace = reader.get_trace(match[1])
+            if trace is None:
+                return _form_error("That run isn't recorded any more.", "/traces", status=404)
+            back = f"/traces/{quote(trace['trace_id'])}"
+            name, case_input = field("dataset", 100), field("input", 100_000)
+            if not name or not case_input:
+                return _form_error("A case needs a dataset name and an input.", back)
+            with StudioStore(db_path).write() as conn:
+                dataset_id = StudioStore.add_dataset_case(
+                    conn, project=trace["project"], dataset=name, input=case_input,
+                    expected=field("expected", 100_000) or None, trace_id=trace["trace_id"],
+                )
+            return _redirect(f"{back}?added={quote(dataset_id)}#datasets")
+        if match := re.fullmatch(r"/scores/(\d{1,18})/delete", path_info):
+            trace_id = reader.score_trace(int(match[1]))
+            with StudioStore(db_path).write() as conn:
+                StudioStore.delete_score(conn, int(match[1]))
+            return _redirect(f"/traces/{quote(trace_id)}#scores" if trace_id else "/traces")
+        if match := re.fullmatch(rf"/datasets/({_ID})/cases/({_ID})/delete", path_info):
+            if reader.get_dataset(match[1]) is None:
+                return _form_error("That dataset doesn't exist.", "/datasets", status=404)
+            with StudioStore(db_path).write() as conn:
+                StudioStore.delete_dataset_case(conn, match[1], match[2])
+            return _redirect(f"/datasets/{quote(match[1])}")
+        return _Response("Not found.", status=404, content_type=_TEXT)
 
     async def app(scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] == "lifespan":
@@ -161,9 +293,16 @@ def create_app(path: str | Path | None = None) -> ASGIApp:
         if scope["type"] != "http":
             return
         method = scope.get("method", "GET")
-        if method not in ("GET", "HEAD"):
-            response = _Response("Studio is read-only.", status=405, content_type="text/plain; charset=utf-8",
-                                 headers=[(b"allow", b"GET, HEAD")])
+        request = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])}
+        allowed = b"GET, HEAD" if read_only else b"GET, HEAD, POST"
+        if not host_ok(request):
+            response = _Response("Studio doesn't answer to this host name. Open it at http://127.0.0.1, or start "
+                                 "it with the name you use.", status=421, content_type=_TEXT)
+        elif method == "POST" and not read_only:
+            response = await _post(scope, receive, request, respond_post)
+        elif method not in ("GET", "HEAD"):
+            response = _Response("Studio is read-only." if read_only else "Method not allowed.", status=405,
+                                 content_type=_TEXT, headers=[(b"allow", allowed)])
         else:
             query = parse_qs(scope.get("query_string", b"").decode("latin-1"))
             try:
@@ -171,7 +310,7 @@ def create_app(path: str | Path | None = None) -> ASGIApp:
             except Exception:  # noqa: BLE001 — one bad page mustn't take the app down
                 _LOG.exception("Studio page failed: %s", scope.get("path"))
                 response = _Response("Studio couldn't render this page; see the server log.", status=500,
-                                     content_type="text/plain; charset=utf-8")
+                                     content_type=_TEXT)
         headers = [
             (b"content-type", response.content_type.encode("latin-1")),
             (b"content-length", str(len(response.body)).encode("latin-1")),
@@ -184,6 +323,55 @@ def create_app(path: str | Path | None = None) -> ASGIApp:
         await send({"type": "http.response.body", "body": b"" if method == "HEAD" else response.body})
 
     return app
+
+
+async def _post(
+    scope: Scope,
+    receive: Receive,
+    headers: dict[str, str],
+    handle: Callable[[str, dict[str, list[str]]], _Response],
+) -> _Response:
+    """Check and read a form post, then hand it to ``handle``."""
+    # A browser says where a request comes from; refuse other sites.
+    if headers.get("sec-fetch-site") == "cross-site":
+        return _Response("Studio only accepts forms from its own pages.", status=403, content_type=_TEXT)
+    origin = headers.get("origin")
+    if origin and origin != "null" and urlsplit(origin).netloc.lower() != headers.get("host", "").lower():
+        return _Response("Studio only accepts forms from its own pages.", status=403, content_type=_TEXT)
+    if headers.get("content-type", "").split(";")[0].strip().lower() != "application/x-www-form-urlencoded":
+        return _Response("Studio only accepts its own forms.", status=415, content_type=_TEXT)
+    body = b""
+    more = True
+    while more:
+        message = await receive()
+        if message["type"] == "http.disconnect":
+            return _Response("", status=400, content_type=_TEXT)
+        body += message.get("body", b"")
+        more = bool(message.get("more_body"))
+        if len(body) > MAX_FORM:
+            return _Response("That's too much to save at once.", status=413, content_type=_TEXT)
+    form = parse_qs(body.decode("utf-8", errors="replace"), keep_blank_values=True)
+    try:
+        return await anyio.to_thread.run_sync(handle, scope.get("path", "/"), form)
+    except Exception:  # noqa: BLE001 — one bad form mustn't take the app down
+        _LOG.exception("Studio couldn't save: %s", scope.get("path"))
+        return _Response("Studio couldn't save that; see the server log.", status=500, content_type=_TEXT)
+
+
+def _redirect(location: str) -> _Response:
+    return _Response(b"", status=303, headers=[(b"location", location.encode("utf-8"))])
+
+
+def _form_error(message: str, back: str, *, status: int = 400) -> _Response:
+    return _Response(pages.form_error(message, back), status=status)
+
+
+def _host_name(host: str) -> str:
+    """``host`` (a ``Host`` header) without its port."""
+    host = host.strip().lower()
+    if host.startswith("["):
+        return host[1:].split("]", 1)[0]
+    return host.rsplit(":", 1)[0] if host.count(":") == 1 else host
 
 
 def _int(value: str | None) -> int | None:
@@ -213,6 +401,7 @@ def _traces(
     filters: dict[str, Any] = {
         "q": arg("q"), "agent": arg("agent"), "user": arg("user"), "model": arg("model"),
         "status": arg("status"), "problems": "1" if arg("problems") == "1" else None,
+        "unscored": "1" if arg("unscored") == "1" else None,
         "session": arg("session"), "version": version, "range": rng if rng != "all" else None,
     }
     data = store.list_traces(
@@ -226,6 +415,7 @@ def _traces(
         version=version,
         since=time.time() - seconds if seconds else None,
         problems=bool(filters["problems"]),
+        unscored=bool(filters["unscored"]),
         limit=PAGE_SIZE,
         offset=page_no * PAGE_SIZE,
     )

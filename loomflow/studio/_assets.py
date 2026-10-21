@@ -122,8 +122,20 @@ pre.code { margin: 0; padding: 12px; border-radius: 8px; background: var(--code-
 .msg .body { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; }
 details summary { cursor: pointer; font-size: 13px; color: var(--soft); }
 .notice { padding: 12px 14px; border-radius: 8px; border: 1px solid var(--madder); color: var(--ink); font-size: 14px; overflow-wrap: anywhere; }
+.notice.ok { border-color: var(--indigo); background: var(--selected); }
+.stack { display: flex; flex-direction: column; gap: 8px; }
+.stack label { font-size: 13px; font-weight: 600; color: var(--soft); }
+.stack input[type="text"], .stack textarea { width: 100%; min-height: 40px; padding: 8px 10px; border: 1px solid var(--line-strong);
+  border-radius: 8px; background: var(--raised); color: var(--ink); font: inherit; font-size: 14px; }
+.stack textarea { font-family: var(--mono); font-size: 13px; line-height: 1.5; resize: vertical; }
+.stack .hint { font-size: 13px; color: var(--faint); }
+.choices { display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: center; }
+.choices label { font-weight: 400; color: var(--body); font-size: 14px; display: inline-flex; gap: 6px; align-items: center; }
+.inline { display: inline; margin: 0; }
+.link-btn { padding: 0; border: 0; background: none; color: var(--link); font: inherit; font-size: 13px; cursor: pointer; text-decoration: underline; }
+.link-btn:hover { color: var(--indigo); }
 .empty { padding: 28px; text-align: left; display: flex; flex-direction: column; gap: 10px; }
-.score-row { display: grid; grid-template-columns: minmax(110px, 160px) 1fr; gap: 2px 14px; padding: 10px 0; border-top: 1px solid var(--hairline); font-size: 14px; }
+.score-row { display: grid; grid-template-columns: minmax(110px, 160px) 1fr auto; gap: 2px 14px; padding: 10px 0; border-top: 1px solid var(--hairline); font-size: 14px; }
 .better { color: var(--indigo); font-weight: 600; white-space: nowrap; }
 .worse { color: var(--madder); font-weight: 600; white-space: nowrap; }
 .pager { display: flex; justify-content: space-between; gap: 12px; padding: 12px 14px; font-size: 14px; color: var(--soft); }
