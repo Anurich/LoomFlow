@@ -7,6 +7,19 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 For development-history detail (per-slice notes, file maps, gate
 counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 
+## [Unreleased]
+
+### Changed
+
+* Studio's trace page needs far less scrolling. Scores sit in a bar
+  under the run's summary, as chips with a one-click **Good** / **Bad**;
+  **Other score…** and **Add to dataset…** open only when you want them
+  (the dataset form full width, input and expected output side by
+  side, the dataset name filled in with the last one used). The
+  architecture diagram moved under the timeline, and on wide screens
+  the selected step's details stay in view while you scroll the
+  timeline; clicking a step keeps your place in it.
+
 ## [0.19.0] — 2026-10-21
 
 ### Added

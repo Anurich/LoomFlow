@@ -157,15 +157,16 @@ def create_app(
                 structure = (definition or {}).get("structure")
             notice = None
             if arg("saved") == "score":
-                notice = ("scores", "Score saved.")
+                notice = "Score saved."
             elif arg("added"):
                 added = store.get_dataset(arg("added") or "")
                 if added is not None:
-                    notice = ("datasets", pages.added_notice(added))
+                    notice = pages.added_notice(added)
             body = pages.trace_page(
                 trace, selected=arg("span"), agent_labels=labels, structure=structure, token=form_token,
                 notice=notice, score_keys=store.score_keys(trace["project"]),
-                datasets=[d["name"] for d in store.list_datasets(trace["project"])],
+                datasets=[d["name"] for d in sorted(store.list_datasets(trace["project"]),
+                                                    key=lambda d: d.get("updated_at") or 0, reverse=True)],
             )
             return _Response(page(pages.first_line(trace.get("input"), 60) or "Trace", "traces", body,
                                   trace["project"], store))
@@ -253,7 +254,7 @@ def create_app(
             row = _score_row(trace.get("run_id"), key, value, field("comment", 2000) or None, "ui")
             with StudioStore(db_path).write() as conn:
                 StudioStore.add_score(conn, {**row, "trace_id": trace["trace_id"]})
-            return _redirect(back + "?saved=score#scores")
+            return _redirect(back + "?saved=score")
         if match := re.fullmatch(rf"/traces/({_ID})/datasets", path_info):
             trace = reader.get_trace(match[1])
             if trace is None:
@@ -267,12 +268,12 @@ def create_app(
                     conn, project=trace["project"], dataset=name, input=case_input,
                     expected=field("expected", 100_000) or None, trace_id=trace["trace_id"],
                 )
-            return _redirect(f"{back}?added={quote(dataset_id)}#datasets")
+            return _redirect(f"{back}?added={quote(dataset_id)}")
         if match := re.fullmatch(r"/scores/(\d{1,18})/delete", path_info):
             trace_id = reader.score_trace(int(match[1]))
             with StudioStore(db_path).write() as conn:
                 StudioStore.delete_score(conn, int(match[1]))
-            return _redirect(f"/traces/{quote(trace_id)}#scores" if trace_id else "/traces")
+            return _redirect(f"/traces/{quote(trace_id)}" if trace_id else "/traces")
         if match := re.fullmatch(rf"/datasets/({_ID})/cases/({_ID})/delete", path_info):
             if reader.get_dataset(match[1]) is None:
                 return _form_error("That dataset doesn't exist.", "/datasets", status=404)
