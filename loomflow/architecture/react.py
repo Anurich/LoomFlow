@@ -41,6 +41,7 @@ from ..observability.semconv import (
     set_span_attributes,
     usage_attrs,
 )
+from ..studio import _hooks as _studio
 from .base import AgentSession, Dependencies
 from .helpers import (
     _NULL_CTX,
@@ -309,6 +310,16 @@ class ReAct:
                                     cache_write_tokens=usage.cache_write_tokens,
                                 ),
                             )
+                        # Studio: the messages sent and the reply (kept
+                        # off the span, so no exporter sees them).
+                        _studio.model_call(
+                            model_span,
+                            model=deps.model.name,
+                            messages=session.messages,
+                            text=text,
+                            tool_calls=tool_calls,
+                            usage=usage,
+                        )
                 else:
                     text_parts: list[str] = []
                     stream_finish_reason: str | None = None
@@ -375,6 +386,14 @@ class ReAct:
                                 ),
                             )
                     text = "".join(text_parts)
+                    _studio.model_call(
+                        stream_span,
+                        model=deps.model.name,
+                        messages=session.messages,
+                        text=text,
+                        tool_calls=tool_calls,
+                        usage=usage,
+                    )
 
                 # 2b. Update budget + telemetry + cumulative usage.
                 # ``count_turn=False`` — ReAct already incremented

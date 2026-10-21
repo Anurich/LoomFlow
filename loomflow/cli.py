@@ -6,11 +6,13 @@ Stdlib ``argparse`` only; no click/typer dependency. Wired up via
     loom run "summarise this" --model gpt-4o
     loom serve my_service:agent --host 0.0.0.0 --port 8000
     loom eval cases.jsonl --agent my_service:agent --threshold exact_match=0.9
+    loom studio                      # browse recorded runs at http://127.0.0.1:7600
     loom version
 
-``loom serve`` needs an ASGI server; install the extra::
+``loom serve`` and ``loom studio`` need an ASGI server; install the
+extra::
 
-    pip install 'loomflow[serve]'
+    pip install 'loomflow[serve]'     # or 'loomflow[studio]'
 """
 
 from __future__ import annotations
@@ -119,6 +121,27 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_studio(args: argparse.Namespace) -> int:
+    try:
+        import uvicorn  # type: ignore[import-not-found]  # noqa: PLC0415
+    except ImportError:
+        return _fail(
+            "uvicorn is not installed; the studio command needs an ASGI "
+            "server.\n  pip install 'loomflow[studio]'"
+        )
+
+    from .studio.web import create_app  # deferred: keep `loom version` import-light
+
+    url = f"http://{args.host}:{args.port}"
+    print(f"Loomflow Studio: {url}  (reading {args.db})", file=sys.stderr)
+    if args.open:
+        import webbrowser  # noqa: PLC0415
+
+        webbrowser.open(url)
+    uvicorn.run(create_app(args.db), host=args.host, port=args.port, log_level="warning")
+    return 0
+
+
 def _cmd_eval(args: argparse.Namespace) -> int:
     from .eval import Contains, Dataset, EvalHarness, ExactMatch  # tier-2 import
 
@@ -141,12 +164,20 @@ def _cmd_eval(args: argparse.Namespace) -> int:
     except (OSError, ValueError) as exc:
         return _fail(str(exc))
 
+    if args.studio is not None:
+        from . import studio  # noqa: PLC0415
+
+        studio.enable(args.studio or None)
     metric = ExactMatch() if args.metric == "exact" else Contains()
     harness = EvalHarness(agent, metrics=[metric])
     try:
         report = anyio.run(harness.run, dataset)
     except Exception as exc:  # noqa: BLE001 — CLI boundary: message, not traceback
         return _fail(f"{type(exc).__name__}: {exc}")
+    if args.studio is not None:
+        from . import studio  # noqa: PLC0415
+
+        studio.flush()
 
     print(json.dumps({"passed": report.passed, "metrics": report.summary()}, indent=2))
     if thresholds:
@@ -211,7 +242,24 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="NAME=MIN",
         help="CI gate, e.g. exact_match=0.9 (repeatable); exit 1 when unmet",
     )
+    p_eval.add_argument(
+        "--studio",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="DB",
+        help="record the run in Studio as an experiment (optionally at DB; default .loomflow/studio.db)",
+    )
     p_eval.set_defaults(func=_cmd_eval)
+
+    p_studio = sub.add_parser("studio", help="browse recorded runs, agents and experiments")
+    p_studio.add_argument(
+        "--db", default=".loomflow/studio.db", help="the Studio database (default: .loomflow/studio.db)"
+    )
+    p_studio.add_argument("--host", default="127.0.0.1")
+    p_studio.add_argument("--port", type=int, default=7600)
+    p_studio.add_argument("--open", action="store_true", help="open the page in your browser")
+    p_studio.set_defaults(func=_cmd_studio)
 
     p_version = sub.add_parser("version", help="print the loomflow version")
     p_version.set_defaults(func=_cmd_version)

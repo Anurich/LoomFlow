@@ -86,6 +86,7 @@ from ..runtime.journaled import resuming_last_run
 from ..security.audit import AuditLog
 from ..security.hooks import HookRegistry, PostToolHook, PreToolHook
 from ..security.permissions import AllowAll
+from ..studio import _hooks as _studio
 from ..tools.registry import InProcessToolHost, Tool
 from .stop_hooks import GoalStopHook, StopHook, StopHookResult
 
@@ -261,6 +262,7 @@ class Agent:
         snip_window: int = 0,
         auto_compact_at_tokens: int | Literal["auto"] | None = None,
         persist_tool_transcripts: bool = False,
+        name: str | None = None,
         tuning: Tuning | None = None,
         **_legacy: Any,
     ) -> None:
@@ -306,6 +308,12 @@ class Agent:
         )
         has_skills = skill_registry is not None and len(skill_registry) > 0
 
+        if name is not None and (not isinstance(name, str) or not name.strip()):
+            raise ValueError(f"name must be a non-empty string or None, not {name!r}")
+        # Optional display name: telemetry's ``gen_ai.agent.name``, a
+        # Workflow node's name, and Studio's key for grouping this
+        # agent's runs and versions.
+        self._name: str | None = name
         self._instructions = instructions
         if has_skills:
             # Append the skill catalog to the system prompt — the
@@ -881,6 +889,11 @@ class Agent:
     # ---- public introspection ------------------------------------------
 
     @property
+    def name(self) -> str | None:
+        """The agent's ``name=``, or ``None`` when it wasn't given one."""
+        return self._name
+
+    @property
     def model(self) -> Model:
         """The configured :class:`Model` adapter."""
         return self._model
@@ -1304,6 +1317,7 @@ class Agent:
             # Single-shot model call. Use ``complete`` when
             # available (no streaming overhead); fall back to
             # consuming ``stream`` otherwise.
+            retry_started = _studio.now()
             if hasattr(deps.model, "complete"):
                 new_text, _calls, usage, _finish = (
                     await deps.model.complete(
@@ -1330,6 +1344,14 @@ class Agent:
                     ):
                         usage = chunk.usage
                 new_text = "".join(parts)
+            _studio.model_call(
+                None,
+                model=getattr(deps.model, "name", None),
+                messages=session.messages,
+                text=new_text,
+                usage=usage,
+                started_at=retry_started,
+            )
 
             session.messages.append(
                 Message(role=Role.ASSISTANT, content=new_text)
@@ -1567,6 +1589,7 @@ class Agent:
             run_until=run_until_arg,
             prompt_caching=cfg.get("prompt_caching"),
             snip_window=int(cfg.get("snip_window", 0)),
+            name=cfg.get("name"),
             # Rarely-touched knobs go through Tuning (see loomflow.Tuning).
             tuning=Tuning(
                 response_tone=response_tone,
@@ -1907,8 +1930,9 @@ class Agent:
     async def aclose(self, *, timeout: float = 30.0) -> int:  # noqa: ASYNC109
         """Wait for background work the agent started to finish: fact
         extraction from earlier runs (``auto_extract``), which runs
-        after ``run()`` returns. ``timeout`` is how long to wait, in
-        seconds. Returns how many tasks were still running then
+        after ``run()`` returns, and Studio's queued writes when
+        recording. ``timeout`` is how long to wait, in seconds.
+        Returns how many extraction tasks were still running then
         (``0`` = all done).
 
         Call it before reading facts a run just produced, and at
@@ -1916,10 +1940,15 @@ class Agent:
         the memory backend you passed in, and the agent stays usable.
         """
         from ..memory.auto_extract import AutoExtractMemory
+        from ..studio import _state as studio_state
 
+        remaining = 0
         if isinstance(self._wrapped_memory, AutoExtractMemory):
-            return await self._wrapped_memory.aclose(timeout=timeout)
-        return 0
+            remaining = await self._wrapped_memory.aclose(timeout=timeout)
+        # Studio writes in the background too: wait for what's queued.
+        for recorder in studio_state.all_recorders():
+            await anyio.to_thread.run_sync(recorder.flush, timeout)
+        return remaining
 
     async def list_checkpoints(
         self, session_id: str, limit: int = 50, *, user_id: str | None = None
@@ -2170,13 +2199,16 @@ class Agent:
             # It partitions memory, journals and workers: a dict here
             # could reach a backend filter as an operator.
             raise TypeError(f"user_id must be a string or None, not {type(user_id).__name__}")
-        if self._timeout is None:
-            return await self._loop(prompt, **kwargs)
-        try:
-            with anyio.fail_after(self._timeout):
+        # Studio: the first run in a call chain starts a trace when
+        # recording is on (a no-op otherwise); nested runs join it.
+        async with _studio.agent_run():
+            if self._timeout is None:
                 return await self._loop(prompt, **kwargs)
-        except TimeoutError as exc:
-            raise RunTimeout(self._timeout) from exc
+            try:
+                with anyio.fail_after(self._timeout):
+                    return await self._loop(prompt, **kwargs)
+            except TimeoutError as exc:
+                raise RunTimeout(self._timeout) from exc
 
     async def _loop(
         self,
@@ -2253,7 +2285,10 @@ class Agent:
         # and the README "Fast path by default" section for the user-
         # facing story.
         fast_audit = self._audit_log is None
-        fast_telemetry = isinstance(self._telemetry, NoTelemetry)
+        # The agent's telemetry, with Studio's sink added when this
+        # run is being recorded.
+        telemetry = _studio.compose(self._telemetry)
+        fast_telemetry = isinstance(telemetry, NoTelemetry)
         fast_permissions = isinstance(self._permissions, AllowAll)
         fast_hooks = (
             len(self._hooks.pre_tool_hooks) == 0
@@ -2287,6 +2322,12 @@ class Agent:
         # site (input / output here, tool_result in
         # ``run_single_tool``) is skipped entirely.
         fast_guardrails = len(self._guardrails) == 0
+        # Whether anyone reads the events as they happen, decided before
+        # ``emit`` is wrapped below (a wrapper is never "nobody").
+        caller_streams = emit is not _noop_emit
+        # Studio records the events the caller receives: tapped inside
+        # the output-guard wrapper below, so redactions are recorded.
+        emit = _studio.tap(emit)
         # Streamed text reaches the caller before the output stage
         # runs: with output-stage guards wired, it goes through them
         # first (see :class:`~loomflow.guardrails.streaming.GuardedStream`).
@@ -2298,7 +2339,7 @@ class Agent:
         run_trace: contextlib.AbstractAsyncContextManager[Any] = (
             _NULL_CTX
             if fast_telemetry
-            else self._telemetry.trace(
+            else telemetry.trace(
                 "loom.run",
                 session_id=session_id,
                 max_turns=self._max_turns,
@@ -2308,6 +2349,7 @@ class Agent:
                     "gen_ai.operation.name": "invoke_agent",
                     "gen_ai.conversation.id": session_id,
                     "gen_ai.request.model": self._model.name,
+                    "gen_ai.agent.name": self._name,
                 },
             )
         )
@@ -2408,6 +2450,9 @@ class Agent:
                         "architecture": self._architecture.name,
                     },
                 )
+            # Studio: who is running, in which version (no-op unless
+            # this run is recorded).
+            await _studio.agent_started(self, run_ctx, prompt)
             await emit(Event.started(session_id, prompt))
 
             # G13 — input-stage guardrails: run BEFORE the prompt
@@ -2441,6 +2486,7 @@ class Agent:
                         interruption_reason=(
                             f"guardrail:{inbound.guard}"
                         ),
+                        run_id=run_id,
                     )
                     if not fast_audit:
                         await self._audit(
@@ -2623,7 +2669,7 @@ class Agent:
                 budget=self._budget,
                 permissions=self._permissions,
                 hooks=self._hooks,
-                telemetry=self._telemetry,
+                telemetry=telemetry,
                 audit_log=self._audit_log,
                 max_turns=self._max_turns,
                 approval_handler=self._approval_handler,
@@ -2651,7 +2697,7 @@ class Agent:
                 prompt_caching=self._prompt_caching,
                 # Architectures consult this to pick fast (buffered)
                 # vs streaming (channel) paths for parallel work.
-                streaming=emit is not _noop_emit,
+                streaming=caller_streams or isinstance(emit, GuardedStream),
                 fast_audit=fast_audit,
                 fast_telemetry=fast_telemetry,
                 fast_permissions=fast_permissions,
@@ -2916,13 +2962,14 @@ class Agent:
                 finished_at=datetime.now(UTC),
                 interrupted=session.interrupted,
                 interruption_reason=session.interruption_reason,
+                run_id=run_id,
                 cited_slugs=cited_slugs,
             )
 
             elapsed_ms = (anyio.current_time() - loop_started) * 1000
             if not fast_telemetry:
                 # No session id / turn count: unbounded cardinality.
-                await self._telemetry.emit_metric(
+                await telemetry.emit_metric(
                     "loom.session.duration_ms",
                     elapsed_ms,
                     interrupted=session.interrupted,
@@ -3293,6 +3340,7 @@ _CONFIG_KEYS = frozenset({
     "architecture", "effort", "strict_effort", "response_tone", "auto_extract",
     "memory", "runtime", "telemetry", "audit_log", "permissions", "budget",
     "skills", "mcp", "living_plan", "run_until", "prompt_caching", "snip_window",
+    "name",
 })
 _BUDGET_CONFIG_KEYS = frozenset({
     "max_tokens", "max_input_tokens", "max_output_tokens", "max_cost_usd",

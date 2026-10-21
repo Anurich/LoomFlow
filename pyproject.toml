@@ -36,6 +36,9 @@ cohere = ["cohere>=5.0.0"]
 # The app itself is framework-free pure ASGI — any server works;
 # this extra just pulls the recommended one.
 serve = ["uvicorn>=0.30"]
+# `loom studio`: the local web app over recorded runs (loomflow.studio).
+# Recording itself needs nothing beyond the standard library.
+studio = ["uvicorn>=0.30"]
 # A2A protocol client (loomflow.a2a.A2AClient). The server side
 # (serve_a2a) is dependency-free pure ASGI; httpx is only needed
 # to CALL remote A2A agents.

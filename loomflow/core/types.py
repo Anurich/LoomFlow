@@ -794,6 +794,9 @@ class RunResult(BaseModel):
     finished_at: datetime
     interrupted: bool = False
     interruption_reason: str | None = None
+    run_id: str | None = None
+    """This run's id (``RunContext.run_id``): pass it, or the result
+    itself, to :func:`loomflow.studio.score` to score the run."""
 
     cited_slugs: list[str] = Field(default_factory=list)
     """Workspace note slugs the agent READ during this run (via
