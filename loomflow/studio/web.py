@@ -24,9 +24,13 @@ Routes (``GET``): ``/traces`` (filter with ``q``, ``agent``, ``user``,
 ``/agents/{key}``, ``/experiments``, ``/experiments/{id}``,
 ``/experiments/compare?a=&b=&show=all|changed|regressed``,
 ``/datasets``, ``/datasets/{id}``, ``/datasets/{id}.jsonl``,
-``/health``. ``POST``: ``/traces/{id}/scores``,
+``/evals/new``, ``/health``. ``POST``: ``/traces/{id}/scores``,
 ``/traces/{id}/datasets``, ``/scores/{n}/delete``,
-``/datasets/{id}/cases/{case}/delete``.
+``/datasets/{id}/cases/{case}/delete``, ``/evals``,
+``/experiments/{id}/cancel``.
+
+With ``agents=``, the page can run evals on those agents (see
+:mod:`loomflow.studio._evals`).
 """
 
 from __future__ import annotations
@@ -37,13 +41,14 @@ import logging
 import re
 import secrets
 import time
-from collections.abc import Awaitable, Callable, Collection, MutableMapping
+from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, MutableMapping
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 import anyio
 
+from . import _evals
 from . import _pages as pages
 from ._assets import CSS
 from ._state import DEFAULT_PATH
@@ -77,11 +82,15 @@ class _Response:
         status: int = 200,
         content_type: str = _HTML,
         headers: list[tuple[bytes, bytes]] | None = None,
+        then: Callable[[], _Response] | None = None,
     ) -> None:
         self.body = body.encode("utf-8") if isinstance(body, str) else body
         self.status = status
         self.content_type = content_type
         self.headers = headers or []
+        # Work that has to run on the event loop (starting or cancelling
+        # an eval); its response is the one sent.
+        self.then = then
 
 
 def create_app(
@@ -89,11 +98,15 @@ def create_app(
     *,
     read_only: bool = False,
     allowed_hosts: Collection[str] | None = None,
+    agents: Iterable[Any] | Mapping[str, Any] = (),
 ) -> ASGIApp:
     """The Studio web app over the database at ``path`` (default
     ``.loomflow/studio.db``, the file :func:`loomflow.studio.enable`
     writes by default).
 
+    ``agents`` are the agents the page may run evals on: ``Agent``
+    objects, or ``"module:attribute"`` names to import. The app runs
+    them in its own process, so their models need keys here.
     ``read_only=True`` hides the forms and refuses every change.
     ``allowed_hosts`` are the host names the app answers to (default:
     ``localhost``, ``127.0.0.1``, ``::1`` and ``*.localhost``); pass
@@ -107,6 +120,8 @@ def create_app(
     token = secrets.token_urlsafe(24)
     form_token = None if read_only else token
     hosts = {h.lower().strip("[]") for h in (allowed_hosts if allowed_hosts is not None else LOOPBACK_HOSTS)}
+    targets = _evals.targets(agents)
+    runner = _evals.Runner(db_path, targets) if targets and not read_only else None
 
     def host_ok(headers: dict[str, str]) -> bool:
         host = headers.get("host")
@@ -115,11 +130,14 @@ def create_app(
         name = _host_name(host)
         return name in hosts or (allowed_hosts is None and name.endswith(".localhost"))
 
-    def page(title: str, active: str, body: str, project: str | None, store: StudioStore | None) -> str:
+    def page(
+        title: str, active: str, body: str, project: str | None, store: StudioStore | None,
+        refresh: int | None = None,
+    ) -> str:
         projects = store.projects() if store is not None else []
         return pages.layout(
             title=title, active=active, body=body, project=project,
-            projects=projects, db_path=shown_path, version=__version__,
+            projects=projects, db_path=shown_path, version=__version__, refresh=refresh,
         )
 
     def respond(path_info: str, query: dict[str, list[str]]) -> _Response:
@@ -178,11 +196,12 @@ def create_app(
                 return _Response(page("Not found", "agents", pages.not_found("Agent"), project, store), status=404)
             versions = store.agent_versions(selected["project"], selected["agent_key"]) if selected else []
             body = pages.agents_page(
-                agents, selected=selected, versions=versions, project=project, shown_version=_int(arg("version"))
+                agents, selected=selected, versions=versions, project=project, shown_version=_int(arg("version")),
+                evaluable=runner is not None and selected is not None and selected["agent_key"] in runner.targets,
             )
             return _Response(page("Agents", "agents", body, project, store))
         if path_info == "/experiments":
-            body = pages.experiments_page(store.list_experiments(project), project=project)
+            body = pages.experiments_page(store.list_experiments(project), project=project, can_run=runner is not None)
             return _Response(page("Experiments", "experiments", body, project, store))
         if path_info == "/experiments/compare":
             a = store.get_experiment(arg("a") or "")
@@ -194,11 +213,51 @@ def create_app(
             body = pages.compare_page(a, b, show=show or "all")
             return _Response(page("Compare", "experiments", body, b["project"], store))
         if path_info.startswith("/experiments/"):
-            exp = store.get_experiment(path_info[len("/experiments/"):])
+            exp_id = path_info[len("/experiments/"):]
+            exp = store.get_experiment(exp_id)
+            run = runner.runs.get(exp_id) if runner is not None else None
+            if exp is None and run is not None:
+                body = pages.starting_page({"name": run.name, "agent": run.target.name, "dataset": run.dataset})
+                return _Response(page(run.name, "experiments", body, project, store, refresh=2))
             if exp is None:
                 return _Response(page("Not found", "experiments", pages.not_found("Experiment"), project, store),
                                  status=404)
-            return _Response(page(exp["name"], "experiments", pages.experiment_page(exp), exp["project"], store))
+            # Until the file says it ended: one this app started is about
+            # to; one started elsewhere might have stopped without saying.
+            refresh = None
+            if exp.get("ended_at") is None:
+                if run is not None:
+                    refresh = 3 if run.running else 1
+                elif time.time() - exp["started_at"] < 3600:
+                    refresh = 5
+            body = pages.experiment_page(
+                exp, token=form_token, cancellable=run is not None and run.running,
+                previous=store.previous_experiment(exp), refreshing=refresh is not None,
+            )
+            return _Response(page(exp["name"], "experiments", body, exp["project"], store, refresh=refresh))
+        if path_info == "/evals/new":
+            if runner is None:
+                why = ("This Studio is read-only." if read_only and targets else
+                       "Start Studio with the agents it may run, for example "
+                       "<span class=\"mono\">loom studio --agent app.agents:billing</span>, or list them under "
+                       "<span class=\"mono\">[tool.loomflow.studio] agents</span> in pyproject.toml.")
+                body = f'<div class="head"><h1>Run an eval</h1></div><div class="panel empty"><p>{why}</p></div>'
+                return _Response(page("Run an eval", "experiments", body, project, store))
+            datasets = store.list_datasets(None)
+            chosen = next((d for d in datasets if d["id"] == arg("dataset")), None) or next(
+                (d for d in datasets if d.get("cases")), None)
+            cost_project = chosen["project"] if chosen else project
+            info = [
+                {"key": t.key, "name": t.name, "spec": t.spec,
+                 "cost": store.average_cost(cost_project, t.key) if cost_project else None}
+                for t in runner.targets.values()
+            ]
+            busy = runner.busy()
+            body = pages.eval_form(
+                info, datasets, token=token, dataset_id=chosen["id"] if chosen else None, agent_key=arg("agent"),
+                metrics=_evals.METRICS, busy={"id": busy.id, "name": busy.name} if busy else None,
+            )
+            return _Response(page("Run an eval", "experiments", body, project, store))
         if path_info == "/datasets":
             body = pages.datasets_page(store.list_datasets(project), project=project, writable=form_token is not None)
             return _Response(page("Datasets", "datasets", body, project, store))
@@ -216,7 +275,7 @@ def create_app(
                     headers=[(b"content-disposition",
                               f'attachment; filename="{pages.safe_name(dataset["name"])}.jsonl"'.encode("latin-1"))],
                 )
-            body = pages.dataset_page(dataset, token=form_token)
+            body = pages.dataset_page(dataset, token=form_token, can_run=runner is not None)
             return _Response(page(dataset["name"], "datasets", body, dataset["project"], store))
         return _Response(page("Not found", "traces", pages.not_found("Page"), project, store), status=404)
 
@@ -274,6 +333,17 @@ def create_app(
             with StudioStore(db_path).write() as conn:
                 StudioStore.delete_score(conn, int(match[1]))
             return _redirect(f"/traces/{quote(trace_id)}" if trace_id else "/traces")
+        if path_info == "/evals":
+            return start_eval(form, field, reader)
+        if match := re.fullmatch(rf"/experiments/({_ID})/cancel", path_info):
+            exp_id = match[1]
+
+            def cancel() -> _Response:
+                if runner is not None:
+                    runner.cancel(exp_id)
+                return _redirect(f"/experiments/{quote(exp_id)}")
+
+            return _Response(b"", then=cancel)
         if match := re.fullmatch(rf"/datasets/({_ID})/cases/({_ID})/delete", path_info):
             if reader.get_dataset(match[1]) is None:
                 return _form_error("That dataset doesn't exist.", "/datasets", status=404)
@@ -282,6 +352,48 @@ def create_app(
             return _redirect(f"/datasets/{quote(match[1])}")
         return _Response("Not found.", status=404, content_type=_TEXT)
 
+    def start_eval(
+        form: dict[str, list[str]], field: Callable[[str, int], str], reader: StudioStore
+    ) -> _Response:
+        if runner is None:
+            return _form_error("This Studio can't run evals: start it with --agent.", "/experiments", status=404)
+        target = runner.targets.get(field("agent", 200))
+        dataset = reader.get_dataset(field("dataset", 100))
+        back = "/evals/new" + (f"?dataset={quote(dataset['id'])}" if dataset else "")
+        if target is None:
+            return _form_error("Pick one of the agents Studio was started with.", back)
+        if dataset is None or not dataset["cases"]:
+            return _form_error("Pick a dataset that has cases.", back)
+        try:
+            metrics = _evals.build_metrics(form.get("metrics", []), field("judge_model", 100) or None)
+        except ValueError as exc:
+            return _form_error(str(exc), back)
+        try:
+            concurrency = min(max(int(field("concurrency", 3) or 4), 1), 8)
+        except ValueError:
+            concurrency = 4
+        raw_cap = field("max_cost_usd", 12).lstrip("$")
+        try:
+            cap = float(raw_cap) if raw_cap else None
+        except ValueError:
+            cap = -1.0
+        if cap is not None and not cap > 0:
+            return _form_error("The spending limit has to be an amount above 0, or empty for no limit.", back)
+        name = field("name", 100) or f"{target.name} {time.strftime('%b %d %H:%M')}"
+
+        def start() -> _Response:
+            busy = runner.busy()
+            if busy is not None:
+                return _form_error(f"An eval is already running ({busy.name}). Wait for it, or cancel it, first.",
+                                   f"/experiments/{quote(busy.id)}", status=409)
+            run = runner.start(
+                target=target, dataset=dataset["name"], project=dataset["project"], total=len(dataset["cases"]),
+                metrics=metrics, name=name, concurrency=concurrency, max_cost_usd=cap,
+            )
+            return _redirect(f"/experiments/{quote(run.id)}")
+
+        return _Response(b"", then=start)
+
     async def app(scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] == "lifespan":
             while True:
@@ -289,6 +401,8 @@ def create_app(
                 if message["type"] == "lifespan.startup":
                     await send({"type": "lifespan.startup.complete"})
                 elif message["type"] == "lifespan.shutdown":
+                    if runner is not None:
+                        await runner.aclose()
                     await send({"type": "lifespan.shutdown.complete"})
                     return
         if scope["type"] != "http":
@@ -353,7 +467,8 @@ async def _post(
             return _Response("That's too much to save at once.", status=413, content_type=_TEXT)
     form = parse_qs(body.decode("utf-8", errors="replace"), keep_blank_values=True)
     try:
-        return await anyio.to_thread.run_sync(handle, scope.get("path", "/"), form)
+        response = await anyio.to_thread.run_sync(handle, scope.get("path", "/"), form)
+        return response.then() if response.then is not None else response
     except Exception:  # noqa: BLE001 — one bad form mustn't take the app down
         _LOG.exception("Studio couldn't save: %s", scope.get("path"))
         return _Response("Studio couldn't save that; see the server log.", status=500, content_type=_TEXT)

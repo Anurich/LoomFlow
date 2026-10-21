@@ -889,6 +889,28 @@ class StudioStore:
         ]
         return exp
 
+    def average_cost(self, project: str, agent_key: str) -> float | None:
+        """What one run of ``agent_key`` cost on average, over its last
+        100 runs that cost anything (``None`` if none did)."""
+        with self._read() as conn:
+            row = conn.execute(
+                "SELECT AVG(cost_usd) FROM (SELECT cost_usd FROM traces WHERE project = ? AND agent_key = ?"
+                " AND cost_usd > 0 ORDER BY started_at DESC LIMIT 100)",
+                (project, agent_key),
+            ).fetchone()
+        return None if row is None or row[0] is None else float(row[0])
+
+    def previous_experiment(self, exp: Mapping[str, Any]) -> dict[str, Any] | None:
+        """The run of the same dataset, in the same project, that
+        started last before ``exp``."""
+        with self._read() as conn:
+            row = conn.execute(
+                "SELECT id, name, started_at FROM experiments WHERE project = ? AND dataset = ? AND id != ?"
+                " AND started_at < ? ORDER BY started_at DESC LIMIT 1",
+                (exp["project"], exp["dataset"], exp["id"], exp["started_at"]),
+            ).fetchone()
+        return None if row is None else dict(row)
+
     def score_keys(self, project: str | None) -> list[str]:
         """Score keys in use, most used first (suggestions for the form)."""
         clause, args = ("WHERE t.project = ?", [project]) if project else ("", [])

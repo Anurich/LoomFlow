@@ -1132,6 +1132,10 @@ loom studio                              # http://127.0.0.1:7600
 - **Scores and datasets from the page.** Mark a run good or bad, and
   add a bad one to a dataset with the answer it should have given;
   `loomflow.studio.dataset("name")` runs your evals on it.
+- **Evals from the page.** Start Studio with your agents
+  (`loom studio --agent app.agents:billing`) and run an eval on a
+  dataset from its page, with a spending limit, then compare it with
+  the last run.
 
 Model messages never travel on telemetry spans, so they never reach
 an OpenTelemetry exporter. `enable(redact="pii")` scrubs text before

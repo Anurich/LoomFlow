@@ -148,7 +148,10 @@ def layout(
     projects: Sequence[str],
     db_path: str,
     version: str,
+    refresh: int | None = None,
 ) -> str:
+    """The page around ``body``; ``refresh`` reloads it every that many
+    seconds (an eval's page while it runs)."""
     def item(path: str, label: str, key: str) -> str:
         current = ' aria-current="page"' if key == active else ""
         return f'<a class="item" href="{href(path, project=project)}"{current}>{e(label)}</a>'
@@ -174,7 +177,7 @@ def layout(
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{e(title)} · Loomflow Studio</title>
+<title>{e(title)} · Loomflow Studio</title>{f'<meta http-equiv="refresh" content="{int(refresh)}">' if refresh else ""}
 <link rel="stylesheet" href="/static/studio.css">
 </head>
 <body>
@@ -737,6 +740,7 @@ def agents_page(
     versions: Sequence[Mapping[str, Any]],
     project: str | None,
     shown_version: int | None = None,
+    evaluable: bool = False,
 ) -> str:
     intro = ('<div class="head"><div class="row-gap" style="flex-direction:column;align-items:flex-start">'
              '<h1>Agents</h1><p class="lede">Every agent and workflow that has run, how it\'s put together, '
@@ -808,6 +812,11 @@ def agents_page(
     diagram = render_diagram(
         definition.get("structure"), uid=f"a{latest['version']}", title=f"{selected['name']} v{latest['version']}"
     )
+    evaluate = (
+        f'<a class="btn small" href="{href("/evals/new", agent=selected["agent_key"])}">Evaluate on a dataset</a>'
+        if evaluable
+        else ""
+    )
     return intro + f"""<div class="split">
 <section class="panel list" aria-label="Agent list">{picks}</section>
 <div class="wide" style="display:flex;flex-direction:column;gap:20px">
@@ -817,7 +826,7 @@ def agents_page(
 {diagram}
 </section>
 <section class="panel scroll" aria-label="Versions">
-<div class="panel-head"><h2>{e(selected["name"])} versions</h2></div>
+<div class="panel-head"><h2>{e(selected["name"])} versions</h2>{evaluate}</div>
 <table><thead><tr><th>Version</th><th>First seen</th><th class="num">Runs</th><th class="num">Errors</th>
 <th class="num">{e(main_score or "Score")}</th><th>What changed</th></tr></thead><tbody>{rows}</tbody></table>
 </section>
@@ -836,15 +845,29 @@ def agents_page(
 
 def _metric_means(exp: Mapping[str, Any]) -> dict[str, float]:
     metrics = (exp.get("summary") or {}).get("metrics") or {}
-    return {name: float(v["mean"]) for name, v in metrics.items() if isinstance(v, Mapping) and "mean" in v}
+    means = {name: float(v["mean"]) for name, v in metrics.items() if isinstance(v, Mapping) and "mean" in v}
+    if means or not exp.get("cases"):
+        return means
+    # Running, or stopped before the harness summed up: from the cases.
+    totals: dict[str, list[float]] = defaultdict(list)
+    for case in exp["cases"]:
+        for name, value in (case.get("scores") or {}).items():
+            if isinstance(value, int | float):
+                totals[name].append(float(value))
+    return {name: sum(v) / len(v) for name, v in sorted(totals.items())}
 
 
-def experiments_page(experiments: Sequence[Mapping[str, Any]], *, project: str | None) -> str:
+def experiments_page(
+    experiments: Sequence[Mapping[str, Any]], *, project: str | None, can_run: bool = False
+) -> str:
+    run = f'<div class="row-gap"><a class="btn primary" href="{href("/evals/new")}">Run an eval</a></div>' if can_run else ""
     intro = ('<div class="head"><div class="row-gap" style="flex-direction:column;align-items:flex-start">'
              '<h1>Experiments</h1><p class="lede">Each <span class="mono">EvalHarness</span> run, grouped by '
-             "dataset. Compare two runs on the same dataset to see what improved and what regressed.</p></div></div>")
+             f"dataset. Compare two runs on the same dataset to see what improved and what regressed.</p></div>{run}</div>")
     if not experiments:
-        return intro + ('<div class="panel empty"><p>No experiments yet. Run an eval with Studio on:</p>'
+        first = ("No experiments yet. Use <strong>Run an eval</strong>, or run one in code with Studio on:"
+                 if can_run else "No experiments yet. Run an eval with Studio on:")
+        return intro + (f'<div class="panel empty"><p>{first}</p>'
                         '<pre class="code">loomflow.studio.enable()\nreport = await EvalHarness(agent, metrics).run(dataset)</pre>'
                         '<p class="soft">or <span class="mono">LOOMFLOW_STUDIO=1 loom eval cases.jsonl --agent app:agent</span></p></div>')
     groups: dict[tuple[str, str], list[Mapping[str, Any]]] = defaultdict(list)
@@ -901,8 +924,42 @@ def _num(value: Any) -> str:
     return f"{value:.2f}".rstrip("0").rstrip(".") if isinstance(value, float) else str(value)
 
 
-def experiment_page(exp: Mapping[str, Any]) -> str:
+def experiment_page(
+    exp: Mapping[str, Any],
+    *,
+    token: str | None = None,
+    cancellable: bool = False,
+    previous: Mapping[str, Any] | None = None,
+    refreshing: bool = False,
+) -> str:
+    """An experiment's cases and scores. While it runs (no ``ended_at``)
+    it shows its progress, and a Cancel button when ``cancellable``
+    (this app started it); ``previous`` is the run to compare it with;
+    ``refreshing`` says the page reloads itself."""
     means = _metric_means(exp)
+    summary = exp.get("summary") or {}
+    total = (exp.get("metadata") or {}).get("cases") or len(exp["cases"])
+    done = len(exp["cases"])
+    status = ""
+    if exp.get("ended_at") is None:
+        cancel = (
+            f'<form class="inline" method="post" action="/experiments/{e(quote(exp["id"]))}/cancel">'
+            f'{_token_field(token)}<button class="btn small" type="submit">Cancel</button></form>'
+            if cancellable and token
+            else ""
+        )
+        again = " This page refreshes itself." if refreshing else " Reload the page to see more."
+        status = (f'<div class="notice ok row-gap" role="status" style="justify-content:space-between">'
+                  f'<span>Running: {done} of {total} cases done.{again}</span>{cancel}</div>')
+    elif summary.get("stopped"):
+        skipped = f" {summary['skipped']} cases didn't run." if summary.get("skipped") else ""
+        status = f'<div class="notice" role="status">Stopped: {e(summary["stopped"])}.{e(skipped)}</div>'
+    compare = (
+        f'<a class="btn" href="{href("/experiments/compare", a=previous["id"], b=exp["id"])}">'
+        f'Compare with {e(previous["name"])}</a>'
+        if previous and exp.get("ended_at") is not None
+        else ""
+    )
     metrics = "".join(f"<div><dt>{e(k)}</dt><dd><strong>{e(f'{v:.2f}')}</strong></dd></div>" for k, v in means.items())
     rows = "".join(
         f'<tr><td class="num faint">{e(c["position"] + 1)}</td><td>{e(first_line(c.get("input"), 160))}</td>'
@@ -916,7 +973,9 @@ def experiment_page(exp: Mapping[str, Any]) -> str:
 <span aria-hidden="true">/</span><span>{e(exp["dataset"])}</span></div>
 <div class="head"><div class="row-gap" style="flex-direction:column;align-items:flex-start">
 <h1>{e(exp["name"])}{version}</h1>
-<p class="lede">Dataset {e(exp["dataset"])}, {len(exp["cases"])} cases, started {e(fmt_ts(exp["started_at"]))}.</p></div></div>
+<p class="lede">Dataset {e(exp["dataset"])}, {len(exp["cases"])} cases, started {e(fmt_ts(exp["started_at"]))}.</p></div>
+<div class="row-gap">{compare}</div></div>
+{status}
 {f'<dl class="meta">{metrics}</dl>' if metrics else ""}
 <div class="panel scroll"><table><thead><tr><th class="num">#</th><th>Input</th><th>Expected</th><th>Output</th>
 <th>Scores</th><th></th></tr></thead><tbody>{rows}</tbody></table></div>"""
@@ -1091,7 +1150,7 @@ def datasets_page(datasets: Sequence[Mapping[str, Any]], *, project: str | None,
 <th class="num">Cases</th><th>Last added</th></tr></thead><tbody>{rows}</tbody></table></div>"""
 
 
-def dataset_page(dataset: Mapping[str, Any], *, token: str | None) -> str:
+def dataset_page(dataset: Mapping[str, Any], *, token: str | None, can_run: bool = False) -> str:
     cases = dataset.get("cases") or []
     base = f"/datasets/{quote(dataset['id'])}"
     rows = []
@@ -1116,15 +1175,27 @@ from loomflow.eval import Contains, EvalHarness
 dataset = loomflow.studio.dataset({name})
 await EvalHarness(agent, [Contains()]).run(dataset, experiment="my change")"""
     count = len(cases)
+    run_button = (
+        f'<a class="btn primary" href="{href("/evals/new", dataset=dataset["id"])}">Run eval</a>'
+        if can_run and cases
+        else ""
+    )
+    hint = (
+        ""
+        if can_run or not token
+        else '<p class="soft">To run it from here, start Studio with the agents it may run: '
+             '<span class="mono">loom studio --agent app.agents:billing</span>.</p>'
+    )
     return f"""<div class="crumbs"><a href="{href("/datasets", project=dataset["project"])}">Datasets</a>
 <span aria-hidden="true">/</span><span>{e(dataset["name"])}</span></div>
 <div class="head"><div class="row-gap" style="flex-direction:column;align-items:flex-start"><h1>{e(dataset["name"])}</h1>
 <p class="lede">{count} case{"" if count == 1 else "s"} in project {e(dataset["project"])}.</p></div>
-<div class="row-gap"><a class="btn" href="{e(base)}.jsonl">Download JSONL</a></div></div>
+<div class="row-gap">{run_button}<a class="btn" href="{e(base)}.jsonl">Download JSONL</a></div></div>
 <div class="panel scroll"><table><thead><tr><th>Input</th><th>Expected</th><th>From</th><th>Added</th><th></th></tr>
 </thead><tbody>{table}</tbody></table></div>
 <section class="panel pad" aria-label="Run an eval on it"><h2>Run an eval on it</h2>
 <pre class="code">{e(usage)}</pre>
+{hint}
 <p class="soft">Or download the JSONL file and run <span class="mono">loom eval {e(safe_name(dataset["name"]))}.jsonl --agent app:agent --studio</span>.
 Each case keeps its id, so experiments on this dataset compare case by case.</p></section>"""
 
@@ -1146,3 +1217,80 @@ def dataset_jsonl(dataset: Mapping[str, Any]) -> str:
 def safe_name(name: str) -> str:
     """``name`` as a file name."""
     return re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._") or "dataset"
+
+
+# ---------------------------------------------------------------------------
+# Running evals
+# ---------------------------------------------------------------------------
+
+
+def eval_form(
+    targets: Sequence[Mapping[str, Any]],
+    datasets: Sequence[Mapping[str, Any]],
+    *,
+    token: str,
+    dataset_id: str | None,
+    agent_key: str | None,
+    metrics: Mapping[str, str],
+    busy: Mapping[str, Any] | None,
+) -> str:
+    """The form that starts an eval. ``targets`` carry ``key``,
+    ``name``, ``spec`` and ``cost`` (an average run's, or ``None``)."""
+    intro = ('<div class="crumbs"><a href="/experiments">Experiments</a><span aria-hidden="true">/</span>'
+             '<span>Run an eval</span></div><div class="head"><div class="row-gap" style="flex-direction:column;'
+             'align-items:flex-start"><h1>Run an eval</h1><p class="lede">Runs every case of a dataset through an '
+             "agent and records it as an experiment, to compare with other runs on the same dataset.</p></div></div>")
+    if busy is not None:
+        intro += (f'<div class="notice" role="status">An eval is running: <a href="/experiments/{e(quote(busy["id"]))}">'
+                  f'{e(busy["name"])}</a>. Wait for it to finish, or cancel it, to start another.</div>')
+    usable = [d for d in datasets if d.get("cases")]
+    if not usable:
+        return intro + ('<div class="panel empty"><p>No dataset has cases yet.</p><p class="soft">Open a trace and use '
+                        "<strong>Add to dataset…</strong> to collect cases from your runs.</p></div>")
+
+    def cost(t: Mapping[str, Any]) -> str:
+        return f", about {fmt_cost(t['cost'])} a run" if t.get("cost") else ""
+
+    agent_options = "".join(
+        f'<option value="{e(t["key"])}"{" selected" if t["key"] == agent_key else ""}>{e(t["name"])}'
+        f'{" (" + e(t["spec"]) + ")" if t.get("spec") else ""}{e(cost(t))}</option>'
+        for t in targets
+    )
+    dataset_options = "".join(
+        f'<option value="{e(d["id"])}"{" selected" if d["id"] == dataset_id else ""}>{e(d["name"])}, '
+        f'{fmt_int(d["cases"])} case{"" if d["cases"] == 1 else "s"} ({e(d["project"])})</option>'
+        for d in usable
+    )
+    checks = "".join(
+        f'<label><input type="checkbox" name="metrics" value="{e(k)}"{" checked" if k == "contains" else ""}> '
+        f"{e(label)}</label>"
+        for k, label in metrics.items()
+    )
+    return intro + f"""<form class="panel pad stack" method="post" action="/evals" style="max-width:820px">
+{_token_field(token)}
+<div class="pair">
+<div><label for="e-agent">Agent</label><select id="e-agent" name="agent" required>{agent_options}</select></div>
+<div><label for="e-dataset">Dataset</label><select id="e-dataset" name="dataset" required>{dataset_options}</select></div>
+</div>
+<label>Score each case by</label>
+<div class="choices" style="flex-direction:column;align-items:flex-start">{checks}
+<label for="e-judge" style="font-weight:400">Judge model, for the LLM judge</label>
+<input id="e-judge" type="text" name="judge_model" maxlength="100" placeholder="gpt-5-mini" style="max-width:320px">
+</div>
+<div class="pair">
+<div><label for="e-name">Name</label><input id="e-name" type="text" name="name" maxlength="100"
+ placeholder="Default: the agent's name and the time"></div>
+<div><label for="e-cap">Stop after spending (USD)</label><input id="e-cap" type="text" name="max_cost_usd"
+ inputmode="decimal" value="1.00" maxlength="12"><span class="hint">Leave empty for no limit.</span></div>
+</div>
+<label for="e-concurrency">Cases at once</label>
+<select id="e-concurrency" name="concurrency" style="max-width:120px">{"".join(f'<option{" selected" if n == 4 else ""}>{n}</option>' for n in (1, 2, 4, 8))}</select>
+<p class="hint">Runs use your agent as Studio imported it, with its own model and keys, and cost what its runs
+cost. Each case is recorded as a trace.</p>
+<div><button class="btn primary" type="submit"{" disabled" if busy is not None else ""}>Start eval</button></div>
+</form>"""
+
+
+def starting_page(run: Mapping[str, Any]) -> str:
+    return (f'<div class="head"><h1>{e(run["name"])}</h1></div><div class="notice ok" role="status">Starting the eval '
+            f'of {e(run["agent"])} on {e(run["dataset"])}. This page refreshes itself.</div>')

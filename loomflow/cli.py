@@ -18,7 +18,6 @@ extra::
 from __future__ import annotations
 
 import argparse
-import importlib
 import json
 import sys
 from typing import Any
@@ -33,15 +32,11 @@ _DEFAULT_INSTRUCTIONS = "You are a helpful assistant."
 
 
 def _load_target(spec: str) -> Any:
-    """Import ``module:attribute`` and return the attribute."""
-    module_name, sep, attr = spec.partition(":")
-    if not sep or not module_name or not attr:
-        raise ValueError(f"expected 'module:attribute', got {spec!r}")
-    module = importlib.import_module(module_name)
-    try:
-        return getattr(module, attr)
-    except AttributeError as exc:
-        raise ValueError(f"module {module_name!r} has no attribute {attr!r}") from exc
+    """Import ``module:attribute`` (from the current folder too) and
+    return the attribute."""
+    from ._targets import load_target  # noqa: PLC0415
+
+    return load_target(spec)
 
 
 def _fail(message: str) -> int:
@@ -133,9 +128,16 @@ def _cmd_studio(args: argparse.Namespace) -> int:
     from .studio.web import create_app  # deferred: keep `loom version` import-light
 
     hosts = _studio_hosts(args.host, args.allow_host)
+    specs = list(dict.fromkeys([*(args.agent or []), *_pyproject_studio_agents()]))
+    try:
+        app = create_app(args.db, read_only=args.read_only, allowed_hosts=hosts, agents=specs)
+    except (ImportError, ValueError) as exc:
+        return _fail(f"couldn't load an agent to run evals on: {exc}")
     url = f"http://{args.host}:{args.port}"
     mode = ", read-only" if args.read_only else ""
     print(f"Loomflow Studio: {url}  (reading {args.db}{mode})", file=sys.stderr)
+    if specs and not args.read_only:
+        print(f"  Evals can run on: {', '.join(specs)}", file=sys.stderr)
     if "*" in hosts:
         print("  Listening on every address: anyone who can reach this port can read your traces"
               + ("" if args.read_only else " and add scores and dataset cases") + ".", file=sys.stderr)
@@ -143,9 +145,22 @@ def _cmd_studio(args: argparse.Namespace) -> int:
         import webbrowser  # noqa: PLC0415
 
         webbrowser.open(url)
-    app = create_app(args.db, read_only=args.read_only, allowed_hosts=hosts)
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     return 0
+
+
+def _pyproject_studio_agents(path: str = "pyproject.toml") -> list[str]:
+    """``[tool.loomflow.studio] agents`` from the current folder's
+    pyproject.toml: the agents ``loom studio`` may run evals on."""
+    import tomllib  # noqa: PLC0415
+    from pathlib import Path  # noqa: PLC0415
+
+    try:
+        config = tomllib.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return []
+    agents = config.get("tool", {}).get("loomflow", {}).get("studio", {}).get("agents", [])
+    return [a for a in agents if isinstance(a, str)] if isinstance(agents, list) else []
 
 
 def _studio_hosts(host: str, extra: list[str] | None) -> list[str]:
@@ -278,6 +293,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p_studio.add_argument("--open", action="store_true", help="open the page in your browser")
     p_studio.add_argument(
         "--read-only", action="store_true", help="don't allow adding scores or dataset cases from the page"
+    )
+    p_studio.add_argument(
+        "--agent",
+        action="append",
+        default=[],
+        metavar="MODULE:ATTR",
+        help="an agent the page may run evals on (repeatable; also [tool.loomflow.studio] agents in pyproject.toml)",
     )
     p_studio.add_argument(
         "--allow-host",

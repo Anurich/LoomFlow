@@ -7,6 +7,35 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 For development-history detail (per-slice notes, file maps, gate
 counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 
+## [Unreleased]
+
+### Added
+
+* **Run evals from Studio.** Start it with the agents it may run,
+  ``loom studio --agent app.agents:billing`` (repeatable), or list them
+  under ``[tool.loomflow.studio] agents`` in ``pyproject.toml``. Then
+  **Run eval** on a dataset's page (or **Evaluate on a dataset** on an
+  agent's) picks the agent, how to score the cases (contains the
+  expected answer, exact match, an LLM judge with the model you name),
+  a name, a spending limit and how many cases run at once. The
+  experiment's page opens at once, refreshes itself while the eval
+  runs, has a **Cancel** button, and links to **Compare with** the
+  previous run. Studio imports the agents into its own process and runs
+  them there, with their tools and keys; one eval runs at a time, and
+  ``--read-only`` turns it off. ``create_app(path, agents=[...])`` does
+  the same for a mounted app. Agents only: workflows can't be evaluated
+  yet.
+* ``EvalHarness.run(dataset, max_cost_usd=...)`` stops starting cases
+  once the runs have cost that much; ``EvalReport.skipped`` lists the
+  cases left out, ``EvalReport.cost_usd`` and ``CaseResult.cost_usd``
+  say what the runs cost.
+
+### Fixed
+
+* ``loom eval --agent app:agent`` and ``loom serve app:agent`` import
+  ``app`` from the folder you run them in; installed as a command,
+  ``loom`` couldn't find it ("No module named 'app'").
+
 ## [0.19.1] — 2026-10-21
 
 ### Changed
