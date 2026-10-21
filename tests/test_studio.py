@@ -352,8 +352,10 @@ async def test_capture_content_off_keeps_only_structure(tmp_path: Path) -> None:
     await _agent(_tool_turns("the answer"), tools=[lookup]).run("my secret question")
     [trace] = _traces(db)
     assert trace["input"] is None and trace["output"] is None and trace["tokens_in"] == 250
-    dumped = json.dumps(_spans(db, trace["trace_id"]))
-    assert "secret question" not in dumped and "the answer" not in dumped and "4471" not in dumped
+    # Content and attributes only: span ids are random hex and may
+    # contain "4471" by chance.
+    dumped = json.dumps([(s["content"], s["attributes"]) for s in _spans(db, trace["trace_id"])])
+    assert "secret question" not in dumped and "the answer" not in dumped and '"4471"' not in dumped
 
 
 async def test_redact_scrubs_text_before_it_is_written(tmp_path: Path) -> None:
@@ -574,3 +576,29 @@ async def test_a_case_that_raises_still_links_to_its_trace(tmp_path: Path) -> No
     [case] = [dict(r) for r in _db(db).execute("SELECT * FROM experiment_cases")]
     assert "model down" in case["error"]
     assert case["trace_id"] == _traces(db)[0]["trace_id"]
+
+
+def test_several_processes_can_record_to_one_new_file(tmp_path: Path) -> None:
+    import subprocess
+    import sys
+
+    db = tmp_path / "shared.db"
+    script = (
+        "import sys, anyio, loomflow.studio as studio\n"
+        "from loomflow import Agent\n"
+        "from loomflow.model.scripted import ScriptedModel, ScriptedTurn\n"
+        "async def main():\n"
+        f"    studio.enable({str(db)!r})\n"
+        "    for i in range(8):\n"
+        "        agent = Agent('x', name=sys.argv[1], auto_extract=False,\n"
+        "                      model=ScriptedModel([ScriptedTurn(text='ok')]))\n"
+        "        await agent.run(str(i))\n"
+        "anyio.run(main)\n"
+    )
+    env = {k: v for k, v in __import__("os").environ.items() if k != studio.ENV_VAR}
+    procs = [subprocess.Popen([sys.executable, "-c", script, f"p{i}"], env=env, stderr=subprocess.PIPE)
+             for i in range(4)]
+    errors = [p.communicate(timeout=60)[1].decode() for p in procs]
+    assert all(p.returncode == 0 for p in procs), errors
+    conn = sqlite3.connect(db)
+    assert conn.execute("SELECT COUNT(*), COUNT(DISTINCT name) FROM traces WHERE status = 'ok'").fetchone() == (32, 4)

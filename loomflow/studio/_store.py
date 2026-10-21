@@ -144,6 +144,23 @@ def _loads(text: str | None) -> Any:
     return None if text is None else json.loads(text)
 
 
+def _use_wal(conn: sqlite3.Connection) -> None:
+    """Put the file in WAL mode. Switching can report "locked" without
+    waiting while another process creates the same file, so retry."""
+    delay = 0.02
+    deadline = time.monotonic() + 10.0
+    while True:
+        try:
+            if conn.execute("PRAGMA journal_mode").fetchone()[0].lower() != "wal":
+                conn.execute("PRAGMA journal_mode=WAL")
+            return
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc) or time.monotonic() > deadline:
+                raise
+            time.sleep(delay)
+            delay = min(delay * 2, 0.5)
+
+
 def describe_changes(old: Mapping[str, Any], new: Mapping[str, Any]) -> str:
     """One readable line saying how ``new`` differs from ``old``
     (two agent definitions), e.g. ``"Model a to b. Tool added: x."``."""
@@ -193,13 +210,17 @@ class StudioStore:
     # ---- connections ---------------------------------------------------
 
     def _connect(self) -> sqlite3.Connection:
+        # ``timeout`` waits out another process's lock (several
+        # processes may record to one file), including while the
+        # first of them switches the file to WAL.
         if self.readonly:
-            conn = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True, check_same_thread=False)
+            conn = sqlite3.connect(
+                f"file:{self.path}?mode=ro", uri=True, timeout=10.0, check_same_thread=False
+            )
         else:
-            conn = sqlite3.connect(self.path, check_same_thread=False)
-            conn.execute("PRAGMA journal_mode=WAL")
+            conn = sqlite3.connect(self.path, timeout=10.0, check_same_thread=False)
+            _use_wal(conn)
             conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("PRAGMA busy_timeout=5000")
         conn.row_factory = sqlite3.Row
         return conn
 

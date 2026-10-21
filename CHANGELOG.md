@@ -7,6 +7,63 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 For development-history detail (per-slice notes, file maps, gate
 counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 
+## [Unreleased]
+
+### Added
+
+* **Loomflow Studio** (``loomflow.studio``): record what your agents
+  do, and browse it locally. Turn it on once with
+  ``loomflow.studio.enable()`` or ``LOOMFLOW_STUDIO=1`` and every
+  ``Agent`` and ``Workflow`` run in the process is saved to a SQLite
+  file (``.loomflow/studio.db`` by default), with no change to the
+  agents. ``loom studio`` (``pip install 'loomflow[studio]'``) serves a
+  read-only web UI over it at ``http://127.0.0.1:7600``.
+
+  * **Traces**: the run, its turns, model calls with the messages sent
+    and the reply, tool calls with arguments, result and the
+    permission / approval decision, guardrail hits, architecture
+    events and errors. Sub-agent and workflow runs nest into the trace
+    of the run that called them. Filter by agent, version, user,
+    model, status or time; search the recorded content; follow a
+    ``session_id`` as a thread.
+  * **Agents and versions**: each agent and workflow is catalogued by
+    its definition (instructions, model, tools, architecture, limits,
+    guards). A changed definition is recorded as the next version,
+    with a note of what changed.
+  * **Experiments**: ``EvalHarness`` runs are saved with each case's
+    trace and scores; compare two runs on the same dataset case by
+    case (improved / regressed / unchanged, cost and latency).
+  * **Scores**: ``loomflow.studio.score(result, key, value)``, plus
+    eval and ``OnlineScorer`` scores, attached to the run.
+  * **Switches**: ``enable(path, project=, sample_rate=,
+    capture_content=, redact=)``, the ``LOOMFLOW_STUDIO`` /
+    ``LOOMFLOW_STUDIO_PROJECT`` environment variables, and
+    ``loomflow.studio.session(project=, tags=, metadata=, enabled=)``
+    blocks; ``redact="pii"`` scrubs text before it's written.
+  * Model messages travel on a private channel, never on telemetry
+    spans, so they never reach an OpenTelemetry exporter; your own
+    telemetry keeps working alongside. Writes happen on one background
+    thread; with Studio off the hooks cost a few microseconds per run.
+* ``Agent(name=...)``: the agent's name, used as ``gen_ai.agent.name``
+  on its run span, as its node name in a ``Workflow``, and as its key
+  in Studio (also ``name`` in ``Agent.from_config``).
+* ``RunResult.run_id``.
+* ``Dataset(name=...)`` (``Dataset.from_jsonl`` uses the file name) and
+  ``EvalHarness.run(dataset, experiment=...)``; ``loom eval --studio``.
+* Tool spans carry ``loom.permission`` (``allow`` / ``deny`` /
+  ``ask``) and ``loom.approval`` (``approved`` / ``declined``).
+* ``examples/34_studio.py``: records a small support bot offline and
+  tells you how to browse it.
+
+### Changed
+
+* An ``Agent`` given a ``name=`` keeps that name as its node in
+  ``Workflow.chain`` (``chain([billing, tech])`` visits ``"billing"``,
+  ``"tech"``) and as its branch name in ``Workflow.parallel``
+  (``interruption_reason`` ``"fan_out:billing:..."``). Unnamed agents
+  keep the generated names; ``Workflow.route`` still names its nodes
+  ``route_<key>``.
+
 ## [0.17.3] — 2026-10-20
 
 ### Fixed

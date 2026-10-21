@@ -1092,6 +1092,49 @@ all in one runnable file.
 
 ---
 
+## Loomflow Studio — see what your agents did
+
+Turn recording on once and every `Agent` and `Workflow` run in the
+process is saved to a local SQLite file. Nothing about your agents
+changes, and nothing leaves your machine:
+
+```python
+import loomflow.studio
+loomflow.studio.enable()                 # or: export LOOMFLOW_STUDIO=1
+
+result = await agent.run("My card was charged twice", user_id="alice")
+loomflow.studio.score(result, "resolved", True)
+```
+
+```bash
+pip install 'loomflow[studio]'
+loom studio                              # http://127.0.0.1:7600
+```
+
+- **Traces.** Each run as a timeline: turns, model calls with the
+  messages sent and the reply, tool calls with their arguments, result
+  and permission decision, guardrail hits, sub-agent and workflow
+  steps, tokens, cost and time. Filter by agent, user, model or status,
+  search the content, and follow a conversation (`session_id`) as a
+  thread.
+- **Agents and versions.** Every agent and workflow is catalogued from
+  its definition. Change the instructions, model or tools and Studio
+  records a new version, with a note of what changed, so "it got worse
+  on Tuesday" becomes "v3 added `refund_charge` on Tuesday". Give
+  agents a `name=` to keep their history together.
+- **Experiments.** `EvalHarness` runs are saved as experiments.
+  Compare two runs on the same dataset to see which cases improved
+  and which regressed.
+
+Model messages never travel on telemetry spans, so they never reach
+an OpenTelemetry exporter. `enable(redact="pii")` scrubs text before
+it's written; `enable(capture_content=False)` keeps only timing,
+tokens and structure. See
+[`examples/34_studio.py`](examples/34_studio.py), which records a
+small support bot offline and tells you how to browse it.
+
+---
+
 ## Multi-tenant by default — every primitive
 
 Every stateful primitive in the framework partitions by `user_id`.
@@ -1266,6 +1309,7 @@ End-to-end demo: [`examples/03_multi_user_sessions.py`](examples/03_multi_user_s
 | **Budget** | Per-token / per-cost / per-wall-clock limits with soft warnings; per-user caps via `BudgetConfig(per_user_max_*)` | `StandardBudget`, `BudgetConfig`, `NoBudget` (top-level) |
 | **Run timeout** | Wall-clock ceiling for the whole run — setup, every model + tool call (incl. parallel dispatch and sub-agents), teardown — via `anyio.fail_after`. Default `None` = unbounded, zero overhead. `run()` raises `RunTimeout` (carries `.seconds`); `stream()` consumers see an `ERROR` event. TOML-expressible (`timeout = 30.0`). | `Agent(timeout=)`, `RunTimeout` (top-level) |
 | **Run-until-done loop** | `Agent(run_until="all tests pass")` re-prompts the agent until a fast checker model confirms a measurable stop condition. Guardrails against runaway loops: `max_iterations`, `max_no_progress`, `max_cost_usd` (also honours the Agent-wide `Budget`). Exit reason in `session.metadata["run_until.exit"]`; guardrail stops set `RunResult.interrupted`. Wraps any architecture; `Team.*` builders forward it. | `Agent(run_until=)`, `GoalStopHook`, `StopHook`, `StopHookResult` (top-level) |
+| **Studio** | Local recording of every run (traces with model messages, tool calls, approvals, guardrails), an agent catalog with automatic versions, eval experiments compared case by case, and a read-only web UI (`loom studio`). One switch; SQLite; no account. | `loomflow.studio.enable/session/score`, `LOOMFLOW_STUDIO`, `loom studio`, `loomflow.studio.web.create_app` |
 | **Telemetry** | OpenTelemetry spans + metrics for every milestone | `NoTelemetry` (top-level); `from loomflow.observability import OTelTelemetry` |
 | **Audit log** | HMAC-signed, hash-chained JSONL or in-memory; tracks every tool call; entries attributed by `user_id`; `verify()` reports edited, deleted or reordered entries | `InMemoryAuditLog`, `AuditLog` (top-level); `from loomflow.security import FileAuditLog, verify_chain, verify_signature` |
 | **Certified values** | Freshness + lineage policies | `from loomflow.data import FreshnessPolicy, LineagePolicy` |

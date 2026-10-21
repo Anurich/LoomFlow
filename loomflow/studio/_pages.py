@@ -886,10 +886,11 @@ def compare_page(a: Mapping[str, Any], b: Mapping[str, Any], *, show: str) -> st
     )
 
     def head(exp: Mapping[str, Any], role: str) -> str:
-        version = f" v{exp['agent_version']}" if exp.get("agent_version") else ""
+        version = f", agent v{exp['agent_version']}" if exp.get("agent_version") else ""
         return (f'<th class="num"><span style="display:flex;flex-direction:column;gap:2px;align-items:flex-end">'
-                f'<span style="color:var(--ink);font-size:14px">{e(exp["name"] + version)}</span>'
-                f'<span class="faint" style="font-weight:400">{e(role)}, {e(fmt_ts(exp["started_at"]))}</span></span></th>')
+                f'<span style="color:var(--ink);font-size:14px">{e(exp["name"])}</span>'
+                f'<span class="faint" style="font-weight:400">{e(role + version)}, {e(fmt_ts(exp["started_at"]))}</span>'
+                "</span></th>")
 
     note = "" if a["dataset"] == b["dataset"] else (
         f'<div class="notice">These runs used different datasets ({e(a["dataset"])} and {e(b["dataset"])}); '
