@@ -62,6 +62,7 @@ p { margin: 0; }
   text-decoration: none; cursor: pointer; }
 .btn:hover { background: var(--hover); color: var(--ink); }
 .btn.primary { background: var(--indigo); border-color: var(--indigo); color: var(--on-accent); font-weight: 600; }
+.btn[disabled] { opacity: 0.5; cursor: not-allowed; }
 .chip { display: inline-flex; align-items: center; min-height: 36px; padding: 0 14px; border: 1px solid var(--line-strong);
   border-radius: 999px; background: var(--raised); color: var(--body); font-size: 14px; text-decoration: none; }
 .chip[aria-current="true"] { background: var(--indigo); border-color: var(--indigo); color: var(--on-accent); font-weight: 600; }
@@ -125,7 +126,7 @@ details summary { cursor: pointer; font-size: 13px; color: var(--soft); }
 .notice.ok { border-color: var(--indigo); background: var(--selected); }
 .stack { display: flex; flex-direction: column; gap: 8px; }
 .stack label { font-size: 13px; font-weight: 600; color: var(--soft); }
-.stack input[type="text"], .stack textarea { width: 100%; min-height: 40px; padding: 8px 10px; border: 1px solid var(--line-strong);
+.stack input[type="text"], .stack textarea, .stack select { width: 100%; min-height: 40px; padding: 8px 10px; border: 1px solid var(--line-strong);
   border-radius: 8px; background: var(--raised); color: var(--ink); font: inherit; font-size: 14px; }
 .stack textarea { font-family: var(--mono); font-size: 13px; line-height: 1.5; resize: vertical; }
 .stack .hint { font-size: 13px; color: var(--faint); }

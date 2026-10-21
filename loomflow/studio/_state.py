@@ -55,6 +55,9 @@ class Scope:
     # Set by the eval harness: the experiment a case run belongs to.
     experiment_id: str | None = None
     case_key: str | None = None
+    # Record to this file whatever else is configured (evals the web
+    # app starts record to the file it shows).
+    settings: Settings | None = None
 
 
 # The trace being recorded, and the span new spans hang under.
@@ -63,6 +66,9 @@ parent_var: ContextVar[str | None] = ContextVar("loomflow_studio_parent", defaul
 # Set inside an unsampled trace, so its nested runs don't start their own.
 suppress_var: ContextVar[bool] = ContextVar("loomflow_studio_suppress", default=False)
 scope_var: ContextVar[Scope | None] = ContextVar("loomflow_studio_scope", default=None)
+# The id the next experiment started here takes (the web app picks it
+# first, to show the experiment's page while it runs).
+next_experiment_var: ContextVar[str | None] = ContextVar("loomflow_studio_next_experiment", default=None)
 
 _global: Settings | None = None
 _recorders: dict[str, Recorder] = {}
@@ -111,6 +117,8 @@ def current_settings() -> Settings | None:
     scope = scope_var.get()
     if scope is not None and scope.enabled is False:
         return None
+    if scope is not None and scope.settings is not None:
+        return scope.settings
     settings = _global or settings_from_env()
     if settings is None and scope is not None and scope.enabled:
         settings = Settings()

@@ -908,6 +908,219 @@ async def test_pages_work_on_a_file_from_0_18_0(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Running evals from the web app
+# ---------------------------------------------------------------------------
+
+
+async def test_the_harness_stops_at_its_spending_cap(tmp_path: Path) -> None:
+    db = tmp_path / "s.db"
+    studio.enable(db)
+    turns = [ScriptedTurn(text=str(n), usage=Usage(input_tokens=10, output_tokens=1, cost_usd=0.01)) for n in range(4)]
+    cases = [Case(id=f"c{n}", input=f"say {n}", expected=str(n)) for n in range(4)]
+    report = await EvalHarness(_agent(turns), [Contains()], concurrency=1).run(
+        Dataset(cases, name="numbers"), max_cost_usd=0.015)
+    assert [r.case_id for r in report.results] == ["c0", "c1"] and report.skipped == ["c2", "c3"]
+    assert report.cost_usd == pytest.approx(0.02) and report.results[0].cost_usd == pytest.approx(0.01)
+    assert not report.passed and json.loads(report.to_json())["skipped"] == ["c2", "c3"]
+    assert studio.flush()
+    summary = json.loads(_db(db).execute("SELECT summary FROM experiments").fetchone()[0])
+    assert summary["skipped"] == 2 and summary["stopped"] == "Spending cap of $0.015 reached"
+    with pytest.raises(ValueError, match="max_cost_usd"):
+        await EvalHarness(_agent([]), [Contains()]).run(cases, max_cost_usd=0)
+
+
+async def _dataset(db: Path, project: str = "p") -> str:
+    from loomflow.studio._store import StudioStore
+
+    with StudioStore(db).write() as conn:
+        StudioStore.add_dataset_case(conn, project=project, dataset="refunds", input="Refund order 4471",
+                                     expected="refunded", trace_id=None)
+        return StudioStore.add_dataset_case(conn, project=project, dataset="refunds", input="Why twice?",
+                                            expected="duplicate", trace_id=None)
+
+
+async def _finished(db: Path, exp_id: str) -> dict[str, Any]:
+    import anyio
+
+    from loomflow.studio._store import StudioStore
+
+    for _ in range(500):
+        studio.flush()
+        exp = StudioStore(db, readonly=True).get_experiment(exp_id)
+        if exp is not None and exp["ended_at"] is not None:
+            return exp
+        await anyio.sleep(0.01)
+    raise AssertionError(f"experiment {exp_id} didn't finish")
+
+
+async def test_running_an_eval_from_the_page(tmp_path: Path) -> None:
+    from loomflow.studio.web import create_app
+
+    db = tmp_path / "s.db"
+    dataset_id = await _dataset(db)
+    # The web app's process records the eval to its file even though
+    # Studio isn't otherwise on there.
+    assert not studio.is_enabled()
+    # Replies for two eval runs of two cases, one case at a time.
+    agent = _agent([ScriptedTurn(text="Refunded it.", usage=Usage(input_tokens=5, output_tokens=2, cost_usd=0.002)),
+                    ScriptedTurn(text="No idea."), ScriptedTurn(text="Refunded."),
+                    ScriptedTurn(text="A duplicate charge.")])
+    app = create_app(db, agents=[agent])
+    _, _, body = await _get(app, f"/datasets/{dataset_id}")
+    assert f'/evals/new?dataset={dataset_id}' in body and "Run eval" in body
+    status, _, body = await _get(app, f"/evals/new?dataset={dataset_id}")
+    assert status == 200 and '<option value="billing">billing' in body and "refunds, 2 cases (p)" in body
+    form = {"token": _token(body), "agent": "billing", "dataset": dataset_id, "metrics": ["contains"],
+            "concurrency": "1", "max_cost_usd": "", "name": "first try"}
+    status, headers, _ = await _get(app, "/evals", "POST", form=form)
+    assert status == 303 and headers["location"].startswith("/experiments/exp_")
+    exp_id = headers["location"].rsplit("/", 1)[1]
+    exp = await _finished(db, exp_id)
+    assert (exp["name"], exp["dataset"], exp["project"], exp["agent_key"]) == ("first try", "refunds", "p", "billing")
+    assert [c["scores"] for c in exp["cases"]] == [{"contains": 1.0}, {"contains": 0.0}]
+    assert all(c["trace_id"] for c in exp["cases"])  # each case's run is a trace in the same file
+    status, _, body = await _get(app, f"/experiments/{exp_id}")
+    assert status == 200 and "0.50" in body and 'http-equiv="refresh"' not in body
+    # A second run links to the first for comparison.
+    _, headers, _ = await _get(app, "/evals", "POST", form={**form, "name": "second try"})
+    second = headers["location"].rsplit("/", 1)[1]
+    await _finished(db, second)
+    _, _, body = await _get(app, f"/experiments/{second}")
+    assert f"/experiments/compare?a={exp_id}&amp;b={second}" in body and "Compare with first try" in body
+    status, _, body = await _get(app, f"/experiments/compare?a={exp_id}&b={second}")
+    assert status == 200 and "1 improved, 0 regressed" in body
+
+
+async def test_a_running_eval_shows_progress_and_can_be_cancelled(tmp_path: Path) -> None:
+    import anyio
+
+    from loomflow.studio.web import create_app
+
+    class Slow(ScriptedModel):
+        async def complete(self, messages: Any, **kwargs: Any) -> Any:
+            await anyio.sleep(60)
+
+        async def stream(self, messages: Any, **kwargs: Any) -> Any:
+            await anyio.sleep(60)
+            yield  # pragma: no cover
+
+    db = tmp_path / "s.db"
+    dataset_id = await _dataset(db)
+    app = create_app(db, agents=[Agent("You are slow.", name="slow", model=Slow([]), auto_extract=False)])
+    _, _, body = await _get(app, f"/evals/new?dataset={dataset_id}")
+    form = {"token": _token(body), "agent": "slow", "dataset": dataset_id, "metrics": "contains", "max_cost_usd": "1"}
+    _, headers, _ = await _get(app, "/evals", "POST", form=form)
+    exp_id = headers["location"].rsplit("/", 1)[1]
+    for _ in range(200):
+        studio.flush()
+        status, _, body = await _get(app, f"/experiments/{exp_id}")
+        if "Running:" in body:
+            break
+        await anyio.sleep(0.01)
+    assert "Running: 0 of 2 cases done" in body and 'http-equiv="refresh" content="3"' in body and "Cancel" in body
+    status, _, body = await _get(app, "/evals", "POST", form=form)
+    assert status == 409 and "already running" in body
+    _, _, body = await _get(app, f"/evals/new?dataset={dataset_id}")
+    assert "An eval is running" in body and "disabled" in body
+    status, headers, _ = await _get(app, f"/experiments/{exp_id}/cancel", "POST", form={"token": form["token"]})
+    assert status == 303
+    exp = await _finished(db, exp_id)
+    assert exp["summary"]["stopped"] == "Cancelled"
+    _, _, body = await _get(app, f"/experiments/{exp_id}")
+    assert "Stopped: Cancelled." in body and 'http-equiv="refresh"' not in body
+    # Stopping the server stops a running eval, and says so.
+    _, headers, _ = await _get(app, "/evals", "POST", form=form)
+    second = headers["location"].rsplit("/", 1)[1]
+    messages = [{"type": "lifespan.startup"}, {"type": "lifespan.shutdown"}]
+
+    async def receive() -> dict[str, Any]:
+        return messages.pop(0)
+
+    async def send(message: dict[str, Any]) -> None:
+        pass
+
+    await app({"type": "lifespan"}, receive, send)
+    assert (await _finished(db, second))["summary"]["stopped"] == "Studio was stopped"
+
+
+async def test_an_unfinished_experiment_page_refreshes_until_the_file_says_it_ended(tmp_path: Path) -> None:
+    from loomflow.studio.web import create_app
+
+    db = tmp_path / "s.db"
+    dataset_id = await _dataset(db)
+    app = create_app(db, agents=[_agent([ScriptedTurn(text="refunded"), ScriptedTurn(text="duplicate")])])
+    _, _, body = await _get(app, "/evals/new")
+    _, headers, _ = await _get(app, "/evals", "POST", form={"token": _token(body), "agent": "billing",
+                                                             "dataset": dataset_id, "metrics": "contains"})
+    exp_id = headers["location"].rsplit("/", 1)[1]
+    exp = await _finished(db, exp_id)
+    with sqlite3.connect(db) as conn:  # as if the last writes weren't on disk yet
+        conn.execute("UPDATE experiments SET ended_at = NULL WHERE id = ?", (exp_id,))
+    _, _, body = await _get(app, f"/experiments/{exp_id}")
+    assert 'http-equiv="refresh" content="1"' in body and "refreshes itself" in body
+    # One started elsewhere refreshes for an hour, then asks for a reload.
+    other = create_app(db)
+    assert 'content="5"' in (await _get(other, f"/experiments/{exp_id}"))[2]
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE experiments SET started_at = ? WHERE id = ?", (exp["started_at"] - 7200, exp_id))
+    _, _, body = await _get(other, f"/experiments/{exp_id}")
+    assert 'http-equiv="refresh"' not in body and "Reload the page" in body
+
+
+async def test_eval_forms_are_checked(tmp_path: Path) -> None:
+    from loomflow.studio.web import create_app
+
+    db = tmp_path / "s.db"
+    dataset_id = await _dataset(db)
+    app = create_app(db, agents=[_agent([])])
+    _, _, body = await _get(app, "/evals/new")
+    token = _token(body)
+    base = {"token": token, "agent": "billing", "dataset": dataset_id, "metrics": "contains"}
+    for change, message in (
+        ({"metrics": []}, "Pick at least one"),
+        ({"metrics": "judge"}, "Name a model for the LLM judge"),
+        ({"metrics": "judge", "judge_model": "no-such-model"}, "can&#x27;t be used"),
+        ({"max_cost_usd": "lots"}, "spending limit"),
+        ({"max_cost_usd": "0"}, "spending limit"),
+        ({"agent": "nobody"}, "Pick one of the agents"),
+        ({"dataset": "ds_missing"}, "Pick a dataset"),
+    ):
+        status, _, body = await _get(app, "/evals", "POST", form={**base, **change})
+        assert status in (400, 404) and message in body, change
+    # Read-only, or no agents: nothing can be started.
+    read_only = create_app(db, agents=[_agent([])], read_only=True)
+    assert (await _get(read_only, "/evals", "POST", form=base))[0] == 405
+    assert "read-only" in (await _get(read_only, "/evals/new"))[2]
+    plain = create_app(db)
+    assert "loom studio --agent" in (await _get(plain, "/evals/new"))[2]
+    _, _, body = await _get(plain, f"/datasets/{dataset_id}")
+    assert "Run eval" not in body and "loom studio --agent" in body
+    assert 'href="/evals/new"' not in (await _get(plain, "/experiments"))[2]
+    assert 'href="/evals/new"' in (await _get(app, "/experiments"))[2]
+
+
+def test_agents_studio_may_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import sys
+
+    from loomflow.studio._evals import targets
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "path", [p for p in sys.path if p not in ("", str(tmp_path))])
+    (tmp_path / "studio_app_mod.py").write_text(
+        "from loomflow import Agent, Workflow\n"
+        "billing = Agent('You do billing.', model='echo', name='billing')\n"
+        "flow = Workflow.chain([billing], name='flow')\n")
+    found = targets(["studio_app_mod:billing"])
+    assert list(found) == ["billing"] and found["billing"].spec == "studio_app_mod:billing"
+    with pytest.raises(ValueError, match="not an Agent"):
+        targets(["studio_app_mod:flow"])
+    with pytest.raises(ValueError, match="both named"):
+        targets([found["billing"].agent, Agent("x", model="echo", name="billing")])
+    with pytest.raises(ImportError):
+        targets(["no_such_module_here:agent"])
+
+
+# ---------------------------------------------------------------------------
 # Agent names, the CLI
 # ---------------------------------------------------------------------------
 
@@ -923,13 +1136,25 @@ def test_agent_name_from_config() -> None:
     assert Agent.from_dict({"instructions": "x", "model": "echo", "name": "cfg-agent"}).name == "cfg-agent"
 
 
+def test_pyproject_lists_the_agents_studio_may_run(tmp_path: Path) -> None:
+    from loomflow.cli import _pyproject_studio_agents
+
+    config = tmp_path / "pyproject.toml"
+    config.write_text('[tool.loomflow.studio]\nagents = ["app.agents:billing", "app:tech"]\n')
+    assert _pyproject_studio_agents(str(config)) == ["app.agents:billing", "app:tech"]
+    config.write_text("[project]\nname = 'x'\n")
+    assert _pyproject_studio_agents(str(config)) == []
+    assert _pyproject_studio_agents(str(tmp_path / "missing.toml")) == []
+
+
 def test_cli_studio_and_eval_flags() -> None:
     from loomflow.cli import _build_parser, _studio_hosts
 
     args = _build_parser().parse_args(["studio", "--db", "x.db", "--port", "7700"])
     assert (args.db, args.port, args.host, args.read_only, args.allow_host) == ("x.db", 7700, "127.0.0.1", False, [])
-    args = _build_parser().parse_args(["studio", "--read-only", "--allow-host", "studio.internal"])
-    assert args.read_only and args.allow_host == ["studio.internal"]
+    args = _build_parser().parse_args(["studio", "--read-only", "--allow-host", "studio.internal",
+                                       "--agent", "app:billing", "--agent", "app:tech"])
+    assert args.read_only and args.allow_host == ["studio.internal"] and args.agent == ["app:billing", "app:tech"]
     assert _studio_hosts("127.0.0.1", ["studio.internal"]) == ["localhost", "127.0.0.1", "::1", "studio.internal"]
     assert _studio_hosts("10.0.0.5", []) == ["localhost", "127.0.0.1", "::1", "10.0.0.5"]
     assert _studio_hosts("0.0.0.0", []) == ["*"]

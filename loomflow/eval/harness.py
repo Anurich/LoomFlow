@@ -73,7 +73,8 @@ class CaseResult(BaseModel):
     ``error`` is set (and ``scores`` left empty) when ``agent.run``
     raised; ``metric_errors`` maps a metric that raised on this case
     to its error. The report's ``passed`` flag and
-    ``assert_thresholds`` treat both as failures.
+    ``assert_thresholds`` treat both as failures. ``cost_usd`` is what
+    the case's run cost.
     """
 
     case_id: str
@@ -83,20 +84,30 @@ class CaseResult(BaseModel):
     scores: dict[str, float] = Field(default_factory=dict)
     error: str | None = None
     metric_errors: dict[str, str] = Field(default_factory=dict)
+    cost_usd: float = 0.0
 
 
 class EvalReport(BaseModel):
-    """Per-case scores + per-metric aggregates for one eval run."""
+    """Per-case scores + per-metric aggregates for one eval run.
+
+    ``skipped`` lists the ids of the cases that didn't run because the
+    run's ``max_cost_usd`` was reached first."""
 
     results: list[CaseResult] = Field(default_factory=list)
     started_at: datetime
     finished_at: datetime
+    skipped: list[str] = Field(default_factory=list)
+
+    @property
+    def cost_usd(self) -> float:
+        """What the cases' runs cost together."""
+        return sum(r.cost_usd for r in self.results)
 
     @property
     def passed(self) -> bool:
         """True when every case ran, and was scored by every metric,
         without raising."""
-        return all(r.error is None and not r.metric_errors for r in self.results)
+        return not self.skipped and all(r.error is None and not r.metric_errors for r in self.results)
 
     def scores_for(self, metric: str) -> list[float]:
         return [r.scores[metric] for r in self.results if metric in r.scores]
@@ -132,6 +143,8 @@ class EvalReport(BaseModel):
                 "started_at": self.started_at.isoformat(),
                 "finished_at": self.finished_at.isoformat(),
                 "metrics": self.summary(),
+                "cost_usd": self.cost_usd,
+                "skipped": self.skipped,
                 "cases": [r.model_dump(mode="json") for r in self.results],
             },
             indent=indent,
@@ -228,26 +241,45 @@ class EvalHarness:
             warn_if_same_model(metric, agent_model)
 
     async def run(
-        self, dataset: Dataset | Sequence[Case], *, experiment: str | None = None
+        self,
+        dataset: Dataset | Sequence[Case],
+        *,
+        experiment: str | None = None,
+        max_cost_usd: float | None = None,
     ) -> EvalReport:
         """Offline eval: run every case, score, aggregate.
+
+        ``max_cost_usd`` stops starting new cases once the runs so far
+        have cost that much (cases already running finish, so it can go
+        over by up to ``concurrency - 1`` runs); the rest are listed in
+        the report's ``skipped``.
 
         When Studio is recording, the run is saved as an experiment
         (named ``experiment``, default the agent's name), each case's
         run as a trace with its scores, so experiments on the same
         dataset can be compared.
         """
+        if max_cost_usd is not None and not max_cost_usd > 0:
+            raise ValueError(f"max_cost_usd must be more than 0, got {max_cost_usd!r}")
         cases = list(dataset)
         started_at = datetime.now(UTC)
         results: list[CaseResult | None] = [None] * len(cases)
+        skipped = [False] * len(cases)
+        spent = 0.0
         limiter = anyio.CapacityLimiter(self._concurrency)
         studio = await _studio.experiment_start(
             self._agent, dataset, cases, [m.name for m in self._metrics], name=experiment
         )
 
         async def _one(index: int, case: Case) -> None:
+            nonlocal spent
             async with limiter:
-                results[index] = await self._run_case(case, studio=studio, position=index)
+                if max_cost_usd is not None and spent >= max_cost_usd:
+                    skipped[index] = True
+                    return
+                result = await self._run_case(case, studio=studio, position=index)
+                results[index] = result
+                spent += result.cost_usd
 
         async with anyio.create_task_group() as tg:
             for index, case in enumerate(cases):
@@ -258,8 +290,13 @@ class EvalHarness:
             results=[r for r in results if r is not None],
             started_at=started_at,
             finished_at=finished_at,
+            skipped=[case.id for case, skip in zip(cases, skipped, strict=True) if skip],
         )
-        _studio.experiment_finish(studio, {"passed": report.passed, "metrics": report.summary()})
+        summary: dict[str, Any] = {"passed": report.passed, "metrics": report.summary()}
+        if report.skipped:
+            summary["skipped"] = len(report.skipped)
+            summary["stopped"] = f"Spending cap of ${max_cost_usd:g} reached"
+        _studio.experiment_finish(studio, summary)
         return report
 
     async def _run_case(
@@ -293,6 +330,7 @@ class EvalHarness:
                 error=error,
             )
         scores, metric_errors = await _score_case(self._metrics, case, result, events)
+        cost = float(getattr(result, "cost_usd", 0.0) or 0.0)
         _studio.experiment_record_case(
             studio, position=position, key=key, case=case, run_id=result.run_id,
             output=result.output, scores=scores,
@@ -305,6 +343,7 @@ class EvalHarness:
             session_id=session_id,
             scores=scores,
             metric_errors=metric_errors,
+            cost_usd=cost,
         )
 
     def online(self, *, sample_rate: float = 0.1, seed: int | None = None) -> OnlineScorer:

@@ -281,7 +281,8 @@ async def experiment_start(
         agent_record = await describe_agent(agent)
     scope = _state.scope_var.get()
     project = (scope.project if scope else None) or recorder.settings.project or _state.default_project()
-    exp_id = "exp_" + _new_id()[:20]
+    exp_id = _state.next_experiment_var.get() or "exp_" + _new_id()[:20]
+    _state.next_experiment_var.set(None)  # one experiment per id
     label = name or (agent_record["name"] if agent_record else "experiment")
     recorder.submit((
         "experiment_start",
@@ -312,6 +313,7 @@ def experiment_case(handle: ExperimentHandle | None, key: str) -> Iterator[None]
         metadata=dict(outer.metadata) if outer else {},
         experiment_id=handle.id,
         case_key=key,
+        settings=outer.settings if outer else None,
     )
     token = _state.scope_var.set(scope)
     try:

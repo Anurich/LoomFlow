@@ -162,6 +162,7 @@ def session(
         metadata={**(outer.metadata if outer else {}), **(metadata or {})},
         experiment_id=outer.experiment_id if outer else None,
         case_key=outer.case_key if outer else None,
+        settings=outer.settings if outer else None,
     )
     token = _state.scope_var.set(scope)
     try:
