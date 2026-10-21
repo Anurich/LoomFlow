@@ -35,6 +35,7 @@ from pydantic import BaseModel, Field
 
 from ..core.ids import new_id
 from ..core.types import Event, RunResult
+from ..studio import _hooks as _studio
 from .dataset import Case, Dataset
 from .judge import warn_if_same_model
 from .metrics import Metric
@@ -226,50 +227,77 @@ class EvalHarness:
         for metric in self._metrics:
             warn_if_same_model(metric, agent_model)
 
-    async def run(self, dataset: Dataset | Sequence[Case]) -> EvalReport:
-        """Offline eval: run every case, score, aggregate."""
+    async def run(
+        self, dataset: Dataset | Sequence[Case], *, experiment: str | None = None
+    ) -> EvalReport:
+        """Offline eval: run every case, score, aggregate.
+
+        When Studio is recording, the run is saved as an experiment
+        (named ``experiment``, default the agent's name), each case's
+        run as a trace with its scores, so experiments on the same
+        dataset can be compared.
+        """
         cases = list(dataset)
         started_at = datetime.now(UTC)
         results: list[CaseResult | None] = [None] * len(cases)
         limiter = anyio.CapacityLimiter(self._concurrency)
+        studio = await _studio.experiment_start(
+            self._agent, dataset, cases, [m.name for m in self._metrics], name=experiment
+        )
 
         async def _one(index: int, case: Case) -> None:
             async with limiter:
-                results[index] = await self._run_case(case)
+                results[index] = await self._run_case(case, studio=studio, position=index)
 
         async with anyio.create_task_group() as tg:
             for index, case in enumerate(cases):
                 tg.start_soon(_one, index, case)
 
         finished_at = datetime.now(UTC)
-        return EvalReport(
+        report = EvalReport(
             results=[r for r in results if r is not None],
             started_at=started_at,
             finished_at=finished_at,
         )
+        _studio.experiment_finish(studio, {"passed": report.passed, "metrics": report.summary()})
+        return report
 
-    async def _run_case(self, case: Case) -> CaseResult:
+    async def _run_case(
+        self, case: Case, *, studio: _studio.ExperimentHandle | None = None, position: int = 0
+    ) -> CaseResult:
         events: list[Event] = []
 
         async def _capture(event: Event) -> None:
             events.append(event)
 
         session_id = new_id("eval")
+        key = _studio.case_key(case)
         try:
-            result = await self._agent.run(
-                case.input,
-                session_id=session_id,
-                user_id=EVAL_USER_ID,
-                emit=_capture,
-            )
+            with _studio.experiment_case(studio, key):
+                result = await self._agent.run(
+                    case.input,
+                    session_id=session_id,
+                    user_id=EVAL_USER_ID,
+                    emit=_capture,
+                )
         except Exception as exc:  # noqa: BLE001 - a crashing case must not abort the suite
+            error = f"{type(exc).__name__}: {exc}"
+            _studio.experiment_record_case(
+                studio, position=position, key=key, case=case, run_id=None,
+                output=None, scores={}, error=error,
+            )
             return CaseResult(
                 case_id=case.id,
                 input=case.input,
                 session_id=session_id,
-                error=f"{type(exc).__name__}: {exc}",
+                error=error,
             )
         scores, metric_errors = await _score_case(self._metrics, case, result, events)
+        _studio.experiment_record_case(
+            studio, position=position, key=key, case=case, run_id=result.run_id,
+            output=result.output, scores=scores,
+            error="; ".join(f"{k}: {v}" for k, v in metric_errors.items()) or None,
+        )
         return CaseResult(
             case_id=case.id,
             input=case.input,
@@ -344,6 +372,8 @@ class OnlineScorer:
         self._sampled += 1
         case = Case(input=prompt)  # unlabelled: ground-truth metrics skip via applies()
         scores, _errors = await _score_case(self._metrics, case, result, events)
+        # Studio (when recording): the scores join the run's trace.
+        _studio.record_scores(result, scores, source="online")
         day = result.finished_at.astimezone(UTC).date().isoformat()
         bucket = self._by_day.setdefault(day, {})
         for name, score in scores.items():

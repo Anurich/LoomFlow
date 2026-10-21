@@ -45,10 +45,14 @@ class Dataset:
 
     JSONL format: one JSON object per line, each the ``model_dump`` of
     a :class:`Case`. Lines that are blank are skipped on read.
+
+    ``name`` identifies the dataset in Studio, where experiments on the
+    same dataset are compared; :meth:`from_jsonl` uses the file name.
     """
 
-    def __init__(self, cases: Iterable[Case] = ()) -> None:
+    def __init__(self, cases: Iterable[Case] = (), *, name: str | None = None) -> None:
         self.cases: list[Case] = list(cases)
+        self.name = name
 
     def __len__(self) -> int:
         return len(self.cases)
@@ -76,7 +80,7 @@ class Dataset:
             except json.JSONDecodeError as exc:
                 raise ValueError(f"{path}:{lineno}: invalid JSON: {exc}") from exc
             cases.append(Case.model_validate(data))
-        return cls(cases)
+        return cls(cases, name=Path(path).stem)
 
     def to_jsonl(self, path: str | Path) -> None:
         """Write the dataset to ``path`` as JSONL (overwrites)."""

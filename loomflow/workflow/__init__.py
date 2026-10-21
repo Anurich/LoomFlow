@@ -91,6 +91,7 @@ from ..core.streaming import stream_from
 from ..core.types import Event, EventKind
 from ..observability.tracing import NoTelemetry
 from ..runtime.journaled import journal_container
+from ..studio import _hooks as _studio
 from ..tools.registry import Tool
 
 if TYPE_CHECKING:
@@ -883,6 +884,25 @@ class Workflow:
         session_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> AsyncGenerator[Event, None]:
+        # Studio records the run (a no-op unless recording): the
+        # workflow's own span, then each step's output from the events.
+        sid = session_id if session_id is not None else new_id("wf_session")
+        async with _studio.workflow_run(self, input, user_id=user_id, session_id=sid) as studio:
+            async with aclosing(
+                self._run_graph(input, user_id=user_id, session_id=sid, metadata=metadata)
+            ) as events:
+                async for event in events:
+                    _studio.workflow_event(studio, event)
+                    yield event
+
+    async def _run_graph(
+        self,
+        input: Any = None,
+        *,
+        user_id: str | None = None,
+        session_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> AsyncGenerator[Event, None]:
         if self._start is None and self._entry_router is None:
             raise RuntimeError(
                 f"workflow {self.name!r} has no start node; "
@@ -900,8 +920,10 @@ class Workflow:
         # Install a RunContext so @step decorators and nested agent
         # runs can pick up user_id / session_id / telemetry hookup.
         run_meta = dict(metadata or {})
-        if self._telemetry is not None:
-            run_meta["_workflow_telemetry"] = self._telemetry
+        # The workflow's telemetry, plus Studio's sink when recording.
+        telemetry = _studio.compose(self._telemetry)
+        if telemetry is not None:
+            run_meta["_workflow_telemetry"] = telemetry
         run_meta["_workflow"] = self  # for @step's audit entries
         ctx = RunContext(
             user_id=user_id,
@@ -994,7 +1016,7 @@ class Workflow:
                 tuple[str, str, Any]
             ](math.inf)
             limiter = anyio.CapacityLimiter(self._max_concurrency)
-            tel = self._telemetry or NoTelemetry()
+            tel = telemetry or NoTelemetry()
 
             def _deliver(dst: str, idx: int, val: Any) -> None:
                 nonlocal arrival
@@ -1748,6 +1770,8 @@ class Workflow:
             max_visits_per_node=max_visits_per_node,
             workspace=workspace,
         )
+        # The branches, for diagrams (loomflow.graph draws them).
+        _fan_out._loom_branches = tuple(zip(branch_names, steps, strict=True))  # type: ignore[attr-defined]
         wf.add_node("fan_out", _fan_out)
         wf.set_start("fan_out")
         wf.add_edge("fan_out", END)

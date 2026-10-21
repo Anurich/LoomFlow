@@ -67,6 +67,7 @@ from ..core.types import (
 from ..guardrails.base import apply_guardrails
 from ..observability.semconv import set_span_attributes, tool_attrs
 from ..security.audit import AuditLog, wants_full_transcripts
+from ..studio import _hooks as _studio
 from .base import ApprovalDecision, Dependencies
 
 if TYPE_CHECKING:
@@ -199,6 +200,7 @@ async def text_only_model_call(
     (critics, planners, classifiers) must NOT be schema-constrained.
     """
     mdl = model if model is not None else deps.model
+    started_at = _studio.now()
 
     if not deps.streaming and hasattr(mdl, "complete"):
         if deps.fast_runtime:
@@ -223,6 +225,10 @@ async def text_only_model_call(
                     prompt_caching=deps.prompt_caching,
                 )
             )
+        _studio.model_call(
+            None, model=getattr(mdl, "name", None), messages=messages,
+            text=text, usage=usage, started_at=started_at,
+        )
         return text, usage
 
     text_parts: list[str] = []
@@ -244,7 +250,12 @@ async def text_only_model_call(
         elif chunk.kind == "finish" and chunk.usage is not None:
             usage = chunk.usage
 
-    return "".join(text_parts), usage
+    text = "".join(text_parts)
+    _studio.model_call(
+        None, model=getattr(mdl, "name", None), messages=messages,
+        text=text, usage=usage, started_at=started_at,
+    )
+    return text, usage
 
 
 # ---------------------------------------------------------------------------
@@ -772,6 +783,7 @@ async def run_single_tool(
             result = ToolResult.denied_(
                 call.id, hook_decision.reason or "denied by hook"
             )
+            set_span_attributes(tool_span, {"loom.permission": "denied by hook"})
         else:
             if deps.fast_permissions:
                 # AllowAll always allows — skip the dataclass round-trip.
@@ -801,6 +813,12 @@ async def run_single_tool(
             # silently disabled the approval gate for every agent with
             # a hook registered — destructive writes/edits/bash ran
             # ungated. Hooks influence the gate by DENYING only.
+            # The decision on the span (no arguments, no content):
+            # allow, deny, or ask plus what the approver decided.
+            set_span_attributes(tool_span, {
+                "loom.permission": "deny" if perm.deny else "ask" if perm.ask else "allow",
+                "loom.permission.reason": perm.reason,
+            })
             if perm.deny:
                 result = ToolResult.denied_(
                     call.id, perm.reason or "denied by policy"
@@ -821,6 +839,10 @@ async def run_single_tool(
                     run_user_id,
                     approval_memory=deps.approval_memory,
                 )
+                set_span_attributes(tool_span, {
+                    "loom.approval": "approved" if approved else "declined",
+                    "loom.approval.edited": call is not original_call or None,
+                })
                 if not approved:
                     result = ToolResult.denied_(
                         call.id,
