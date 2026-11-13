@@ -37,6 +37,7 @@ from ..core.types import Message, ModelChunk, Role, ToolCall, ToolDef, Usage
 from ._names import canonical_model_name
 from ._pricing import estimate_cost
 from ._timeout import deadline_from, iter_with_deadline, timeout_error
+from ._toolargs import parse_tool_args
 
 
 def _cache_control_for(prompt_caching: Any) -> dict[str, Any] | None:
@@ -589,7 +590,8 @@ class AnthropicModel:
         text_parts: list[str] = []
         tool_calls: list[ToolCall] = []
         thinking_blocks: list[dict[str, Any]] = []
-        for block in getattr(response, "content", None) or []:
+        blocks = list(getattr(response, "content", None) or [])
+        for block in blocks:
             btype = getattr(block, "type", None)
             if btype == "text":
                 text_parts.append(getattr(block, "text", "") or "")
@@ -630,6 +632,25 @@ class AnthropicModel:
                         args=args,
                     )
                 )
+        # A reply cut off by ``max_tokens`` while the model was writing
+        # a tool call ends on an incomplete ``tool_use`` block whose
+        # input is partial. Flag it so the dispatcher doesn't run the
+        # tool with missing arguments.
+        if (
+            tool_calls
+            and getattr(response, "stop_reason", None) == "max_tokens"
+            and getattr(blocks[-1], "type", None) == "tool_use"
+            and (getattr(blocks[-1], "id", "") or "") == tool_calls[-1].id
+        ):
+            tool_calls[-1] = tool_calls[-1].model_copy(
+                update={
+                    "args": {},
+                    "args_error": (
+                        "this tool call was cut off by the output token "
+                        "limit before its arguments were complete"
+                    ),
+                }
+            )
         self._remember_thinking(thinking_blocks, tool_calls)
 
         u = getattr(response, "usage", None)
@@ -857,18 +878,15 @@ class AnthropicModel:
                         )
                     partial = partials.pop(event.index, None)
                     if partial is not None:
-                        try:
-                            args = (
-                                json.loads(partial.args_json)
-                                if partial.args_json
-                                else {}
-                            )
-                        except json.JSONDecodeError:
-                            args = {}
+                        # Unusable arguments (cut off by ``max_tokens``,
+                        # or not an object) are flagged on the call, not
+                        # replaced by ``{}``: the dispatcher won't run it.
+                        args, args_error = parse_tool_args(partial.args_json)
                         call = ToolCall(
                             id=partial.id,
                             tool=partial.name,
                             args=args,
+                            args_error=args_error,
                         )
                         emitted_tool_calls.append(call)
                         yield ModelChunk(kind="tool_call", tool_call=call)

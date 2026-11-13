@@ -57,6 +57,7 @@ from ..governance.retry import (
     compute_backoff,
     retry_after_exceeds_cap,
 )
+from ._toolargs import collect_stream
 
 __all__ = ["RetryingModel"]
 
@@ -100,6 +101,22 @@ class RetryingModel:
         """Single-shot completion with retry on transient failures."""
 
         async def _do_call() -> tuple[str, list[ToolCall], Usage, str]:
+            if not hasattr(self._inner, "complete"):
+                # Stream-only model (the Model protocol only mandates
+                # ``stream``): drain it. Nothing has reached the
+                # caller yet, so the whole call is still retryable.
+                return await collect_stream(
+                    self._inner.stream(
+                        messages,
+                        tools=tools,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        output_schema=output_schema,
+                        effort=effort,
+                        strict_effort=strict_effort,
+                        prompt_caching=prompt_caching,
+                    )
+                )
             result: tuple[str, list[ToolCall], Usage, str] = (
                 await self._inner.complete(
                     messages,

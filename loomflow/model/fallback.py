@@ -50,6 +50,7 @@ from ..core.errors import (
 )
 from ..core.types import Message, ModelChunk, ToolCall, ToolDef, Usage
 from ..governance.retry import classify_model_error
+from ._toolargs import collect_stream
 
 __all__ = ["FallbackModel", "default_fall_on"]
 
@@ -174,8 +175,9 @@ class FallbackModel:
         last_idx = len(self._models) - 1
         for idx, model in enumerate(self._models):
             try:
-                result: tuple[str, list[ToolCall], Usage, str] = (
-                    await model.complete(
+                result: tuple[str, list[ToolCall], Usage, str]
+                if hasattr(model, "complete"):
+                    result = await model.complete(
                         messages,
                         tools=tools,
                         temperature=temperature,
@@ -185,7 +187,22 @@ class FallbackModel:
                         strict_effort=strict_effort,
                         prompt_caching=prompt_caching,
                     )
-                )
+                else:
+                    # Stream-only chain member (the Model protocol only
+                    # mandates ``stream``): drain it. Nothing has
+                    # reached the caller, so failover still applies.
+                    result = await collect_stream(
+                        model.stream(
+                            messages,
+                            tools=tools,
+                            temperature=temperature,
+                            max_tokens=max_tokens,
+                            output_schema=output_schema,
+                            effort=effort,
+                            strict_effort=strict_effort,
+                            prompt_caching=prompt_caching,
+                        )
+                    )
             except Exception as exc:  # noqa: BLE001 — predicate decides
                 if idx == last_idx or not self._fall_on(exc):
                     raise

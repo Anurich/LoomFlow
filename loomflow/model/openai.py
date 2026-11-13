@@ -28,6 +28,7 @@ from ..core.types import Message, ModelChunk, Role, ToolCall, ToolDef, Usage
 from ._names import canonical_model_name
 from ._pricing import estimate_cost
 from ._timeout import deadline_from, iter_with_deadline, timeout_error
+from ._toolargs import parse_tool_args
 
 
 @dataclass
@@ -326,15 +327,16 @@ class OpenAIModel:
             fn = getattr(tc, "function", None)
             name = getattr(fn, "name", "") if fn else ""
             args_json = getattr(fn, "arguments", "") if fn else ""
-            try:
-                args = json.loads(args_json) if args_json else {}
-            except json.JSONDecodeError:
-                args = {}
+            # Unusable arguments (cut-off / non-object JSON) are NOT
+            # turned into ``{}``: the error rides on the ToolCall and
+            # the dispatcher refuses to run it.
+            args, args_error = parse_tool_args(args_json)
             tool_calls.append(
                 ToolCall(
                     id=getattr(tc, "id", None) or new_id("tc"),
                     tool=name,
                     args=args,
+                    args_error=args_error,
                 )
             )
 
@@ -510,16 +512,16 @@ class OpenAIModel:
         # only after the stream ends do we have a complete picture.
         for idx in sorted(partials.keys()):
             p = partials[idx]
-            try:
-                args = json.loads(p.args_json) if p.args_json else {}
-            except json.JSONDecodeError:
-                args = {}
+            # See ``complete()``: unusable arguments are flagged, not
+            # replaced by ``{}``.
+            args, args_error = parse_tool_args(p.args_json)
             yield ModelChunk(
                 kind="tool_call",
                 tool_call=ToolCall(
                     id=p.id or new_id("tc"),
                     tool=p.name,
                     args=args,
+                    args_error=args_error,
                 ),
             )
 

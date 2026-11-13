@@ -93,9 +93,7 @@ class ExtendedToolHost:
             try:
                 output = await extra.execute(args)
             except Exception as exc:  # noqa: BLE001
-                return ToolResult.error_(
-                    call_id=call_id, message=str(exc)
-                )
+                return ToolResult.from_exception(call_id, exc)
             if isinstance(output, ToolResult):
                 # The extra's fn already built a ToolResult — pass
                 # it through instead of double-nesting it inside
