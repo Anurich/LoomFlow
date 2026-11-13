@@ -28,6 +28,19 @@ signature — :func:`verify_signature` then proves nothing. Both
 backends emit a one-shot :class:`UserWarning` when constructed
 without a real secret.
 
+**Secrets are redacted before signing.** Tool arguments, tool
+results and prompts routinely carry credentials, and an audit log is
+exactly the artefact that gets copied to other systems and read by
+other people. Both backends therefore run every payload through
+:func:`loomflow.security.secrets.redact_secrets` — known secret
+values plus common key shapes (``sk-...``, ``Bearer ...``, cloud
+keys, ``NAME_API_KEY=...``) — before the entry is signed and stored,
+so the stored entry verifies and never held the secret. Pass
+``redact=`` a ``str -> str`` function to use your own scrubber, or
+``redact=False`` to store payloads verbatim. This is about
+credentials, not PII: ordinary prompt text is kept (truncated unless
+you opt into :class:`FullTranscriptAuditLog`).
+
 ``seq`` is per-log, starts at 1 and never repeats. :class:`FileAuditLog`
 takes an exclusive file lock for each append and continues from the
 file's last entry, so several processes (or several log objects) can
@@ -43,7 +56,7 @@ import logging
 import os
 import sys
 import warnings
-from collections.abc import AsyncIterator, Iterable, Iterator
+from collections.abc import AsyncIterator, Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -54,6 +67,7 @@ import anyio
 from pydantic_core import to_json
 
 from ..core.types import AuditEntry
+from .secrets import redact_payload, redact_secrets
 
 _LOG = logging.getLogger("loomflow.security.audit")
 
@@ -147,9 +161,28 @@ def _json_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+#: ``redact=`` argument of the shipped logs: ``True`` (default)
+#: scrubs with :func:`~loomflow.security.secrets.redact_secrets`,
+#: ``False`` stores payloads verbatim, a callable is your own scrubber.
+Redactor = Callable[[str], str] | bool
+
+
+def _resolve_redactor(redact: Redactor) -> Callable[[str], str] | None:
+    if redact is True:
+        return redact_secrets
+    if redact is False or redact is None:
+        return None
+    if not callable(redact):
+        raise TypeError(
+            f"redact must be a str -> str function or a bool, not {redact!r}"
+        )
+    return redact
+
+
 def _new_entry(
     secret: str,
     *,
+    redact: Callable[[str], str] | None = None,
     seq: int,
     prev_hash: str,
     session_id: str,
@@ -160,6 +193,10 @@ def _new_entry(
 ) -> AuditEntry:
     timestamp = datetime.now(UTC)
     payload = _json_payload(payload)
+    if redact is not None:
+        # Redact BEFORE signing: the signature covers what is stored,
+        # and the secret never reaches the log (or its HMAC input).
+        payload = redact_payload(payload, redact)
     body = _canonical_payload(
         seq=seq,
         timestamp=timestamp,
@@ -324,11 +361,15 @@ def _verify(
 
 
 class InMemoryAuditLog:
-    """List-backed signed audit log."""
+    """List-backed signed audit log.
 
-    def __init__(self, *, secret: str = "") -> None:
+    Payloads are scrubbed of secrets before signing (see the module
+    docstring); ``redact=`` swaps the scrubber or turns it off."""
+
+    def __init__(self, *, secret: str = "", redact: Redactor = True) -> None:
         _warn_if_empty_secret(secret, "InMemoryAuditLog")
         self._secret = secret
+        self._redact = _resolve_redactor(redact)
         self._entries: list[AuditEntry] = []
         self._seq = 0
         self._lock = anyio.Lock()
@@ -345,6 +386,7 @@ class InMemoryAuditLog:
         async with self._lock:
             entry = _new_entry(
                 self._secret,
+                redact=self._redact,
                 seq=self._seq + 1,
                 prev_hash=(
                     self._entries[-1].signature if self._entries else GENESIS_HASH
@@ -446,12 +488,18 @@ class FileAuditLog:
 
     ``query`` skips (and logs) lines that are not valid entries;
     ``verify`` reports them with their line numbers.
+
+    Payloads are scrubbed of secrets before signing (see the module
+    docstring); ``redact=`` swaps the scrubber or turns it off.
     """
 
-    def __init__(self, path: str | Path, *, secret: str = "") -> None:
+    def __init__(
+        self, path: str | Path, *, secret: str = "", redact: Redactor = True
+    ) -> None:
         _warn_if_empty_secret(secret, "FileAuditLog")
         self._path = Path(path)
         self._secret = secret
+        self._redact = _resolve_redactor(redact)
         self._tail: _Tail | None = None
         self._lock = anyio.Lock()
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -499,6 +547,7 @@ class FileAuditLog:
                     tail = self._recover_tail(fh, size)
                 entry = _new_entry(
                     self._secret,
+                    redact=self._redact,
                     seq=tail.seq + 1,
                     prev_hash=tail.head,
                     session_id=session_id,

@@ -218,7 +218,9 @@ async def test_destructive_annotations_map_to_tooldef() -> None:
     assert by_name["append"].destructive is False
     assert by_name["mutate"].destructive is True
     assert by_name["peek"].destructive is False
-    assert by_name["plain"].destructive is False
+    # MCP spec: destructiveHint defaults to true — no annotations
+    # means "not declared safe".
+    assert by_name["plain"].destructive is True
 
 
 async def test_destructive_annotations_as_mapping() -> None:

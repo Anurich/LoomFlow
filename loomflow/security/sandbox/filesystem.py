@@ -27,13 +27,28 @@ the first root, which is how workdir-based tools resolve them, not
 the process's working directory), and anything the check can't
 decide — a null byte, arguments nested deeper than it scans —
 is refused.
+
+**This is an argument check, not containment.** It looks at the
+path-shaped *arguments* of a call; it has no say over what the tool
+then does. For file tools (read / write / edit) the argument IS the
+access, so the check is the boundary. For a shell or code-execution
+tool it is not: ``bash(command="cat /etc/passwd")`` has no path
+argument to refuse, and the command can read, write and delete
+anywhere the process can. Wrapping such a tool therefore emits a
+:class:`UserWarning` on its first call (``shell_tools="warn"``, the
+default); pass ``shell_tools="deny"`` to refuse those calls, or
+``"allow"`` to silence the warning when the shell is contained some
+other way. To actually contain commands use
+:class:`~loomflow.security.sandbox.OSSandbox` or run them through a
+container executor (``bash_tool(executor=...)``).
 """
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import AsyncIterator, Iterable, Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from ...core.protocols import ToolHost
 from ...core.types import ToolDef, ToolEvent, ToolResult
@@ -87,8 +102,42 @@ _PATH_NAME_SUFFIXES: tuple[str, ...] = (
 _MAX_ARG_DEPTH = 16
 
 
+# Tool names that mean "runs whatever text it is given" — plus any
+# tool carrying the ``__loomflow_shell__`` marker (the built-in
+# ``bash_tool`` does, whatever it was renamed to) or taking a
+# ``command`` / ``cmd`` / ``script`` string argument.
+SHELL_TOOL_NAMES: frozenset[str] = frozenset(
+    {
+        "bash",
+        "sh",
+        "shell",
+        "zsh",
+        "powershell",
+        "terminal",
+        "exec",
+        "execute",
+        "execute_command",
+        "run_command",
+        "run_shell",
+        "shell_exec",
+    }
+)
+_SHELL_ARG_NAMES: frozenset[str] = frozenset({"command", "cmd", "script"})
+
+ShellToolPolicy = Literal["warn", "deny", "allow"]
+
+
 class FilesystemSandbox:
-    """Restrict a tool host's path-typed arguments to declared roots."""
+    """Restrict a tool host's path-typed arguments to declared roots.
+
+    Only arguments are checked. That contains file tools; it does
+    NOT contain a shell / code-execution tool, whose command can
+    touch any path without naming it in an argument the check
+    understands. ``shell_tools`` says what to do when such a tool is
+    called through the sandbox: ``"warn"`` (default) lets the call
+    through with a one-time :class:`UserWarning`, ``"deny"`` refuses
+    it, ``"allow"`` lets it through silently.
+    """
 
     def __init__(
         self,
@@ -98,7 +147,15 @@ class FilesystemSandbox:
         path_args: Iterable[str] | None = None,
         auto_detect: bool = True,
         base: str | Path | None = None,
+        shell_tools: ShellToolPolicy = "warn",
     ) -> None:
+        if shell_tools not in ("warn", "deny", "allow"):
+            raise ValueError(
+                "shell_tools must be 'warn', 'deny' or 'allow', "
+                f"got {shell_tools!r}"
+            )
+        self._shell_tools: ShellToolPolicy = shell_tools
+        self._warned_shell_tools: set[str] = set()
         roots_list = [Path(r).resolve() for r in roots]
         if not roots_list:
             raise ValueError(
@@ -138,6 +195,28 @@ class FilesystemSandbox:
         *,
         call_id: str = "",
     ) -> ToolResult:
+        if self._shell_tools != "allow" and self._is_shell_tool(tool, args):
+            if self._shell_tools == "deny":
+                return ToolResult.denied_(
+                    call_id,
+                    f"FilesystemSandbox: {tool!r} runs arbitrary commands, "
+                    "which a path-argument check cannot contain "
+                    "(shell_tools='deny'). Use OSSandbox or a container "
+                    "executor for shell tools.",
+                )
+            if tool not in self._warned_shell_tools:
+                self._warned_shell_tools.add(tool)
+                warnings.warn(
+                    f"FilesystemSandbox does not contain the shell tool "
+                    f"{tool!r}: it only checks path-like ARGUMENTS, and a "
+                    "command can read or write any path the process can "
+                    "(`cat /etc/passwd` passes). Use OSSandbox or "
+                    "bash_tool(executor=<container executor>) to contain "
+                    "commands; pass shell_tools='deny' to refuse shell "
+                    "tools here, or shell_tools='allow' to silence this.",
+                    UserWarning,
+                    stacklevel=2,
+                )
         violation = self._first_violation(args)
         if violation is not None:
             arg_name, arg_value = violation
@@ -151,6 +230,35 @@ class FilesystemSandbox:
     async def watch(self) -> AsyncIterator[ToolEvent]:
         async for event in self._inner.watch():
             yield event
+
+    # ---- shell-tool detection -------------------------------------------
+
+    def _is_shell_tool(self, tool: str, args: Mapping[str, Any]) -> bool:
+        """Best-effort: does ``tool`` execute free-form commands?"""
+        if tool.lower() in SHELL_TOOL_NAMES:
+            return True
+        if any(
+            isinstance(args.get(name), str) for name in _SHELL_ARG_NAMES
+        ):
+            return True
+        # The built-in ``bash_tool`` marks its function, so a renamed
+        # one is still recognised when the inner host can hand the
+        # Tool back (``InProcessToolHost.get``).
+        host: Any = self._inner
+        for _ in range(8):  # walk nested sandboxes down to the host
+            getter = getattr(host, "get", None)
+            if callable(getter):
+                try:
+                    registered = getter(tool)
+                except Exception:  # noqa: BLE001 — detection is best-effort
+                    registered = None
+                fn = getattr(registered, "fn", None)
+                if getattr(fn, "__loomflow_shell__", False):
+                    return True
+            host = getattr(host, "inner", None) or getattr(host, "_inner", None)
+            if host is None:
+                break
+        return False
 
     # ---- validation -----------------------------------------------------
 
