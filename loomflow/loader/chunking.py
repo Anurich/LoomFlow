@@ -26,6 +26,16 @@ All chunkers default to ``chunk_size=800`` characters with
 recommends in their RAG documentation. Override per-chunker as
 needed.
 
+``chunk_size`` is a hard upper bound for the character chunkers: no
+chunk is ever longer. ``chunk_overlap`` is an upper bound too, and
+overlap is made of *whole pieces* (words, sentences, paragraphs —
+whatever the text was split on), never a cut through the middle of
+one. Consecutive chunks therefore share up to ``chunk_overlap``
+characters, and share nothing when the piece at the boundary is
+itself longer than ``chunk_overlap`` (e.g. 300-character paragraphs
+with ``chunk_overlap=100``). Only :class:`TokenChunker` overlaps by
+an exact amount.
+
 Convenience factory: :func:`chunk` picks a strategy by name::
 
     from loomflow.loader import chunk
@@ -92,10 +102,21 @@ _DEFAULT_SEPARATORS: tuple[str, ...] = (
 class RecursiveChunker:
     """Recursive character splitter — the production workhorse.
 
-    Aims for chunks of ``chunk_size`` characters with
-    ``chunk_overlap`` chars of overlap. Splits on a hierarchy of
-    separators (paragraph → line → sentence → word → char), trying
-    to preserve semantic boundaries.
+    Produces chunks of at most ``chunk_size`` characters. Splits on
+    a hierarchy of separators (paragraph → line → sentence → word →
+    char), trying to preserve semantic boundaries.
+
+    ``chunk_overlap`` is the most a chunk may repeat from the end of
+    the previous one. The repeated text is always whole pieces at the
+    level the text was split on, so the actual overlap is anywhere
+    from 0 to ``chunk_overlap`` characters: text split into words
+    overlaps by close to the full amount, while paragraphs longer
+    than ``chunk_overlap`` do not overlap at all.
+
+    ``separators`` may be customised. If none of them can break a
+    run of text down to ``chunk_size`` (say ``["\\n\\n", " "]`` and a
+    500-character token), the run is cut every ``chunk_size``
+    characters, so the size bound holds whatever the separators.
 
     This is the algorithm LangChain calls
     ``RecursiveCharacterTextSplitter`` and the one most production
@@ -148,8 +169,10 @@ class RecursiveChunker:
         on the first separator present, merge consecutive small pieces
         back up to ``chunk_size`` (with overlap made of whole pieces),
         and recurse into any piece that is still too long using the
-        finer separators. Pieces keep their trailing separator, so
-        joining a chunk's pieces reproduces the text exactly.
+        finer separators — or, when none is left, cut it every
+        ``chunk_size`` characters. Pieces keep their trailing
+        separator, so joining a chunk's pieces reproduces the text
+        exactly.
         """
         separator = separators[-1] if separators else ""
         finer: Sequence[str] = []
@@ -174,15 +197,23 @@ class RecursiveChunker:
             small = []
             if finer:
                 chunks.extend(self._recursive_split(piece, finer))
-            else:  # nothing finer to split on: keep it whole
-                chunks.append(piece)
+            else:
+                # No separator left can shorten it (custom separators
+                # without ""): cut it hard, so ``chunk_size`` stays a
+                # real upper bound.
+                chunks.extend(
+                    piece[start : start + self.chunk_size]
+                    for start in range(0, len(piece), self.chunk_size)
+                )
         chunks.extend(self._merge_pieces(small))
         return chunks
 
     def _merge_pieces(self, pieces: list[str]) -> list[str]:
         """Merge pieces into chunks of at most ``chunk_size``; each new
         chunk starts with the previous one's last pieces, up to
-        ``chunk_overlap`` characters (whole pieces, never mid-word)."""
+        ``chunk_overlap`` characters (whole pieces, never mid-word —
+        so no overlap at all when the last piece alone is longer than
+        ``chunk_overlap``)."""
         chunks: list[str] = []
         current: list[str] = []
         total = 0
@@ -238,6 +269,12 @@ class MarkdownChunker:
     same OR shallower depth. Long sections are further split via
     :class:`RecursiveChunker` so no chunk exceeds ``chunk_size``.
 
+    A heading with nothing under it (a title followed directly by a
+    sub-heading, say) is not emitted as a chunk of its own — a bare
+    heading retrieves well and answers nothing. It is prepended to
+    the next section's chunk instead, so the content carries its
+    heading trail in the text as well as in the metadata.
+
     Each chunk's metadata records the trail of parent headers
     (the path from the document root to this section), letting the
     retriever show users where each chunk came from.
@@ -262,7 +299,7 @@ class MarkdownChunker:
     def split(self, text: str, *, source: str = "") -> list[Chunk]:
         if not text:
             return []
-        sections = self._split_into_sections(text)
+        sections = self._merge_heading_only(self._split_into_sections(text))
         chunks: list[Chunk] = []
         chunk_index = 0
         for headers, content in sections:
@@ -302,6 +339,30 @@ class MarkdownChunker:
                     )
                     chunk_index += 1
         return chunks
+
+    @staticmethod
+    def _merge_heading_only(
+        sections: list[tuple[list[str], str]],
+    ) -> list[tuple[list[str], str]]:
+        """Fold sections that are nothing but a heading line into the
+        section that follows (which keeps its own header trail). A
+        trailing heading with nothing after it stays as it is, so no
+        text is ever dropped."""
+        merged: list[tuple[list[str], str]] = []
+        pending = ""
+        pending_headers: list[str] = []
+        for headers, content in sections:
+            body = _HEADING_RE.sub("", content, count=1) if headers else content
+            if headers and not body.strip():
+                # Heading only: carry it forward.
+                pending += content if content.endswith("\n") else content + "\n"
+                pending_headers = headers
+                continue
+            merged.append((headers, pending + content))
+            pending = ""
+        if pending:
+            merged.append((pending_headers, pending))
+        return merged
 
     def _split_into_sections(
         self, text: str
@@ -357,16 +418,107 @@ class MarkdownChunker:
 # ---------------------------------------------------------------------------
 
 
-_SENTENCE_RE = re.compile(r"(?<=[\.!?])\s+(?=[A-Z])")
+# A possible sentence boundary: terminator(s), any closing quotes /
+# brackets, then whitespace — or a CJK full stop, which ends a
+# sentence with or without a following space.
+_BOUNDARY_RE = re.compile(
+    r"(?P<end>[.!?…]+[\"'”’»)\]]*)(?P<gap>\s+)"
+    r"|(?P<cjk>[。！？]+[”’」』）]*)(?P<cjk_gap>\s*)"
+)
+
+# Abbreviations whose trailing period does not end a sentence.
+_ABBREVIATIONS = frozenset(
+    {
+        "mr", "mrs", "ms", "dr", "prof", "sr", "jr", "st", "mt", "rev",
+        "gen", "col", "lt", "sgt", "capt", "gov", "sen", "rep", "hon",
+        "vs", "cf", "al", "ca", "approx", "est", "viz",
+        "e.g", "i.e", "eg", "ie", "a.m", "p.m",
+        "fig", "figs", "eq", "eqs", "sec", "ch", "vol", "pp", "ed", "eds",
+        "inc", "ltd", "co", "corp", "dept", "univ", "no", "nos",
+        "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept",
+        "oct", "nov", "dec",
+    }
+)
+# The word a period closes (back to whitespace / an opening bracket).
+_LAST_WORD_RE = re.compile(r"[^\s(\[\"'“‘«]+\Z")
+# Dotted acronyms: "U.S", "e.g", "Ph.D" (the final period is the
+# candidate boundary itself).
+_DOTTED_ACRONYM_RE = re.compile(r"(?:[^\W\d_]{1,2}\.)+[^\W\d_]{1,2}\Z")
+# These end a sentence when the next one starts with a capital
+# ("…apples, pears, etc. The rest…") but not otherwise.
+_SOFT_ABBREVIATIONS = frozenset({"etc", "no", "nos", "co", "inc", "ltd", "corp", "est"})
+
+
+def _is_sentence_break(text: str, match: re.Match[str]) -> bool:
+    """Decide whether a boundary candidate really ends a sentence."""
+    if match.group("cjk") is not None:
+        return True
+    end = match.group("end")
+    following = text[match.end() : match.end() + 1]
+    if not following:
+        return False  # trailing whitespace, nothing follows
+    if not end.startswith(".") or len(end.rstrip("\"'”’»)]")) > 1:
+        return True  # "!", "?", "…", "?!", "..." always end one
+    # A single period: look at the word it closes.
+    word_match = _LAST_WORD_RE.search(
+        text, max(0, match.start() - 32), match.start()
+    )
+    word = word_match.group(0) if word_match else ""
+    lowered = word.lower()
+    if lowered in _SOFT_ABBREVIATIONS:
+        return following.isupper()
+    if lowered in _ABBREVIATIONS or _DOTTED_ACRONYM_RE.match(word):
+        return False
+    # An initial ("J. K. Rowling", "U. S."): one capital letter.
+    if len(word) == 1 and word.isalpha() and word.isupper():
+        return False
+    # A list number at the start of a line ("1. First item").
+    if word.isdigit() and len(word) <= 3 and word_match is not None:
+        preceding = text[: word_match.start()].rstrip(" \t")
+        if not preceding or preceding.endswith("\n"):
+            return False
+    return True
+
+
+def split_sentences(text: str) -> list[str]:
+    """Split ``text`` into sentences.
+
+    A sentence ends at ``.``, ``!``, ``?`` or ``…`` (plus any closing
+    quote / bracket) followed by whitespace, or at a CJK full stop
+    (``。！？``) with or without whitespace. The next sentence may
+    start with anything — an uppercase or lowercase letter in any
+    script, a digit, a quote or a bracket — so text that isn't
+    capitalised English prose still splits. Periods after common
+    abbreviations (``Dr.``, ``e.g.``, ``Fig.``) and single-letter
+    initials don't split.
+    """
+    sentences: list[str] = []
+    start = 0
+    for match in _BOUNDARY_RE.finditer(text):
+        if not _is_sentence_break(text, match):
+            continue
+        boundary = match.end("end") if match.group("end") is not None else match.end("cjk")
+        sentence = text[start:boundary].strip()
+        if sentence:
+            sentences.append(sentence)
+        start = match.end()
+    tail = text[start:].strip()
+    if tail:
+        sentences.append(tail)
+    return sentences
 
 
 class SentenceChunker:
     """Sentence-boundary chunks.
 
-    Splits on sentence terminators (``.``, ``!``, ``?``) followed by
-    whitespace and a capital letter. Greedily packs sentences up to
-    ``chunk_size`` characters; adds ``chunk_overlap`` chars between
-    chunks (rounded to the nearest sentence boundary).
+    Splits into sentences with :func:`split_sentences` — terminators
+    (``.``, ``!``, ``?``, ``…``, CJK ``。！？``) followed by whitespace,
+    whatever the next sentence starts with (any script, any case,
+    digits, quotes, brackets), skipping common abbreviations and
+    initials. Greedily packs sentences up to ``chunk_size``
+    characters. Each new chunk starts with the previous chunk's last
+    whole sentences, as many as fit in ``chunk_overlap`` characters —
+    possibly none, when the last sentence is longer than that.
 
     Best for QA-style RAG where each chunk should answer one short
     question.
@@ -389,9 +541,7 @@ class SentenceChunker:
     def split(self, text: str, *, source: str = "") -> list[Chunk]:
         if not text:
             return []
-        sentences = [
-            s.strip() for s in _SENTENCE_RE.split(text) if s.strip()
-        ]
+        sentences = split_sentences(text)
         if not sentences:
             return []
         # A sentence longer than a chunk is split at word (then

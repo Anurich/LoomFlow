@@ -29,6 +29,7 @@ Embedders in :mod:`loomflow.memory.embedder`:
   :class:`CohereEmbedder` — real semantic embeddings.
 """
 
+from ._embedding_util import EmbedderMismatchError
 from ._hybrid import default_recall_scored
 from .auto_extract import AutoExtractMemory
 from .chroma import ChromaMemory
@@ -57,6 +58,7 @@ __all__ = [
     "ConsolidationWorker",
     "Consolidator",
     "Edge",
+    "EmbedderMismatchError",
     "FactGraph",
     "FactStore",
     "default_recall_scored",

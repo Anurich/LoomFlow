@@ -71,8 +71,10 @@ def test_flatten_metadata_passes_bool_through() -> None:
     assert out["final"] is True
 
 
-def test_flatten_metadata_passes_none_through() -> None:
-    assert _flatten_metadata({"parent": None}) == {"parent": None}
+def test_flatten_metadata_drops_none() -> None:
+    # chromadb rejects None values; a missing key and None are the
+    # same thing to the filter contract.
+    assert _flatten_metadata({"parent": None}) == {}
 
 
 def test_flatten_metadata_list_becomes_json_string() -> None:
@@ -234,9 +236,11 @@ async def test_chroma_headers_stored_as_json_string(tmp_path) -> None:
     got = await store.get_by_ids([ids[0]])
 
     assert got
-    headers = got[0].metadata["headers"]
-    assert isinstance(headers, str)
-    assert json.loads(headers) == chunks[0].metadata["headers"]
+    # Stored as a JSON string, decoded back to the list on read.
+    stored = store._collection.get(ids=[ids[0]])["metadatas"][0]
+    assert isinstance(stored["headers"], str)
+    assert json.loads(stored["headers"]) == chunks[0].metadata["headers"]
+    assert got[0].metadata["headers"] == chunks[0].metadata["headers"]
 
 
 async def test_chroma_scalar_metadata_survives_as_int(tmp_path) -> None:

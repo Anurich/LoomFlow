@@ -25,11 +25,16 @@ Recognised dict keys:
   name across backends; each backend maps it to its native kwarg)
 * ``embedder`` — ``"openai"`` / ``"hash"`` / explicit
   :class:`Embedder` instance. ``None`` triggers auto-pick (OpenAI
-  if ``OPENAI_API_KEY`` set, else Hash)
+  if ``OPENAI_API_KEY`` set, else Hash — with a one-time warning,
+  because the hash embedder is not semantic). A persistent store
+  remembers the embedder it was first written with and refuses to
+  open with a different one, so an environment change (a key added
+  or removed) can't silently mix two vector spaces.
 * ``with_facts`` — default ``True`` for the resolver path; pass
   ``False`` to skip the fact-store wiring
-* ``collection_name`` (Chroma), ``key_prefix`` (Redis), etc. —
-  any backend-native kwarg passes through unchanged
+* ``collection_name`` (Chroma), ``key_prefix`` (Redis),
+  ``table_prefix`` / ``schema`` (Postgres: keep loomflow's tables
+  apart from your application's own)
 
 The resolver is **non-async** even when the underlying backend
 needs an async connect. Postgres / Redis URLs return a
@@ -45,7 +50,7 @@ from typing import Any
 
 from ..core.errors import ConfigError
 from ..core.protocols import Embedder, Memory
-from .embedder import HashEmbedder
+from .embedder import HashEmbedder, warn_hash_embedder_fallback
 
 __all__ = ["resolve_memory"]
 
@@ -93,23 +98,25 @@ def _resolve_string(spec: str) -> Memory:
     if spec == "inmemory":
         return _build_inmemory()
     if spec == "sqlite":
-        return _build_sqlite(":memory:", embedder=_default_embedder())
+        return _build_sqlite(":memory:", embedder=_default_embedder("sqlite"))
     if spec == "chroma":
-        return _build_chroma_ephemeral(embedder=_default_embedder())
+        return _build_chroma_ephemeral(embedder=_default_embedder("chroma"))
 
     # Schemes carrying a target.
     if spec.startswith("sqlite:") and not spec.startswith("sqlite://"):
         # ``sqlite:./path.db`` — colon is the scheme separator, not
         # a network URL. Trim the prefix and pass the rest as a path.
         path = spec[len("sqlite:"):]
-        return _build_sqlite(path or ":memory:", embedder=_default_embedder())
+        return _build_sqlite(
+            path or ":memory:", embedder=_default_embedder("sqlite")
+        )
     if spec.startswith("chroma:") and not spec.startswith("chroma://"):
         path = spec[len("chroma:"):]
-        return _build_chroma_local(path, embedder=_default_embedder())
+        return _build_chroma_local(path, embedder=_default_embedder("chroma"))
     if spec.startswith(("postgres://", "postgresql://")):
-        return _build_postgres_lazy(spec, embedder=_default_embedder())
+        return _build_postgres_lazy(spec, embedder=_default_embedder("postgres"))
     if spec.startswith(("redis://", "rediss://")):
-        return _build_redis_lazy(spec, embedder=_default_embedder())
+        return _build_redis_lazy(spec, embedder=_default_embedder("redis"))
 
     raise ConfigError(
         f"memory= unrecognised string spec {spec!r}. Recognised:\n"
@@ -140,11 +147,16 @@ def _resolve_dict(spec: Mapping[str, Any]) -> Memory:
         )
     backend = backend.lower()
 
-    embedder = _resolve_embedder(spec.get("embedder"))
     with_facts = bool(spec.get("with_facts", True))
 
     if backend == "inmemory":
+        # No embedder involved (and so no hash-fallback warning); an
+        # explicit one is still validated so a typo isn't ignored.
+        if spec.get("embedder") is not None:
+            _resolve_embedder(spec.get("embedder"), backend=backend)
         return _build_inmemory(with_facts=with_facts)
+
+    embedder = _resolve_embedder(spec.get("embedder"), backend=backend)
 
     if backend == "sqlite":
         path = spec.get("path") or spec.get("url") or ":memory:"
@@ -179,11 +191,26 @@ def _resolve_dict(spec: Mapping[str, Any]) -> Memory:
                 "memory= postgres backend requires 'url' (or 'dsn')."
             )
         namespace = spec.get("namespace") or "default"
+        table_prefix = spec.get("table_prefix") or ""
+        schema = spec.get("schema")
+        # Validate now: the connection itself only opens on first use.
+        from ..vectorstore._pgvector import (
+            validate_schema,
+            validate_table_prefix,
+        )
+
+        try:
+            validate_table_prefix(table_prefix)
+            validate_schema(schema)
+        except ValueError as exc:
+            raise ConfigError(f"memory= postgres backend: {exc}") from exc
         return _build_postgres_lazy(
             url,
             embedder=embedder,
             namespace=str(namespace),
             with_facts=with_facts,
+            table_prefix=str(table_prefix),
+            schema=schema,
         )
 
     if backend == "redis":
@@ -276,6 +303,8 @@ def _build_postgres_lazy(
     embedder: Embedder,
     namespace: str = "default",
     with_facts: bool = True,
+    table_prefix: str = "",
+    schema: str | None = None,
 ) -> Memory:
     """Wrap ``await PostgresMemory.connect(dsn)`` in a
     :class:`LazyMemory` so the sync :class:`Agent` constructor
@@ -292,6 +321,8 @@ def _build_postgres_lazy(
             with_facts=with_facts,
             # A URL is all the user gave us: create the tables too.
             init_schema=True,
+            table_prefix=table_prefix,
+            schema=schema,
         )
         return result
 
@@ -327,7 +358,7 @@ def _build_redis_lazy(
 # ---------------------------------------------------------------------------
 
 
-def _resolve_embedder(spec: Any) -> Embedder:
+def _resolve_embedder(spec: Any, *, backend: str | None = None) -> Embedder:
     """Convert a string / instance / None into a concrete
     :class:`Embedder`.
 
@@ -345,7 +376,7 @@ def _resolve_embedder(spec: Any) -> Embedder:
     API keys are present in the environment.
     """
     if spec is None:
-        return _default_embedder()
+        return _default_embedder(backend)
     if isinstance(spec, str):
         s = spec.lower()
         if s == "hash":
@@ -371,7 +402,7 @@ def _resolve_embedder(spec: Any) -> Embedder:
     return spec  # type: ignore[no-any-return]
 
 
-def _default_embedder() -> Embedder:
+def _default_embedder(backend: str | None = None) -> Embedder:
     """Pick a sensible embedder based on the environment.
 
     Resolution order:
@@ -388,6 +419,9 @@ def _default_embedder() -> Embedder:
        quality semantic search).
     3. Otherwise :class:`HashEmbedder` (deterministic, zero-key —
        fine for dev / tests, not for production retrieval quality).
+       This silent default is announced with a one-time
+       ``UserWarning``; choosing ``"hash"`` explicitly (step 1 or
+       ``embedder="hash"``) is not.
     """
     override = os.environ.get("LOOMFLOW_EMBEDDER")
     if override:
@@ -401,4 +435,9 @@ def _default_embedder() -> Embedder:
             return OpenAIEmbedder("text-embedding-3-small")
         except ImportError:
             pass
+    warn_hash_embedder_fallback(
+        f"memory={backend or 'memory'!r} (no embedder configured, "
+        "no OPENAI_API_KEY)",
+        stacklevel=5,
+    )
     return HashEmbedder()

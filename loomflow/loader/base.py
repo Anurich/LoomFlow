@@ -11,6 +11,7 @@ metadata pointing back at the source.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 
@@ -65,3 +66,46 @@ class Chunk:
 
     def __len__(self) -> int:
         return len(self.content)
+
+
+#: Default text encoding for the text-based loaders: UTF-8, with a
+#: leading byte-order mark (as Excel and Notepad write) stripped.
+DEFAULT_ENCODING = "utf-8-sig"
+
+
+def read_text_file(
+    path: Path,
+    *,
+    encoding: str = DEFAULT_ENCODING,
+    errors: str = "strict",
+    universal_newlines: bool = True,
+) -> str:
+    """Read a text file for a loader.
+
+    The default ``utf-8-sig`` reads plain UTF-8 and drops a BOM if
+    there is one. A file in another encoding raises
+    :class:`UnicodeDecodeError` whose message names the way out:
+    pass ``encoding=`` (``"latin-1"``, ``"cp1252"``, ``"utf-16"`` …)
+    or ``errors="replace"`` to the loader.
+
+    ``universal_newlines=False`` keeps CRLF / CR line endings as
+    they are (the csv module does its own line handling).
+    """
+    try:
+        text = path.read_bytes().decode(encoding, errors)
+    except UnicodeDecodeError as exc:
+        raise UnicodeDecodeError(
+            exc.encoding,
+            exc.object,
+            exc.start,
+            exc.end,
+            f"{exc.reason} — {path} is not valid {encoding!r} text. Pass "
+            "encoding= with the file's real encoding (e.g. "
+            "encoding='latin-1' or 'cp1252'), or errors='replace' to "
+            "substitute the undecodable bytes",
+        ) from exc
+    # ``utf-8-sig`` strips the BOM itself; cover an explicit "utf-8".
+    text = text.removeprefix("\ufeff")
+    if universal_newlines:
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+    return text
