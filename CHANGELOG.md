@@ -7,6 +7,132 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 For development-history detail (per-slice notes, file maps, gate
 counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 
+## [Unreleased]
+
+Fixes from a full review of the framework. Several change behaviour;
+those are listed under **Changed**.
+
+### Security
+
+* **Workspace notes.** ``update_note`` / ``archive_note`` took a slug
+  such as ``../../victim/notes/agent/001-plan`` or ``*`` and could
+  overwrite another user's note. A slug is now one plain path segment
+  and must resolve inside the caller's own folder.
+* **Workspace folders.** ``alice@example.com``, ``alice#example.com``
+  and ``alice_example.com`` shared one folder. Each id now gets its
+  own (see **Changed**).
+* **``loom serve`` and A2A.** Both take ``auth=``: a callable that
+  returns the caller's identity or refuses. ``bearer_token_auth(...)``,
+  ``loom serve --auth-token`` and ``LOOM_SERVE_TOKEN`` cover a shared
+  token. Without ``auth`` the ``user_id`` in a request is whatever the
+  caller says; the server warns when it's bound to a non-loopback
+  address that way.
+* **A2A tasks** belong to the caller that created them: ``ListTasks``,
+  ``GetTask`` and ``CancelTask`` no longer show other callers' tasks.
+* **Budgets under concurrency.** Concurrent runs could together spend
+  many times a per-user cap. A call now reserves its share first.
+* **Audit log.** Known secret values and key-shaped strings are
+  written as ``[REDACTED]``, as documented.
+* **MCP.** A tool without annotations counts as destructive, as the
+  MCP spec says. ``MCPServerSpec(destructive=..., safe_tools=[...])``
+  marks a trusted server's tools safe.
+* **``bash`` tool.** A timeout kills the whole process group, and the
+  model can shorten the timeout but not raise it.
+* **Error bodies.** ``/run``, ``/stream``, ``/resume`` and failed A2A
+  tasks return a generic message with an ``error_id``; the detail goes
+  to the ``loomflow.serve`` log. ``debug=True`` / ``--debug`` shows it.
+* **Postgres vector store.** The ``table`` name is validated and
+  quoted; it was put into SQL as given.
+* A guardrail verdict with an unknown action blocks. A skill's script
+  must be inside the skill's folder.
+
+### Fixed
+
+* **Tool calls.** Cut-off or malformed tool-call JSON ran the tool
+  with its default arguments; arguments that weren't an object crashed
+  the run. Both now come back to the model as a tool error.
+* **Tool arguments are validated** against the function's annotations
+  before it runs (``ToolArgumentError``); ``"8"`` for an ``int`` still
+  works.
+* ``resume()`` after ``max_turns_exceeded`` continues the run.
+* **Spend that wasn't counted:** structured-output retries, the
+  auto-compact and tool-result summarisers, a delegated worker that
+  failed or timed out, and an eval's LLM judge.
+* Delegating to a sub-agent is no longer cut off at 120 seconds.
+* An exception from a tool, permission check or audit log is raised
+  as itself, not inside an ``ExceptionGroup``. A ``TimeoutError`` from
+  inside a run is no longer reported as the run's own timeout.
+* A stream-only model works with a retry policy and ``FallbackModel``.
+* **Evals.** Cases shared one user, so with memory on a case could
+  see an earlier case's answer; each case now runs as its own user.
+  An unparseable judge reply, an interrupted run, and a NaN or
+  out-of-range score fail the case; they used to pass.
+* **Workflows.** The output no longer depends on which parallel
+  branch finishes first; a join inside a loop sees only its own
+  iteration; a slow sync step no longer delays cancellation; a run has
+  one root span and cancelled spans are recorded.
+* **Embeddings are sent in batches** within each provider's limit
+  (``batch_size=``, ``max_concurrency=``); Chroma adds are split too.
+* **Vector stores behave alike:** re-adding an id replaces it,
+  ``k <= 0`` raises, filters compare types strictly.
+* SQLite memory and saved in-memory stores raise
+  ``EmbedderMismatchError`` when reopened with a different embedder;
+  they used to return wrong results silently.
+* ``VectorMemory(max_episodes=)`` is per user; one user's writes no
+  longer evict another's.
+* The HTML loader keeps headings, lists and tables inside ``div`` /
+  ``section``; the sentence chunker handles non-ASCII text; text and
+  CSV loaders strip a BOM and take ``encoding=``.
+* Clearer errors for a missing API key, ``model=123``, a non-string
+  prompt and a mistyped ``Agent(...)`` argument. The README's facts
+  and examples match the code.
+
+### Added
+
+* ``RunResult.finish_reason``, with ``truncated`` and
+  ``content_filtered``.
+* ``Tuning(tool_timeout=...)``, ``@tool(timeout=...)``,
+  ``Tuning(parallel_tool_calls=False)``,
+  ``Supervisor(delegate_timeout=..., max_delegation_depth=...)`` (also
+  on ``Team.supervisor``).
+* ``Agent.run_sync(...)``, ``Agent.tools``; a ``@tool`` function can be
+  called directly; ``ScriptedModel.calls`` records what the model was
+  sent.
+* **Workflow checkpoints.** ``workflow.run(..., checkpointer=...,
+  session_id=...)`` with ``InMemoryCheckpointer`` or
+  ``SqliteCheckpointer`` (``loomflow.workflow``): a rerun skips the
+  steps that finished. At-least-once for the step that was running.
+* Workflow steps take ``timeout=``, ``retries=`` and
+  ``retry_backoff=``; ``WorkflowResult`` has ``usage`` and ``cost_usd``.
+* ``EvalHarness.run(case_timeout=..., allow_interrupted=...)``,
+  ``LLMJudge(name=...)``.
+* ``PostgresMemory(table_prefix=..., schema=...)``;
+  ``append_block(max_block_chars=...)``.
+
+### Changed
+
+* **Workspace folders for some user ids move.** An id with characters
+  outside letters, digits, ``_``, ``.`` and ``-`` is now
+  percent-encoded: ``alice@example.com`` moves from
+  ``alice_example.com`` to ``alice%40example.com``. The workspace
+  warns once and names the folder to rename; it doesn't move it for
+  you, because the old folder may hold another user's notes.
+* MCP tools without annotations ask for approval under permission
+  modes that ask for destructive tools.
+* Tool errors reach the model as ``ERROR: <Type>: <message>``; dict,
+  list and pydantic results reach it as JSON.
+* Two tools with the same name raise ``ConfigError``. Destructive tool
+  calls in one turn run one at a time, in order.
+* Two eval metrics with the same name raise ``ValueError``.
+* ``ScriptedModel`` raises ``ScriptExhaustedError`` when its script
+  runs out (``on_exhausted="empty"`` for the old empty reply).
+* ``Agent(model="gpt-…")`` / ``"claude-…"`` without the API key fails
+  when the agent is built.
+* ``append_block`` keeps the newest 20,000 characters by default.
+* Postgres filters no longer match a number against a numeric string.
+* Near a budget cap, concurrent runs may wait up to 60 seconds
+  (``reserve_wait_seconds=``) for calls in flight to finish.
+
 ## [0.20.0] — 2026-10-21
 
 ### Added
