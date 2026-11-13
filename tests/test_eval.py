@@ -229,8 +229,10 @@ async def test_judge_ignores_prose_numbers_and_retries_once() -> None:
 
 
 async def test_judge_neutral_fallback_on_double_parse_failure() -> None:
+    # Opt-in since 0.20.1: without ``neutral_score`` an unparseable
+    # judge raises (see tests/test_fixes_eval_harness.py).
     model = ScriptedModel([ScriptedTurn(text="no score here"), ScriptedTurn(text="still nothing")])
-    judge = LLMJudge(model)
+    judge = LLMJudge(model, neutral_score=0.5)
     with pytest.warns(UserWarning, match="neutral score"):
         score = await judge.score(Case(input="q"), make_result("out"), [])
     assert score == 0.5
@@ -363,9 +365,10 @@ async def test_harness_respects_concurrency_limit() -> None:
     assert len(report.results) == 6
     assert agent.max_seen <= 2
     assert agent.max_seen == 2  # the limiter actually allowed parallelism
-    # Fresh session per case, eval user id partition on every run.
+    # Fresh session AND user partition per case, all under the eval prefix.
     assert len(set(agent.session_ids)) == 6
-    assert set(agent.user_ids) == {EVAL_USER_ID}
+    assert len(set(agent.user_ids)) == 6
+    assert all(str(u).startswith(EVAL_USER_ID + ":") for u in agent.user_ids)
 
 
 async def test_harness_rejects_bad_concurrency() -> None:
