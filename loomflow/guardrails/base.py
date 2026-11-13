@@ -31,6 +31,7 @@ site).
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
@@ -47,6 +48,8 @@ __all__ = [
     "GuardVerdict",
     "apply_guardrails",
 ]
+
+_log = logging.getLogger("loomflow.guardrails")
 
 GuardAction = Literal["allow", "annotate", "block"]
 
@@ -152,7 +155,10 @@ async def apply_guardrails(
         verdict = await guard.check(
             outcome.text, stage=stage, context=context
         )
-        if verdict.action == "block":
+        # Plain ``str``: the annotation says Literal, but nothing
+        # enforces it at runtime (see the fail-closed branch below).
+        action: str = verdict.action
+        if action == "block":
             outcome.blocked = True
             outcome.guard = guard.name
             outcome.reason = verdict.reason
@@ -165,7 +171,7 @@ async def apply_guardrails(
                 )
             )
             return outcome
-        if verdict.action == "annotate":
+        if action == "annotate":
             if verdict.transformed is not None:
                 outcome.text = verdict.transformed
             if verdict.reason is not None:
@@ -177,5 +183,31 @@ async def apply_guardrails(
                         reason=verdict.reason,
                     )
                 )
-        # "allow" (and any unknown action, defensively) — continue.
+            continue
+        if action == "allow":
+            continue
+        # Fail CLOSED on anything else. A verdict whose action isn't
+        # one of allow / annotate / block (a typo like "deny" or
+        # "blocked", a value from a newer or foreign guard, a verdict
+        # built with ``model_construct``) used to be skipped — i.e.
+        # treated as "allow". A guard that tried to say no must not
+        # be read as yes.
+        reason = (
+            f"guardrail {guard.name!r} returned an unknown verdict action "
+            f"{action!r} (expected 'allow', 'annotate' or 'block'); "
+            "failing closed"
+        )
+        _log.error(reason)
+        outcome.blocked = True
+        outcome.guard = guard.name
+        outcome.reason = reason
+        outcome.triggered.append(
+            GuardrailTrigger(
+                guard=guard.name,
+                stage=stage,
+                action="block",
+                reason=reason,
+            )
+        )
+        return outcome
     return outcome

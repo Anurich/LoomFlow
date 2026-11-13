@@ -34,11 +34,15 @@ Routes:
   enums, ``{"task": ...}`` results); v0.3 requests get v0.3 ones.
 
   Sending runs the agent: the message's ``contextId`` (generated when
-  absent) becomes the loomflow ``session_id``, ``params.metadata
-  .userId`` becomes ``user_id``, and the reply comes back as a
-  completed task with one text artifact. Agent exceptions come back as
-  a ``failed`` task, not a JSON-RPC error — execution failure is
-  task-level, protocol failure is RPC-level. Streaming is coarse: the
+  absent) becomes the loomflow ``session_id``, the caller's identity
+  becomes ``user_id`` (see *Authentication* below), and the reply
+  comes back as a completed task with one text artifact. Agent
+  exceptions come back as a ``failed`` task, not a JSON-RPC error —
+  execution failure is task-level, protocol failure is RPC-level. The
+  failed task carries a generic message with an ``error_id``; the
+  exception itself is logged on the ``loomflow.serve`` logger
+  (``serve_a2a(..., debug=True)`` puts it back in the task for local
+  development). Streaming is coarse: the
   task (working), then the artifact, then the final status. A task
   that is still running can be cancelled; a finished one is
   ``-32002``. Tasks live in a bounded in-memory table (restarting the
@@ -48,6 +52,25 @@ Routes:
   Unknown methods → ``-32601``; malformed envelope → ``-32600``;
   unparseable body → ``-32700``; bad params → ``-32602``. JSON-RPC
   errors are returned with HTTP 200 per convention.
+
+Authentication and task ownership
+---------------------------------
+
+**Without** ``auth=`` **the endpoint is open and the caller's identity
+is self-asserted**: it is ``params.metadata.userId`` from the request
+body (absent = the anonymous caller), so any client can claim to be
+any user. Use that on loopback for local development only. Pass
+``auth=`` (the same hook as :func:`loomflow.serve.create_app`, see
+:mod:`loomflow.serve.auth`) for anything else: the JSON-RPC endpoint
+then answers 401 without valid credentials, the authenticated identity
+is the ``user_id``, and a ``metadata.userId`` naming someone else is
+a 403. The agent card stays public (it is the discovery document).
+
+Tasks belong to the identity that created them. ``GetTask`` /
+``CancelTask`` / ``ListTasks`` only ever see the caller's own tasks —
+someone else's task id answers ``-32001`` (not found), exactly like
+an id that doesn't exist — and a client-supplied ``taskId`` can't
+replace another caller's task.
 """
 
 from __future__ import annotations
@@ -69,11 +92,12 @@ from ..serve.app import (
     Scope,
     Send,
     _ClientDisconnect,
+    _error_body,
     _read_body,
     _send_error,
     _send_json,
-    _unwrap_exception,
 )
+from ..serve.auth import AuthHook, Identity, authenticate, resolve_user_id, warn_if_open
 from .types import (
     EXTENDED_CARD_NOT_CONFIGURED,
     INVALID_PARAMS,
@@ -102,6 +126,10 @@ from .types import (
 )
 
 __all__ = ["MAX_TASKS", "serve_a2a"]
+
+
+class _Forbidden(Exception):
+    """The request names a user other than the authenticated one."""
 
 MAX_TASKS = 1024
 """In-memory task-table cap; oldest tasks are evicted past this."""
@@ -223,6 +251,8 @@ def serve_a2a(
     description: str | None = None,
     url: str = "",
     skills: Sequence[AgentSkill | Mapping[str, Any]] | None = None,
+    auth: AuthHook | None = None,
+    debug: bool = False,
 ) -> ASGIApp:
     """Wrap ``agent`` in a framework-free A2A ASGI application.
 
@@ -232,7 +262,18 @@ def serve_a2a(
     at is used. ``skills`` accepts :class:`AgentSkill` instances or
     plain ``{id, name, description, tags}`` mappings; when omitted a
     single catch-all ``run`` skill is advertised.
+
+    ``auth`` authenticates every JSON-RPC request — the same hook as
+    :func:`loomflow.serve.create_app` (see :mod:`loomflow.serve.auth`).
+    The authenticated identity is the ``user_id`` and owns the tasks
+    it creates. Without it the endpoint is open and the identity is
+    the self-asserted ``params.metadata.userId``.
+
+    ``debug=True`` puts exception types and messages in failed tasks
+    (local development only); by default they carry a generic message
+    and an ``error_id`` that is also in the server log.
     """
+    warned_open: list[bool] = []
     card_description = description or "A loomflow agent exposed over the A2A protocol."
     card_skills = _coerce_skills(skills, card_description)
 
@@ -255,13 +296,45 @@ def serve_a2a(
 
     # Bounded, insertion-ordered task table (dict preserves order).
     tasks: dict[str, Task] = {}
+    # Who created each task (``None`` = the anonymous caller). Every
+    # lookup goes through ``_owned`` so one caller never sees, cancels
+    # or replaces another caller's task.
+    owners: dict[str, str | None] = {}
     # Tasks still running, with the scope that cancels them.
     running: dict[str, anyio.CancelScope] = {}
 
-    def _store(task: Task) -> None:
+    def _store(task: Task, owner: str | None) -> None:
         tasks[task.id] = task
+        owners[task.id] = owner
         while len(tasks) > MAX_TASKS:
+            owners.pop(next(iter(tasks)), None)
             tasks.pop(next(iter(tasks)))
+
+    def _owned(task_id: str, caller: str | None) -> Task | None:
+        """The task, when it exists AND belongs to ``caller``."""
+        task = tasks.get(task_id)
+        if task is None or owners.get(task_id) != caller:
+            return None
+        return task
+
+    def _caller(params: Mapping[str, Any], identity: Identity | None) -> str | None:
+        """Who is making this request.
+
+        The authenticated identity when ``auth`` yields one; otherwise
+        (no auth, or a trusted caller) the self-asserted
+        ``params.metadata.userId``. Raises ``_Forbidden`` when the
+        body names a user other than the authenticated one.
+        """
+        claimed: str | None = None
+        metadata = params.get("metadata")
+        if isinstance(metadata, Mapping):
+            candidate = metadata.get("userId")
+            if isinstance(candidate, str) and candidate:
+                claimed = candidate
+        allowed, user_id = resolve_user_id(identity, claimed)
+        if not allowed:
+            raise _Forbidden
+        return user_id
 
     def _render(task: Task, version: str) -> dict[str, Any]:
         dumped = task.model_dump(exclude_none=True)
@@ -271,8 +344,8 @@ def serve_a2a(
 
     def _parse_message_params(
         params: Mapping[str, Any],
-    ) -> tuple[Message, str, str, str | None] | str:
-        """Return ``(message, text, context_id, user_id)`` or an error string."""
+    ) -> tuple[Message, str, str] | str:
+        """Return ``(message, text, context_id)`` or an error string."""
         raw = params.get("message")
         if not isinstance(raw, Mapping):
             return "params.message must be a Message object"
@@ -285,13 +358,7 @@ def serve_a2a(
         if not text:
             return "message contains no text parts (only text parts are supported)"
         context_id = message.contextId or new_id("ctx")
-        metadata = params.get("metadata")
-        user_id: str | None = None
-        if isinstance(metadata, Mapping):
-            candidate = metadata.get("userId")
-            if isinstance(candidate, str) and candidate:
-                user_id = candidate
-        return message, text, context_id, user_id
+        return message, text, context_id
 
     async def _execute(
         message: Message, text: str, context_id: str, user_id: str | None, task_id: str
@@ -304,15 +371,16 @@ def serve_a2a(
             with scope:
                 result = await agent.run(text, user_id=user_id, session_id=context_id)
         except Exception as exc:  # noqa: BLE001 — wire boundary: failure → failed task
-            cause = _unwrap_exception(exc)
+            # The exception goes to the log; the task only names it
+            # when ``debug`` is on (its text isn't client-safe).
+            body = _error_body(exc, debug=debug, where=f"A2A task {task_id}")
+            detail = f"{body['error']}: {body['message']}" if debug else body["message"]
             return Task(
                 id=task_id,
                 contextId=context_id,
                 status=TaskStatus(
                     state="failed",
-                    message=text_message(
-                        "agent", f"{type(cause).__name__}: {cause}", contextId=context_id
-                    ),
+                    message=text_message("agent", detail, contextId=context_id),
                 ),
                 history=[message],
             )
@@ -335,35 +403,57 @@ def serve_a2a(
 
     # -- operations ----------------------------------------------------------
 
-    async def _send(request_id: Any, params: Mapping[str, Any], version: str) -> dict[str, Any]:
+    def _claim_task_id(message: Message, caller: str | None) -> str | None:
+        """The id to run this message under, or ``None`` when the
+        client-supplied ``taskId`` names a task the caller doesn't own
+        (it must not replace it)."""
+        if not message.taskId:
+            return new_id("task")
+        if message.taskId in tasks and owners.get(message.taskId) != caller:
+            return None
+        return message.taskId
+
+    async def _send(
+        request_id: Any, params: Mapping[str, Any], version: str, identity: Identity | None
+    ) -> dict[str, Any]:
+        user_id = _caller(params, identity)
         parsed = _parse_message_params(params)
         if isinstance(parsed, str):
             return _rpc_error(request_id, INVALID_PARAMS, parsed)
-        message, text, context_id, user_id = parsed
-        task_id = message.taskId or new_id("task")
+        message, text, context_id = parsed
+        task_id = _claim_task_id(message, user_id)
+        if task_id is None:
+            return _rpc_error(request_id, TASK_NOT_FOUND, f"task not found: {message.taskId}")
         _store(
             Task(id=task_id, contextId=context_id, status=TaskStatus(state="working"),
-                 history=[message])
+                 history=[message]),
+            user_id,
         )
         task = await _execute(message, text, context_id, user_id, task_id)
-        _store(task)
+        _store(task, user_id)
         rendered = _render(task, version)
         return _rpc_result(request_id, {"task": rendered} if version == V1 else rendered)
 
-    async def _get(request_id: Any, params: Mapping[str, Any], version: str) -> dict[str, Any]:
+    async def _get(
+        request_id: Any, params: Mapping[str, Any], version: str, identity: Identity | None
+    ) -> dict[str, Any]:
+        caller = _caller(params, identity)
         task_id = params.get("id")
         if not isinstance(task_id, str) or not task_id:
             return _rpc_error(request_id, INVALID_PARAMS, "missing or empty 'id'")
-        task = tasks.get(task_id)
+        task = _owned(task_id, caller)
         if task is None:
             return _rpc_error(request_id, TASK_NOT_FOUND, f"task not found: {task_id}")
         return _rpc_result(request_id, _history(_render(task, version), params.get("historyLength")))
 
-    async def _cancel(request_id: Any, params: Mapping[str, Any], version: str) -> dict[str, Any]:
+    async def _cancel(
+        request_id: Any, params: Mapping[str, Any], version: str, identity: Identity | None
+    ) -> dict[str, Any]:
+        caller = _caller(params, identity)
         task_id = params.get("id")
         if not isinstance(task_id, str) or not task_id:
             return _rpc_error(request_id, INVALID_PARAMS, "missing or empty 'id'")
-        task = tasks.get(task_id)
+        task = _owned(task_id, caller)
         if task is None:
             return _rpc_error(request_id, TASK_NOT_FOUND, f"task not found: {task_id}")
         scope = running.get(task_id)
@@ -375,10 +465,13 @@ def serve_a2a(
             )
         scope.cancel()
         canceled = task.model_copy(update={"status": TaskStatus(state="canceled")})
-        _store(canceled)
+        _store(canceled, caller)
         return _rpc_result(request_id, _render(canceled, version))
 
-    async def _list(request_id: Any, params: Mapping[str, Any], version: str) -> dict[str, Any]:
+    async def _list(
+        request_id: Any, params: Mapping[str, Any], version: str, identity: Identity | None
+    ) -> dict[str, Any]:
+        caller = _caller(params, identity)
         context_id = params.get("contextId")
         state = params.get("status")
         state = from_v1({"state": state})["state"] if isinstance(state, str) else None
@@ -389,7 +482,8 @@ def serve_a2a(
         matching = [
             t
             for t in reversed(tasks.values())  # newest first
-            if (not context_id or t.contextId == context_id)
+            if owners.get(t.id) == caller
+            and (not context_id or t.contextId == context_id)
             and (state is None or t.status.state == state)
         ]
         page = matching[offset : offset + page_size]
@@ -408,18 +502,25 @@ def serve_a2a(
         )
 
     async def _stream(
-        request_id: Any, params: Mapping[str, Any], version: str, send: Send
+        request_id: Any,
+        params: Mapping[str, Any],
+        version: str,
+        send: Send,
+        identity: Identity | None,
     ) -> dict[str, Any] | None:
         """Coarse streaming (see module docstring).
 
         Returns an error envelope for the normal JSON path when params
         are bad; returns ``None`` once the SSE response has started.
         """
+        user_id = _caller(params, identity)
         parsed = _parse_message_params(params)
         if isinstance(parsed, str):
             return _rpc_error(request_id, INVALID_PARAMS, parsed)
-        message, text, context_id, user_id = parsed
-        task_id = message.taskId or new_id("task")
+        message, text, context_id = parsed
+        task_id = _claim_task_id(message, user_id)
+        if task_id is None:
+            return _rpc_error(request_id, TASK_NOT_FOUND, f"task not found: {message.taskId}")
 
         await send(
             {
@@ -447,7 +548,7 @@ def serve_a2a(
             id=task_id, contextId=context_id, status=TaskStatus(state="working"),
             history=[message],
         )
-        _store(working)
+        _store(working, user_id)
         if version == V1:
             # A v1.0 task stream begins with the Task itself.
             await _frame({"task": _render(working, V1)})
@@ -457,7 +558,7 @@ def serve_a2a(
             )
             await _frame(update.model_dump(exclude_none=True))
         task = await _execute(message, text, context_id, user_id, task_id)
-        _store(task)
+        _store(task, user_id)
         for artifact in task.artifacts:
             event = TaskArtifactUpdateEvent(taskId=task_id, contextId=context_id, artifact=artifact)
             dumped = event.model_dump(exclude_none=True)
@@ -471,7 +572,9 @@ def serve_a2a(
         return None
 
     def _unsupported(code: int, what: str) -> Callable[..., Awaitable[dict[str, Any]]]:
-        async def handler(request_id: Any, params: Mapping[str, Any], version: str) -> dict[str, Any]:
+        async def handler(
+            request_id: Any, params: Mapping[str, Any], version: str, identity: Identity | None
+        ) -> dict[str, Any]:
             return _rpc_error(request_id, code, what)
 
         return handler
@@ -493,6 +596,20 @@ def serve_a2a(
     # -- HTTP plumbing -------------------------------------------------------
 
     async def _handle_rpc(scope: Scope, receive: Receive, send: Send) -> None:
+        identity: Identity | None = None
+        if auth is None:
+            warn_if_open(scope, warned_open)
+        else:
+            # Authenticate BEFORE reading the body.
+            identity = await authenticate(auth, scope)
+            if identity is None:
+                await _send_json(
+                    send,
+                    401,
+                    {"error": "unauthorized", "message": "authentication required"},
+                    extra_headers=[(b"www-authenticate", b"Bearer")],
+                )
+                return
         raw = await _read_body(receive)
         if raw is None:
             await _send_json(send, 200, _rpc_error(None, INVALID_REQUEST, "request body too large"))
@@ -548,12 +665,24 @@ def serve_a2a(
                 ),
             )
             return
-        if operation == "stream":
-            envelope = await _stream(request_id, params, version, send)
-            if envelope is not None:
-                await _send_json(send, 200, envelope)
+        envelope: dict[str, Any] | None
+        try:
+            if operation == "stream":
+                envelope = await _stream(request_id, params, version, send, identity)
+            else:
+                envelope = await handlers[operation](request_id, params, version, identity)
+        except _Forbidden:
+            # Raised before any response bytes (identity is resolved
+            # first in every operation).
+            await _send_error(
+                send,
+                403,
+                "forbidden",
+                "'metadata.userId' does not match the authenticated identity",
+            )
             return
-        await _send_json(send, 200, await handlers[operation](request_id, params, version))
+        if envelope is not None:
+            await _send_json(send, 200, envelope)
 
     async def _handle_lifespan(receive: Receive, send: Send) -> None:
         while True:

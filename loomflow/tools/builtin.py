@@ -72,6 +72,7 @@ These will be the foundation of the upcoming Deep Agent architecture
 
 from __future__ import annotations
 
+import contextlib
 import fnmatch
 import os
 import re
@@ -79,7 +80,7 @@ import shutil
 import tempfile
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import anyio
 
@@ -513,6 +514,108 @@ _DEFAULT_ENV_ALLOWLIST: tuple[str, ...] = (
 )
 
 
+def _kill_process_tree(pid: int) -> None:
+    """SIGKILL the command's whole process group (best effort).
+
+    The command is started as the leader of its own session, so its
+    pgid is its pid and ``killpg`` reaches every descendant that
+    didn't deliberately move itself to another session — including
+    ``sleep 600 &`` children that outlive the shell. Windows has no
+    process groups in that sense; ``taskkill /T`` walks the tree.
+    """
+    import signal
+    import subprocess
+    import sys
+
+    if sys.platform == "win32":
+        with contextlib.suppress(Exception):
+            subprocess.run(  # noqa: S603
+                ["taskkill", "/F", "/T", "/PID", str(pid)],  # noqa: S607
+                capture_output=True,
+                check=False,
+                timeout=10,
+            )
+        return
+    with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+        os.killpg(pid, signal.SIGKILL)
+
+
+async def _run_shell_bounded(
+    argv: list[str],
+    *,
+    cwd: str,
+    env: dict[str, str],
+    limit_s: float,
+) -> tuple[bytes, bytes, int | None] | None:
+    """Run ``argv`` with a timeout that actually bounds it.
+
+    Returns ``(stdout, stderr, returncode)``, or ``None`` on timeout.
+
+    ``anyio.run_process`` under ``fail_after`` is not enough: on
+    timeout it kills only the shell, then keeps reading the output
+    pipes until EOF — and any child of the shell (``sleep 6; echo x``
+    forks ``sleep``) still holds them open, so the call returns when
+    the CHILD finishes, not at the timeout, and backgrounded children
+    are never killed at all. Here the command gets its own session /
+    process group and the whole group is killed on timeout (and on
+    cancellation), and the output readers are cancelled rather than
+    awaited.
+    """
+    import subprocess
+    import sys
+
+    spawn_kwargs: dict[str, Any] = {}
+    if sys.platform == "win32":
+        spawn_kwargs["creationflags"] = getattr(
+            subprocess, "CREATE_NEW_PROCESS_GROUP", 0
+        )
+    else:
+        spawn_kwargs["start_new_session"] = True
+
+    process = await anyio.open_process(
+        argv,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=cwd,
+        env=env,
+        **spawn_kwargs,
+    )
+    out = bytearray()
+    err = bytearray()
+
+    async def _drain(stream: Any, sink: bytearray) -> None:
+        if stream is None:
+            return
+        with contextlib.suppress(anyio.ClosedResourceError, anyio.BrokenResourceError):
+            async for chunk in stream:
+                sink.extend(chunk)
+
+    finished = False
+    try:
+        with anyio.move_on_after(limit_s):
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(_drain, process.stdout, out)
+                tg.start_soon(_drain, process.stderr, err)
+                await process.wait()
+            # Reached only when the shell exited AND both pipes hit
+            # EOF (no descendant still holds them) inside the budget.
+            finished = True
+    finally:
+        with anyio.CancelScope(shield=True):
+            if not finished:
+                # Timeout, cancellation or an error: nothing this
+                # command started may outlive it.
+                _kill_process_tree(process.pid)
+                with contextlib.suppress(Exception):
+                    process.kill()
+            with anyio.move_on_after(5):
+                await process.aclose()
+    if not finished:
+        return None
+    return bytes(out), bytes(err), process.returncode
+
+
 def bash_tool(
     workdir: Path | str | None = None,
     *,
@@ -541,8 +644,13 @@ def bash_tool(
       environment, so host secrets (API keys, tokens) are not
       handed to model-authored commands. See ``env_allowlist`` /
       ``inherit_env`` below to opt in to more.
-    * Commands run with a default ``timeout`` of 30 seconds; the
-      subprocess is killed on timeout.
+    * Commands run with a default ``timeout`` of 30 seconds. The
+      command runs in its own process group / session and the WHOLE
+      group is killed on timeout (POSIX; ``taskkill /T`` best effort
+      on Windows), so ``sleep 600; echo x`` and backgrounded
+      children (``server &``) don't outlive it. ``timeout`` is the
+      operator's ceiling: the model may pass ``timeout_sec`` to ask
+      for LESS time, never more.
     * The shell is invoked via ``/bin/sh -c <command>`` on POSIX
       (macOS, Linux) and ``cmd.exe /c <command>`` on Windows. The
       command STRING is what the model emits — it must use the
@@ -565,7 +673,9 @@ def bash_tool(
     * ``extra_env`` — extra environment variables merged into the
       subprocess env (applied last, on top of whichever base the
       two knobs above produced).
-    * ``timeout`` — seconds before the command is killed.
+    * ``timeout`` — seconds before the command (and everything it
+      spawned) is killed. Also the upper bound for the
+      model-supplied ``timeout_sec``.
     * ``executor`` — a :class:`~loomflow.tools.executor.CodeExecutor`
       to route execution through (Docker / remote sandbox adapters,
       or :class:`~loomflow.tools.executor.SubprocessExecutor`).
@@ -604,9 +714,18 @@ def bash_tool(
         if not ok:
             return f"ERROR: {reason}"
 
-        effective_timeout = (
-            float(timeout_sec) if timeout_sec is not None else timeout
-        )
+        # ``timeout_sec`` comes from the MODEL; ``timeout`` is the
+        # operator's ceiling. The model may shorten a call, never
+        # extend it (a non-numeric / non-positive / NaN value falls
+        # back to the ceiling).
+        effective_timeout = timeout
+        if timeout_sec is not None:
+            try:
+                requested = float(timeout_sec)
+            except (TypeError, ValueError):
+                requested = timeout
+            if 0 < requested < timeout:
+                effective_timeout = requested
 
         # Build env. Default: the minimal allowlist (or the caller's
         # replacement) — never the full parent environment unless
@@ -659,32 +778,22 @@ def bash_tool(
             else:
                 argv = ["/bin/sh", "-c", command]
 
-            # Use anyio's subprocess support so we don't block the loop.
-            try:
-                with anyio.fail_after(effective_timeout):
-                    process = await anyio.run_process(
-                        argv,
-                        cwd=str(workdir_path),
-                        env=env,
-                        check=False,
-                    )
-            except TimeoutError:
+            # Own process group + kill-the-group on timeout, so the
+            # timeout bounds the command AND everything it spawned.
+            completed = await _run_shell_bounded(
+                argv,
+                cwd=str(workdir_path),
+                env=env,
+                limit_s=effective_timeout,
+            )
+            if completed is None:
                 return (
                     f"ERROR: command timed out after "
                     f"{effective_timeout:.1f}s: {command!r}"
                 )
-
-            stdout = (
-                process.stdout.decode("utf-8", errors="replace")
-                if process.stdout
-                else ""
-            )
-            stderr = (
-                process.stderr.decode("utf-8", errors="replace")
-                if process.stderr
-                else ""
-            )
-            rc = process.returncode
+            raw_out, raw_err, rc = completed
+            stdout = raw_out.decode("utf-8", errors="replace")
+            stderr = raw_err.decode("utf-8", errors="replace")
 
         # Truncate huge outputs so the model isn't blown up
         max_len = 10_000
@@ -708,6 +817,10 @@ def bash_tool(
             sections.append("(no output)")
         return "\n".join(sections)
 
+    # Marker read by ``FilesystemSandbox``: this tool runs arbitrary
+    # commands, which a path-argument check cannot contain.
+    _bash.__loomflow_shell__ = True  # type: ignore[attr-defined]
+
     import sys as _sys_for_desc
     host_shell = "cmd.exe" if _sys_for_desc.platform == "win32" else "/bin/sh"
     return Tool(
@@ -716,11 +829,13 @@ def bash_tool(
             f"Run a shell command with cwd={str(workdir_path)}. "
             f"Host shell: {host_shell} (use its native syntax — "
             f"sh on macOS/Linux, cmd on Windows). "
-            f"Default timeout {timeout:.0f}s. Returns stdout + "
+            f"Timeout {timeout:.0f}s (the command and anything it "
+            "started are killed when it expires). Returns stdout + "
             "stderr + exit code in a structured block. The default "
             "deny list rejects obviously-dangerous patterns "
-            "(rm -rf /, sudo, mkfs, fork bombs, ...). For "
-            "long-running commands, pass timeout_sec to override."
+            "(rm -rf /, sudo, mkfs, fork bombs, ...). Pass "
+            "timeout_sec to give a call LESS time; it cannot exceed "
+            "the timeout above."
         ),
         fn=_bash,
         input_schema={
@@ -737,8 +852,8 @@ def bash_tool(
                 "timeout_sec": {
                     "type": "number",
                     "description": (
-                        "Override the default timeout for this "
-                        "call (seconds). Optional."
+                        "Shorter timeout for this call (seconds). "
+                        f"Optional; capped at {timeout:g}s."
                     ),
                 },
             },

@@ -45,6 +45,21 @@ class MCPServerSpec:
     # otherwise-identical specs still compare equal.
     sampling_handler: SamplingHandler | None = field(default=None, compare=False)
 
+    # Operator override for how this server's tools are classified.
+    # By default loomflow follows the MCP spec: a tool is destructive
+    # (needs approval under a non-bypass permission mode) unless the
+    # server annotates it ``readOnlyHint: true`` or
+    # ``destructiveHint: false`` — a tool with no annotations is
+    # destructive. For a server you trust:
+    #
+    # * ``destructive=False`` — none of its tools are destructive.
+    # * ``destructive=True`` — all of them are, whatever it claims
+    #   (annotations are hints from the server, not guarantees).
+    # * ``safe_tools=("search", "read")`` — just these tools (by the
+    #   server's own tool name) are non-destructive.
+    destructive: bool | None = None
+    safe_tools: tuple[str, ...] = ()
+
     @classmethod
     def stdio(
         cls,
@@ -55,6 +70,8 @@ class MCPServerSpec:
         *,
         description: str = "",
         sampling_handler: SamplingHandler | None = None,
+        destructive: bool | None = None,
+        safe_tools: list[str] | tuple[str, ...] | None = None,
     ) -> MCPServerSpec:
         """Spawn ``command`` as a subprocess and speak JSON-RPC over its stdio."""
         return cls(
@@ -65,6 +82,8 @@ class MCPServerSpec:
             env=tuple((env or {}).items()),
             description=description,
             sampling_handler=sampling_handler,
+            destructive=destructive,
+            safe_tools=tuple(safe_tools or ()),
         )
 
     @classmethod
@@ -76,6 +95,8 @@ class MCPServerSpec:
         *,
         description: str = "",
         sampling_handler: SamplingHandler | None = None,
+        destructive: bool | None = None,
+        safe_tools: list[str] | tuple[str, ...] | None = None,
     ) -> MCPServerSpec:
         """Connect to ``url`` via Streamable HTTP transport."""
         return cls(
@@ -85,4 +106,6 @@ class MCPServerSpec:
             headers=tuple((headers or {}).items()),
             description=description,
             sampling_handler=sampling_handler,
+            destructive=destructive,
+            safe_tools=tuple(safe_tools or ()),
         )

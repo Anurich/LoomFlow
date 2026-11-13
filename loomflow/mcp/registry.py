@@ -232,7 +232,7 @@ class MCPRegistry:
 
         self._per_server_tools = per_server
         self._unavailable = failed
-        self._set_index(_build_index(per_server))
+        self._set_index(_build_index(per_server, self._specs()))
 
     async def _refresh_server(self, server_name: str) -> None:
         """Re-pull ONE server's tools and rebuild the index from the
@@ -248,7 +248,15 @@ class MCPRegistry:
             return
         self._per_server_tools[server_name] = await client.list_tools()
         self._unavailable.discard(server_name)
-        self._set_index(_build_index(self._per_server_tools))
+        self._set_index(_build_index(self._per_server_tools, self._specs()))
+
+    def _specs(self) -> dict[str, MCPServerSpec]:
+        """Server name → spec, for the per-server tool overrides."""
+        return {
+            name: spec
+            for name, client in self._clients.items()
+            if isinstance(spec := getattr(client, "spec", None), MCPServerSpec)
+        }
 
     def _set_index(self, new_index: dict[str, _IndexEntry]) -> None:
         """Swap in a rebuilt index, emitting diff events to watchers."""
@@ -706,16 +714,36 @@ def _is_connection_error(exc: BaseException) -> bool:
     return False
 
 
-def _annotated_destructive(t: Any) -> bool:
+def _annotated_destructive(t: Any, spec: MCPServerSpec | None = None) -> bool:
     """Map MCP tool annotations onto :attr:`ToolDef.destructive`.
 
-    ``destructiveHint`` is authoritative when present; a
-    ``readOnlyHint`` of ``False`` is a weaker fallback signal used
-    only when ``destructiveHint`` is absent.
+    Follows the MCP spec's defaults (``ToolAnnotations``:
+    ``readOnlyHint`` defaults to **false**, ``destructiveHint``
+    defaults to **true**), so a tool is destructive unless the server
+    says otherwise:
+
+    * ``destructiveHint`` set — authoritative (``true`` → destructive,
+      ``false`` → additive only, not destructive).
+    * else ``readOnlyHint: true`` — not destructive.
+    * else — including a tool with NO annotations at all —
+      destructive. A server that says nothing about a tool has not
+      said it is safe.
+
+    The operator's per-server override wins over anything the server
+    reports: ``MCPServerSpec(..., destructive=False)`` marks every
+    tool of a trusted server safe (``True`` marks them all
+    destructive, ignoring the server's hints), and ``safe_tools``
+    names individual tools to treat as non-destructive.
     """
+    if spec is not None:
+        if getattr(t, "name", None) in spec.safe_tools:
+            return False
+        if spec.destructive is not None:
+            return spec.destructive
+
     ann = getattr(t, "annotations", None)
     if ann is None:
-        return False
+        return True
 
     def _get(key: str) -> Any:
         return mcp_field(ann, key)
@@ -723,11 +751,12 @@ def _annotated_destructive(t: Any) -> bool:
     destructive_hint = _get("destructiveHint")
     if destructive_hint is not None:
         return bool(destructive_hint)
-    return _get("readOnlyHint") is False
+    return _get("readOnlyHint") is not True
 
 
 def _build_index(
     per_server: dict[str, list[Any]],
+    specs: Mapping[str, MCPServerSpec] | None = None,
 ) -> dict[str, _IndexEntry]:
     """Build the name index with auto-disambiguation.
 
@@ -737,6 +766,9 @@ def _build_index(
     displayed with the bare name); a name that appears in multiple
     servers is displayed qualified and gets no bare key (it would be
     ambiguous).
+
+    ``specs`` (server name → spec) carries each server's
+    ``destructive`` / ``safe_tools`` overrides.
     """
     counts: dict[str, int] = {}
     for tools in per_server.values():
@@ -761,7 +793,9 @@ def _build_index(
                 description=getattr(t, "description", "") or "",
                 input_schema=mcp_field(t, "inputSchema") or {"type": "object"},
                 server=server_name,
-                destructive=_annotated_destructive(t),
+                destructive=_annotated_destructive(
+                    t, (specs or {}).get(server_name)
+                ),
             )
             entry = _IndexEntry(
                 server=server_name, mcp_name=tname, tool_def=tool_def

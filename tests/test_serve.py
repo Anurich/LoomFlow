@@ -207,7 +207,9 @@ async def test_run_agent_error_500_shape() -> None:
     resp = await _request(app, "POST", "/run", json_body={"prompt": "hi"})
     assert resp.status == 500
     data = resp.json()
-    assert set(data) == {"error", "message"}
+    assert set(data) == {"error", "message", "error_id"}
+    assert data["error"] == "internal_error"
+    assert "kaboom" not in resp.body.decode("utf-8")
     assert isinstance(data["error"], str) and data["error"]
     assert "Traceback" not in resp.body.decode("utf-8")
 
