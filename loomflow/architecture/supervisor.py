@@ -43,6 +43,7 @@ Composition
 
 from __future__ import annotations
 
+import math
 from collections.abc import AsyncIterator, Callable
 from contextlib import aclosing
 from dataclasses import replace
@@ -57,13 +58,20 @@ from ..core.protocols import Memory, Model
 from ..core.streaming import relay
 from ..core.types import Event, Usage
 from ..tools.registry import Tool
-from .base import AgentSession, Architecture, Dependencies
+from .base import (
+    DEFAULT_MAX_DELEGATION_DEPTH,
+    AgentSession,
+    Architecture,
+    Dependencies,
+    partial_usage_sink_var,
+)
 from .helpers import (
     SubagentInvocation,
     add_usage,
+    child_run_context,
     consume_worker_usage,
+    delegation_depth,
     fill_template,
-    usage_from_result_dict,
 )
 from .react import ReAct
 from .tool_host_wrappers import ExtendedToolHost
@@ -156,6 +164,19 @@ class Supervisor:
       ``False`` (no behavior change).
     * ``max_spawned``: hard cap on spawns **per run**. Exceeding it
       returns an error string to the model (not an exception).
+    * ``delegate_timeout``: wall-clock cap, in seconds, on ONE
+      delegation (``delegate`` / ``send_message``). Default ``None``:
+      no cap of its own — a worker is a whole agent run and is NOT
+      subject to the ordinary per-tool timeout
+      (``Tuning(tool_timeout=...)``, 120s); only the run's own
+      ``Agent(timeout=...)`` bounds it. When a worker does time out,
+      raises or is cancelled, what it had spent still counts in the
+      coordinator's usage, cost and budget.
+    * ``max_delegation_depth``: how many sub-agent levels may nest
+      below the top-level run (a worker that is itself a supervisor,
+      ...). A ``delegate`` call that would go deeper returns an error
+      to the model instead of running. Default 5 — stops a delegation
+      cycle long before it exhausts a budget.
     * ``spawn_template``: template :class:`Agent` a spawned worker
       clones its model + tools from. When ``None``, spawned workers
       use the coordinator's own model and get no tools. v1 keeps the
@@ -178,9 +199,25 @@ class Supervisor:
         allow_spawn: bool = False,
         max_spawned: int = 5,
         spawn_template: Agent | None = None,
+        delegate_timeout: float | None = None,
+        max_delegation_depth: int = DEFAULT_MAX_DELEGATION_DEPTH,
     ) -> None:
         if not workers:
             raise ValueError("Supervisor requires at least one worker")
+        if delegate_timeout is not None and not delegate_timeout > 0:
+            raise ValueError(
+                f"delegate_timeout must be > 0 seconds or None, got {delegate_timeout}"
+            )
+        if max_delegation_depth < 1:
+            raise ValueError(
+                f"max_delegation_depth must be >= 1, got {max_delegation_depth}"
+            )
+        # ``inf`` on the tool = "no per-tool cap" (it overrides the
+        # agent's ordinary tool timeout; see ToolDef.timeout).
+        self._delegate_timeout: float = (
+            delegate_timeout if delegate_timeout is not None else math.inf
+        )
+        self._max_delegation_depth = max_delegation_depth
         self._workers: dict[str, Agent] = dict(workers)
         self._base: Architecture = base if base is not None else ReAct()
         self._template = (
@@ -289,6 +326,8 @@ class Supervisor:
                     role_to_worker_id=self._role_to_worker_id,
                     deps=deps,
                     spawn_overlay=spawn_overlay,
+                    timeout=self._delegate_timeout,
+                    max_depth=self._max_delegation_depth,
                 ),
                 _make_forward_message_tool(
                     last_outputs=last_outputs,
@@ -316,6 +355,9 @@ class Supervisor:
                 memory=deps.memory,
                 event_sink=send_chan,
             )
+            # A message to a worker runs that worker: same cap as
+            # ``delegate``, not the ordinary tool timeout.
+            send_msg_tool.timeout = self._delegate_timeout
             extra_tools.append(send_msg_tool)
         wrapped_host = ExtendedToolHost(deps.tools, extra_tools)
 
@@ -480,9 +522,16 @@ def _make_delegate_tool(
     role_to_worker_id: dict[str, str] | None = None,
     deps: Dependencies | None = None,
     spawn_overlay: dict[str, Any] | None = None,
+    timeout: float | None = math.inf,
+    max_depth: int = DEFAULT_MAX_DELEGATION_DEPTH,
 ) -> Tool:
     """Build a :class:`Tool` whose ``execute`` routes to the named
     worker :class:`Agent` and returns its final output.
+
+    ``timeout`` is the tool's own wall-clock cap (``inf`` = none, the
+    default: a delegation is a whole agent run, not an ordinary tool
+    call). ``max_depth`` bounds how deep delegation may nest; a call
+    from a run already that deep returns an error string.
 
     ``spawn_overlay`` (``allow_spawn=True`` only) maps a spawned
     role → its per-run :class:`_WorkerHandle`. Spawned handles win
@@ -510,7 +559,10 @@ def _make_delegate_tool(
     against the parent's budget via
     :func:`~loomflow.architecture.helpers.consume_worker_usage`
     (budget-only — cumulative_usage is never double-counted, and
-    workers sharing the parent's budget instance are skipped).
+    workers sharing the parent's budget instance are skipped). Both
+    also happen when the worker does NOT finish — it raised, timed
+    out or was cancelled: what it had spent by then is rolled up
+    (see ``partial_usage_sink_var``), not lost.
     """
 
     async def _charge_parent_budget(
@@ -519,12 +571,99 @@ def _make_delegate_tool(
         if deps is not None:
             await consume_worker_usage(deps, worker_agent, usage)
 
+    async def _run_worker(
+        agent: Agent, instructions: str, worker_session_id: str
+    ) -> str:
+        """Run ``agent`` and return its output (marked when it was
+        interrupted). Its usage is rolled into the parent session and
+        charged to the parent budget on EVERY exit path: a worker that
+        raises, times out or is cancelled reports what it had spent
+        through ``partial_usage_sink_var``."""
+        if event_sink is None:
+            # No event sink → plain run() (events lost). The worker
+            # inherits the parent's RunContext (user_id + metadata,
+            # one delegation level deeper) so it runs in the same
+            # namespace partition; ``session_id`` is its own.
+            partial: list[Usage] = []
+            sink_token = partial_usage_sink_var.set(partial.append)
+            worker_usage = Usage()
+            try:
+                result = await agent.run(
+                    instructions,
+                    session_id=worker_session_id,
+                    context=child_run_context(),
+                )
+                worker_usage = Usage(
+                    input_tokens=result.tokens_in,
+                    cached_input_tokens=result.cached_tokens_in,
+                    cache_write_tokens=result.cache_write_tokens,
+                    output_tokens=result.tokens_out,
+                    cost_usd=result.cost_usd,
+                )
+            except BaseException:
+                if partial:
+                    worker_usage = partial[-1]
+                raise
+            finally:
+                partial_usage_sink_var.reset(sink_token)
+                # Roll worker usage into the parent's session so cost
+                # accounting is correct (mirrors what
+                # SubagentInvocation does in the streaming branch),
+                # and charge it against the parent budget. Shielded:
+                # we may be unwinding a cancellation (a timeout).
+                session.cumulative_usage = add_usage(
+                    session.cumulative_usage, worker_usage
+                )
+                with anyio.CancelScope(shield=True):
+                    await _charge_parent_budget(agent, worker_usage)
+            return _mark_if_interrupted(
+                result.output,
+                interrupted=result.interrupted,
+                reason=result.interruption_reason,
+            )
+
+        # Stream worker events into the supervisor's shared channel
+        # using a clone of the send half (clone keeps the channel
+        # alive past this tool call's lifetime). ``aclosing`` so a
+        # cancelled delegation stops the worker — and collects its
+        # partial usage — before we charge the budget below.
+        invocation = SubagentInvocation(
+            agent,
+            instructions,
+            session_id=worker_session_id,
+            rollup_into=session,
+        )
+        try:
+            async with (
+                event_sink.clone() as sink,
+                aclosing(invocation.events()) as worker_events,
+            ):
+                async for ev in worker_events:
+                    await sink.send(ev)
+        finally:
+            with anyio.CancelScope(shield=True):
+                await _charge_parent_budget(agent, invocation.usage)
+        return _mark_if_interrupted(
+            str(invocation.result.get("output", "")),
+            interrupted=bool(invocation.result.get("interrupted", False)),
+            reason=invocation.result.get("interruption_reason"),
+        )
+
     async def _delegate(worker: str, instructions: str) -> str:
         agent = workers.get(worker)
         if agent is None:
             known = ", ".join(sorted(workers))
             return (
                 f"Error: unknown worker {worker!r}. Known: {known}"
+            )
+        # Depth limit: a worker that is itself a coordinator can
+        # delegate further, and a cycle (A → B → A) would otherwise
+        # recurse until the budget is gone.
+        if delegation_depth() >= max_depth:
+            return (
+                f"Error: delegation depth limit reached ({max_depth} "
+                "levels of sub-agents). Do this part of the task "
+                "yourself instead of delegating it."
             )
 
         # Persistent-subagents path: the worker has a stable
@@ -577,56 +716,9 @@ def _make_delegate_tool(
                     # agent.run inside a task group) also sees the
                     # ambient.
                     with inherit_ambient_memory(memory):
-                        if event_sink is None:
-                            result = await agent.run(
-                                instructions,
-                                session_id=worker_session_id,
-                                context=get_run_context(),
-                            )
-                            worker_usage = Usage(
-                                input_tokens=result.tokens_in,
-                                cached_input_tokens=result.cached_tokens_in,
-                                cache_write_tokens=result.cache_write_tokens,
-                                output_tokens=result.tokens_out,
-                                cost_usd=result.cost_usd,
-                            )
-                            session.cumulative_usage = add_usage(
-                                session.cumulative_usage,
-                                worker_usage,
-                            )
-                            await _charge_parent_budget(
-                                agent, worker_usage
-                            )
-                            output = _mark_if_interrupted(
-                                result.output,
-                                interrupted=result.interrupted,
-                                reason=result.interruption_reason,
-                            )
-                        else:
-                            invocation = SubagentInvocation(
-                                agent,
-                                instructions,
-                                session_id=worker_session_id,
-                                rollup_into=session,
-                            )
-                            async with event_sink.clone() as sink:
-                                async for ev in invocation.events():
-                                    await sink.send(ev)
-                            await _charge_parent_budget(
-                                agent,
-                                usage_from_result_dict(
-                                    invocation.result
-                                ),
-                            )
-                            output = _mark_if_interrupted(
-                                str(invocation.result.get("output", "")),
-                                interrupted=bool(
-                                    invocation.result.get("interrupted", False)
-                                ),
-                                reason=invocation.result.get(
-                                    "interruption_reason"
-                                ),
-                            )
+                        output = await _run_worker(
+                            agent, instructions, worker_session_id
+                        )
             except CrossUserWorkerError as exc:
                 return f"Error: {exc}"
             if last_outputs is not None:
@@ -641,69 +733,11 @@ def _make_delegate_tool(
         worker_session_id = (
             f"{session.id}__delegate_{worker}_{suffix}"
         )
-
-        if event_sink is None:
-            # No event sink → fall back to plain run() (events lost).
-            # Inherit the parent's RunContext (user_id + metadata) so
-            # the worker runs in the same namespace partition as the
-            # supervisor; ``session_id`` is the worker-specific one
-            # we just derived, overriding the parent's session.
-            # Memory propagation: same rationale as the persistent
-            # path above — worker without explicit memory= inherits
-            # the coordinator's.
-            with inherit_ambient_memory(memory):
-                result = await agent.run(
-                    instructions,
-                    session_id=worker_session_id,
-                    context=get_run_context(),
-                )
-            # Roll worker usage into the parent's session so cost
-            # accounting is correct (mirrors what
-            # SubagentInvocation does in the streaming branch),
-            # and charge it against the parent budget.
-            worker_usage = Usage(
-                input_tokens=result.tokens_in,
-                cached_input_tokens=result.cached_tokens_in,
-                cache_write_tokens=result.cache_write_tokens,
-                output_tokens=result.tokens_out,
-                cost_usd=result.cost_usd,
-            )
-            session.cumulative_usage = add_usage(
-                session.cumulative_usage, worker_usage
-            )
-            await _charge_parent_budget(agent, worker_usage)
-            output = _mark_if_interrupted(
-                result.output,
-                interrupted=result.interrupted,
-                reason=result.interruption_reason,
-            )
-            if last_outputs is not None:
-                last_outputs[worker] = output
-            return output
-
-        # Stream worker events into the supervisor's shared channel
-        # using a clone of the send half (clone keeps the channel
-        # alive past this tool call's lifetime).
-        invocation = SubagentInvocation(
-            agent,
-            instructions,
-            session_id=worker_session_id,
-            rollup_into=session,
-        )
+        # Memory propagation: same rationale as the persistent path
+        # above — worker without explicit memory= inherits the
+        # coordinator's.
         with inherit_ambient_memory(memory):
-            async with event_sink.clone() as sink:
-                async for ev in invocation.events():
-                    await sink.send(ev)
-        await _charge_parent_budget(
-            agent, usage_from_result_dict(invocation.result)
-        )
-        output = _mark_if_interrupted(
-            str(invocation.result.get("output", "")),
-            interrupted=bool(
-                invocation.result.get("interrupted", False)
-            ),
-            reason=invocation.result.get("interruption_reason"),
-        )
+            output = await _run_worker(agent, instructions, worker_session_id)
         if last_outputs is not None:
             last_outputs[worker] = output
         return output
@@ -723,6 +757,7 @@ def _make_delegate_tool(
             f"Available workers:\n{worker_descriptions}"
         ),
         fn=_delegate,
+        timeout=timeout,
         input_schema={
             "type": "object",
             "properties": {

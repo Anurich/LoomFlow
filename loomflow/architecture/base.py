@@ -31,6 +31,7 @@ strategy without re-implementing setup/teardown plumbing.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
@@ -52,6 +53,24 @@ if TYPE_CHECKING:
     from ..agent.api import Agent
     from ..governance.rate_limit import RateLimiter
     from ..guardrails.base import Guardrail
+
+# How deep sub-agent delegation may nest by default (a supervisor's
+# worker that is itself a supervisor, and so on) before ``delegate``
+# refuses. Deep enough for real hierarchies, shallow enough to stop a
+# cycle (A delegates to B delegates to A) long before it burns a budget.
+DEFAULT_MAX_DELEGATION_DEPTH = 5
+
+# Set by a parent (``SubagentInvocation`` / the ``delegate`` tool)
+# around a sub-agent run: a synchronous callback the sub-agent's
+# ``Agent._loop`` calls with what it has spent so far when it does NOT
+# finish normally (it raised, timed out or was cancelled) — the only
+# way that spend reaches the parent, since no ``completed`` event and
+# no ``RunResult`` exist then. ``None`` (the default) outside a
+# delegation.
+partial_usage_sink_var: ContextVar[Callable[[Usage], None] | None] = ContextVar(
+    "loomflow_partial_usage_sink", default=None
+)
+
 
 @dataclass
 class ApprovalDecision:
@@ -143,6 +162,17 @@ class AgentSession:
     interrupted: bool = False
     interruption_reason: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    finish_reason: str | None = None
+    """Why the model stopped on its most recent call, as the provider
+    reported it (``stop``, ``length``, ``max_tokens``,
+    ``content_filter``, ...). Written by the architecture after each
+    model call; surfaced as ``RunResult.finish_reason``."""
+    turns_at_start: int = 0
+    """``turns`` already spent when this ``Agent.run`` / ``resume``
+    call began — non-zero only for a run restored from a checkpoint.
+    ``max_turns`` is an allowance per call, so architectures compare
+    ``turns - turns_at_start`` against it: a resumed run keeps counting
+    ``turns`` up (step names stay unique) but gets a fresh allowance."""
 
 
 @dataclass
@@ -273,13 +303,22 @@ class Dependencies:
     summariser prompt and fall-back semantics."""
 
     tool_timeout_s: float | None = 120.0
-    """Hard wall-clock cap on a single tool invocation, enforced with
-    ``anyio.fail_after`` in the shared tool-execution helper
-    (:func:`loomflow.architecture.helpers.run_single_tool`). On
-    timeout the tool returns ``ToolResult.error_(call_id, "tool
-    timed out after Ns")`` so the model can observe the failure and
-    react, instead of the whole run hanging on one stuck tool.
-    ``None`` disables the backstop."""
+    """Wall-clock cap on a single tool invocation, enforced in the
+    shared tool-execution helper
+    (:func:`loomflow.architecture.helpers.run_single_tool`). Set with
+    ``Tuning(tool_timeout=...)``; a tool's own ``@tool(timeout=...)``
+    (``ToolDef.timeout``) wins over it. On timeout the tool returns
+    ``ToolResult.error_(call_id, "tool timed out after Ns ...")`` so
+    the model can observe the failure and react, instead of the whole
+    run hanging on one stuck tool. ``None`` disables the backstop."""
+
+    parallel_tool_calls: bool = True
+    """Whether the tool calls a model emits in one turn may run
+    concurrently. ``False`` (``Tuning(parallel_tool_calls=False)``)
+    runs them one at a time in the order emitted. Calls to tools
+    marked ``destructive`` are ALWAYS run alone, in emitted order,
+    whatever this says — only the non-destructive calls between them
+    run in parallel."""
 
     compact_context: Callable[[AgentSession], Awaitable[Event | None]] | None = None
     """Called by ReAct before each model call; compacts

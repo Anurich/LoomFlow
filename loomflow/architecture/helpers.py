@@ -43,24 +43,31 @@ circular re-implementation:
 from __future__ import annotations
 
 import contextlib
+import dataclasses
+import functools
+import inspect
 import itertools
 import json
 import logging
+import math
 import re
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
 import anyio
+from pydantic import BaseModel
 
 from ..core._deprecation import warn_legacy_protocol
 from ..core.context import RunContext, _tool_gate_var, get_run_context
 from ..core.streaming import stream_from
 from ..core.types import (
+    TRUNCATED_FINISH_REASONS,
     Event,
     Message,
     PermissionDecision,
     ToolCall,
+    ToolDef,
     ToolResult,
     Usage,
 )
@@ -68,7 +75,7 @@ from ..guardrails.base import apply_guardrails
 from ..observability.semconv import set_span_attributes, tool_attrs
 from ..security.audit import AuditLog, wants_full_transcripts
 from ..studio import _hooks as _studio
-from .base import ApprovalDecision, Dependencies
+from .base import ApprovalDecision, Dependencies, partial_usage_sink_var
 
 if TYPE_CHECKING:
     from ..agent.api import Agent
@@ -82,6 +89,69 @@ if TYPE_CHECKING:
 # everywhere a hot path wants to *maybe* enter a telemetry span via
 # ``async with (_NULL_CTX if fast else tel.trace(...)):``.
 _NULL_CTX: contextlib.AbstractAsyncContextManager[None] = contextlib.nullcontext()
+
+
+@functools.lru_cache(maxsize=1024)
+def _function_accepts_kwarg(fn: Any, name: str) -> bool:
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        # No introspectable signature (some builtins / C callables):
+        # assume the current protocol.
+        return True
+    param = params.get(name)
+    if param is not None:
+        return param.kind is not inspect.Parameter.POSITIONAL_ONLY
+    return any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+    )
+
+
+def accepts_kwarg(fn: Any, name: str) -> bool:
+    """Whether callable ``fn`` can be called with keyword ``name``.
+
+    How the framework tells a current protocol implementation from a
+    legacy one that predates a keyword (``user_id=`` on budgets, hooks,
+    permissions, audit logs, memory): by looking at the signature, not
+    by calling it and catching ``TypeError``. The catch-and-retry probe
+    ran the callee TWICE whenever the ``TypeError`` came from a bug
+    inside it, and hid that bug behind the second call. Results are
+    cached per underlying function.
+    """
+    target = getattr(fn, "__func__", fn)
+    try:
+        return _function_accepts_kwarg(target, name)
+    except TypeError:  # unhashable callable: inspect without the cache
+        return bool(_function_accepts_kwarg.__wrapped__(target, name))
+
+
+def raise_from_task_group(group: BaseExceptionGroup[BaseException]) -> NoReturn:
+    """Re-raise what a task group of tool dispatches failed with as a
+    plain exception.
+
+    A task group raises an ``ExceptionGroup`` even when a single task
+    failed, so ``agent.run()`` surfaced ``ExceptionGroup('unhandled
+    errors in a TaskGroup', [ConnectionError(...)])`` and a caller's
+    ``except ConnectionError`` never matched. One failure is raised as
+    itself. Several (parallel calls that all hit the same broken
+    dependency) raise the first, chained ``from`` the group so the
+    others stay visible in the traceback. A non-``Exception`` leaf
+    (``KeyboardInterrupt``) takes precedence.
+    """
+    leaves: list[BaseException] = []
+    stack: list[BaseException] = [group]
+    while stack:
+        exc = stack.pop(0)
+        if isinstance(exc, BaseExceptionGroup):
+            stack[0:0] = list(exc.exceptions)
+        else:
+            leaves.append(exc)
+    if not leaves:
+        raise group
+    chosen = next((e for e in leaves if not isinstance(e, Exception)), leaves[0])
+    if len(leaves) == 1:
+        raise chosen from None
+    raise chosen from group
 
 
 class _StandInKey:
@@ -274,10 +344,10 @@ async def budget_gate(
     / ``interruption_reason`` are already set by then).
 
     Always forwards ``deps.context.user_id`` to ``allows_step`` so
-    per-user budget caps fire in EVERY architecture, with the
-    ``except TypeError`` fallback for legacy budget impls that
-    predate the kwarg. Skipped entirely on the ``fast_budget`` path
-    (``NoBudget`` returns OK unconditionally).
+    per-user budget caps fire in EVERY architecture; legacy budget
+    impls that predate the kwarg (told apart by signature, see
+    :func:`accepts_kwarg`) are called without it. Skipped entirely on
+    the ``fast_budget`` path (``NoBudget`` returns OK unconditionally).
 
     Also the per-tenant QPS choke point (G5): when a rate limiter is
     wired (``deps.fast_rate_limit`` False), ``acquire`` runs BEFORE
@@ -291,11 +361,11 @@ async def budget_gate(
         await deps.rate_limiter.acquire(user_id=deps.context.user_id)
     if deps.fast_budget:
         return False, []
-    try:
+    if accepts_kwarg(deps.budget.allows_step, "user_id"):
         status = await deps.budget.allows_step(
             user_id=deps.context.user_id
         )
-    except TypeError:
+    else:
         # Legacy budget impls without the user_id kwarg.
         status = await deps.budget.allows_step()
     if status.blocked:
@@ -329,20 +399,7 @@ async def consume_usage(
     top of its loop, so it passes ``count_turn=False``.
     """
     if not deps.fast_budget:
-        try:
-            await deps.budget.consume(
-                tokens_in=usage.input_tokens,
-                tokens_out=usage.output_tokens,
-                cost_usd=usage.cost_usd,
-                user_id=deps.context.user_id,
-            )
-        except TypeError:
-            # Legacy budget impls without the user_id kwarg.
-            await deps.budget.consume(
-                tokens_in=usage.input_tokens,
-                tokens_out=usage.output_tokens,
-                cost_usd=usage.cost_usd,
-            )
+        await charge_budget(deps.budget, usage, user_id=deps.context.user_id)
     session.cumulative_usage = add_usage(session.cumulative_usage, usage)
     if count_turn:
         session.turns += 1
@@ -403,16 +460,23 @@ async def consume_worker_usage(
         or usage.cost_usd
     ):
         return
-    try:
-        await deps.budget.consume(
+    await charge_budget(deps.budget, usage, user_id=deps.context.user_id)
+
+
+async def charge_budget(
+    budget: Any, usage: Usage, *, user_id: str | None
+) -> None:
+    """``budget.consume`` with ``user_id`` forwarding; legacy impls
+    without the kwarg (told apart by signature) are called without."""
+    if accepts_kwarg(budget.consume, "user_id"):
+        await budget.consume(
             tokens_in=usage.input_tokens,
             tokens_out=usage.output_tokens,
             cost_usd=usage.cost_usd,
-            user_id=deps.context.user_id,
+            user_id=user_id,
         )
-    except TypeError:
-        # Legacy budget impls without the user_id kwarg.
-        await deps.budget.consume(
+    else:
+        await budget.consume(
             tokens_in=usage.input_tokens,
             tokens_out=usage.output_tokens,
             cost_usd=usage.cost_usd,
@@ -497,6 +561,58 @@ def parse_fenced_json(text: str) -> Any | None:
 # ---------------------------------------------------------------------------
 
 
+_DEFAULT_REPR_RE = re.compile(r"^<.* object at 0x[0-9a-fA-F]+>$", re.DOTALL)
+
+
+def _json_fallback(value: Any) -> Any:
+    """``json.dumps(default=)`` for the values tools actually return."""
+    if isinstance(value, BaseModel):
+        return value.model_dump(mode="json")
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return dataclasses.asdict(value)
+    if isinstance(value, set | frozenset | tuple):
+        return list(value)
+    if isinstance(value, bytes | bytearray):
+        return bytes(value).decode("utf-8", "replace")
+    text = str(value)
+    if _DEFAULT_REPR_RE.match(text):
+        # ``<pkg.Thing object at 0x10f3...>``: the address is noise and
+        # tells the model nothing; keep the type name.
+        cls = type(value)
+        return f"<{cls.__module__}.{cls.__qualname__} object>"
+    return text
+
+
+def render_tool_output(output: Any) -> str:
+    """The text of a successful tool result as the model sees it.
+
+    Strings pass through; ``dict`` / ``list`` / ``tuple`` / Pydantic
+    models / dataclasses are sent as JSON (a Python ``repr`` —
+    ``{'ok': True, 'items': None}`` — is not something a model, or
+    anything downstream parsing its echo, should have to read). Other
+    scalars use ``str()``. Values JSON can't carry fall back to
+    ``str()``, with the type name instead of a memory address.
+    """
+    if isinstance(output, str):
+        return output
+    structured = isinstance(output, dict | list | tuple | BaseModel) or (
+        dataclasses.is_dataclass(output) and not isinstance(output, type)
+    )
+    if structured:
+        try:
+            return json.dumps(
+                _json_fallback(output)
+                if not isinstance(output, dict | list | tuple)
+                else output,
+                default=_json_fallback,
+                ensure_ascii=False,
+            )
+        except (TypeError, ValueError):
+            pass  # circular / non-string keys: fall through to str()
+    fallback = _json_fallback(output)
+    return fallback if isinstance(fallback, str) else str(output)
+
+
 def tool_result_payload(
     *,
     call: ToolCall,
@@ -533,7 +649,7 @@ async def audit(
     """Append an audit entry, tolerating legacy AuditLog impls."""
     if audit_log is None:
         return
-    try:
+    if accepts_kwarg(audit_log.append, "user_id"):
         await audit_log.append(
             session_id=session_id,
             actor=actor,
@@ -541,7 +657,7 @@ async def audit(
             payload=payload,
             user_id=user_id,
         )
-    except TypeError:
+    else:
         # Legacy AuditLog impls without the user_id kwarg.
         warn_legacy_protocol("AuditLog", "append")
         await audit_log.append(
@@ -674,6 +790,7 @@ async def run_single_tool(
     slot: int,
     step_name: str | None = None,
     destructive_map: Mapping[str, bool] | None = None,
+    tool_defs: Mapping[str, ToolDef] | None = None,
 ) -> ToolResult:
     """Hooks → permission → journaled tool host call → post-hook.
 
@@ -694,13 +811,29 @@ async def run_single_tool(
     destructive flag without a second round-trip to the tool host;
     when ``None`` we fall back to fetching the defs here.
 
-    ``deps.tool_timeout_s`` bounds the actual tool execution with
-    ``anyio.fail_after`` — a stuck tool becomes a
+    ``tool_defs`` (``{tool_name: ToolDef}``, same source) supplies the
+    tool's own ``timeout`` override and whether a timeout can actually
+    stop it.
+
+    ``deps.tool_timeout_s`` (or the tool's ``@tool(timeout=...)``)
+    bounds the actual tool execution — a stuck tool becomes a
     ``ToolResult.error_`` the model can react to instead of hanging
     the whole run.
+
+    A call whose arguments the model adapter could not use
+    (:attr:`ToolCall.args_error` — invalid or cut-off JSON) is never
+    executed: it returns a tool error straight away, before hooks,
+    permissions or an approval prompt.
     """
     started = anyio.current_time()
     result: ToolResult
+    if call.args_error is not None:
+        return ToolResult.error_(
+            call.id,
+            f"invalid tool call: {call.args_error}. The tool was NOT run. "
+            "Call it again with complete, valid JSON arguments.",
+        )
+    tool_def = tool_defs.get(call.tool) if tool_defs is not None else None
 
     tool_trace: contextlib.AbstractAsyncContextManager[Any] = (
         _NULL_CTX
@@ -739,11 +872,15 @@ async def run_single_tool(
                 try:
                     defs = await deps.tools.list_tools()
                     for d in defs:
-                        if d.name == call.tool and d.destructive:
+                        if d.name != call.tool:
+                            continue
+                        if tool_def is None:
+                            tool_def = d
+                        if d.destructive:
                             call = call.model_copy(
                                 update={"destructive": True}
                             )
-                            break
+                        break
                 except Exception as exc:  # noqa: BLE001 — host may be flaky; never crash here
                     # FAIL CLOSED. If we can't fetch the tool defs we
                     # don't know whether this tool is destructive —
@@ -769,11 +906,11 @@ async def run_single_tool(
         if deps.fast_hooks:
             hook_decision: PermissionDecision = PermissionDecision.allow_()
         else:
-            try:
+            if accepts_kwarg(deps.hooks.pre_tool, "user_id"):
                 hook_decision = await deps.hooks.pre_tool(
                     call, user_id=run_user_id
                 )
-            except TypeError:
+            else:
                 # Legacy HookHost without the kwarg. Warn once
                 # per-process so callers know to add it.
                 warn_legacy_protocol("HookHost", "pre_tool")
@@ -789,11 +926,11 @@ async def run_single_tool(
                 # AllowAll always allows — skip the dataclass round-trip.
                 perm: PermissionDecision = PermissionDecision.allow_()
             else:
-                try:
+                if accepts_kwarg(deps.permissions.check, "user_id"):
                     perm = await deps.permissions.check(
                         call, context={}, user_id=run_user_id
                     )
-                except TypeError:
+                else:
                     # Legacy Permissions without the kwarg. Warn
                     # once per-process so callers know to add it.
                     warn_legacy_protocol("Permissions", "check")
@@ -880,54 +1017,71 @@ async def run_single_tool(
                     if step_name is not None
                     else f"tool_call_{turn}_{slot}"
                 )
+                # The tool's own ``@tool(timeout=...)`` wins over the
+                # agent default; ``inf`` means "no cap for this tool".
                 timeout_s = deps.tool_timeout_s
-                timeout_cm: contextlib.AbstractContextManager[Any] = (
-                    anyio.fail_after(timeout_s)
-                    if timeout_s is not None
-                    else contextlib.nullcontext()
-                )
+                if tool_def is not None and tool_def.timeout is not None:
+                    timeout_s = (
+                        None
+                        if math.isinf(tool_def.timeout)
+                        else tool_def.timeout
+                    )
                 # Tool calls this tool makes itself (code mode) go
                 # through the same gates as this one.
                 gate_token = _tool_gate_var.set(
                     _nested_tool_gate(deps, turn=turn, parent_step=resolved_step)
                 )
-                try:
-                    with timeout_cm:
-                        if deps.fast_runtime:
-                            result = await deps.tools.call(
-                                call.tool,
-                                call.args,
-                                call_id=call.id,
-                            )
-                        else:
-                            result = await deps.runtime.step(
-                                resolved_step,
-                                deps.tools.call,
-                                call.tool,
-                                call.args,
-                                call_id=call.id,
-                                # Position + content: replays on resume,
-                                # runs again for a retry in a later turn.
-                                idempotency_key=(
-                                    f"{resolved_step}:{call.idempotency_key()}"
-                                ),
-                            )
-                except TimeoutError:
-                    result = ToolResult.error_(
-                        call.id,
-                        f"tool timed out after {timeout_s}s",
+
+                async def _call_host(
+                    call: ToolCall = call, resolved_step: str = resolved_step
+                ) -> ToolResult:
+                    if deps.fast_runtime:
+                        return await deps.tools.call(
+                            call.tool,
+                            call.args,
+                            call_id=call.id,
+                        )
+                    stepped: ToolResult = await deps.runtime.step(
+                        resolved_step,
+                        deps.tools.call,
+                        call.tool,
+                        call.args,
+                        call_id=call.id,
+                        # Position + content: replays on resume,
+                        # runs again for a retry in a later turn.
+                        idempotency_key=(
+                            f"{resolved_step}:{call.idempotency_key()}"
+                        ),
                     )
+                    return stepped
+
+                try:
+                    if timeout_s is None:
+                        result = await _call_host()
+                    else:
+                        # ``move_on_after`` + ``cancelled_caught``, not
+                        # ``fail_after``: only OUR deadline counts as
+                        # the tool timing out. A ``TimeoutError`` the
+                        # tool (or its host) raised itself is an
+                        # ordinary tool failure, reported as such.
+                        with anyio.move_on_after(timeout_s) as timeout_scope:
+                            result = await _call_host()
+                        if timeout_scope.cancelled_caught:
+                            result = ToolResult.error_(
+                                call.id,
+                                _timeout_message(timeout_s, tool_def),
+                            )
                 except Exception as exc:  # noqa: BLE001
-                    result = ToolResult.error_(call.id, str(exc))
+                    result = ToolResult.from_exception(call.id, exc)
                 finally:
                     _tool_gate_var.reset(gate_token)
 
                 if not deps.fast_hooks:
-                    try:
+                    if accepts_kwarg(deps.hooks.post_tool, "user_id"):
                         await deps.hooks.post_tool(
                             call, result, user_id=run_user_id
                         )
-                    except TypeError:
+                    else:
                         warn_legacy_protocol("HookHost", "post_tool")
                         await deps.hooks.post_tool(call, result)
 
@@ -966,6 +1120,28 @@ async def run_single_tool(
     return result
 
 
+def _timeout_message(timeout_s: float, tool_def: ToolDef | None) -> str:
+    """Error text for a tool call that hit its timeout.
+
+    A synchronous tool runs in a worker thread, and a thread cannot be
+    stopped: the function carries on after the model has been told the
+    call failed, so its side effect (a charge, a write, an email) may
+    still land. The model must be told that, or it will retry and do
+    it twice.
+    """
+    base = f"tool timed out after {timeout_s}s"
+    if tool_def is not None and not tool_def.cancellable:
+        return (
+            f"{base}, but it could not be stopped and is still running "
+            "in the background; do not assume it didn't happen. Check "
+            "whether its effect took place before calling it again."
+        )
+    return (
+        f"{base} and was cancelled; anything it had already started "
+        "may still have taken effect."
+    )
+
+
 def _tool_error_type(result: ToolResult) -> str | None:
     """``error.type`` for a tool call that didn't succeed."""
     if result.ok:
@@ -990,7 +1166,8 @@ async def _guard_tool_result(
     — this helper returns a ToolResult, so it can't yield events
     itself.
     """
-    original = str(result.output)
+    # The text the model would see (JSON for structured results).
+    original = render_tool_output(result.output)
     outcome = await apply_guardrails(
         deps.guardrails,
         original,
@@ -1083,6 +1260,7 @@ async def run_gated_tool(
     slot: int,
     step_name: str | None = None,
     destructive_map: Mapping[str, bool] | None = None,
+    tool_defs: Mapping[str, ToolDef] | None = None,
 ) -> ToolResult:
     """:func:`run_single_tool` bracketed by audit-log writes.
 
@@ -1113,6 +1291,7 @@ async def run_gated_tool(
         slot=slot,
         step_name=step_name,
         destructive_map=destructive_map,
+        tool_defs=tool_defs,
     )
     if not deps.fast_audit:
         await audit(
@@ -1179,6 +1358,46 @@ async def wait_for_user_signal(
     return await waiter(session_id, name)
 
 
+class UsageTap:
+    """Wrap a model and add up the usage its calls report.
+
+    For helper model calls made through code that only returns text
+    (the tool-result summariser, the auto-compact summariser): the
+    caller reads :attr:`usage` afterwards and accounts for it, so that
+    spend shows up in ``RunResult`` and the budget like any other.
+    """
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+        self.usage = Usage()
+
+    @property
+    def name(self) -> str:
+        return str(getattr(self._inner, "name", "model"))
+
+    @property
+    def spent(self) -> bool:
+        """Whether any tokens or cost were recorded."""
+        u = self.usage
+        return bool(
+            u.input_tokens
+            or u.cached_input_tokens
+            or u.cache_write_tokens
+            or u.output_tokens
+            or u.cost_usd
+        )
+
+    def __getattr__(self, attr: str) -> Any:
+        return getattr(self._inner, attr)
+
+    async def stream(self, messages: list[Message], **kwargs: Any) -> AsyncIterator[Any]:
+        async for chunk in self._inner.stream(messages, **kwargs):
+            usage = getattr(chunk, "usage", None)
+            if getattr(chunk, "kind", None) == "finish" and isinstance(usage, Usage):
+                self.usage = add_usage(self.usage, usage)
+            yield chunk
+
+
 def add_usage(a: Usage, b: Usage) -> Usage:
     return Usage(
         input_tokens=a.input_tokens + b.input_tokens,
@@ -1209,6 +1428,46 @@ _FALLBACK_DECIMAL_RE = re.compile(r"\b(0?\.\d+|1\.0+)\b")
 # Whole-line fallback: a line that is NOTHING but a plausible 0-1
 # number ("0", "1", "0.7") is unambiguous even for bare integers.
 _WHOLE_LINE_NUMBER_RE = re.compile(r"[01](?:\.\d+)?")
+
+
+# Reserved RunContext.metadata key: how many sub-agent hops deep the
+# current run is (0 = a top-level ``Agent.run``).
+_DELEGATION_DEPTH_KEY = "_loomflow_delegation_depth"
+
+
+def delegation_depth(context: RunContext | None = None) -> int:
+    """How many sub-agent hops deep ``context`` (default: the current
+    run's) is — 0 for a top-level run, 1 for a worker it delegated to,
+    and so on."""
+    ctx = context if context is not None else get_run_context()
+    try:
+        return max(0, int(ctx.metadata.get(_DELEGATION_DEPTH_KEY, 0)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def child_run_context(context: RunContext | None = None) -> RunContext:
+    """``context`` (default: the current run's) for a sub-agent: the
+    same scope, one delegation level deeper."""
+    ctx = context if context is not None else get_run_context()
+    return ctx.with_overrides(
+        metadata={
+            **ctx.metadata,
+            _DELEGATION_DEPTH_KEY: delegation_depth(ctx) + 1,
+        }
+    )
+
+
+def truncation_note(finish_reason: str | None) -> str | None:
+    """A sentence for the model when ``finish_reason`` says its reply
+    was cut off by the output-token limit, else ``None``."""
+    if finish_reason not in TRUNCATED_FINISH_REASONS:
+        return None
+    return (
+        f"your reply was cut off by the output token limit "
+        f"(finish_reason={finish_reason}) before this tool call was "
+        f"complete; send the call again, with shorter arguments if needed"
+    )
 
 
 class SubagentInvocation:
@@ -1269,7 +1528,10 @@ class SubagentInvocation:
         # ``get_run_context`` returns the empty default — sub-agents
         # then run anonymously, same as direct ``Agent.run`` with
         # no kwargs.
-        base_ctx = context if context is not None else get_run_context()
+        # Either way the sub-agent runs one delegation level deeper.
+        base_ctx = child_run_context(
+            context if context is not None else get_run_context()
+        )
         # Subagent parent-attribution (0.10.18): record the parent's
         # session_id + run_id under reserved metadata keys so the
         # child agent (and any downstream telemetry / audit /
@@ -1310,8 +1572,31 @@ class SubagentInvocation:
         # architecture protocol can still use the helper.
         self._rollup_into = rollup_into
         self.result: dict[str, Any] = {}
+        # What the sub-agent had spent when it did NOT finish (raised,
+        # timed out, cancelled) — reported by its ``Agent._loop``
+        # through ``partial_usage_sink_var`` and rolled into
+        # ``rollup_into`` just like a completed run's usage. ``None``
+        # while running and after a normal completion.
+        self.partial_usage: Usage | None = None
 
-    async def events(self) -> AsyncIterator[Event]:
+    @property
+    def usage(self) -> Usage:
+        """The sub-agent's spend: its ``RunResult`` usage when it
+        completed, else what it had spent when it was cut short."""
+        if self.result:
+            return usage_from_result_dict(self.result)
+        return self.partial_usage if self.partial_usage is not None else Usage()
+
+    def _on_partial_usage(self, usage: Usage) -> None:
+        # Synchronous on purpose: called from the sub-agent's teardown,
+        # possibly while it is being cancelled (no ``await`` allowed).
+        self.partial_usage = usage
+        if self._rollup_into is not None:
+            self._rollup_into.cumulative_usage = add_usage(
+                self._rollup_into.cumulative_usage, usage
+            )
+
+    async def events(self) -> AsyncGenerator[Event, None]:
         """Yield the sub-agent's events (filtered) as they happen.
 
         After the iterator drains, ``self.result`` contains the
@@ -1341,13 +1626,19 @@ class SubagentInvocation:
                 else:
                     await send(ev)
 
-            await self._agent.run(
-                self._prompt,
-                session_id=self._session_id,
-                context=self._context,
-                extra_tools=self._extra_tools,
-                emit=_capture,
-            )
+            # Runs in this worker's own task, so the sink is scoped
+            # to exactly this sub-agent run.
+            sink_token = partial_usage_sink_var.set(self._on_partial_usage)
+            try:
+                await self._agent.run(
+                    self._prompt,
+                    session_id=self._session_id,
+                    context=self._context,
+                    extra_tools=self._extra_tools,
+                    emit=_capture,
+                )
+            finally:
+                partial_usage_sink_var.reset(sink_token)
 
         # The worker runs as its own task (core/streaming.py), so no
         # cancel scope is held across ``yield``.
