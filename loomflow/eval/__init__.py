@@ -23,7 +23,7 @@ no network is required to eval or to test the eval.
 
 from .dataset import Case, Dataset
 from .harness import EVAL_USER_ID, CaseResult, EvalHarness, EvalReport, OnlineScorer
-from .judge import LLMJudge
+from .judge import JudgeParseError, LLMJudge, record_metric_usage
 from .metrics import (
     Contains,
     ExactMatch,
@@ -44,12 +44,14 @@ __all__ = [
     "EvalHarness",
     "EvalReport",
     "ExactMatch",
+    "JudgeParseError",
     "LLMJudge",
     "Metric",
     "MultiStepCoherence",
     "OnlineScorer",
     "ToolExecutionSuccess",
     "ToolSelectionAccuracy",
+    "record_metric_usage",
     "tool_calls_from_events",
     "tool_results_from_events",
 ]

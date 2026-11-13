@@ -509,12 +509,12 @@ async def test_the_online_scorer_records_scores(tmp_path: Path) -> None:
         name = "length"
 
         async def score(self, case: Any, result: Any, events: Any) -> float:
-            return float(len(result.output))
+            return len(result.output) / 10  # a score is in [0, 1]
 
     result = await _agent([ScriptedTurn(text="four")]).run("hi")
     await OnlineScorer([Length()], sample_rate=1.0).maybe_score("hi", result, [])
     rows = [dict(r) for r in _db(db).execute("SELECT key, score, source, trace_id FROM scores")]
-    assert rows[0]["key"] == "length" and rows[0]["score"] == 4.0 and rows[0]["source"] == "online"
+    assert rows[0]["key"] == "length" and rows[0]["score"] == 0.4 and rows[0]["source"] == "online"
     assert rows[0]["trace_id"] == _traces(db)[0]["trace_id"]
 
 
