@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from .base import Document
 from .csv import load_csv, load_tsv
@@ -35,11 +36,29 @@ _DISPATCH = {
 }
 
 
-def load(path: str | Path) -> Document:
+# Loaders that decode text themselves and so take ``encoding=`` /
+# ``errors=``.
+_TEXT_LOADERS = frozenset(
+    {load_csv, load_tsv, load_markdown, load_text, load_html}
+)
+
+
+def load(
+    path: str | Path,
+    *,
+    encoding: str | None = None,
+    errors: str | None = None,
+) -> Document:
     """Load a document by auto-detecting its format from the file
     extension. Supported: ``.pdf``, ``.docx``, ``.xlsx``, ``.xlsm``,
     ``.csv``, ``.tsv``, ``.md``, ``.markdown``, ``.txt``, ``.html``,
     ``.htm``.
+
+    ``encoding`` / ``errors`` apply to the text formats (``.txt``,
+    ``.md``, ``.markdown``, ``.csv``, ``.tsv``, ``.html``, ``.htm``),
+    which default to UTF-8 with a byte-order mark stripped; pass e.g.
+    ``encoding="latin-1"`` for a file in another encoding. They are
+    ignored for binary formats.
 
     Raises :class:`ValueError` for unknown extensions.
     """
@@ -51,4 +70,11 @@ def load(path: str | Path) -> Document:
         raise ValueError(
             f"unsupported extension {suffix!r}; supported: {supported}"
         )
+    if loader in _TEXT_LOADERS:
+        options: dict[str, Any] = {}
+        if encoding is not None:
+            options["encoding"] = encoding
+        if errors is not None:
+            options["errors"] = errors
+        return loader(p, **options)
     return loader(p)
