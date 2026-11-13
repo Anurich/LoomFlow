@@ -199,6 +199,7 @@ def _absorb_legacy_tuning(
         raise TypeError(
             "Agent() got unexpected keyword argument(s): "
             + ", ".join(sorted(unknown))
+            + _did_you_mean_agent_kwarg(sorted(unknown))
         )
     if not moved:
         return tuning if tuning is not None else Tuning()
@@ -221,6 +222,32 @@ def _absorb_legacy_tuning(
     }
     from dataclasses import replace
     return replace(base, **overrides)
+
+
+def _did_you_mean_agent_kwarg(unknown: list[str]) -> str:
+    """Suffix for the unknown-kwarg error: the closest real ``Agent()``
+    argument for each typo (``tool`` -> ``tools``), or ``""``."""
+    import difflib
+    import inspect
+
+    known = sorted(
+        {
+            name
+            for name, param in inspect.signature(Agent.__init__).parameters.items()
+            if param.kind is inspect.Parameter.KEYWORD_ONLY
+        }
+        | _TUNING_FIELDS
+    )
+    hints: list[tuple[str, str]] = []
+    for key in unknown:
+        close = difflib.get_close_matches(key, known, n=1)
+        if close:
+            hints.append((key, close[0]))
+    if not hints:
+        return ""
+    if len(unknown) == 1:
+        return f". Did you mean {hints[0][1]!r}?"
+    return ". Did you mean " + ", ".join(f"{good!r} (for {bad!r})" for bad, good in hints) + "?"
 
 
 class Agent:
@@ -266,6 +293,133 @@ class Agent:
         tuning: Tuning | None = None,
         **_legacy: Any,
     ) -> None:
+        """Build an agent. Only ``instructions`` and ``model`` are required.
+
+        **Core**
+
+        :param instructions: The system prompt. Sections for skills, the
+            workspace and the living plan are appended to it when those
+            features are on.
+        :param model: Which LLM to call. A name string resolved by prefix
+            (``"gpt-4o"``, ``"claude-opus-4-7"``, ``"deepseek-chat"``,
+            ``"mistral-large"``, ``"litellm/<any>"``, or ``"echo"`` for a
+            zero-key fake), a ``Model`` instance, or a dict
+            ``{"name": ..., "effort": ..., "strict_effort": ...}``.
+            Required — ``None`` raises ``ConfigError``.
+        :param tools: What the model may call: a list of ``@tool``
+            functions / ``Tool`` objects / plain callables, a single one
+            of those, or a ``ToolHost`` (MCP registry, sandbox, ...).
+        :param name: Optional display name, used in telemetry, as the node
+            name inside a ``Workflow``, and by Studio to group this
+            agent's runs and versions.
+        :param output_schema: Default Pydantic model (or union of models)
+            every run must return on ``RunResult.parsed``. A per-call
+            ``run(output_schema=)`` overrides it.
+
+        **State**
+
+        :param memory: Where episodes, facts and session history live. A
+            ``Memory`` instance, a string (``"inmemory"``,
+            ``"sqlite:./bot.db"``, ``"chroma:./vectors"``,
+            ``"postgres://..."``, ``"redis://..."``) or a config dict.
+            Default: in-process memory, lost on exit.
+        :param auto_extract: Extract ``(subject, predicate, object)`` facts
+            from each stored episode with the agent's model. ``None``
+            (default) turns it on for the OpenAI / Anthropic / LiteLLM
+            adapters and off for ``EchoModel`` / ``ScriptedModel`` and
+            custom models.
+        :param runtime: Journal for durable, resumable runs. A ``Runtime``
+            instance, ``"inproc"`` (default), ``"sqlite"`` /
+            ``"sqlite:./journal.db"``, or a config dict.
+        :param workspace: Shared notebook for multi-agent work. A
+            ``Workspace``, a ``WorkspaceMembership``
+            (``ws.member("researcher", teammates=[...])``), a string or a
+            config dict. Adds the note tools and a prompt section.
+        :param persist_tool_transcripts: Also store each run's tool calls
+            and results, so a resumed session sees them and not only the
+            prompt and the answer. Default ``False``.
+
+        **Loop**
+
+        :param architecture: The iteration strategy. An ``Architecture``
+            instance or a name such as ``"self-refine"``, ``"reflexion"``,
+            ``"plan-and-execute"``, ``"rewoo"``, ``"tree-of-thoughts"``.
+            Default: ReAct.
+        :param max_turns: Upper bound on model turns per run.
+        :param timeout: Wall-clock limit for a whole run, in seconds;
+            raises ``RunTimeout``. ``None`` (default) means no limit.
+        :param skills: Skill folders (paths, ``(path, label)`` tuples) or
+            ``Skill`` objects. Their names and descriptions go in the
+            system prompt and a ``load_skill`` tool is added.
+        :param living_plan: ``True`` adds the ``plan_write`` /
+            ``plan_read`` tools (and a stop hook that keeps the agent
+            going while steps are in progress). Also accepts a
+            ``LivingPlan`` to start from, or a config dict. Default: off.
+        :param run_until: Keep re-prompting until a checker model agrees a
+            condition holds. The condition as a string, or a dict with
+            ``condition`` plus ``checker``, ``decider``,
+            ``max_iterations``, ``max_no_progress``, ``max_cost_usd``,
+            ``checker_prompt``.
+        :param effort: Default reasoning effort for every run
+            (validated here; a per-call ``run(effort=)`` overrides it).
+        :param strict_effort: Raise when the model cannot honour
+            ``effort`` instead of ignoring it.
+
+        **Limits and safety**
+
+        :param budget: Token / cost / wall-clock caps (``StandardBudget``).
+            Default: unlimited.
+        :param rate_limiter: Per-user request rate limit
+            (``TokenBucketRateLimiter``). Default: none.
+        :param guardrails: Input / output guards, run in the order given.
+        :param permissions: Policy deciding which tool calls are allowed,
+            denied, or need approval. Default: allow everything.
+        :param approval_handler: Called when the permission policy answers
+            "ask". Without one, "ask" is treated as deny.
+        :param hooks: A ``HookRegistry`` of pre- / post-tool hooks (or use
+            ``@agent.before_tool`` / ``@agent.after_tool`` afterwards).
+
+        **Observability**
+
+        :param telemetry: Spans and metrics. A ``Telemetry`` instance, a
+            string (``"console"``, ``"file:./spans.jsonl"``, ``"otel"``)
+            or a config dict. Default: none.
+        :param audit_log: Record of runs and tool calls. An ``AuditLog``
+            instance, a file path, or a dict
+            ``{"name": path, "scope_full": bool, "secret": str}``.
+            Default: none.
+
+        **Context size**
+
+        :param tool_result_summarizer: Model (instance or name) that
+            summarises tool results longer than
+            ``Tuning.tool_result_summary_threshold``. Default: results
+            are passed through verbatim.
+        :param snip_window: Keep only the last N user turns of history
+            before each pass. ``0`` (default) keeps everything.
+        :param auto_compact_at_tokens: Summarise older history once the
+            conversation passes this many tokens. ``"auto"`` uses 80% of
+            the model's context window when the model is recognised.
+            ``None`` (default) disables it.
+        :param prompt_caching: Provider prompt caching. ``True``, or a dict
+            ``{"enabled": bool, "ttl": "5m" | "1h", "cache_key": str}``.
+
+        **Rarely needed**
+
+        :param tuning: A :class:`Tuning` with the remaining knobs:
+            ``retry_policy``, ``secrets``, ``stop_hooks``,
+            ``max_stop_hook_iterations``, ``response_tone``,
+            ``auto_consolidate``, ``checkpoint``, tool search, memory
+            token budget and the auto-compact / transcript sizes.
+        :param _legacy: **Deprecated.** The ``Tuning`` fields passed flat
+            (``Agent(retry_policy=...)``, ``Agent(secrets=...)``, ...).
+            They still work but emit a ``DeprecationWarning``; pass
+            ``tuning=Tuning(...)`` instead. Any other keyword raises
+            ``TypeError``.
+
+        Use :meth:`run` (async), :meth:`run_sync` (blocking) or
+        :meth:`stream` to run the agent.
+        """
         # ``tuning`` carries the rarely-touched knobs (see :class:`Tuning`).
         # Pre-0.11 callers passed these flat; ``_absorb_legacy_tuning`` keeps
         # that working (with a DeprecationWarning) and rejects real typos.
@@ -1066,13 +1220,40 @@ class Agent:
             )
         return self._tool_host.unregister(name)
 
-    async def tools_list(self) -> list[str]:
-        """Return the names of all currently-registered tools.
+    @property
+    def tools(self) -> list[Tool]:
+        """The :class:`Tool` objects registered in this process, in
+        registration order. Synchronous; no ``await`` needed.
 
-        Convenience that works for any :class:`ToolHost`. Calls
-        ``tool_host.list_tools()`` under the hood and returns just the
-        names; use ``self.tool_host.list_tools()`` directly for the
-        full :class:`ToolDef` records.
+        Covers tools passed as ``tools=[...]`` / added with
+        :meth:`add_tool`, plus the ones the framework adds (skills,
+        workspace, living plan). Tools that live behind a remote or
+        sandboxed :class:`ToolHost` (an MCP server, for example) have
+        no local ``Tool`` object and are not included — use
+        :meth:`tools_list` or ``tool_host.list_tools()`` for those.
+        """
+        layers: list[dict[str, Tool]] = []
+        host: Any = self._tool_host
+        while isinstance(host, ExtendedToolHost):
+            layers.append(host._extras_by_name)
+            host = host._base
+        if isinstance(host, InProcessToolHost):
+            layers.append(host._tools)
+        found: dict[str, Tool] = {}
+        # Innermost host first; an outer layer's tool replaces a
+        # same-named inner one, as it does when the model calls it.
+        for layer in reversed(layers):
+            found.update(layer)
+        return list(found.values())
+
+    async def tools_list(self) -> list[str]:
+        """Return the **names** of all currently-registered tools.
+
+        Async because it asks the :class:`ToolHost`, which may be
+        remote (MCP). Works for any host. For the :class:`Tool`
+        objects themselves use the synchronous :attr:`tools` property;
+        for the full :class:`ToolDef` records use
+        ``await self.tool_host.list_tools()``.
         """
         defs = await self._tool_host.list_tools()
         return [d.name for d in defs]
@@ -1805,6 +1986,65 @@ class Agent:
             effort=effort if effort is not None else self._default_effort,
         )
 
+    def run_sync(
+        self,
+        prompt: str,
+        *,
+        user_id: str | None = None,
+        session_id: str | None = None,
+        metadata: Mapping[str, Any] | None = None,
+        context: RunContext | None = None,
+        extra_tools: list[Tool] | None = None,
+        emit: Emit | None = None,
+        output_schema: type[BaseModel] | Any | None = None,
+        output_validation_retries: int = 1,
+        response_tone: str | None = None,
+        effort: str | None = None,
+    ) -> RunResult:
+        """Blocking version of :meth:`run` for scripts and REPLs: no
+        ``async`` / ``await`` / ``asyncio.run`` needed. Same arguments,
+        same :class:`RunResult`::
+
+            result = agent.run_sync("What's the weather in Tokyo?")
+            print(result.output)
+
+        Each call starts its own event loop and closes it when the run
+        finishes. Inside code that is already async (an ``async def``,
+        a Jupyter cell, a web handler) it raises ``RuntimeError`` —
+        use ``await agent.run(...)`` there. Prefer :meth:`run` as well
+        when the agent holds a connection-pooled backend (Postgres,
+        Redis, MCP), which belongs to one event loop.
+        """
+        import asyncio
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        else:
+            raise RuntimeError(
+                "Agent.run_sync() cannot be called from inside a running "
+                "event loop (an async function, a Jupyter notebook, an "
+                "async web handler). Use `await agent.run(...)` there instead."
+            )
+
+        async def _run() -> RunResult:
+            return await self.run(
+                prompt,
+                user_id=user_id,
+                session_id=session_id,
+                metadata=metadata,
+                context=context,
+                extra_tools=extra_tools,
+                emit=emit,
+                output_schema=output_schema,
+                output_validation_retries=output_validation_retries,
+                response_tone=response_tone,
+                effort=effort,
+            )
+
+        return anyio.run(_run)
+
     async def resume(
         self,
         prompt: str | None = None,
@@ -2199,6 +2439,12 @@ class Agent:
             # It partitions memory, journals and workers: a dict here
             # could reach a backend filter as an operator.
             raise TypeError(f"user_id must be a string or None, not {type(user_id).__name__}")
+        if not isinstance(prompt, str):
+            raise TypeError(
+                f"prompt must be a string, not {type(prompt).__name__}: {prompt!r:.80}. "
+                "Pass the user's message as text, e.g. agent.run('hello')."
+            )
+        _check_output_schema(kwargs.get("output_schema"))
         # Studio: the first run in a call chain starts a trace when
         # recording is on (a no-op otherwise); nested runs join it.
         async with _studio.agent_run():
@@ -3223,6 +3469,21 @@ def _extract_schema_types(schema: Any) -> list[type[BaseModel]]:
     return []
 
 
+def _check_output_schema(schema: Any) -> None:
+    """Reject an ``output_schema`` the run could not use, before any
+    model call is made."""
+    if schema is None or _extract_schema_types(schema):
+        return
+    from ..core.errors import ConfigError
+
+    raise ConfigError(
+        "output_schema must be a Pydantic BaseModel subclass or a union of "
+        f"them (e.g. Invoice | Error); got {schema!r}. For free-form JSON, "
+        "define a BaseModel with the fields you expect and read "
+        "result.parsed.model_dump()."
+    )
+
+
 def _strip_json_fences(text: str) -> str:
     """Strip markdown code fences a model might wrap its JSON in.
 
@@ -3491,6 +3752,30 @@ def _normalize_run_until_spec(
     )
 
 
+def _require_api_key(
+    spec: str, env_var: str, adapter: str, secrets: Any | None
+) -> None:
+    """Raise :class:`ConfigError` when the API key a model-name string
+    needs is missing — at construction, naming the variable — instead
+    of the provider SDK's own error (raised later, for Anthropic)."""
+    from ..core.errors import ConfigError
+
+    key: str | None = None
+    if secrets is not None:
+        key = secrets.lookup_sync(env_var)
+    if key is None:
+        key = os.environ.get(env_var)
+    if key is not None:
+        return
+    raise ConfigError(
+        f"model={spec!r} needs an API key, but {env_var} is not set. "
+        f"Set the {env_var} environment variable (or supply it through "
+        "Tuning(secrets=...)), or build the adapter yourself: "
+        f"model={adapter}({spec!r}, api_key=...). For a run that needs no "
+        "key, use model='echo'."
+    )
+
+
 def _resolve_model(
     spec: Model | str | None, *, secrets: Any | None = None
 ) -> Model:
@@ -3536,12 +3821,24 @@ def _resolve_model(
             "or any Model-protocol instance for full control."
         )
     if not isinstance(spec, str):
+        if not (hasattr(spec, "stream") or hasattr(spec, "complete")):
+            raise ConfigError(
+                "model= must be a model name string (e.g. 'gpt-4o', "
+                "'claude-opus-4-7', 'echo') or a Model instance (an object "
+                f"with a `stream` method); got {type(spec).__name__}: {spec!r}."
+            )
         return spec
     if spec.startswith("claude-"):
         from ..model.anthropic import AnthropicModel
+
+        # ANTHROPIC_AUTH_TOKEN is the SDK's own bearer-token alternative.
+        if "ANTHROPIC_AUTH_TOKEN" not in os.environ:
+            _require_api_key(spec, "ANTHROPIC_API_KEY", "AnthropicModel", secrets)
         return AnthropicModel(spec, secrets=secrets)
     if spec.startswith(("gpt-", "o1-", "o3-", "o4-")) or spec in ("o1", "o3"):
         from ..model.openai import OpenAIModel
+
+        _require_api_key(spec, "OPENAI_API_KEY", "OpenAIModel", secrets)
         return OpenAIModel(spec, secrets=secrets)
     if spec.startswith("deepseek-"):
         from ..model.openai import OpenAIModel
