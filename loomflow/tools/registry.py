@@ -17,8 +17,9 @@ from dataclasses import dataclass, field
 from typing import Any, overload
 
 import anyio
-from pydantic import TypeAdapter
+from pydantic import TypeAdapter, ValidationError
 
+from ..core.errors import ConfigError
 from ..core.types import ToolDef, ToolEvent, ToolResult
 
 _PRIMITIVE_TO_JSON_SCHEMA: dict[type, str] = {
@@ -27,6 +28,45 @@ _PRIMITIVE_TO_JSON_SCHEMA: dict[type, str] = {
     float: "number",
     bool: "boolean",
 }
+# Validators for parameters annotated with a primitive type: after the
+# lenient string coercion (``"8"`` → 8), a value that still isn't the
+# declared type (``n: int`` given ``"abc"``) fails here instead of
+# reaching the function.
+_PRIMITIVE_ADAPTERS: dict[type, TypeAdapter[Any]] = {
+    t: TypeAdapter(t) for t in _PRIMITIVE_TO_JSON_SCHEMA
+}
+# How many validation problems of one parameter are reported back.
+_MAX_ARG_ERRORS = 5
+
+
+class ToolArgumentError(ValueError):
+    """The arguments a model supplied don't match the tool's declared
+    parameter types. Raised by :meth:`Tool.execute` BEFORE the wrapped
+    function is called; the tool host turns it into a tool error that
+    names the parameter and the problem, so the model can retry."""
+
+
+def _short_repr(value: Any, limit: int = 80) -> str:
+    text = repr(value)
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+def _describe_arg_error(name: str, exc: Exception, value: Any) -> str:
+    """One parameter's validation failure, for the model: which
+    parameter (and where inside it), what was wrong, what it sent."""
+    if isinstance(exc, ValidationError):
+        errors = exc.errors(include_url=False)
+        parts = []
+        for err in errors[:_MAX_ARG_ERRORS]:
+            loc = ".".join(str(piece) for piece in err["loc"])
+            where = f"{name}.{loc}" if loc else name
+            parts.append(f"parameter {where!r}: {err['msg']}")
+        if len(errors) > _MAX_ARG_ERRORS:
+            parts.append(f"(+{len(errors) - _MAX_ARG_ERRORS} more)")
+        detail = "; ".join(parts)
+    else:
+        detail = f"parameter {name!r}: {type(exc).__name__}: {exc}"
+    return f"{detail} (got {_short_repr(value)})"
 
 
 def _coerce_to_json_type(value: Any, json_type: str) -> Any:
@@ -92,6 +132,21 @@ class Tool:
     param_adapters: dict[str, TypeAdapter[Any]] = field(
         default_factory=dict, repr=False
     )
+    # Params annotated with a primitive type (``n: int``), keyed by
+    # name — populated by ``@tool`` so ``execute`` can reject a value
+    # that isn't that type. Unannotated params are not listed (and
+    # not validated).
+    param_types: dict[str, type] = field(default_factory=dict, repr=False)
+    # Wall-clock cap for one call, in seconds (see ToolDef.timeout):
+    # ``None`` uses the agent's default, ``float("inf")`` means no cap.
+    timeout: float | None = None
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        """Call the wrapped function directly, exactly as written (no
+        coercion, validation, thread hop or timeout) — so a
+        ``@tool``-decorated function can still be unit-tested like a
+        plain function. An ``async def`` tool returns its coroutine."""
+        return self.fn(*args, **kwargs)
 
     def to_def(self) -> ToolDef:
         return ToolDef(
@@ -100,6 +155,10 @@ class Tool:
             input_schema=self.input_schema,
             destructive=self.destructive,
             ends_turn=self.ends_turn,
+            timeout=self.timeout,
+            # A sync function runs in a worker thread (see ``execute``),
+            # which a timeout cannot stop.
+            cancellable=_is_async_callable(self.fn),
         )
 
     async def execute(self, args: Mapping[str, Any]) -> Any:
@@ -113,23 +172,37 @@ class Tool:
         call returns at once; its thread finishes in the background.
         """
         kwargs = dict(args)
+        required = set(self.input_schema.get("required", ()))
+        problems: list[str] = []
         # Coerce stringified args to their declared schema types before
         # calling — models often send numbers / bools as strings, which
         # would otherwise crash typed functions and trigger retry storms.
+        # A value that still isn't the annotated type afterwards
+        # (``n: int`` given ``"abc"``) is a problem reported to the
+        # model; the function is not called with it.
         props = self.input_schema.get("properties", {})
-        if props:
-            for name, val in list(kwargs.items()):
-                if name in self.param_adapters:
-                    continue  # complex params validate below
-                spec = props.get(name)
-                if isinstance(spec, dict) and "type" in spec:
-                    kwargs[name] = _coerce_to_json_type(val, spec["type"])
+        for name, val in list(kwargs.items()):
+            if name in self.param_adapters:
+                continue  # complex params validate below
+            spec = props.get(name)
+            if isinstance(spec, dict) and "type" in spec:
+                val = kwargs[name] = _coerce_to_json_type(val, spec["type"])
+            declared = self.param_types.get(name)
+            if declared is None:
+                continue
+            try:
+                kwargs[name] = _PRIMITIVE_ADAPTERS[declared].validate_python(val)
+            except ValidationError as exc:
+                if val is None and name not in required:
+                    # ``null`` for an optional param: use its default.
+                    del kwargs[name]
+                else:
+                    problems.append(_describe_arg_error(name, exc, val))
         # Complex params: validate the model-supplied value back into
         # the annotated type (dict → BaseModel instance, ["8"] →
         # [8], ...). Models also sometimes send nested objects as a
-        # JSON *string*; decode and retry once. Conservative like
-        # ``_coerce_to_json_type``: any failure passes the ORIGINAL
-        # value through so the function's own error still surfaces.
+        # JSON *string*; decode and retry once. A value that validates
+        # neither way is reported, never passed through raw.
         for name, adapter in self.param_adapters.items():
             if name not in kwargs:
                 continue
@@ -137,13 +210,28 @@ class Tool:
             try:
                 kwargs[name] = adapter.validate_python(val)
                 continue
-            except Exception:  # noqa: BLE001 — fall through to JSON retry
-                pass
+            except Exception as exc:  # noqa: BLE001 — fall through to JSON retry
+                failure: Exception = exc
             if isinstance(val, str):
                 try:
                     kwargs[name] = adapter.validate_python(json.loads(val))
-                except Exception:  # noqa: BLE001 — keep original value
+                    continue
+                except ValidationError as exc:
+                    # It WAS JSON: the decoded value's errors are the
+                    # useful ones.
+                    failure = exc
+                except Exception:  # noqa: BLE001 — not JSON; keep first error
                     pass
+            if val is None and name not in required:
+                del kwargs[name]  # ``null`` for an optional param
+                continue
+            problems.append(_describe_arg_error(name, failure, val))
+        if problems:
+            raise ToolArgumentError(
+                f"invalid arguments for tool {self.name!r}: "
+                + "; ".join(problems)
+                + ". The tool was not run; fix the arguments and call it again."
+            )
         if _is_async_callable(self.fn):
             return await self.fn(**kwargs)
         result = await anyio.to_thread.run_sync(
@@ -179,6 +267,7 @@ def tool(
     description: str | None = None,
     destructive: bool = False,
     ends_turn: bool = False,
+    timeout: float | None = None,
 ) -> Callable[[Callable[..., Any]], Tool]: ...
 
 
@@ -189,12 +278,18 @@ def tool(
     description: str | None = None,
     destructive: bool = False,
     ends_turn: bool = False,
+    timeout: float | None = None,
 ) -> Tool | Callable[[Callable[..., Any]], Tool]:
     """Promote a callable to a :class:`Tool`.
 
     Use as ``@tool`` (bare) or ``@tool(name=..., description=..., destructive=...)``.
     ``ends_turn=True`` makes a successful call end the agent's turn (the
     model is not called again), for tools that hand control elsewhere.
+    ``timeout=`` (seconds) overrides the agent's per-tool timeout
+    (``Tuning(tool_timeout=...)``, 120s by default) for this tool;
+    ``float("inf")`` removes the cap. The result is still directly
+    callable (``my_tool(x)`` runs the function as written), so it can
+    be unit-tested.
     The schema is derived from parameter annotations: primitive types map
     to their JSON-Schema equivalents, and complex types (Pydantic models,
     ``list[...]``, ``dict[...]``, ``Literal``, optionals, ...) get a full
@@ -202,6 +297,12 @@ def tool(
     model's raw args are validated back into the annotated Python types.
     Annotations Pydantic cannot handle fall back to ``string``.
     """
+
+    if timeout is not None and (isinstance(timeout, bool) or not timeout > 0):
+        raise ConfigError(
+            f"@tool(timeout=...) must be a positive number of seconds "
+            f'(float("inf") for no cap), not {timeout!r}'
+        )
 
     def _make(f: Callable[..., Any]) -> Tool:
         # ``eval_str=True`` resolves PEP 563 stringized annotations
@@ -214,7 +315,7 @@ def tool(
             sig = inspect.signature(f, eval_str=True)
         except (NameError, TypeError):
             sig = inspect.signature(f)
-        schema, adapters = _schema_from_signature(sig)
+        schema, adapters, primitives = _schema_from_signature(sig)
         doc_text, param_docs = _parse_docstring(f.__doc__ or "")
         for pname, text in param_docs.items():
             prop = schema["properties"].get(pname)
@@ -231,6 +332,8 @@ def tool(
             destructive=destructive,
             ends_turn=ends_turn,
             param_adapters=adapters,
+            param_types=primitives,
+            timeout=timeout,
         )
 
     if fn is not None:
@@ -284,8 +387,9 @@ def _parse_docstring(doc: str) -> tuple[str, dict[str, str]]:
 
 def _schema_from_signature(
     sig: inspect.Signature,
-) -> tuple[dict[str, Any], dict[str, TypeAdapter[Any]]]:
-    """Derive ``(input_schema, param_adapters)`` from a signature.
+) -> tuple[dict[str, Any], dict[str, TypeAdapter[Any]], dict[str, type]]:
+    """Derive ``(input_schema, param_adapters, param_types)`` from a
+    signature.
 
     Primitives map straight to their JSON-Schema type (and stay on the
     cheap string-coercion path in :meth:`Tool.execute`). Anything else
@@ -301,6 +405,7 @@ def _schema_from_signature(
     required: list[str] = []
     defs: dict[str, Any] = {}
     adapters: dict[str, TypeAdapter[Any]] = {}
+    primitives: dict[str, type] = {}
     for pname, param in sig.parameters.items():
         if pname in ("self", "cls"):
             continue
@@ -314,6 +419,7 @@ def _schema_from_signature(
             properties[pname] = {"type": "string"}
         elif ann in _PRIMITIVE_TO_JSON_SCHEMA:
             properties[pname] = {"type": _PRIMITIVE_TO_JSON_SCHEMA[ann]}
+            primitives[pname] = ann
         else:
             try:
                 adapter: TypeAdapter[Any] = TypeAdapter(ann)
@@ -345,7 +451,7 @@ def _schema_from_signature(
     }
     if defs:
         schema["$defs"] = defs
-    return schema, adapters
+    return schema, adapters, primitives
 
 
 # ---------------------------------------------------------------------------
@@ -374,12 +480,31 @@ class InProcessToolHost:
     """A dict-backed :class:`~loomflow.core.protocols.ToolHost`."""
 
     def __init__(self, tools: list[Tool | Callable[..., Any]] | None = None) -> None:
-        coerced = [_coerce_tool(t) for t in (tools or [])]
-        self._tools: dict[str, Tool] = {t.name: t for t in coerced}
+        self._tools: dict[str, Tool] = {}
+        for item in tools or []:
+            self._add(_coerce_tool(item), replace=False)
 
-    def register(self, item: Tool | Callable[..., Any]) -> Tool:
-        t = _coerce_tool(item)
+    def _add(self, t: Tool, *, replace: bool) -> None:
+        existing = self._tools.get(t.name)
+        if existing is not None and existing is not t and not replace:
+            # The model addresses tools by name: a second tool under
+            # the same name would silently replace the first.
+            raise ConfigError(
+                f"duplicate tool name {t.name!r}: another tool is already "
+                f"registered under this name and would be silently "
+                f"replaced. Rename one (@tool(name=...)), or call "
+                f"register(..., replace=True) to replace it on purpose."
+            )
         self._tools[t.name] = t
+
+    def register(
+        self, item: Tool | Callable[..., Any], *, replace: bool = False
+    ) -> Tool:
+        """Add a tool. A name already taken by a different tool raises
+        :class:`~loomflow.core.errors.ConfigError` unless
+        ``replace=True``."""
+        t = _coerce_tool(item)
+        self._add(t, replace=replace)
         return t
 
     def unregister(self, name: str) -> bool:
@@ -409,7 +534,7 @@ class InProcessToolHost:
         try:
             output = await registered.execute(args)
         except Exception as exc:  # noqa: BLE001 — surface failure as ToolResult
-            return ToolResult.error_(call_id=call_id, message=str(exc))
+            return ToolResult.from_exception(call_id, exc)
         return ToolResult.success(call_id=call_id, output=output)
 
     async def watch(self) -> AsyncIterator[ToolEvent]:

@@ -47,7 +47,16 @@ from ..architecture import (
     Dependencies,
     resolve_architecture,
 )
-from ..architecture.helpers import bind_role_model_secrets
+from ..architecture.base import partial_usage_sink_var
+from ..architecture.helpers import (
+    add_usage,
+    bind_role_model_secrets,
+    budget_gate,
+    charge_budget,
+    consume_usage,
+    text_only_model_call,
+)
+from ..architecture.helpers import audit as _append_audit
 from ..architecture.tool_host_wrappers import ExtendedToolHost
 from ..core.context import RunContext, get_run_context, set_run_context
 from ..core.errors import OutputValidationError, RunTimeout
@@ -64,6 +73,7 @@ from ..core.protocols import (
 )
 from ..core.streaming import stream_from
 from ..core.types import (
+    TRUNCATED_FINISH_REASONS,
     Episode,
     Event,
     Message,
@@ -173,6 +183,20 @@ class Tuning:
     process but are lost on exit; use ``SqliteRuntime`` /
     ``PostgresRuntime`` for crash durability. Checkpoint-write
     failures are logged as warnings and never kill the run."""
+    tool_timeout: float | None = 120.0
+    """Wall-clock cap, in seconds, on one tool call. A call that
+    exceeds it comes back to the model as a tool error (the run goes
+    on). ``None`` removes the cap. A single tool overrides it with
+    ``@tool(timeout=...)``. Note a timed-out *synchronous* tool cannot
+    be stopped — it keeps running in its thread, and the error tells
+    the model so. Sub-agent delegation (a Supervisor's ``delegate``)
+    is not subject to this cap; see ``Supervisor(delegate_timeout=)``."""
+    parallel_tool_calls: bool = True
+    """Whether the tool calls a model emits in ONE turn may run
+    concurrently (the default). ``False`` runs them one at a time, in
+    the order emitted — for tools that share state or must not race.
+    Calls to tools marked ``destructive`` always run alone and in
+    order, whatever this is set to."""
 
 
 # The fields that moved from flat ``Agent(...)`` kwargs into ``Tuning``.
@@ -295,6 +319,15 @@ class Agent:
         )
         # G4 — opt-in per-pass checkpoint writing (see Tuning.checkpoint).
         self._checkpoint_enabled: bool = tuning.checkpoint
+        # Tool dispatch knobs (see Tuning.tool_timeout /
+        # Tuning.parallel_tool_calls), threaded into Dependencies.
+        if tuning.tool_timeout is not None and not tuning.tool_timeout > 0:
+            raise ValueError(
+                "Tuning.tool_timeout must be > 0 seconds or None, "
+                f"not {tuning.tool_timeout!r}"
+            )
+        self._tool_timeout: float | None = tuning.tool_timeout
+        self._parallel_tool_calls: bool = tuning.parallel_tool_calls
 
         # Skills — packaged on-disk playbooks loaded on demand.
         # Build the registry first so frontmatter validation fires
@@ -1108,27 +1141,18 @@ class Agent:
     ) -> None:
         if self._audit_log is None:
             return
-        # Forward user_id as a top-level field. Older AuditLog
-        # impls without the kwarg fall back via the
-        # ``except TypeError`` so the agent never breaks on a
-        # legacy custom log.
-        try:
-            await self._audit_log.append(
-                session_id=session_id,
-                actor=actor,
-                action=action,
-                payload=payload,
-                user_id=user_id,
-            )
-        except TypeError:
-            from ..core._deprecation import warn_legacy_protocol
-            warn_legacy_protocol("AuditLog", "append")
-            await self._audit_log.append(
-                session_id=session_id,
-                actor=actor,
-                action=action,
-                payload=payload,
-            )
+        # Forward user_id as a top-level field. Older AuditLog impls
+        # without the kwarg are told apart by signature (the shared
+        # helper), never by catching ``TypeError`` — that appended the
+        # entry twice when the error came from inside ``append``.
+        await _append_audit(
+            self._audit_log,
+            session_id,
+            actor,
+            action,
+            payload,
+            user_id=user_id,
+        )
 
     def _resolve_run_memory(self) -> Memory:
         """Pick the :class:`Memory` to use for the current run.
@@ -1250,6 +1274,7 @@ class Agent:
         schema: Any,
         retries: int,
         deps: Dependencies,
+        emit: Emit | None = None,
     ) -> BaseModel:
         """Validate ``session.output`` against ``schema``; on failure,
         give the model up to ``retries`` follow-up turns to fix it.
@@ -1268,11 +1293,17 @@ class Agent:
         sees what went wrong, regenerates, and we update
         ``session.output`` + ``cumulative_usage`` accordingly.
 
-        Raises :class:`OutputValidationError` when the retry budget
-        is exhausted.
-        """
-        from ..architecture.helpers import add_usage
+        A retry is a model call like any other: it passes the same
+        gate (rate limiter + budget) first, its usage is charged to
+        the budget, and it carries the run's ``output_schema`` /
+        prompt-caching config. A blocked budget ends the retries.
 
+        Raises :class:`OutputValidationError` when the retry budget
+        is exhausted (or the budget ran out before the output
+        validated).
+        """
+        if emit is None:
+            emit = _noop_emit
         types = _extract_schema_types(schema)
         if not types:
             raise OutputValidationError(
@@ -1284,6 +1315,8 @@ class Agent:
             )
 
         last_error: ValidationError | None = None
+        retries_made = 0
+        budget_stop: str | None = None
         for attempt in range(retries + 1):
             text = _strip_json_fences(session.output)
             parsed, last_error = _try_validate_union(text, types)
@@ -1310,60 +1343,51 @@ class Agent:
                 "prose, no markdown fences, no explanation:\n"
                 f"{schema_json}"
             )
+            # Same gate as every other model call: rate limiter, then
+            # budget. A budget that is already spent ends the retries
+            # here — without it a run capped at N tokens could spend
+            # N x (retries + 1).
+            blocked, gate_events = await budget_gate(deps, session)
+            for gate_event in gate_events:
+                await emit(gate_event)
+            if blocked:
+                budget_stop = session.interruption_reason or "budget"
+                break
+
             session.messages.append(
                 Message(role=Role.USER, content=retry_prompt)
             )
 
-            # Single-shot model call. Use ``complete`` when
-            # available (no streaming overhead); fall back to
-            # consuming ``stream`` otherwise.
-            retry_started = _studio.now()
-            if hasattr(deps.model, "complete"):
-                new_text, _calls, usage, _finish = (
-                    await deps.model.complete(
-                        session.messages,
-                        tools=None,
-                        effort=deps.effort,
-                        strict_effort=deps.strict_effort,
-                    )
-                )
-            else:
-                parts: list[str] = []
-                usage = Usage()
-                async for chunk in deps.model.stream(
-                    session.messages,
-                    tools=None,
-                    effort=deps.effort,
-                    strict_effort=deps.strict_effort,
-                ):
-                    if chunk.kind == "text" and chunk.text:
-                        parts.append(chunk.text)
-                    elif (
-                        chunk.kind == "finish"
-                        and chunk.usage is not None
-                    ):
-                        usage = chunk.usage
-                new_text = "".join(parts)
-            _studio.model_call(
-                None,
-                model=getattr(deps.model, "name", None),
-                messages=session.messages,
-                text=new_text,
-                usage=usage,
-                started_at=retry_started,
+            # Single-shot model call through the shared helper: uses
+            # ``complete`` when available (falls back to ``stream``),
+            # journals the step on a durable runtime, and forwards
+            # ``output_schema`` + prompt caching like the main loop.
+            new_text, usage = await text_only_model_call(
+                deps,
+                f"output_validation_retry_{session.turns + 1}",
+                session.messages,
+                output_schema=deps.output_schema,
             )
 
             session.messages.append(
                 Message(role=Role.ASSISTANT, content=new_text)
             )
             session.output = new_text
-            session.cumulative_usage = add_usage(
-                session.cumulative_usage, usage
-            )
-            session.turns += 1
+            # Budget + cumulative usage + turn count, in one place.
+            await consume_usage(deps, session, usage)
+            retries_made += 1
 
         assert last_error is not None  # we only break above on a failure
         type_names = " | ".join(t.__name__ for t in types)
+        if budget_stop is not None:
+            raise OutputValidationError(
+                f"Model output did not validate against {type_names}, "
+                f"and the budget ran out ({budget_stop}) after "
+                f"{retries_made} of {retries} retry attempt(s).",
+                raw=session.output,
+                schema=schema,
+                cause=last_error,
+            ) from last_error
         raise OutputValidationError(
             f"Model output did not validate against {type_names} "
             f"after {retries} retry attempt(s).",
@@ -2093,6 +2117,10 @@ class Agent:
         the compactor NEVER kills a turn — but are surfaced as an
         ``auto_compact.failed`` event so a silently-disabled
         compaction is observable.
+
+        The summariser's own tokens / cost are counted: added to
+        ``session.cumulative_usage`` (so ``RunResult`` shows them) and
+        charged to the agent's budget.
         """
         if (
             self._auto_compact_at_tokens is None
@@ -2118,13 +2146,23 @@ class Agent:
             )
         if current <= self._auto_compact_at_tokens:
             return None
+        summariser_usage: list[Usage] = []
         new_msgs, summary = await maybe_auto_compact(
             session.messages,
             summariser=self._compact_summariser or self._auto_compact_summariser,
             at_tokens=self._auto_compact_at_tokens,
             current_token_count=current,
             keep_recent_turns=self._auto_compact_keep_recent_turns,
+            on_usage=summariser_usage.append,
         )
+        for spent in summariser_usage:
+            session.cumulative_usage = add_usage(
+                session.cumulative_usage, spent
+            )
+            if not isinstance(self._budget, NoBudget):
+                await charge_budget(
+                    self._budget, spent, user_id=get_run_context().user_id
+                )
         if new_msgs is None:
             return None
         dropped = len(session.messages) - len(new_msgs)
@@ -2183,7 +2221,7 @@ class Agent:
 
         ``timeout=None`` (the default) is a zero-overhead passthrough.
         On expiry the whole run — pending model calls, parallel tool
-        dispatch, sub-agents — is cancelled via the ``fail_after``
+        dispatch, sub-agents — is cancelled via the deadline's cancel
         scope and :class:`~loomflow.RunTimeout` is raised.
         """
         from ..model._effort import validate_effort
@@ -2204,11 +2242,16 @@ class Agent:
         async with _studio.agent_run():
             if self._timeout is None:
                 return await self._loop(prompt, **kwargs)
-            try:
-                with anyio.fail_after(self._timeout):
-                    return await self._loop(prompt, **kwargs)
-            except TimeoutError as exc:
-                raise RunTimeout(self._timeout) from exc
+            # ``move_on_after`` + ``cancelled_caught`` rather than
+            # ``fail_after`` + ``except TimeoutError``: only THIS
+            # deadline expiring is a RunTimeout. A ``TimeoutError``
+            # raised inside the run (a socket read, a model adapter)
+            # propagates as itself instead of being relabelled.
+            with anyio.move_on_after(self._timeout) as deadline:
+                return await self._loop(prompt, **kwargs)
+            if deadline.cancelled_caught:
+                raise RunTimeout(self._timeout)
+            raise AssertionError("unreachable: _loop returns or raises")
 
     async def _loop(
         self,
@@ -2410,11 +2453,35 @@ class Agent:
         # run fails. Entered FIRST in the ``async with`` tuple below
         # so its teardown runs even when a later context manager
         # fails to enter.
+        # When this run is a sub-agent (a parent installed a sink —
+        # see ``partial_usage_sink_var``) and it does NOT finish
+        # normally, hand the parent what it spent: without a
+        # ``completed`` event that spend would otherwise vanish from
+        # the parent's usage / cost. Our own sub-agents get their own
+        # sinks, so clear the var for the duration of this run.
+        report_partial_usage = partial_usage_sink_var.get()
+        sink_token = partial_usage_sink_var.set(None)
+        run_state: dict[str, Any] = {"finished": False}
+
         @contextlib.asynccontextmanager
         async def _ambient_reset_guard() -> AsyncIterator[None]:
             try:
                 yield
             finally:
+                partial_usage_sink_var.reset(sink_token)
+                live_session: AgentSession | None = run_state.get("session")
+                if (
+                    report_partial_usage is not None
+                    and not run_state["finished"]
+                    and live_session is not None
+                ):
+                    # Synchronous: we may be unwinding a cancellation.
+                    report_partial_usage(
+                        _usage_since(
+                            live_session.cumulative_usage,
+                            run_state.get("usage_base", Usage()),
+                        )
+                    )
                 # Reverse of the set order above.
                 if plan_token is not None:
                     _ambient_living_plan_var.reset(plan_token)
@@ -2581,6 +2648,13 @@ class Agent:
                 session.messages = list(restore.messages)
                 session.turns = restore.turn
                 session.cumulative_usage = restore.cumulative_usage
+                # ``max_turns`` is an allowance per call: the restored
+                # turns don't count against this resume. (A run that
+                # stopped on ``max_turns_exceeded`` would otherwise
+                # resume straight into the same stop.)
+                session.turns_at_start = restore.turn
+                run_state["usage_base"] = restore.cumulative_usage
+            run_state["session"] = session
             # Per-run tool injection: if extra_tools provided, wrap
             # the agent's host so the model sees them alongside the
             # statically-configured tools. The wrap is local to this
@@ -2726,6 +2800,8 @@ class Agent:
                     and self._auto_compact_summariser is not None
                     else None
                 ),
+                tool_timeout_s=self._tool_timeout,
+                parallel_tool_calls=self._parallel_tool_calls,
                 goal_decider=self._goal_decider,
                 tool_result_summary_threshold=(
                     self._tool_result_summary_threshold
@@ -2905,6 +2981,7 @@ class Agent:
                     schema=output_schema,
                     retries=output_validation_retries,
                     deps=deps,
+                    emit=emit,
                 )
 
             # Tool-transcript: when opted in, capture the
@@ -2926,7 +3003,13 @@ class Agent:
                 output=session.output,
                 tool_transcript=transcript,
             )
-            if fast_runtime:
+            # A run cut short with nothing to show (``max_turns`` hit
+            # mid tool loop, a blocked budget) is not persisted: an
+            # episode with an empty output rehydrates as a user turn
+            # with no reply, which poisons the next run's history.
+            if session.interrupted and not session.output.strip() and not transcript:
+                pass
+            elif fast_runtime:
                 await effective_memory.remember(episode)
             else:
                 await self._runtime.step(
@@ -2962,9 +3045,24 @@ class Agent:
                 finished_at=datetime.now(UTC),
                 interrupted=session.interrupted,
                 interruption_reason=session.interruption_reason,
+                finish_reason=session.finish_reason,
                 run_id=run_id,
                 cited_slugs=cited_slugs,
             )
+            if result.truncated or result.content_filtered:
+                # Not silently a complete answer: the caller has
+                # ``result.truncated`` / ``result.content_filtered``,
+                # the operator gets a log line.
+                _LOG.warning(
+                    "run %s (session %s): the model's last reply was %s "
+                    "(finish_reason=%s); RunResult.output is incomplete",
+                    run_id,
+                    session_id,
+                    "cut off by its output token limit"
+                    if session.finish_reason in TRUNCATED_FINISH_REASONS
+                    else "stopped by the provider's content filter",
+                    session.finish_reason,
+                )
 
             elapsed_ms = (anyio.current_time() - loop_started) * 1000
             if not fast_telemetry:
@@ -3017,6 +3115,9 @@ class Agent:
                     action="run_completed",
                     payload=completion_payload,
                 )
+            # From here the parent (if any) learns our usage from the
+            # ``completed`` event, not the partial-usage sink.
+            run_state["finished"] = True
             await emit(Event.completed(session_id, result.model_dump(mode="json")))
             return result
 
@@ -3024,6 +3125,22 @@ class Agent:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _usage_since(total: Usage, base: Usage) -> Usage:
+    """``total`` minus ``base`` — what a resumed run spent itself,
+    without the usage it restored from its checkpoint."""
+    return Usage(
+        input_tokens=max(0, total.input_tokens - base.input_tokens),
+        cached_input_tokens=max(
+            0, total.cached_input_tokens - base.cached_input_tokens
+        ),
+        cache_write_tokens=max(
+            0, total.cache_write_tokens - base.cache_write_tokens
+        ),
+        output_tokens=max(0, total.output_tokens - base.output_tokens),
+        cost_usd=max(0.0, total.cost_usd - base.cost_usd),
+    )
 
 
 def _this_run_messages(messages: list[Message], prompt: str) -> list[Message]:

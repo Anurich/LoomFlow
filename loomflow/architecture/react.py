@@ -6,8 +6,10 @@ Each turn:
 2. Call the model with current messages + available tools.
 3. Stream tokens, accumulate text + tool calls + usage.
 4. If no tool calls, the model is done; break.
-5. Otherwise, dispatch all tool calls in parallel through hooks
-   → permissions → tool host. Append results to messages.
+5. Otherwise, dispatch the tool calls through hooks → permissions
+   → tool host — in parallel, except that calls to ``destructive``
+   tools run alone, in the order emitted (and everything does when
+   ``Tuning(parallel_tool_calls=False)``). Append results to messages.
 6. If one of them was an ``ends_turn`` tool that succeeded (a
    Swarm handoff), stop; otherwise loop.
 
@@ -21,7 +23,7 @@ from __future__ import annotations
 import contextlib
 from collections.abc import AsyncIterator
 from itertools import zip_longest
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import anyio
 
@@ -32,6 +34,7 @@ from ..core.types import (
     Message,
     Role,
     ToolCall,
+    ToolDef,
     ToolResult,
     Usage,
 )
@@ -45,13 +48,19 @@ from ..studio import _hooks as _studio
 from .base import AgentSession, Dependencies
 from .helpers import (
     _NULL_CTX,
+    UsageTap,
+    accepts_kwarg,
     budget_gate,
     consume_usage,
+    raise_from_task_group,
+    render_tool_output,
     run_gated_tool,
+    truncation_note,
 )
 
 if TYPE_CHECKING:
     from ..agent.api import Agent
+    from ..core.protocols import Model
 
 
 class ReAct:
@@ -126,11 +135,24 @@ class ReAct:
             else deps.max_turns
         )
 
+        # The last non-empty text the model produced in this pass —
+        # what a ``max_turns`` exit hands back (see below).
+        last_text = ""
+
         # 2. The ReAct loop.
         while True:
-            if session.turns >= max_turns:
+            # ``max_turns`` is an allowance per ``run`` / ``resume``
+            # call: a run restored from a checkpoint carries its earlier
+            # turns in ``session.turns`` (``turns_at_start``) and must
+            # not start out already over the cap.
+            if session.turns - session.turns_at_start >= max_turns:
                 session.interrupted = True
                 session.interruption_reason = "max_turns_exceeded"
+                # The turn that hit the cap ended on tool calls, usually
+                # with no text at all. Hand back the last thing the
+                # model did say rather than an empty answer.
+                if not session.output.strip() and last_text:
+                    session.output = last_text
                 break
 
             # Budget gate — shared helper (user_id forwarding +
@@ -214,6 +236,9 @@ class ReAct:
                 tool_defs = await deps.tools.list_tools()
                 # Read before tool-search stubbing, which rebuilds defs.
                 ends_turn_tools = {d.name for d in tool_defs if d.ends_turn}
+                # The REAL defs by name, for dispatch: per-tool timeout
+                # and whether a timeout can stop the tool.
+                defs_by_name = {d.name: d for d in tool_defs}
                 # G1 — tool search / deferred tool loading. When
                 # enabled AND the full def block is heavier than the
                 # threshold, ship stubs (name + one-liner +
@@ -251,6 +276,7 @@ class ReAct:
                 }
                 tool_calls: list[ToolCall] = []
                 usage = Usage()
+                finish_reason: str | None = None
                 model_started = anyio.current_time()
 
                 if not deps.streaming and hasattr(deps.model, "complete"):
@@ -386,6 +412,7 @@ class ReAct:
                                 ),
                             )
                     text = "".join(text_parts)
+                    finish_reason = stream_finish_reason
                     _studio.model_call(
                         stream_span,
                         model=deps.model.name,
@@ -425,6 +452,28 @@ class ReAct:
                     ):
                         await deps.telemetry.emit_metric(name, value, **attrs)
                 session.output = text
+                if text.strip():
+                    last_text = text
+                # Why the model stopped (``length`` / ``max_tokens`` =
+                # cut off, ``content_filter`` = withheld): surfaced on
+                # the RunResult so a truncated reply isn't mistaken for
+                # a complete answer.
+                session.finish_reason = finish_reason
+
+                # A tool call whose arguments were unusable is not run
+                # (see ``run_single_tool``). When the reply was cut off
+                # by the token limit, say so in the error the model
+                # gets — "invalid JSON" alone invites the same call.
+                cut_off = truncation_note(finish_reason)
+                if cut_off is not None:
+                    tool_calls = [
+                        c.model_copy(
+                            update={"args_error": f"{c.args_error}; {cut_off}"}
+                        )
+                        if c.args_error is not None
+                        else c
+                        for c in tool_calls
+                    ]
 
                 session.messages.append(
                     Message(
@@ -448,7 +497,13 @@ class ReAct:
                         "_tool_search_hydrated", set()
                     ).update(c.tool for c in tool_calls)
 
-                # 2d. Dispatch tool calls in parallel.
+                # 2d. Dispatch tool calls — in parallel where that is
+                # safe. ``_dispatch_batches`` splits the turn's calls
+                # into batches run one after another: each call to a
+                # destructive tool is a batch of its own (so writes
+                # land in the order the model emitted them, and a read
+                # emitted after a write sees it), the non-destructive
+                # calls between them run concurrently.
                 #
                 # Two paths picked from ``deps.streaming``:
                 #
@@ -466,29 +521,51 @@ class ReAct:
                 #   semantics so a consumer that breaks out of the
                 #   stream cancels long-running tools promptly.
                 results: list[ToolResult | None] = [None] * len(tool_calls)
+                batches = _dispatch_batches(deps, tool_calls, destructive_map)
 
                 if deps.streaming:
                     async for ev in _dispatch_streaming(
                         deps, session, tool_calls, results,
-                        destructive_map,
+                        destructive_map, defs_by_name, batches,
                     ):
                         yield ev
                 else:
                     events_per_call: list[list[Event]] = [
                         [] for _ in tool_calls
                     ]
-                    async with anyio.create_task_group() as tg:
-                        for i, call in enumerate(tool_calls):
-                            tg.start_soon(
-                                _run_one_tool,
+                    for batch in batches:
+                        if len(batch) == 1:
+                            slot = batch[0]
+                            await _run_one_tool(
                                 deps,
                                 session,
-                                call,
-                                i,
+                                tool_calls[slot],
+                                slot,
                                 results,
-                                events_per_call[i],
+                                events_per_call[slot],
                                 destructive_map,
+                                defs_by_name,
                             )
+                            continue
+                        try:
+                            async with anyio.create_task_group() as tg:
+                                for slot in batch:
+                                    tg.start_soon(
+                                        _run_one_tool,
+                                        deps,
+                                        session,
+                                        tool_calls[slot],
+                                        slot,
+                                        results,
+                                        events_per_call[slot],
+                                        destructive_map,
+                                        defs_by_name,
+                                    )
+                        except BaseExceptionGroup as group:
+                            # A failed dispatch (a raising hook,
+                            # permission backend, audit log) is raised
+                            # as itself, not wrapped in a group.
+                            raise_from_task_group(group)
                     for event_list in events_per_call:
                         for ev in event_list:
                             yield ev
@@ -523,14 +600,25 @@ class ReAct:
                             summarize_tool_result,
                         )
                         original_len = len(msg_content)
+                        # The summariser is a model call like any
+                        # other: its tokens / cost count towards the
+                        # run's usage and the budget.
+                        summary_tap = UsageTap(deps.tool_result_summarizer)
                         msg_content = await summarize_tool_result(
                             msg_content,
                             tool_name=c.tool,
-                            summarizer=deps.tool_result_summarizer,
+                            summarizer=cast("Model", summary_tap),
                             threshold=(
                                 deps.tool_result_summary_threshold
                             ),
                         )
+                        if summary_tap.spent:
+                            await consume_usage(
+                                deps,
+                                session,
+                                summary_tap.usage,
+                                count_turn=False,
+                            )
                         if len(msg_content) != original_len:
                             yield Event.architecture_event(
                                 session.id,
@@ -641,23 +729,24 @@ async def _build_seed_messages(
     # user_id so alice's pinned context never bleeds into bob's
     # seed prompt. Fall back gracefully for legacy custom Memory
     # implementations whose ``working()`` predates the kwarg.
-    try:
+    if accepts_kwarg(deps.memory.working, "user_id"):
         blocks = await deps.memory.working(user_id=user_id)
-    except TypeError:
+    else:
         blocks = await deps.memory.working()
     if blocks:
         block_text = "\n\n".join(b.format() for b in blocks)
         messages.append(Message(role=Role.SYSTEM, content=block_text))
 
+    # 0.1.x backends without recall_facts, or older signatures missing
+    # ``user_id`` (told apart by signature): no facts. ``AttributeError``
+    # covers a wrapper whose inner backend lacks the method.
     facts: list[Any] = []
-    try:
-        facts = await deps.memory.recall_facts(
-            prompt, limit=5, user_id=user_id
-        )
-    except (AttributeError, TypeError):
-        # 0.1.x backends without recall_facts, or older signatures
-        # missing ``user_id``: silent fallback.
-        facts = []
+    recall_facts = getattr(deps.memory, "recall_facts", None)
+    if recall_facts is not None and accepts_kwarg(recall_facts, "user_id"):
+        try:
+            facts = await recall_facts(prompt, limit=5, user_id=user_id)
+        except AttributeError:
+            facts = []
 
     # G7 — when a memory token budget is set we prefer SCORED recall
     # so the budgeter can rank by true retrieval relevance; backends
@@ -672,28 +761,25 @@ async def _build_seed_messages(
     # ranked first.
     episode_limit = 3
     fetch = episode_limit * 4 if session_id is not None else episode_limit
+    episodes: list[Any] | None = None
     if deps.memory_token_budget is not None:
-        try:
-            matches = await deps.memory.recall_scored(
-                prompt, kind="episodic", limit=fetch, user_id=user_id
-            )
-            episodes = [m.episode for m in matches]
-            episode_scores = {m.episode.id: m.score for m in matches}
-        except (AttributeError, TypeError):
+        recall_scored = getattr(deps.memory, "recall_scored", None)
+        if recall_scored is not None and accepts_kwarg(recall_scored, "user_id"):
             try:
-                episodes = await deps.memory.recall(
+                matches = await recall_scored(
                     prompt, kind="episodic", limit=fetch, user_id=user_id
                 )
-            except TypeError:
-                episodes = await deps.memory.recall(
-                    prompt, kind="episodic", limit=fetch
-                )
-    else:
-        try:
+            except AttributeError:
+                pass  # a wrapper whose inner backend has no scored recall
+            else:
+                episodes = [m.episode for m in matches]
+                episode_scores = {m.episode.id: m.score for m in matches}
+    if episodes is None:
+        if accepts_kwarg(deps.memory.recall, "user_id"):
             episodes = await deps.memory.recall(
                 prompt, kind="episodic", limit=fetch, user_id=user_id
             )
-        except TypeError:
+        else:
             # Backends that haven't picked up the user_id kwarg yet.
             episodes = await deps.memory.recall(
                 prompt, kind="episodic", limit=fetch
@@ -778,12 +864,19 @@ async def _build_seed_messages(
     # recall. Backends without persisted message logs return [] —
     # in which case we fall through to the current-prompt-only path.
     if session_id is not None:
-        try:
-            history = await deps.memory.session_messages(
-                session_id, user_id=user_id, limit=20
-            )
-        except (AttributeError, TypeError):
-            history = []
+        history: list[Message] = []
+        session_messages = getattr(deps.memory, "session_messages", None)
+        if (
+            session_messages is not None
+            and accepts_kwarg(session_messages, "user_id")
+            and accepts_kwarg(session_messages, "limit")
+        ):
+            try:
+                history = await session_messages(
+                    session_id, user_id=user_id, limit=20
+                )
+            except AttributeError:
+                history = []
         messages.extend(history)
 
     # Vision: attach any images passed for this run (carried on the run
@@ -814,12 +907,49 @@ async def _build_seed_messages(
     return messages
 
 
+def _dispatch_batches(
+    deps: Dependencies,
+    tool_calls: list[ToolCall],
+    destructive_map: dict[str, bool],
+) -> list[list[int]]:
+    """Split a turn's tool calls into batches (lists of call indices)
+    that run one after another; the calls inside a batch run
+    concurrently.
+
+    A call to a destructive tool is always a batch of its own, so
+    destructive calls execute in the order the model emitted them and
+    never race anything else. Consecutive non-destructive calls share
+    a batch. With ``deps.parallel_tool_calls`` off, every call is its
+    own batch — the whole turn runs sequentially in emitted order.
+    """
+    batches: list[list[int]] = []
+    current: list[int] = []
+    for i, call in enumerate(tool_calls):
+        alone = (
+            not deps.parallel_tool_calls
+            or call.destructive
+            or destructive_map.get(call.tool, False)
+        )
+        if not alone:
+            current.append(i)
+            continue
+        if current:
+            batches.append(current)
+            current = []
+        batches.append([i])
+    if current:
+        batches.append(current)
+    return batches
+
+
 async def _dispatch_streaming(
     deps: Dependencies,
     session: AgentSession,
     tool_calls: list[ToolCall],
     results: list[ToolResult | None],
     destructive_map: dict[str, bool] | None = None,
+    tool_defs: dict[str, ToolDef] | None = None,
+    batches: list[list[int]] | None = None,
 ) -> AsyncIterator[Event]:
     """Streaming path for tool dispatch — events flow as they happen.
 
@@ -827,12 +957,17 @@ async def _dispatch_streaming(
     (via the channel) and its tool_result event AFTER, so a stream
     consumer can break the iterator on a tool_call event and the
     surrounding task group cancels the in-flight worker promptly.
+
+    ``batches`` (see :func:`_dispatch_batches`) run one after another;
+    ``None`` means one batch with every call.
     """
     from anyio.streams.memory import MemoryObjectSendStream
 
     send, receive = anyio.create_memory_object_stream[Event](
         max_buffer_size=len(tool_calls) * 4
     )
+    if batches is None:
+        batches = [list(range(len(tool_calls)))]
 
     async def _stream_one(
         slot: int,
@@ -847,15 +982,28 @@ async def _dispatch_streaming(
                 call,
                 slot=slot,
                 destructive_map=destructive_map,
+                tool_defs=tool_defs,
             )
             results[slot] = result
             await sender.send(Event.tool_result(session.id, result))
 
     async def _dispatch_all() -> None:
         async with send:
-            async with anyio.create_task_group() as tg:
-                for i, call in enumerate(tool_calls):
-                    tg.start_soon(_stream_one, i, call, send.clone())
+            for batch in batches:
+                if len(batch) == 1:
+                    slot = batch[0]
+                    await _stream_one(slot, tool_calls[slot], send.clone())
+                    continue
+                try:
+                    async with anyio.create_task_group() as tg:
+                        for slot in batch:
+                            tg.start_soon(
+                                _stream_one, slot, tool_calls[slot], send.clone()
+                            )
+                except BaseExceptionGroup as group:
+                    # As in the buffered path: a failure is raised as
+                    # itself, not wrapped in a group.
+                    raise_from_task_group(group)
 
     # The workers' task group lives in its own task (core/streaming.py),
     # so no cancel scope is held across ``yield``.
@@ -872,6 +1020,7 @@ async def _run_one_tool(
     results: list[ToolResult | None],
     event_buffer: list[Event],
     destructive_map: dict[str, bool] | None = None,
+    tool_defs: dict[str, ToolDef] | None = None,
 ) -> None:
     """Per-call worker: append tool_call event, run the tool through
     the shared gated executor (audit → hooks → permissions →
@@ -886,6 +1035,7 @@ async def _run_one_tool(
         call,
         slot=slot,
         destructive_map=destructive_map,
+        tool_defs=tool_defs,
     )
     results[slot] = result
     event_buffer.append(Event.tool_result(session.id, result))
@@ -893,7 +1043,8 @@ async def _run_one_tool(
 
 def _format_tool_message(result: ToolResult) -> str:
     if result.ok:
-        return str(result.output)
+        # dict / list / Pydantic results go out as JSON, not a repr.
+        return render_tool_output(result.output)
     if result.denied:
         return f"DENIED: {result.reason or 'no reason given'}"
     return f"ERROR: {result.error or 'unknown'}"
