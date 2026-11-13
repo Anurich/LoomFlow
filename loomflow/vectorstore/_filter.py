@@ -32,6 +32,30 @@ For ergonomics, three shapes are accepted as shorthand for ``$eq`` /
 * ``{"key": {"$gte": 5}}``        → operator form, used as-is
 * ``{"$and": [{"a": 1}, {"b": 2}]}`` → composition
 
+# Value semantics (the cross-backend contract)
+
+The same rules hold in every backend (InMemory / FAISS evaluate this
+module directly; Postgres and Chroma translate to it):
+
+* **Types are strict.** A number never equals a numeric string
+  (``{"year": 2020}`` does not match ``"2020"``), and a bool never
+  equals a number (``{"flag": 1}`` does not match ``True``). ``1`` and
+  ``1.0`` are the same number.
+* **None means "no value".** ``{"k": None}`` (and ``$eq`` /
+  ``$in: [None]``) matches chunks where ``k`` is missing *or*
+  ``None``; ``{"k": {"$ne": None}}`` matches chunks that have a
+  value. Use ``$exists`` to ask about the key itself.
+* **Lists match by element.** If the stored value is a list,
+  ``$eq`` / shorthand equality matches when any element equals the
+  operand, and ``$in`` when any element is in the supplied list (so
+  ``{"headers": {"$in": ["Intro"]}}`` finds chunks under that
+  heading). ``{"$eq": [...]}`` compares the whole list.
+* **Ordering** (``$gt`` / ``$gte`` / ``$lt`` / ``$lte``) compares a
+  number with a number, or a string with a string (by code point);
+  any other pairing — including a missing key, ``None``, bools and
+  lists — simply doesn't match.
+* A missing key is "not equal" for ``$ne`` / ``$nin`` / ``$not``.
+
 # Examples
 
 ::
@@ -115,7 +139,7 @@ def _eval_field(
     """Evaluate one field-level constraint.
 
     ``present`` is needed to distinguish "key absent" from "key
-    explicitly None" so that ``$exists`` and ``$ne`` work correctly.
+    explicitly None" so that ``$exists`` works correctly.
     """
     # Operator form: dict whose keys all start with "$".
     if isinstance(condition, Mapping) and condition and all(
@@ -128,62 +152,83 @@ def _eval_field(
 
     # Shorthand: list → $in
     if isinstance(condition, list | tuple):
-        return present and actual in condition
+        return _in(actual, condition)
 
     # Shorthand: scalar → $eq
-    return present and actual == condition
+    return values_equal(actual, condition)
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, int | float) and not isinstance(value, bool)
+
+
+def _scalar_equal(actual: Any, expected: Any) -> bool:
+    """Type-strict equality: bools only equal bools, numbers only
+    numbers (``1 == 1.0``), strings only strings."""
+    if isinstance(actual, bool) or isinstance(expected, bool):
+        return (
+            isinstance(actual, bool)
+            and isinstance(expected, bool)
+            and actual == expected
+        )
+    if _is_number(actual) != _is_number(expected):
+        return False
+    return bool(actual == expected)
+
+
+def values_equal(actual: Any, expected: Any) -> bool:
+    """``$eq`` under the shared contract (see the module docstring):
+    ``None`` matches a missing / ``None`` value, a stored list matches
+    by element, everything else is type-strict."""
+    if expected is None:
+        return actual is None
+    if actual is None:
+        return False
+    if isinstance(actual, list | tuple) and not isinstance(expected, list | tuple):
+        return any(_scalar_equal(item, expected) for item in actual)
+    if isinstance(actual, list | tuple):
+        return list(actual) == list(expected)
+    return _scalar_equal(actual, expected)
+
+
+def _in(actual: Any, expected: Any) -> bool:
+    return any(values_equal(actual, item) for item in expected)
+
+
+def _ordered(actual: Any, expected: Any, fn: Any) -> bool:
+    """Ordering comparison: number vs number or string vs string;
+    any other pairing doesn't match (never raises)."""
+    if _is_number(actual) and _is_number(expected):
+        return bool(fn(actual, expected))
+    if isinstance(actual, str) and isinstance(expected, str):
+        return bool(fn(actual, expected))
+    return False
 
 
 def _apply_op(
     op: str, actual: Any, expected: Any, present: bool
 ) -> bool:
     if op == "$eq":
-        return present and actual == expected
+        return values_equal(actual, expected)
     if op == "$ne":
-        # NB: missing key is "not equal to anything", so it matches $ne.
-        return not present or actual != expected
+        # NB: missing key is "not equal to anything" (but None).
+        return not values_equal(actual, expected)
     if op == "$gt":
-        return (
-            present
-            and actual is not None
-            and _safe_cmp(actual, expected, lambda a, b: a > b)
-        )
+        return _ordered(actual, expected, lambda a, b: a > b)
     if op == "$gte":
-        return (
-            present
-            and actual is not None
-            and _safe_cmp(actual, expected, lambda a, b: a >= b)
-        )
+        return _ordered(actual, expected, lambda a, b: a >= b)
     if op == "$lt":
-        return (
-            present
-            and actual is not None
-            and _safe_cmp(actual, expected, lambda a, b: a < b)
-        )
+        return _ordered(actual, expected, lambda a, b: a < b)
     if op == "$lte":
-        return (
-            present
-            and actual is not None
-            and _safe_cmp(actual, expected, lambda a, b: a <= b)
-        )
+        return _ordered(actual, expected, lambda a, b: a <= b)
     if op == "$in":
         if not isinstance(expected, list | tuple):
             raise FilterError("$in expects a list")
-        return present and actual in expected
+        return _in(actual, expected)
     if op == "$nin":
         if not isinstance(expected, list | tuple):
             raise FilterError("$nin expects a list")
-        return not present or actual not in expected
+        return not _in(actual, expected)
     if op == "$exists":
         return bool(expected) == present
     raise FilterError(f"Unknown field operator: {op}")
-
-
-def _safe_cmp(a: Any, b: Any, fn: Any) -> bool:
-    """Comparison that returns False (rather than raising) for
-    incomparable types (e.g. str vs int). Lets a heterogeneous
-    metadata corpus filter cleanly without surfacing TypeErrors."""
-    try:
-        return bool(fn(a, b))
-    except TypeError:
-        return False

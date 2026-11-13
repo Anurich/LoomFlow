@@ -40,7 +40,10 @@ def test_numeric_operator_binds_floats() -> None:
 def test_string_operator_stays_textual() -> None:
     sql, params = _build_where_sql({"source": {"$eq": "a.pdf"}}, [])
     assert "::numeric" not in sql
-    assert params == ["a.pdf"]
+    # Equality is JSONB-typed (the string "a.pdf", not the bare text),
+    # so a number never equals a numeric string.
+    assert "::jsonb" in sql
+    assert params == ['"a.pdf"']
 
 
 def test_bool_operand_not_treated_as_numeric() -> None:
@@ -50,16 +53,17 @@ def test_bool_operand_not_treated_as_numeric() -> None:
 
 
 def test_scalar_numeric_shorthand_casts() -> None:
+    # Numeric equality compares JSON numbers (3 == 3.0, 3 != "3").
     sql, params = _build_where_sql({"page": 3}, [])
-    assert "::numeric" in sql
-    assert params == [3]
+    assert "::jsonb" in sql
+    assert params == ["3"]
 
 
 def test_numeric_cast_guarded_against_non_numeric_rows() -> None:
-    # The cast is wrapped in a regex guard so a non-numeric metadata
-    # value can't error the whole query.
+    # The cast only runs for JSON numbers (a CASE on jsonb_typeof), so
+    # a non-numeric metadata value can't error the whole query.
     sql, _ = _build_where_sql({"page": {"$gt": 1}}, [])
-    assert "~" in sql
+    assert "CASE WHEN jsonb_typeof(metadata->'page') = 'number'" in sql
 
 
 # ---------------------------------------------------------------------------

@@ -990,8 +990,8 @@ def test_postgres_filter_translation() -> None:
     from loomflow.vectorstore.postgres import _build_where_sql
 
     sql, params = _build_where_sql({"source": "x.pdf"}, [])
-    assert "metadata->>'source'" in sql
-    assert params == ["x.pdf"]
+    assert "metadata->'source'" in sql
+    assert params == ['"x.pdf"']  # bound as JSONB: type-strict equality
 
 
 def test_postgres_filter_range_translation() -> None:
@@ -1223,8 +1223,8 @@ async def test_postgres_search_hybrid_filter_reaches_both_legs() -> None:
     await store.search_hybrid("q", k=2, filter={"source": "router.md"})
     assert len(log) == 2
     for sql, args in log:
-        assert "metadata->>'source'" in sql
-        assert "router.md" in args
+        assert "metadata->'source'" in sql
+        assert '"router.md"' in args
 
 
 @pytest.mark.anyio

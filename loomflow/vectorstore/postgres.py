@@ -32,6 +32,7 @@ are all supported.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from collections.abc import Mapping
 from typing import Any
@@ -44,16 +45,29 @@ from ..loader.base import Chunk
 from ._bm25 import fuse_weighted
 from ._filter import COMPARISON_OPERATORS, LOGICAL_OPERATORS, FilterError
 from ._mmr import rerank_tail
-from ._pgvector import hnsw_scan
-from ._util import embed_all, resolve_ids
+from ._pgvector import (
+    HNSW_MAX_DIMENSIONS,
+    hnsw_scan,
+    index_name,
+    qualified_name,
+    split_table_name,
+)
+from ._util import (
+    dedupe_last,
+    embed_all,
+    embedder_identity,
+    resolve_ids,
+    validate_k,
+    validate_query_vector,
+)
 from .base import SearchResult, _chunks_from_texts
 
-# Map Mongo-style ops to SQL operators that act on the JSONB extracted
-# value. Note: we always extract via ``->>`` (text) and cast on demand
-# so numeric comparisons work on integers stored as JSON numbers.
+logger = logging.getLogger(__name__)
+
+# Ordering operators → SQL. They act on the JSONB value extracted as
+# text (``->>``), cast to numeric or compared as text depending on the
+# operand's type (see ``_xlate_field``).
 _SQL_BIN_OPS: dict[str, str] = {
-    "$eq": "=",
-    "$ne": "<>",
     "$gt": ">",
     "$gte": ">=",
     "$lt": "<",
@@ -92,9 +106,33 @@ class PostgresVectorStore:
                 "bare Postgres text-search config name like 'english' "
                 "or 'simple')"
             )
+        # The table name is interpolated into every statement, so it is
+        # validated here and only ever emitted quoted.
+        self._schema, self._table_name = split_table_name(table)
+        self._table = qualified_name(self._schema, self._table_name)
+        if dimension is not None and (
+            isinstance(dimension, bool)
+            or not isinstance(dimension, int)
+            or dimension < 1
+        ):
+            raise ValueError(
+                f"dimension must be a positive integer, got {dimension!r}"
+            )
+        _, embedder_dims = embedder_identity(embedder)
+        if (
+            dimension is not None
+            and embedder_dims is not None
+            and dimension != embedder_dims
+        ):
+            raise ValueError(
+                f"dimension={dimension} does not match the embedder "
+                f"({getattr(embedder, 'name', type(embedder).__name__)!r} "
+                f"produces {embedder_dims}-dimensional vectors). Drop "
+                "dimension= to use the embedder's, or pass an embedder "
+                "with that output size."
+            )
         self._embedder = embedder
         self._dsn = dsn
-        self._table = table
         self._dimension = dimension
         self._initialized = False
         self._pool_size = pool_size
@@ -224,7 +262,13 @@ class PostgresVectorStore:
         place: ``ADD COLUMN IF NOT EXISTS content_tsv`` back-fills
         the full-text column (generated, so Postgres computes it for
         existing rows) that :meth:`search_hybrid` ranks on.
+
+        pgvector can only HNSW-index a ``vector`` column of up to
+        2000 dimensions. Above that (e.g. ``text-embedding-3-large``
+        at 3072) the index is skipped with a warning: searches stay
+        correct — an exact scan — but slow on large tables.
         """
+        self._check_dimension(dimension)
         self._dimension = dimension
         tsv_expr = (
             f"tsvector GENERATED ALWAYS AS "
@@ -240,7 +284,7 @@ class PostgresVectorStore:
                     id TEXT PRIMARY KEY,
                     content TEXT NOT NULL,
                     metadata JSONB,
-                    embedding vector({dimension}) NOT NULL,
+                    embedding vector({int(dimension)}) NOT NULL,
                     content_tsv {tsv_expr}
                 )
                 """
@@ -255,23 +299,49 @@ class PostgresVectorStore:
                 ADD COLUMN IF NOT EXISTS content_tsv {tsv_expr}
                 """
             )
+            if dimension <= HNSW_MAX_DIMENSIONS:
+                await conn.execute(
+                    f"""
+                    CREATE INDEX IF NOT EXISTS
+                        {index_name(self._table_name, "embedding_hnsw")}
+                    ON {self._table}
+                    USING hnsw (embedding vector_cosine_ops)
+                    """
+                )
+            else:
+                logger.warning(
+                    "PostgresVectorStore: %s holds %d-dimensional vectors, "
+                    "above pgvector's %d-dimension limit for HNSW indexes; "
+                    "no vector index was created and searches scan the "
+                    "whole table (exact, but slow on large tables). Use an "
+                    "embedder with at most %d dimensions (e.g. "
+                    "OpenAIEmbedder('text-embedding-3-large', "
+                    "dimensions=1536)) to get an index.",
+                    self._table,
+                    dimension,
+                    HNSW_MAX_DIMENSIONS,
+                    HNSW_MAX_DIMENSIONS,
+                )
             await conn.execute(
                 f"""
                 CREATE INDEX IF NOT EXISTS
-                    {self._table}_embedding_hnsw
-                ON {self._table}
-                USING hnsw (embedding vector_cosine_ops)
-                """
-            )
-            await conn.execute(
-                f"""
-                CREATE INDEX IF NOT EXISTS
-                    {self._table}_content_tsv_gin
+                    {index_name(self._table_name, "content_tsv_gin")}
                 ON {self._table}
                 USING gin (content_tsv)
                 """
             )
             self._initialized = True
+
+    def _check_dimension(self, actual: int) -> None:
+        """The constructor's ``dimension=`` is a promise about the
+        embedder's output; a vector of another size breaks it."""
+        if self._dimension is not None and actual != self._dimension:
+            raise ValueError(
+                f"embedder produced {actual}-dimensional vectors but "
+                f"the store was configured for {self._dimension} "
+                "(dimension=). Use an embedder with that output size, "
+                "or a new table for the new embedder."
+            )
 
     async def add(
         self,
@@ -281,26 +351,34 @@ class PostgresVectorStore:
         if not chunks:
             return []
         assigned = resolve_ids(ids, len(chunks))
+        # An id repeated in one call upserts onto itself: last wins.
+        unique_ids, unique_chunks = dedupe_last(assigned, chunks)
+        # Serialise metadata BEFORE embedding: a failure here shouldn't
+        # cost an embedding call. JSONB round-trips lists/dicts
+        # natively (so a MarkdownChunker ``headers`` list comes back a
+        # list, unlike Chroma's scalar-only store). ``default=str`` is
+        # the safety net so an exotic value can never crash the insert.
+        metadatas = [
+            json.dumps(c.metadata or {}, default=str) for c in unique_chunks
+        ]
         vectors = await embed_all(
-            self._embedder, [c.content for c in chunks]
+            self._embedder, [c.content for c in unique_chunks]
         )
+        for vec in vectors:
+            validate_query_vector(vec)
+            self._check_dimension(len(vec))
 
         if not self._initialized:
             await self.init_schema(len(vectors[0]))
 
         rows = [
             (
-                assigned[i],
-                chunks[i].content,
-                # JSONB round-trips lists/dicts natively (so a
-                # MarkdownChunker ``headers`` list comes back a
-                # list, unlike Chroma's scalar-only store).
-                # ``default=str`` is the safety net so an exotic
-                # value can never crash the insert.
-                json.dumps(chunks[i].metadata or {}, default=str),
+                unique_ids[i],
+                unique_chunks[i].content,
+                metadatas[i],
                 _vec_to_pg(vectors[i]),
             )
-            for i in range(len(chunks))
+            for i in range(len(unique_chunks))
         ]
         async with self._acquire() as conn:
             await conn.executemany(
@@ -356,6 +434,7 @@ class PostgresVectorStore:
         filter: Mapping[str, Any] | None = None,
         diversity: float | None = None,
     ) -> list[SearchResult]:
+        validate_k(k)
         q_vec = await self._embedder.embed(query)
         return await self.search_by_vector(
             q_vec, k=k, filter=filter, diversity=diversity
@@ -369,6 +448,8 @@ class PostgresVectorStore:
         filter: Mapping[str, Any] | None = None,
         diversity: float | None = None,
     ) -> list[SearchResult]:
+        validate_k(k)
+        validate_query_vector(vector, dimensions=self._dimension)
         params: list[Any] = [_vec_to_pg(vector)]
         where_sql = ""
         if filter:
@@ -447,6 +528,7 @@ class PostgresVectorStore:
         to upgrade in place (idempotent; raises :class:`ConfigError`
         with that instruction if the column is missing).
         """
+        validate_k(k)
         alpha = max(0.0, min(1.0, alpha))
         n_fetch = max(k * 4, 20)
 
@@ -457,6 +539,7 @@ class PostgresVectorStore:
         v_params: list[Any] = []
         if alpha > 0:
             q_vec = await self._embedder.embed(query)
+            validate_query_vector(q_vec, dimensions=self._dimension)
             v_params = [_vec_to_pg(q_vec)]
             v_where = ""
             if filter:
@@ -517,7 +600,7 @@ class PostgresVectorStore:
                     if getattr(exc, "sqlstate", None) == "42703":
                         raise ConfigError(
                             f"hybrid search needs the "
-                            f"'{self._table}.content_tsv' full-text "
+                            f"{self._table}.content_tsv full-text "
                             "column (loomflow 0.13 schema). Upgrade "
                             "the table in place with: await "
                             "store.init_schema(dimension) — "
@@ -574,21 +657,26 @@ def _xlate_node(
     parts: list[str] = []
     for key, value in node.items():
         if key == "$and":
-            assert isinstance(value, list)
+            if not isinstance(value, list):
+                raise FilterError("$and expects a list of subfilters")
             sub_exprs = []
             for sub in value:
                 expr, params = _xlate_node(sub, params)
                 sub_exprs.append(f"({expr})")
-            parts.append(" AND ".join(sub_exprs))
+            parts.append(" AND ".join(sub_exprs) if sub_exprs else "true")
         elif key == "$or":
-            assert isinstance(value, list)
+            if not isinstance(value, list):
+                raise FilterError("$or expects a list of subfilters")
             sub_exprs = []
             for sub in value:
                 expr, params = _xlate_node(sub, params)
                 sub_exprs.append(f"({expr})")
-            parts.append("(" + " OR ".join(sub_exprs) + ")")
+            parts.append(
+                "(" + " OR ".join(sub_exprs) + ")" if sub_exprs else "false"
+            )
         elif key == "$not":
-            assert isinstance(value, Mapping)
+            if not isinstance(value, Mapping):
+                raise FilterError("$not expects a subfilter dict")
             expr, params = _xlate_node(value, params)
             # A comparison on a missing key is NULL, and NOT NULL is
             # NULL: COALESCE so "not matching" includes those rows, as
@@ -601,19 +689,13 @@ def _xlate_node(
         else:
             expr, params = _xlate_field(key, value, params)
             parts.append(expr)
-    return " AND ".join(parts), params
+    return (" AND ".join(parts) if parts else "true"), params
 
 
 # Metadata keys are interpolated into the SQL text (JSONB ``->>``
 # takes a literal), so they must be validated — a quote or backslash
 # in a key would be an injection vector. Conservative allow-list.
 _SAFE_KEY_RE = re.compile(r"[A-Za-z0-9_.\- ]+\Z")
-
-# SQL-side guard so casting a non-numeric metadata value to numeric
-# can't blow up the whole query: only rows whose text looks like a
-# JSON number get cast + compared; everything else simply doesn't
-# match (same semantics as the in-memory store's typed comparison).
-_NUMERIC_GUARD_SQL = r"'^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$'"
 
 
 def _safe_key(key: str) -> str:
@@ -627,8 +709,76 @@ def _safe_key(key: str) -> str:
 
 def _is_numeric_operand(value: Any) -> bool:
     """True for int/float operands (bool excluded — it's an int
-    subclass but compares as the JSON strings 'true'/'false')."""
+    subclass but is its own JSON type)."""
     return isinstance(value, int | float) and not isinstance(value, bool)
+
+
+def _jsonb_param(value: Any, params: list[Any]) -> str:
+    """Bind ``value`` as a JSONB parameter; returns its placeholder."""
+    params.append(json.dumps(value, default=str))
+    return f"${len(params)}::jsonb"
+
+
+def _eq_sql(key: str, expected: Any, params: list[Any]) -> str:
+    """``$eq`` under the shared filter contract, never NULL.
+
+    The comparison is JSONB-typed, so it is type-strict like the
+    in-process stores: the number ``2020`` doesn't equal the string
+    ``"2020"`` and ``1`` doesn't equal ``true``, while ``1 = 1.0``.
+    ``@>`` (containment) is equality for scalars and membership when
+    the stored value is an array. ``None`` matches a missing key or a
+    JSON null — ``->>`` is NULL for both.
+    """
+    if expected is None:
+        return f"((metadata->>'{key}') IS NULL)"
+    placeholder = _jsonb_param(expected, params)
+    op = "=" if isinstance(expected, list | tuple | Mapping) else "@>"
+    return f"COALESCE((metadata->'{key}') {op} {placeholder}, false)"
+
+
+def _in_sql(key: str, expected: Any, params: list[Any]) -> str:
+    """``$in``: the stored value (or, for an array, any element of it)
+    equals one of ``expected``. Never NULL."""
+    values = [v for v in expected if v is not None]
+    alternatives: list[str] = []
+    if values:
+        placeholder = _jsonb_param(values, params)
+        alternatives.append(
+            "EXISTS (SELECT 1 FROM jsonb_array_elements("
+            f"{placeholder}) AS _in(v) "
+            f"WHERE (metadata->'{key}') @> _in.v)"
+        )
+    if len(values) != len(expected):  # the list held a None
+        alternatives.append(f"(metadata->>'{key}') IS NULL")
+    if not alternatives:
+        return "false"
+    return "(" + " OR ".join(alternatives) + ")"
+
+
+def _ordering_sql(
+    key: str, op: str, expected: Any, params: list[Any]
+) -> str:
+    """``$gt`` / ``$gte`` / ``$lt`` / ``$lte``: number against number
+    or string against string; anything else doesn't match. ``CASE``
+    (unlike ``AND``) guarantees the type test runs before the cast, so
+    a non-numeric value can never abort the query."""
+    sql_op = _SQL_BIN_OPS[op]
+    if _is_numeric_operand(expected):
+        params.append(expected)
+        return (
+            f"(CASE WHEN jsonb_typeof(metadata->'{key}') = 'number' "
+            f"THEN ((metadata->>'{key}'))::numeric {sql_op} ${len(params)} "
+            "ELSE false END)"
+        )
+    if isinstance(expected, str):
+        params.append(expected)
+        # COLLATE "C" = code-point order, as Python compares strings.
+        return (
+            f"(CASE WHEN jsonb_typeof(metadata->'{key}') = 'string' "
+            f"THEN (metadata->>'{key}') COLLATE \"C\" {sql_op} "
+            f"${len(params)}::text ELSE false END)"
+        )
+    return "false"
 
 
 def _xlate_field(
@@ -641,60 +791,22 @@ def _xlate_field(
     ):
         sub_exprs: list[str] = []
         for op, expected in condition.items():
-            if op == "$ne":
+            if op == "$eq":
+                sub_exprs.append(_eq_sql(key, expected, params))
+            elif op == "$ne":
                 # A missing key is "not equal to anything" (the shared
-                # contract); ``<>`` on it is NULL and drops the row.
-                if _is_numeric_operand(expected):
-                    params.append(expected)
-                    sub_exprs.append(
-                        f"NOT COALESCE((metadata->>'{key}') ~ {_NUMERIC_GUARD_SQL} "
-                        f"AND ((metadata->>'{key}'))::numeric = ${len(params)}, false)"
-                    )
-                else:
-                    params.append(_pg_field_value(expected))
-                    sub_exprs.append(
-                        f"(metadata->>'{key}') IS DISTINCT FROM ${len(params)}"
-                    )
+                # contract) — ``_eq_sql`` is never NULL, so NOT is safe.
+                sub_exprs.append(f"(NOT {_eq_sql(key, expected, params)})")
             elif op in _SQL_BIN_OPS:
-                params.append(
-                    expected
-                    if _is_numeric_operand(expected)
-                    else _pg_field_value(expected)
-                )
-                if _is_numeric_operand(expected):
-                    # Numeric operand → compare numerically, not as
-                    # text ("10" < "9" lexicographically!). Matches
-                    # the module docstring's promised semantics.
-                    sub_exprs.append(
-                        f"((metadata->>'{key}') ~ {_NUMERIC_GUARD_SQL} "
-                        f"AND ((metadata->>'{key}'))::numeric "
-                        f"{_SQL_BIN_OPS[op]} ${len(params)})"
-                    )
-                else:
-                    sub_exprs.append(
-                        f"(metadata->>'{key}') "
-                        f"{_SQL_BIN_OPS[op]} "
-                        f"${len(params)}"
-                    )
+                sub_exprs.append(_ordering_sql(key, op, expected, params))
             elif op == "$in":
                 if not isinstance(expected, list | tuple):
                     raise FilterError("$in expects a list")
-                params.append(
-                    [_pg_field_value(v) for v in expected]
-                )
-                sub_exprs.append(
-                    f"(metadata->>'{key}') = ANY(${len(params)}::text[])"
-                )
+                sub_exprs.append(_in_sql(key, expected, params))
             elif op == "$nin":
                 if not isinstance(expected, list | tuple):
                     raise FilterError("$nin expects a list")
-                params.append(
-                    [_pg_field_value(v) for v in expected]
-                )
-                sub_exprs.append(
-                    f"((metadata->>'{key}') IS NULL OR "
-                    f"(metadata->>'{key}') <> ALL(${len(params)}::text[]))"
-                )
+                sub_exprs.append(f"(NOT {_in_sql(key, expected, params)})")
             elif op == "$exists":
                 if expected:
                     sub_exprs.append(
@@ -709,29 +821,9 @@ def _xlate_field(
         return " AND ".join(sub_exprs), params
 
     if isinstance(condition, list | tuple):
-        params.append([_pg_field_value(v) for v in condition])
-        return (
-            f"(metadata->>'{key}') = ANY(${len(params)}::text[])",
-            params,
-        )
+        return _in_sql(key, condition, params), params
 
-    if _is_numeric_operand(condition):
-        params.append(condition)
-        return (
-            f"((metadata->>'{key}') ~ {_NUMERIC_GUARD_SQL} "
-            f"AND ((metadata->>'{key}'))::numeric = ${len(params)})",
-            params,
-        )
-    params.append(_pg_field_value(condition))
-    return f"(metadata->>'{key}') = ${len(params)}", params
-
-
-def _pg_field_value(v: Any) -> str:
-    """JSONB ``->>`` always returns text; cast values to strings so
-    the parameter binding matches."""
-    if isinstance(v, bool):
-        return "true" if v else "false"
-    return str(v)
+    return _eq_sql(key, condition, params), params
 
 
 def _vec_to_pg(vec: list[float]) -> str:
