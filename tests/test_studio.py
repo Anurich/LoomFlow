@@ -1208,3 +1208,27 @@ def test_several_processes_can_record_to_one_new_file(tmp_path: Path) -> None:
     assert all(p.returncode == 0 for p in procs), errors
     conn = sqlite3.connect(db)
     assert conn.execute("SELECT COUNT(*), COUNT(DISTINCT name) FROM traces WHERE status = 'ok'").fetchone() == (32, 4)
+
+
+async def test_a_cancelled_step_is_recorded_as_failed(tmp_path: Path) -> None:
+    import anyio
+
+    @tool
+    async def hang() -> str:
+        """Never returns."""
+        await anyio.sleep(60)
+        return "x"
+
+    db = tmp_path / "studio.db"
+    studio.enable(path=db)
+    model = ScriptedModel([ScriptedTurn(tool_calls=[ToolCall(id="c1", tool="hang", args={})])])
+    agent = Agent("x", model=model, tools=[hang])
+    with anyio.move_on_after(0.2):
+        await agent.run("go")
+    await anyio.to_thread.run_sync(studio.flush)
+    conn = sqlite3.connect(db)
+    try:
+        errors = [row[0] for row in conn.execute("SELECT error FROM spans")]
+    finally:
+        conn.close()
+    assert any("Cancelled" in (error or "") for error in errors), errors

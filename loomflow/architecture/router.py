@@ -249,6 +249,15 @@ class Router:
             parsed_route, parsed_confidence = _parse_classification(
                 classification_text
             )
+            if not parsed_route:
+                # No ``route:`` line, but the whole reply is exactly one
+                # route's name ("billing") — what a terse or scripted
+                # classifier gives. That is unambiguous, so accept it.
+                bare = _bare_route_name(
+                    classification_text, list(self._routes_by_name)
+                )
+                if bare is not None:
+                    parsed_route, parsed_confidence = bare, None
             if parsed_confidence is None:
                 # The classifier omitted (or garbled) the confidence
                 # line. When a threshold is configured, treat missing as
@@ -436,6 +445,16 @@ _CONFIDENCE_RE = re.compile(
 
 def _route_key(name: str) -> str:
     return re.sub(r"[\s\-_]+", "_", name.strip().lower())
+
+
+def _bare_route_name(text: str, names: list[str]) -> str | None:
+    """The route whose name is the *entire* classifier reply (ignoring
+    case, surrounding markdown / quotes / a final full stop, and
+    spaces vs ``-`` / ``_``), or ``None``."""
+    wanted = _route_key(text.strip().strip("`\"'*.").strip())
+    if not wanted:
+        return None
+    return next((n for n in names if _route_key(n) == wanted), None)
 
 
 def _parse_classification(text: str) -> tuple[str, float | None]:

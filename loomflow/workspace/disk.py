@@ -47,6 +47,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import warnings
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -152,6 +153,7 @@ class LocalDiskWorkspace:
         embedder: Embedder | None = None,
     ) -> None:
         self._root = Path(root).expanduser().resolve()
+        self._legacy_warned: set[str] = set()
         self._root.mkdir(parents=True, exist_ok=True)
         self._cleanup_on_close = cleanup_on_close
         # One lock for index regeneration AND for note writes /
@@ -238,7 +240,28 @@ class LocalDiskWorkspace:
         # bucket or the shared ``seeds/`` dir).
         if not user_id:
             return self._root / ANON_BUCKET
-        return self._root / _sanitise_user_id(user_id)
+        name = _sanitise_user_id(user_id)
+        self._warn_legacy_partition(user_id, name)
+        return self._root / name
+
+    def _warn_legacy_partition(self, user_id: str, name: str) -> None:
+        # Before 0.21 unsafe characters became ``_``, so
+        # ``alice@example.com`` lived in ``alice_example.com``. That
+        # folder may also hold another id's notes, so it's never
+        # adopted automatically: say once how to move it.
+        legacy = _PATH_UNSAFE.sub("_", user_id)
+        if legacy == name or user_id in self._legacy_warned:
+            return
+        self._legacy_warned.add(user_id)
+        if (self._root / legacy).is_dir() and not (self._root / name).exists():
+            warnings.warn(
+                f"workspace notes for user id {user_id!r} were stored in "
+                f"{legacy!r} by older versions and now live in {name!r}. "
+                f"If that folder belongs to this user only, rename it: "
+                f"{self._root / legacy} -> {self._root / name}",
+                UserWarning,
+                stacklevel=3,
+            )
 
     def _notes_dir(
         self,

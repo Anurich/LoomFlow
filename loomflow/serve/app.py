@@ -463,6 +463,17 @@ def create_app(
                     async for event in events:
                         if event.kind is EventKind.COMPLETED:
                             final_result = event.payload.get("result")
+                        if event.kind is EventKind.ERROR and not debug:
+                            # Same rule as the 500 body: exception
+                            # text is not client-safe.
+                            event = event.model_copy(
+                                update={
+                                    "payload": {
+                                        "type": "internal_error",
+                                        "message": "internal error; see the server log",
+                                    }
+                                }
+                            )
                         await _frame(event.kind.value, event.model_dump_json())
                 finally:
                     # Close the generator explicitly (break-to-cancel:

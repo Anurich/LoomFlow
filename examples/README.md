@@ -1,6 +1,6 @@
 # Examples
 
-Thirty-two end-to-end examples that exercise Loom's own
+Thirty-four end-to-end examples that exercise Loom's own
 primitives — loader, vector store, retriever-as-tool pattern,
 multi-agent architectures, multi-user / session-continuity
 primitives, the workflow + agent composition story, observability

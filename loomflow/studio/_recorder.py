@@ -188,8 +188,10 @@ class StudioTelemetry:
         token = _state.parent_var.set(span_id)
         try:
             yield handle
-        except Exception as exc:
-            record.fail(f"{type(exc).__name__}: {exc}")
+        except GeneratorExit:
+            raise
+        except BaseException as exc:  # a cancelled step is recorded too
+            record.fail(f"{type(exc).__name__}: {exc}".rstrip(": "))
             raise
         finally:
             _state.parent_var.reset(token)

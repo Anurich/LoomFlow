@@ -65,6 +65,7 @@ from .architecture import (
     Supervisor,
     Swarm,
 )
+from .architecture.base import DEFAULT_MAX_DELEGATION_DEPTH
 from .architecture.swarm import Handoff
 from .core.types import RunResult
 
@@ -319,6 +320,8 @@ class Team:
         allow_spawn: bool = False,
         max_spawned: int = 5,
         spawn_template: Agent | None = None,
+        delegate_timeout: float | None = None,
+        max_delegation_depth: int | None = None,
     ) -> Agent:
         """Build a coordinator Agent that delegates to ``workers``.
 
@@ -326,6 +329,10 @@ class Team:
         to dispatch a subtask, or ``forward_message(worker)`` to
         return a worker's output verbatim. Multiple delegations in
         one turn run in parallel.
+
+        ``delegate_timeout`` caps one delegation in seconds (default:
+        no cap beyond the run's own timeout); ``max_delegation_depth``
+        limits how deep supervisors may delegate to supervisors.
 
         ``allow_spawn=True`` additionally injects a
         ``spawn_worker(role, instructions)`` tool so the coordinator
@@ -371,6 +378,12 @@ class Team:
                 allow_spawn=allow_spawn,
                 max_spawned=max_spawned,
                 spawn_template=spawn_template,
+                delegate_timeout=delegate_timeout,
+                max_delegation_depth=(
+                    DEFAULT_MAX_DELEGATION_DEPTH
+                    if max_delegation_depth is None
+                    else max_delegation_depth
+                ),
             ),
             workspace=coord_ws,
             worker_registry=worker_registry,
@@ -590,8 +603,9 @@ class Team:
             route: <route name>
             confidence: <number between 0 and 1>
 
-        The ``route:`` line is required — a reply without one (a bare
-        route name included) is not routed: the run goes to
+        A reply that is exactly one route's name is also accepted.
+        Any other reply without a ``route:`` line is not routed: the
+        run goes to
         ``fallback_route`` when set, otherwise it ends with a "Could
         not route this request" output. ``confidence:`` is optional
         (a missing one counts as 0 when ``require_confidence_above``
