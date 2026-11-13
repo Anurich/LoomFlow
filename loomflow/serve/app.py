@@ -22,8 +22,9 @@ Routes:
   kind, e.g. ``model_chunk`` or ``error``), terminated by an
   ``event: done`` frame carrying the final result payload. If the run
   fails after the stream started, an ``event: stream_error`` frame
-  (``{"error": <type>, "message": ...}``) precedes ``done``; it's
-  named apart from agent ``error`` events, whose payload is an Event.
+  (``{"error": ..., "message": ..., "error_id": ...}``) precedes
+  ``done``; it's named apart from agent ``error`` events, whose
+  payload is an Event.
   A client disconnect cancels the underlying run (the stream
   generator is closed, which triggers the agent's break-to-cancel
   contract).
@@ -36,14 +37,44 @@ The ``output_schema`` request field is accepted but **ignored in v1**
 
 Concurrency model: the app holds ONE shared Agent — multi-tenant by
 design — and each request simply awaits ``agent.run(...)`` with the
-``user_id`` from the request body as the tenancy partition. No worker
-pool, no long-lived state: serverless-friendly.
+caller's ``user_id`` as the tenancy partition. No worker pool, no
+long-lived state: serverless-friendly.
+
+Authentication
+--------------
+
+**Without** ``auth=`` **the app is open and** ``user_id`` **is
+self-asserted**: it is read from the request body, so any client can
+claim to be any user (and so reach that user's memory, workspace,
+permissions and budget). That is acceptable on loopback for local
+development only. For anything else pass an ``auth`` hook (see
+:mod:`loomflow.serve.auth`)::
+
+    from loomflow.serve import bearer_token_auth, create_app
+
+    app = create_app(agent, auth=bearer_token_auth({"tok-a": "alice"}))
+
+With ``auth`` set, every route except ``GET /health`` requires it
+(401 otherwise); the authenticated identity is the ``user_id`` and a
+body ``user_id`` that differs is rejected with 403.
+
+Errors
+------
+
+When the agent raises, the client gets a generic 500 body
+``{"error": "internal_error", "message": ..., "error_id": ...}`` and
+the exception is logged on the ``loomflow.serve`` logger under the
+same ``error_id`` — exception text routinely carries connection
+strings, paths and upstream payloads. ``create_app(..., debug=True)``
+puts the exception type and message back in the response for local
+development.
 """
 
 from __future__ import annotations
 
 import inspect
 import json
+import logging
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, MutableMapping
 from contextlib import suppress
 from typing import Any, Protocol, cast
@@ -51,9 +82,13 @@ from typing import Any, Protocol, cast
 import anyio
 
 from .. import __version__
+from ..core.ids import new_id
 from ..core.types import Event, EventKind, RunResult
+from .auth import AuthHook, Identity, authenticate, resolve_user_id, warn_if_open
 
 __all__ = ["ASGIApp", "MAX_BODY_BYTES", "ServableAgent", "create_app"]
+
+_log = logging.getLogger("loomflow.serve")
 
 # --- ASGI-3 protocol aliases (h11-level dicts; no framework types) ---
 ASGIMessage = MutableMapping[str, Any]
@@ -62,7 +97,7 @@ Receive = Callable[[], Awaitable[ASGIMessage]]
 Send = Callable[[ASGIMessage], Awaitable[None]]
 ASGIApp = Callable[[Scope, Receive, Send], Awaitable[None]]
 
-_Handler = Callable[[Receive, Send], Awaitable[None]]
+_Handler = Callable[[Receive, Send, "Identity | None"], Awaitable[None]]
 
 MAX_BODY_BYTES = 1024 * 1024
 """Request-body cap. Larger bodies get a 413 before any JSON parsing."""
@@ -168,6 +203,33 @@ def _result_payload(result: RunResult) -> dict[str, Any]:
     }
 
 
+def _error_body(exc: BaseException, *, debug: bool, where: str) -> dict[str, str]:
+    """Client-safe description of an agent failure.
+
+    The exception is logged (with traceback) under a fresh
+    ``error_id``; the client only gets that id plus a generic message
+    unless ``debug`` is on. Exception text is not client-safe: it
+    routinely carries DSNs, file paths and upstream response bodies.
+    """
+    cause = _unwrap_exception(exc)
+    error_id = new_id("err")
+    _log.error(
+        "%s failed [error_id=%s]: %s: %s",
+        where,
+        error_id,
+        type(cause).__name__,
+        cause,
+        exc_info=(type(cause), cause, cause.__traceback__),
+    )
+    if debug:
+        return {"error": type(cause).__name__, "message": str(cause), "error_id": error_id}
+    return {
+        "error": "internal_error",
+        "message": f"internal error (error_id={error_id}); see the server log",
+        "error_id": error_id,
+    }
+
+
 def _unwrap_exception(exc: BaseException) -> BaseException:
     """Peel single-member ExceptionGroups (anyio task-group wrapping)."""
     while isinstance(exc, BaseExceptionGroup) and len(exc.exceptions) == 1:
@@ -259,17 +321,57 @@ async def _call_resume(
 # ---------------------------------------------------------------------------
 
 
-def create_app(agent: ServableAgent, *, require_user_id: bool = False) -> ASGIApp:
+def create_app(
+    agent: ServableAgent,
+    *,
+    require_user_id: bool = False,
+    auth: AuthHook | None = None,
+    debug: bool = False,
+) -> ASGIApp:
     """Wrap ``agent`` in a framework-free ASGI application.
 
     ``require_user_id=True`` makes the app reject any ``/run`` /
     ``/stream`` / ``/resume`` request whose body lacks a ``user_id``
     with a 422 — the multi-tenant deployment posture where anonymous
-    runs must not share the default partition.
+    runs must not share the default partition. (It does not
+    authenticate anyone: without ``auth`` the id is self-asserted.)
+
+    ``auth`` authenticates each request — a sync or async callable
+    taking an :class:`~loomflow.serve.auth.AuthRequest` and returning
+    the caller's identity (see :mod:`loomflow.serve.auth`;
+    :func:`~loomflow.serve.auth.bearer_token_auth` is the built-in
+    one). Unauthenticated requests get 401; the identity becomes the
+    run's ``user_id`` and a different body ``user_id`` is a 403.
+    Without it the app is open and ``user_id`` is self-asserted.
+
+    ``debug=True`` returns exception types and messages to the client
+    (local development only); by default agent failures answer with a
+    generic message and an ``error_id`` that is also in the log.
     """
+    warned_open: list[bool] = []
+
+    async def _user_id_for(
+        data: Mapping[str, Any], identity: Identity | None, send: Send
+    ) -> tuple[bool, str | None]:
+        """``(ok, user_id)``; on ``ok=False`` a response was sent."""
+        allowed, user_id = resolve_user_id(identity, _opt_str(data, "user_id"))
+        if not allowed:
+            await _send_error(
+                send,
+                403,
+                "forbidden",
+                "'user_id' does not match the authenticated identity",
+            )
+            return False, None
+        if require_user_id and user_id is None:
+            await _send_error(
+                send, 422, "missing_user_id", "'user_id' is required by this deployment"
+            )
+            return False, None
+        return True, user_id
 
     async def _parse_run_request(
-        receive: Receive, send: Send
+        receive: Receive, send: Send, identity: Identity | None
     ) -> tuple[str, str | None, str | None, str | None] | None:
         """Shared /run + /stream body handling.
 
@@ -283,16 +385,15 @@ def create_app(agent: ServableAgent, *, require_user_id: bool = False) -> ASGIAp
         if not isinstance(prompt, str) or not prompt:
             await _send_error(send, 400, "bad_request", "missing or empty 'prompt'")
             return None
-        user_id = _opt_str(data, "user_id")
-        if require_user_id and user_id is None:
-            await _send_error(
-                send, 422, "missing_user_id", "'user_id' is required by this deployment"
-            )
+        ok, user_id = await _user_id_for(data, identity, send)
+        if not ok:
             return None
         return prompt, user_id, _opt_str(data, "session_id"), _opt_str(data, "tone")
 
-    async def _handle_run(receive: Receive, send: Send) -> None:
-        parsed = await _parse_run_request(receive, send)
+    async def _handle_run(
+        receive: Receive, send: Send, identity: Identity | None
+    ) -> None:
+        parsed = await _parse_run_request(receive, send, identity)
         if parsed is None:
             return
         prompt, user_id, session_id, tone = parsed
@@ -301,13 +402,14 @@ def create_app(agent: ServableAgent, *, require_user_id: bool = False) -> ASGIAp
                 prompt, user_id=user_id, session_id=session_id, response_tone=tone
             )
         except Exception as exc:  # noqa: BLE001 — wire boundary: no tracebacks
-            cause = _unwrap_exception(exc)
-            await _send_error(send, 500, type(cause).__name__, str(cause))
+            await _send_json(send, 500, _error_body(exc, debug=debug, where="POST /run"))
             return
         await _send_json(send, 200, _result_payload(result))
 
-    async def _handle_stream(receive: Receive, send: Send) -> None:
-        parsed = await _parse_run_request(receive, send)
+    async def _handle_stream(
+        receive: Receive, send: Send, identity: Identity | None
+    ) -> None:
+        parsed = await _parse_run_request(receive, send, identity)
         if parsed is None:
             return
         prompt, user_id, session_id, tone = parsed
@@ -372,19 +474,18 @@ def create_app(agent: ServableAgent, *, require_user_id: bool = False) -> ASGIAp
                             await aclose()
                     tg.cancel_scope.cancel()  # release the watcher
         except Exception as exc:  # noqa: BLE001 — headers sent; emit an error frame
-            cause = _unwrap_exception(exc)
+            body = _error_body(exc, debug=debug, where="POST /stream")
             with suppress(Exception):
-                await _frame(
-                    "stream_error",
-                    json.dumps({"error": type(cause).__name__, "message": str(cause)}),
-                )
+                await _frame("stream_error", json.dumps(body))
         if disconnected:
             return  # nobody is listening; the run was cancelled above
         with suppress(Exception):
             await _frame("done", json.dumps(final_result) if final_result is not None else "{}")
             await send({"type": "http.response.body", "body": b"", "more_body": False})
 
-    async def _handle_resume(receive: Receive, send: Send) -> None:
+    async def _handle_resume(
+        receive: Receive, send: Send, identity: Identity | None
+    ) -> None:
         data = await _parse_json_object(receive, send)
         if data is None:
             return
@@ -392,11 +493,8 @@ def create_app(agent: ServableAgent, *, require_user_id: bool = False) -> ASGIAp
         if not isinstance(session_id, str) or not session_id:
             await _send_error(send, 400, "bad_request", "missing or empty 'session_id'")
             return
-        user_id = _opt_str(data, "user_id")
-        if require_user_id and user_id is None:
-            await _send_error(
-                send, 422, "missing_user_id", "'user_id' is required by this deployment"
-            )
+        ok, user_id = await _user_id_for(data, identity, send)
+        if not ok:
             return
         try:
             result = await _call_resume(
@@ -407,12 +505,13 @@ def create_app(agent: ServableAgent, *, require_user_id: bool = False) -> ASGIAp
                 from_checkpoint=_opt_str(data, "from_checkpoint"),
             )
         except Exception as exc:  # noqa: BLE001 — wire boundary: no tracebacks
-            cause = _unwrap_exception(exc)
-            await _send_error(send, 500, type(cause).__name__, str(cause))
+            await _send_json(send, 500, _error_body(exc, debug=debug, where="POST /resume"))
             return
         await _send_json(send, 200, _result_payload(result))
 
-    async def _handle_health(receive: Receive, send: Send) -> None:
+    async def _handle_health(
+        receive: Receive, send: Send, identity: Identity | None
+    ) -> None:
         await _send_json(send, 200, {"status": "ok", "version": __version__})
 
     routes: dict[str, dict[str, _Handler]] = {
@@ -456,8 +555,23 @@ def create_app(agent: ServableAgent, *, require_user_id: bool = False) -> ASGIAp
                 extra_headers=[(b"allow", allow.encode("ascii"))],
             )
             return
+        identity: Identity | None = None
+        if auth is None:
+            warn_if_open(scope, warned_open)
+        elif path != "/health":
+            # Authenticate BEFORE reading the body: unauthenticated
+            # callers get no parsing, no validation detail, no run.
+            identity = await authenticate(auth, scope)
+            if identity is None:
+                await _send_json(
+                    send,
+                    401,
+                    {"error": "unauthorized", "message": "authentication required"},
+                    extra_headers=[(b"www-authenticate", b"Bearer")],
+                )
+                return
         try:
-            await handler(receive, send)
+            await handler(receive, send, identity)
         except _ClientDisconnect:
             return  # client went away before we could respond
 

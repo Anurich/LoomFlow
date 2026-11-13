@@ -355,7 +355,8 @@ async def test_message_send_agent_failure_yields_failed_task() -> None:
     task = resp.json()["result"]
     assert task["status"]["state"] == "failed"
     status_text = task["status"]["message"]["parts"][0]["text"]
-    assert "kaboom" in status_text
+    assert "kaboom" not in status_text  # generic by default; detail is logged
+    assert "error_id=" in status_text
     assert "Traceback" not in resp.body.decode("utf-8")
 
 

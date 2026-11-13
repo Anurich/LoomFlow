@@ -4,7 +4,8 @@ Stdlib ``argparse`` only; no click/typer dependency. Wired up via
 ``[project.scripts]`` in ``pyproject.toml``::
 
     loom run "summarise this" --model gpt-4o
-    loom serve my_service:agent --host 0.0.0.0 --port 8000
+    loom serve my_service:agent --port 8000
+    LOOM_SERVE_TOKEN=... loom serve my_service:agent --host 0.0.0.0
     loom eval cases.jsonl --agent my_service:agent --threshold exact_match=0.9
     loom studio                      # browse recorded runs at http://127.0.0.1:7600
     loom version
@@ -19,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from typing import Any
 
@@ -29,6 +31,9 @@ from . import Agent, __version__
 __all__ = ["main"]
 
 _DEFAULT_INSTRUCTIONS = "You are a helpful assistant."
+
+SERVE_TOKEN_ENV = "LOOM_SERVE_TOKEN"
+"""Env var holding the bearer token ``loom serve`` requires."""
 
 
 def _load_target(spec: str) -> Any:
@@ -111,7 +116,17 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         agent = _load_target(args.target)
     except (ImportError, ValueError) as exc:
         return _fail(str(exc))
-    app = create_app(agent)
+    from .serve.auth import (  # noqa: PLC0415
+        OPEN_SERVER_WARNING,
+        bearer_token_auth,
+        is_loopback_host,
+    )
+
+    token = args.auth_token or os.environ.get(SERVE_TOKEN_ENV) or None
+    auth = bearer_token_auth(token) if token else None
+    if auth is None and not is_loopback_host(args.host):
+        print(OPEN_SERVER_WARNING.format(host=args.host), file=sys.stderr)
+    app = create_app(agent, auth=auth, debug=args.debug)
     uvicorn.run(app, host=args.host, port=args.port)
     return 0
 
@@ -254,6 +269,23 @@ def _build_parser() -> argparse.ArgumentParser:
     p_serve.add_argument("target", help="import path of an Agent, as module:attribute")
     p_serve.add_argument("--host", default="127.0.0.1")
     p_serve.add_argument("--port", type=int, default=8000)
+    p_serve.add_argument(
+        "--auth-token",
+        dest="auth_token",
+        default=None,
+        metavar="TOKEN",
+        help=(
+            "require 'Authorization: Bearer TOKEN' on every request "
+            f"(prefer the {SERVE_TOKEN_ENV} env var: flags show up in process "
+            "listings). Without a token the server is open and user_id is "
+            "self-asserted, so only bind to loopback."
+        ),
+    )
+    p_serve.add_argument(
+        "--debug",
+        action="store_true",
+        help="return exception details to clients (local development only)",
+    )
     p_serve.set_defaults(func=_cmd_serve)
 
     p_eval = sub.add_parser("eval", help="run a JSONL dataset through loomflow.eval")

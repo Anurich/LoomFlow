@@ -152,4 +152,8 @@ async def test_serve_stream_failure_uses_its_own_event_name() -> None:
     names = [line.split(": ", 1)[1] for line in text.splitlines() if line.startswith("event: ")]
     assert names[-2:] == ["stream_error", "done"]
     frame = text.split("event: stream_error\ndata: ", 1)[1].split("\n", 1)[0]
-    assert json.loads(frame) == {"error": "RuntimeError", "message": "provider down"}
+    payload = json.loads(frame)
+    # Generic by default: the exception text stays in the server log.
+    assert payload["error"] == "internal_error"
+    assert "provider down" not in frame
+    assert payload["error_id"] in payload["message"]
