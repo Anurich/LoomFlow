@@ -258,7 +258,12 @@ class GoalStopHook:
         # Lazy imports: stop_hooks loads before the architecture
         # package is fully importable (base.py imports back into the
         # agent package). Deferring here mirrors make_plan_stop_hook.
-        from ..architecture.helpers import add_usage, text_only_model_call
+        from ..architecture.helpers import (
+            accepts_kwarg,
+            add_usage,
+            charge_budget,
+            text_only_model_call,
+        )
         from ..core.types import Message, Role
 
         user_id = getattr(deps.context, "user_id", None)
@@ -271,9 +276,12 @@ class GoalStopHook:
         last_pass = iteration + 1 >= self._max_iterations
 
         # --- Guardrail 2: hard cost cap (loop-local + Agent-wide) ---
-        try:
+        # A legacy Budget without the user_id kwarg is told apart by
+        # its signature, not by catching TypeError (which would call
+        # it twice when the error came from inside it).
+        if accepts_kwarg(deps.budget.allows_step, "user_id"):
             status = await deps.budget.allows_step(user_id=user_id)
-        except TypeError:  # legacy Budget without user_id kwarg
+        else:
             status = await deps.budget.allows_step()
         if status.blocked:
             self._exit(session, f"budget:{status.reason}")
@@ -329,19 +337,7 @@ class GoalStopHook:
             )
             d_usage = decisions.usage
             if not deps.fast_budget:
-                try:
-                    await deps.budget.consume(
-                        tokens_in=d_usage.input_tokens,
-                        tokens_out=d_usage.output_tokens,
-                        cost_usd=d_usage.cost_usd,
-                        user_id=user_id,
-                    )
-                except TypeError:  # legacy Budget without user_id kwarg
-                    await deps.budget.consume(
-                        tokens_in=d_usage.input_tokens,
-                        tokens_out=d_usage.output_tokens,
-                        cost_usd=d_usage.cost_usd,
-                    )
+                await charge_budget(deps.budget, d_usage, user_id=user_id)
             session.cumulative_usage = add_usage(
                 session.cumulative_usage, d_usage
             )
@@ -389,19 +385,7 @@ class GoalStopHook:
         # budget path (NoBudget is a no-op anyway). ``allows_step``
         # above stays unconditional — it IS the cost-cap guardrail.
         if not deps.fast_budget:
-            try:
-                await deps.budget.consume(
-                    tokens_in=usage.input_tokens,
-                    tokens_out=usage.output_tokens,
-                    cost_usd=usage.cost_usd,
-                    user_id=user_id,
-                )
-            except TypeError:  # legacy Budget without user_id kwarg
-                await deps.budget.consume(
-                    tokens_in=usage.input_tokens,
-                    tokens_out=usage.output_tokens,
-                    cost_usd=usage.cost_usd,
-                )
+            await charge_budget(deps.budget, usage, user_id=user_id)
         session.cumulative_usage = add_usage(session.cumulative_usage, usage)
 
         first_line = verdict.strip().splitlines()[0].upper() if verdict.strip() else ""
