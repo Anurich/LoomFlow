@@ -26,7 +26,13 @@ so ``1 - d/2`` recovers cosine.
 Deletes are deferred: HNSW (the default index) can't remove rows,
 so deleted rows are masked out of search results and the index is
 compacted (rebuilt from the cached vectors, no re-embedding) only
-once deleted rows reach half the indexed total.
+once deleted rows reach half the indexed total. Re-adding an existing
+id is an upsert: the old row is masked the same way.
+
+Writes (``add`` / ``delete`` / compaction) are serialised by a lock:
+the index is filled in a worker thread, and without it two concurrent
+``add`` calls could interleave so that index rows and ids no longer
+line up.
 """
 
 from __future__ import annotations
@@ -40,7 +46,13 @@ from ..core.protocols import Embedder
 from ..loader.base import Chunk
 from ._filter import evaluate_filter
 from ._mmr import rerank_tail
-from ._util import embed_all, resolve_ids
+from ._util import (
+    dedupe_last,
+    embed_all,
+    resolve_ids,
+    validate_k,
+    validate_query_vector,
+)
 from .base import SearchResult, _chunks_from_texts
 
 
@@ -82,6 +94,9 @@ class FAISSVectorStore:
         # deleted row indices are masked at query time and the index
         # is compacted lazily (see ``delete`` / ``_compact``).
         self._deleted_rows: set[int] = set()
+        # Serialises index mutation + the bookkeeping that must stay
+        # in step with it (row i of the index is ``_ids[i]``).
+        self._write_lock = anyio.Lock()
 
     @property
     def embedder(self) -> Embedder:
@@ -150,7 +165,8 @@ class FAISSVectorStore:
         elif self._dimension != dim:
             raise ValueError(
                 f"embedder produced {dim}-dim vectors; "
-                f"store was configured for {self._dimension}"
+                f"store was configured for {self._dimension}. Use the "
+                "embedder the store was built with, or a new store."
             )
         metric = (
             self._faiss.METRIC_INNER_PRODUCT
@@ -169,9 +185,13 @@ class FAISSVectorStore:
         if not chunks:
             return []
         assigned = resolve_ids(ids, len(chunks))
+        # An id repeated in one call upserts onto itself: last wins.
+        unique_ids, unique_chunks = dedupe_last(assigned, chunks)
         vectors = await embed_all(
-            self._embedder, [c.content for c in chunks]
+            self._embedder, [c.content for c in unique_chunks]
         )
+        for vec in vectors:
+            validate_query_vector(vec)
 
         import numpy as np  # type: ignore[import-not-found, import-untyped]
 
@@ -180,19 +200,46 @@ class FAISSVectorStore:
         # the score formulas cosine (ip: dot == cos; l2 on unit
         # vectors: d == 2(1 - cos)). See the module docstring.
         self._faiss.normalize_L2(arr)
-        self._ensure_index(arr.shape[1])
-        await anyio.to_thread.run_sync(self._index.add, arr)
-
         # Cache the (already-normalized) vectors for MMR + rebuilds.
         cached_vectors = arr.tolist()
-        for i, (cid, chunk) in enumerate(
-            zip(assigned, chunks, strict=True)
-        ):
-            self._row_for_id[cid] = len(self._ids)
-            self._ids.append(cid)
-            self._chunks.append(chunk)
-            self._vectors.append(cached_vectors[i])
+
+        # The lock spans the threaded ``index.add`` AND the id
+        # bookkeeping: a second ``add`` running in between would get
+        # the index rows this call is about to label.
+        async with self._write_lock:
+            self._check_dimension(arr.shape[1])
+            self._ensure_index(arr.shape[1])
+            await anyio.to_thread.run_sync(self._index.add, arr)
+
+            for i, (cid, chunk) in enumerate(
+                zip(unique_ids, unique_chunks, strict=True)
+            ):
+                # Upsert: the id's previous row (if any) is masked like
+                # a deleted one; the new row takes over the id.
+                old_row = self._row_for_id.get(cid)
+                if old_row is not None:
+                    self._deleted_rows.add(old_row)
+                self._row_for_id[cid] = len(self._ids)
+                self._ids.append(cid)
+                self._chunks.append(chunk)
+                self._vectors.append(cached_vectors[i])
+            # Upserts leave masked rows behind, like deletes do.
+            if (
+                self._deleted_rows
+                and len(self._deleted_rows) * 2 >= len(self._ids)
+            ):
+                await self._compact()
         return assigned
+
+    def _check_dimension(self, dim: int) -> None:
+        """Every vector in one index has the same size; a different
+        one means the embedder changed."""
+        if self._dimension is not None and self._dimension != dim:
+            raise ValueError(
+                f"embedder produced {dim}-dim vectors; "
+                f"store holds {self._dimension}-dim vectors. Use the "
+                "embedder the store was built with, or a new store."
+            )
 
     async def delete(self, ids: list[str]) -> None:
         """Deferred delete: mark rows dead (masked from every search /
@@ -207,27 +254,29 @@ class FAISSVectorStore:
         """
         if not ids or self._index is None:
             return
-        for cid in ids:
-            row = self._row_for_id.pop(cid, None)
-            if row is not None:
-                self._deleted_rows.add(row)
+        async with self._write_lock:
+            for cid in ids:
+                row = self._row_for_id.pop(cid, None)
+                if row is not None:
+                    self._deleted_rows.add(row)
 
-        if not self._row_for_id:
-            # Everything is gone — cheap full reset.
-            self._ids = []
-            self._chunks = []
-            self._vectors = []
-            self._deleted_rows = set()
-            self._index.reset()
-            return
+            if not self._row_for_id:
+                # Everything is gone — cheap full reset.
+                self._ids = []
+                self._chunks = []
+                self._vectors = []
+                self._deleted_rows = set()
+                self._index.reset()
+                return
 
-        if len(self._deleted_rows) * 2 >= len(self._ids):
-            await self._compact()
+            if len(self._deleted_rows) * 2 >= len(self._ids):
+                await self._compact()
 
     async def _compact(self) -> None:
         """Rebuild the FAISS index from the cached (already
         normalised) survivor vectors — no re-embedding, important
-        when the embedder is paid-API-backed."""
+        when the embedder is paid-API-backed. The caller holds the
+        write lock."""
         keep_rows = [
             i
             for i in range(len(self._ids))
@@ -267,6 +316,9 @@ class FAISSVectorStore:
         filter: Mapping[str, Any] | None = None,
         diversity: float | None = None,
     ) -> list[SearchResult]:
+        validate_k(k)
+        if self._index is None or not self._row_for_id:
+            return []
         q_vec = await self._embedder.embed(query)
         return await self.search_by_vector(
             q_vec, k=k, filter=filter, diversity=diversity
@@ -280,6 +332,11 @@ class FAISSVectorStore:
         filter: Mapping[str, Any] | None = None,
         diversity: float | None = None,
     ) -> list[SearchResult]:
+        validate_k(k)
+        validate_query_vector(
+            vector,
+            dimensions=self._dimension if self._index is not None else None,
+        )
         if self._index is None or not self._row_for_id:
             return []
 

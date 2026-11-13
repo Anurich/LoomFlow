@@ -249,8 +249,10 @@ def test_memory_backends_share_one_cosine() -> None:
 
 
 def test_shared_cosine_keeps_safest_semantics() -> None:
-    # Length mismatch and zero vectors return 0.0 (never raise/nan).
-    assert shared_cosine([1.0, 2.0], [1.0]) == 0.0
+    # Empty and zero vectors return 0.0 (never nan). A length mismatch
+    # means two different embedders: that raises instead of scoring 0.
+    with pytest.raises(ValueError, match="different embedder"):
+        shared_cosine([1.0, 2.0], [1.0])
     assert shared_cosine([], [1.0]) == 0.0
     assert shared_cosine([0.0, 0.0], [1.0, 0.0]) == 0.0
     assert shared_cosine([1.0, 0.0], [2.0, 0.0]) == pytest.approx(1.0)

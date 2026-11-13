@@ -68,6 +68,49 @@ class VectorStore(Protocol):
     Backends that aren't natively async (FAISS, Chroma) wrap their
     sync calls in :func:`anyio.to_thread.run_sync` so they don't
     block the event loop.
+
+    The contract (every bundled backend enforces it, so swapping one
+    for another doesn't change results):
+
+    * **add upserts.** Adding an id that already exists replaces its
+      content, metadata and vector — never a duplicate, never the old
+      content. An id repeated inside one ``add`` call keeps the last
+      occurrence. ``ids`` must be as long as ``chunks``.
+    * **k is a positive int.** ``k <= 0`` (or a non-int) raises
+      :class:`ValueError` from ``search`` / ``search_by_vector`` /
+      ``search_hybrid``. Asking for more than the store holds returns
+      what there is.
+    * **Query vectors are finite.** A NaN / infinite / empty query
+      vector raises :class:`ValueError`; so does one whose length
+      differs from the stored vectors (a different embedder).
+    * **Score** is cosine similarity, higher-is-better, in
+      ``[-1, 1]`` — comparable across backends.
+    * **Filters** use one Mongo-style language with one set of value
+      semantics — see :mod:`loomflow.vectorstore._filter`. In short:
+      types are strict (``2020`` never equals ``"2020"``, ``1`` never
+      equals ``True``; ``1 == 1.0``), ``None`` matches a missing or
+      ``None`` value, a stored list matches by element (``$eq`` /
+      ``$in``), and ``$gt``-style comparisons work number-to-number
+      or string-to-string (code-point order).
+
+    Known remaining differences:
+
+    * **Chroma stores scalars only.** ``None`` values are stored as
+      an absent key (so ``$exists`` is false for them); lists / dicts
+      are stored as JSON text and decoded back on read. Filters on
+      them, on ``None``, on string ordering and with ``$exists`` /
+      ``$not`` are re-checked in Python over an over-fetched pool
+      (widened a few times until ``k`` rows match or the
+      collection is exhausted). Whether an ``int`` operand matches a
+      stored ``float`` (``5`` vs ``5.0``) is up to the installed
+      Chroma version; every other backend treats them as equal.
+    * **Postgres** needs filterable metadata keys made of letters,
+      digits, ``_``, ``.``, ``-`` and spaces (others raise
+      ``FilterError``), and stores non-JSON values as their ``str``.
+    * **FAISS post-filters** an over-fetched candidate pool, so a
+      very tight filter can return fewer than ``k`` there (InMemory
+      scans everything; Postgres filters in the query).
+    * ``search_hybrid`` exists on InMemory and Postgres only.
     """
 
     async def add(
@@ -76,7 +119,8 @@ class VectorStore(Protocol):
         ids: list[str] | None = None,
     ) -> list[str]:
         """Embed + store ``chunks``. Returns the assigned ids
-        (caller-provided or generated)."""
+        (caller-provided or generated). An existing id is replaced
+        (upsert)."""
         ...
 
     async def delete(self, ids: list[str]) -> None:
@@ -95,27 +139,20 @@ class VectorStore(Protocol):
         """Embed ``query`` and return the top-``k`` chunks ranked
         by similarity. ``filter`` (optional) restricts candidates
         by metadata. ``diversity`` (optional, 0..1) enables MMR
-        reranking for varied results.
+        reranking for varied results. ``k <= 0`` raises
+        :class:`ValueError`.
 
-        Cross-store contract (so all four backends behave alike):
-
-        * **Score** is cosine similarity, higher-is-better, in
-          ``[-1, 1]`` — comparable across Chroma / FAISS / Postgres /
-          InMemory, so a rerank/fusion pipeline can mix backends.
-        * **filter** uses the same Mongo-style language everywhere
-          (``$eq`` / ``$in`` / ``$gt`` / ``$and`` / ``$exists`` …).
-          Postgres pushes it into the query and scans until ``k`` rows
-          match (pgvector 0.8+ iterative index scans; older pgvector
-          filters after the index scan, so a tight filter can return
-          fewer). Chroma pushes it into the engine too, except
-          ``$exists`` / ``$not``, which it re-checks over an
-          over-fetched pool. FAISS and InMemory POST-filter an
-          over-fetched candidate pool, so a very tight filter on a
-          large store may return FEWER than ``k`` even when more
-          matches exist — best-effort, not guaranteed-``k``. Prefer
-          Postgres when an exact-``k`` filtered result matters.
-          A missing key counts as "not equal" for ``$ne`` / ``$nin``
-          / ``$not`` everywhere.
+        Where the filter runs: Postgres pushes it into the query and
+        scans until ``k`` rows match (pgvector 0.8+ iterative index
+        scans; older pgvector filters after the index scan, so a
+        tight filter can return fewer). Chroma pushes what its engine
+        can express and re-checks the rest (see the class docstring).
+        FAISS POST-filters an over-fetched candidate pool, so a very
+        tight filter on a large store may return FEWER than ``k``
+        even when more matches exist — best-effort, not
+        guaranteed-``k``. Prefer Postgres when an exact-``k``
+        filtered result matters. A missing key counts as "not equal"
+        for ``$ne`` / ``$nin`` / ``$not`` everywhere.
         """
         ...
 
@@ -128,7 +165,7 @@ class VectorStore(Protocol):
         diversity: float | None = None,
     ) -> list[SearchResult]:
         """Same as :meth:`search` but with a precomputed query
-        vector."""
+        vector (which must be finite and of the store's dimension)."""
         ...
 
     async def count(self) -> int:

@@ -19,8 +19,13 @@ inside ``resolve()`` and caches into a local dict for
 inside Agent / model-adapter constructors); ``resolve()`` /
 ``store()`` can do whatever async work you need.
 
-A simple regex-based redaction is also provided here so callers
-who don't wire a vault still get safe-by-default audit log
+Redaction lives here too. :func:`redact_secrets` scrubs (a) every
+secret VALUE a :class:`Secrets` backend in this process has stored
+or handed out, and (b) common key shapes (``sk-...``, ``Bearer
+...``, AWS / GitHub / Slack / Google keys, ``FOO_API_KEY=...``).
+The shipped audit logs (:mod:`loomflow.security.audit`) run every
+payload through it before the entry is signed and written, so
+callers who don't wire a vault still get safe-by-default audit log
 behaviour.
 """
 
@@ -28,12 +33,50 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Final
+import threading
+from typing import Any, Final
 
 __all__ = [
     "DictSecrets",
     "EnvSecrets",
+    "redact_payload",
+    "redact_secrets",
 ]
+
+REDACTED: Final = "[REDACTED]"
+
+# Secret VALUES known to this process: everything a Secrets backend
+# has stored or returned. Pattern matching can't catch a key with no
+# recognisable shape (a database password, a webhook secret); these
+# are scrubbed verbatim. Values shorter than ``_MIN_KNOWN_LEN`` are
+# not tracked — replacing every "dev" or "1234" in a log would make
+# it unreadable without protecting anything.
+_MIN_KNOWN_LEN: Final = 8
+_known_values: set[str] = set()
+_known_lock = threading.Lock()
+_known_pattern: re.Pattern[str] | None = None
+
+
+def _remember(value: str | None) -> None:
+    """Record a secret value so redaction scrubs it verbatim."""
+    global _known_pattern  # noqa: PLW0603
+    if not isinstance(value, str) or len(value) < _MIN_KNOWN_LEN:
+        return
+    with _known_lock:
+        if value not in _known_values:
+            _known_values.add(value)
+            _known_pattern = None  # rebuilt lazily
+
+
+def _known_values_pattern() -> re.Pattern[str] | None:
+    global _known_pattern  # noqa: PLW0603
+    with _known_lock:
+        if _known_pattern is None and _known_values:
+            # Longest first, so a value that contains another is
+            # replaced whole.
+            ordered = sorted(_known_values, key=len, reverse=True)
+            _known_pattern = re.compile("|".join(re.escape(v) for v in ordered))
+        return _known_pattern
 
 
 # Patterns we redact by default, as (pattern, replacement) pairs.
@@ -74,9 +117,41 @@ _REDACTION_PATTERNS: Final[tuple[tuple[re.Pattern[str], str], ...]] = (
 
 def _apply_redaction(text: str) -> str:
     out = text
+    known = _known_values_pattern()
+    if known is not None:
+        out = known.sub(REDACTED, out)
     for pat, replacement in _REDACTION_PATTERNS:
         out = pat.sub(replacement, out)
     return out
+
+
+def redact_secrets(text: str) -> str:
+    """Scrub secrets from ``text``: every value a :class:`Secrets`
+    backend in this process has stored or handed out, plus common
+    credential shapes (``sk-...``, ``Bearer <token>``, AWS / GitHub /
+    Slack / Google keys, ``NAME_API_KEY=...`` assignments)."""
+    return _apply_redaction(text)
+
+
+def redact_payload(value: Any, redact: Any = redact_secrets) -> Any:
+    """Apply ``redact`` to every string inside a JSON-like value
+    (dict values AND keys, list items, nested to any depth); other
+    scalars pass through. Returns a new structure.
+
+    This is what the shipped audit logs run on a payload before
+    signing it — call it from a custom :class:`AuditLog` to get the
+    same behaviour.
+    """
+    if isinstance(value, str):
+        return redact(value)
+    if isinstance(value, dict):
+        return {
+            (redact(k) if isinstance(k, str) else k): redact_payload(v, redact)
+            for k, v in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [redact_payload(v, redact) for v in value]
+    return value
 
 
 class EnvSecrets:
@@ -93,6 +168,7 @@ class EnvSecrets:
         value = os.environ.get(ref)
         if value is None:
             raise KeyError(f"environment variable {ref!r} is not set")
+        _remember(value)
         return value
 
     async def store(self, ref: str, value: str) -> None:
@@ -110,7 +186,9 @@ class EnvSecrets:
         return _apply_redaction(text)
 
     def lookup_sync(self, ref: str) -> str | None:
-        return os.environ.get(ref)
+        value = os.environ.get(ref)
+        _remember(value)
+        return value
 
 
 class DictSecrets:
@@ -127,6 +205,8 @@ class DictSecrets:
 
     def __init__(self, initial: dict[str, str] | None = None) -> None:
         self._values: dict[str, str] = dict(initial or {})
+        for value in self._values.values():
+            _remember(value)
 
     async def resolve(self, ref: str) -> str:
         try:
@@ -136,6 +216,7 @@ class DictSecrets:
 
     async def store(self, ref: str, value: str) -> None:
         self._values[ref] = value
+        _remember(value)
 
     def redact(self, text: str) -> str:
         return _apply_redaction(text)

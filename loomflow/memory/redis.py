@@ -36,6 +36,12 @@ from ..core.types import (
     Role,
 )
 from . import _extractions
+from ._bounds import (
+    DEFAULT_MAX_BLOCK_CHARS,
+    resolve_max_block_chars,
+    trim_block,
+    validate_limit,
+)
 from ._embedding_util import cosine, pack_float32, unpack_float32
 from ._user_key import decode_legacy_user_id, encode_user_id
 from .embedder import HashEmbedder, warn_hash_embedder_fallback
@@ -47,7 +53,11 @@ DEFAULT_INDEX_NAME = "jeeves_idx"
 
 
 class RedisMemory:
-    """Redis-backed :class:`Memory`. Use :meth:`connect` to construct."""
+    """Redis-backed :class:`Memory`. Use :meth:`connect` to construct.
+
+    ``append_block`` keeps the newest ``max_block_chars`` characters
+    of a block (default 20,000; ``None`` for no limit).
+    """
 
     def __init__(
         self,
@@ -58,8 +68,10 @@ class RedisMemory:
         index_name: str = DEFAULT_INDEX_NAME,
         use_vector_index: bool = True,
         fact_store: Any | None = None,
+        max_block_chars: int | None = DEFAULT_MAX_BLOCK_CHARS,
     ) -> None:
         self._client = client
+        self._max_block_chars = resolve_max_block_chars(max_block_chars)
         if embedder is None:
             warn_hash_embedder_fallback("RedisMemory")
             embedder = HashEmbedder()
@@ -97,6 +109,7 @@ class RedisMemory:
         use_vector_index: bool = True,
         with_facts: bool = False,
         fact_key_prefix: str = "jeeves:fact:",
+        max_block_chars: int | None = DEFAULT_MAX_BLOCK_CHARS,
     ) -> RedisMemory:
         """Open an async Redis connection.
 
@@ -120,6 +133,7 @@ class RedisMemory:
             key_prefix=key_prefix,
             index_name=index_name,
             use_vector_index=use_vector_index,
+            max_block_chars=max_block_chars,
         )
         if with_facts:
             from .redis_facts import RedisFactStore
@@ -252,13 +266,15 @@ class RedisMemory:
             if existing is None:
                 user_blocks[name] = MemoryBlock(
                     name=name,
-                    content=content,
+                    content=trim_block(content, self._max_block_chars),
                     pinned_order=len(user_blocks),
                 )
             else:
                 user_blocks[name] = MemoryBlock(
                     name=name,
-                    content=existing.content + content,
+                    content=trim_block(
+                        existing.content + content, self._max_block_chars
+                    ),
                     pinned_order=existing.pinned_order,
                 )
 
@@ -313,6 +329,7 @@ class RedisMemory:
         time_range: tuple[datetime, datetime] | None = None,
         user_id: str | None = None,
     ) -> list[Episode]:
+        validate_limit(limit)
         await self.ensure_index()
 
         if not query.strip():
@@ -448,6 +465,7 @@ class RedisMemory:
         """
         from ._hybrid import hybrid_rank_episodes
 
+        validate_limit(limit)
         await self.ensure_index()
 
         if not query.strip():

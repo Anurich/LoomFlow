@@ -586,7 +586,23 @@ class _SkillScript:
 def _make_subprocess_tool(
     spec: ToolSpec, skill_path: Path, prefix: str
 ) -> Tool:
+    skill_root = skill_path.resolve()
     script_full = (skill_path / spec.script).resolve()
+    # A skill may only run scripts it ships. ``script: ../../bin/sh``,
+    # an absolute path, or a symlink leading out of the folder would
+    # turn a SKILL.md into a way to execute anything on the machine
+    # (and slip past the sandbox, which is granted the skill folder).
+    if script_full != skill_root and skill_root not in script_full.parents:
+        raise SkillError(
+            f"Skill tool {spec.name!r}: script {spec.script!r} resolves "
+            f"outside the skill directory ({skill_root}). Scripts must "
+            "live inside the skill's own folder."
+        )
+    if script_full == skill_root:
+        raise SkillError(
+            f"Skill tool {spec.name!r}: script {spec.script!r} is the "
+            "skill directory itself, not a script inside it."
+        )
     return Tool(
         name=f"{prefix}{spec.name}",
         description=(

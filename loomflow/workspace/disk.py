@@ -1,6 +1,9 @@
 """Local-disk :class:`Workspace` backend.
 
-Layout per user_id partition (anonymous bucket is the empty string)::
+Layout per user_id partition (the anonymous bucket is ``_anon``; user
+ids map to directory names injectively — path-safe ids are used
+verbatim, anything else is percent-encoded, so two distinct ids never
+share a partition)::
 
     <root>/<user_id>/
         WORKSPACE.md            ← auto-regenerated index
@@ -44,6 +47,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import warnings
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -96,6 +100,9 @@ INDEX_FILENAME = "WORKSPACE.md"
 NOTES_DIR = "notes"
 SEEDS_DIR = "seeds"
 LOOM_META_DIR = ".loom"
+# Directory for runs with no ``user_id``. Reserved: no user id can
+# map to it (see ``_sanitise_user_id``).
+ANON_BUCKET = "_anon"
 
 
 def _read_utf8(path: Path) -> str:
@@ -146,6 +153,7 @@ class LocalDiskWorkspace:
         embedder: Embedder | None = None,
     ) -> None:
         self._root = Path(root).expanduser().resolve()
+        self._legacy_warned: set[str] = set()
         self._root.mkdir(parents=True, exist_ok=True)
         self._cleanup_on_close = cleanup_on_close
         # One lock for index regeneration AND for note writes /
@@ -227,8 +235,33 @@ class LocalDiskWorkspace:
     def _user_root(self, user_id: str | None) -> Path:
         # Anonymous bucket goes in ``_anon`` so paths are deterministic
         # and don't collide with named users.
-        bucket = user_id if user_id else "_anon"
-        return self._root / _sanitise_user_id(bucket)
+        # ``_sanitise_user_id`` is injective, so two distinct ids can
+        # never share a partition (and no id can name the anonymous
+        # bucket or the shared ``seeds/`` dir).
+        if not user_id:
+            return self._root / ANON_BUCKET
+        name = _sanitise_user_id(user_id)
+        self._warn_legacy_partition(user_id, name)
+        return self._root / name
+
+    def _warn_legacy_partition(self, user_id: str, name: str) -> None:
+        # Before 0.21 unsafe characters became ``_``, so
+        # ``alice@example.com`` lived in ``alice_example.com``. That
+        # folder may also hold another id's notes, so it's never
+        # adopted automatically: say once how to move it.
+        legacy = _PATH_UNSAFE.sub("_", user_id)
+        if legacy == name or user_id in self._legacy_warned:
+            return
+        self._legacy_warned.add(user_id)
+        if (self._root / legacy).is_dir() and not (self._root / name).exists():
+            warnings.warn(
+                f"workspace notes for user id {user_id!r} were stored in "
+                f"{legacy!r} by older versions and now live in {name!r}. "
+                f"If that folder belongs to this user only, rename it: "
+                f"{self._root / legacy} -> {self._root / name}",
+                UserWarning,
+                stacklevel=3,
+            )
 
     def _notes_dir(
         self,
@@ -368,7 +401,9 @@ class LocalDiskWorkspace:
             # snapshot anyway so the answered transition is
             # auditable.
             async with self._index_lock:
-                await self._snapshot_history(note_path, existing)
+                await self._snapshot_history(
+                    note_path, existing, user_id=user_id
+                )
                 updated = existing.model_copy(
                     update={
                         "answered": True,
@@ -390,7 +425,9 @@ class LocalDiskWorkspace:
         # lock so concurrent updates serialise their version
         # numbers correctly.
         async with self._index_lock:
-            await self._snapshot_history(note_path, existing)
+            await self._snapshot_history(
+                note_path, existing, user_id=user_id
+            )
             update_dict: dict[str, object] = {
                 "body": body,
                 "tags": list(tags) if tags is not None else list(existing.tags),
@@ -442,6 +479,8 @@ class LocalDiskWorkspace:
         author: str,
         user_id: str | None = None,
     ) -> list[NoteVersion]:
+        if not _is_safe_slug(slug):
+            return []
         history_dir = self._history_dir(user_id, author, slug)
         if not history_dir.exists():
             return []
@@ -475,6 +514,8 @@ class LocalDiskWorkspace:
         author: str,
         user_id: str | None = None,
     ) -> Note | None:
+        if not _is_safe_slug(slug) or version < 0:
+            return None
         history_dir = self._history_dir(user_id, author, slug)
         path = history_dir / f"{version:04d}.md"
         if not path.exists():
@@ -624,21 +665,36 @@ class LocalDiskWorkspace:
         # `read_version`/`list_versions` work regardless of which
         # namespace the live note is in. Single source of truth
         # per (user, author, slug).
+        #
+        # ``slug`` is model-controlled: refuse anything that isn't a
+        # single plain path segment so it can't climb out of the
+        # caller's partition.
+        if not _is_safe_slug(slug):
+            raise ValueError(f"invalid note slug {slug!r}")
         return (
             self._notes_dir(user_id, author, namespace=None)
             / HISTORY_DIR
             / slug
         )
 
-    async def _snapshot_history(self, live_path: Path, note: Note) -> None:
+    async def _snapshot_history(
+        self,
+        live_path: Path,
+        note: Note,
+        *,
+        user_id: str | None = None,
+    ) -> None:
         """Copy the live note body to the next version file in
         ``<author>/.history/<slug>/NNNN.md`` before overwriting.
 
         Counter is monotonic per-slug; zero-padded to 4 digits so
         agents on long-running tasks can hit 1000+ revisions
         without collision. Caller must hold the index lock.
+
+        ``user_id`` is the CALLER's partition — never the value
+        stored in the note's frontmatter, which is file content and
+        must not steer where history is written.
         """
-        user_id = note.user_id
         history_dir = self._history_dir(user_id, note.author, note.slug)
         history_dir.mkdir(parents=True, exist_ok=True)
         # Find the highest existing version number; next = +1.
@@ -668,13 +724,26 @@ class LocalDiskWorkspace:
         ``.embeddings``) looking for ``<slug>.md``. Returns the
         first match or None. Cheap because each author has a
         small subtree.
+
+        ``slug`` is model-controlled, so it is never interpolated
+        into a glob pattern or a path: slugs containing separators,
+        ``..`` or glob metacharacters match nothing, candidates are
+        compared by exact stem, and the match must resolve inside
+        the caller's own tenant partition (defence in depth against
+        symlinks planted in the tree).
         """
+        if not _is_safe_slug(slug):
+            return None
         author_root = self._notes_dir(user_id, author, namespace=None)
         if not author_root.exists():
             return None
-        for p in author_root.rglob(f"{slug}.md"):
-            if not _is_in_meta_dir(p):
-                return p
+        partition = self._user_root(user_id).resolve()
+        for p in author_root.rglob("*.md"):
+            if p.stem != slug or not p.is_file() or _is_in_meta_dir(p):
+                continue
+            if not p.resolve().is_relative_to(partition):
+                continue
+            return p
         return None
 
     def _next_counter_across_namespaces(self, author_root: Path) -> int:
@@ -1104,18 +1173,76 @@ class LocalDiskWorkspace:
 _PATH_UNSAFE = re.compile(r"[^\w.\-]")
 
 
+# Directory names directly under the workspace root that a user id
+# must never be able to claim: the anonymous bucket and the shared
+# read-only seeds dir.
+_RESERVED_USER_DIRS = frozenset({ANON_BUCKET, SEEDS_DIR, ".", ".."})
+
+# A slug is ONE plain path segment: word chars, dots and dashes.
+# No separators, no glob metacharacters, no NUL.
+_SAFE_SLUG = re.compile(r"[\w.\-]+")
+
+
+def _percent_encode(text: str) -> str:
+    return "".join(
+        f"%{b:02X}" for b in text.encode("utf-8", "surrogatepass")
+    )
+
+
 def _sanitise_user_id(value: str) -> str:
-    """User-supplied identifiers get path-sanitised before going on
-    disk. ``..``  and slashes can't escape the workspace root."""
-    cleaned = _PATH_UNSAFE.sub("_", value)
-    if not cleaned or cleaned in (".", ".."):
-        return "_anon"
-    return cleaned
+    """Map a user id to its partition directory name — injectively.
+
+    Characters that are safe in a path segment (word characters,
+    ``.`` and ``-``) are kept verbatim, so every id that was already
+    path-safe maps to the SAME folder as before. Everything else
+    (including ``%`` itself) is percent-encoded byte-by-byte, so
+    ``alice@example.com``, ``alice#example.com`` and
+    ``alice_example.com`` get three distinct folders, and ``/`` or
+    ``..`` can't escape the workspace root.
+
+    Ids that would collide with a reserved directory (``_anon`` —
+    the anonymous bucket, ``seeds``, ``.``, ``..``) get their first
+    character percent-encoded. Since a literal ``%`` in an id is
+    always written ``%25``, no other id can produce those names.
+
+    The empty string is the anonymous bucket (callers normally
+    route ``None`` / ``""`` there before reaching this function).
+
+    Note: on case-insensitive filesystems (default macOS / Windows)
+    ids differing only by letter case still share a folder — use
+    case-normalised ids there.
+    """
+    if not value:
+        return ANON_BUCKET
+    if value in _RESERVED_USER_DIRS:
+        return _percent_encode(value[0]) + value[1:]
+    return _PATH_UNSAFE.sub(lambda m: _percent_encode(m.group()), value)
 
 
 def _sanitise_author(value: str) -> str:
+    """Path-safe directory name for an author / namespace.
+
+    Raises :class:`ValueError` for ``.`` / ``..`` — those would
+    resolve to the parent directory instead of naming a bucket.
+    """
     cleaned = _PATH_UNSAFE.sub("_", value)
+    if cleaned in (".", ".."):
+        raise ValueError(
+            f"invalid author / namespace name {value!r}: "
+            "'.' and '..' are not allowed"
+        )
     return cleaned or "agent"
+
+
+def _is_safe_slug(slug: str) -> bool:
+    """``True`` when ``slug`` is a single plain path segment that
+    can't traverse (``..``, separators) or act as a glob pattern
+    (``*``, ``?``, ``[``)."""
+    return (
+        isinstance(slug, str)
+        and slug not in (".", "..")
+        and _SAFE_SLUG.fullmatch(slug) is not None
+    )
 
 
 # ---------------------------------------------------------------------------

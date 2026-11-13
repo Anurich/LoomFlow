@@ -17,27 +17,53 @@ mirror the pattern in :mod:`memory.postgres`.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
 from datetime import datetime
 from typing import Any
 
 from ..core.protocols import Embedder
 from ..core.types import Fact, _normalize_predicate
-from ..vectorstore._pgvector import hnsw_scan
+from ..vectorstore._pgvector import (
+    HNSW_MAX_DIMENSIONS,
+    hnsw_scan,
+    index_reference,
+    table_reference,
+    validate_schema,
+    validate_table_prefix,
+)
 from .facts import plan_supersession
+
+logger = logging.getLogger(__name__)
 
 
 class PostgresFactStore:
-    """Postgres-backed bi-temporal fact store."""
+    """Postgres-backed bi-temporal fact store.
+
+    The table is ``facts`` by default. ``table_prefix`` (e.g.
+    ``"myapp_"`` → ``myapp_facts``) and ``schema`` move it out of the
+    way of an application's own tables; both must be plain
+    identifiers.
+    """
 
     def __init__(
         self,
         pool: Any,
         *,
         embedder: Embedder | None = None,
+        table_prefix: str = "",
+        schema: str | None = None,
     ) -> None:
         self._pool = pool
         self._embedder = embedder
+        self._table_prefix = validate_table_prefix(table_prefix)
+        self._schema = validate_schema(schema)
+        self._table = table_reference(self._schema, self._table_prefix, "facts")
+        # Validate the longest derived index name up front too.
+        self._index("facts_user_subject_predicate_idx")
+
+    def _index(self, name: str) -> str:
+        return index_reference(self._table_prefix, name)
 
     # ---- factory ---------------------------------------------------------
 
@@ -49,6 +75,8 @@ class PostgresFactStore:
         embedder: Embedder | None = None,
         min_size: int = 1,
         max_size: int = 10,
+        table_prefix: str = "",
+        schema: str | None = None,
     ) -> PostgresFactStore:
         try:
             import asyncpg  # type: ignore[import-not-found, import-untyped]
@@ -76,7 +104,9 @@ class PostgresFactStore:
             max_size=max_size,
             init=_setup,
         )
-        return cls(pool, embedder=embedder)
+        return cls(
+            pool, embedder=embedder, table_prefix=table_prefix, schema=schema
+        )
 
     async def aclose(self) -> None:
         if self._pool is not None and hasattr(self._pool, "close"):
@@ -98,7 +128,7 @@ class PostgresFactStore:
         statements = [
             "CREATE EXTENSION IF NOT EXISTS vector;",
             (
-                f"CREATE TABLE IF NOT EXISTS facts ("
+                f"CREATE TABLE IF NOT EXISTS {self._table} ("
                 f"  id TEXT PRIMARY KEY,"
                 f"  user_id TEXT,"
                 f"  subject TEXT NOT NULL,"
@@ -112,20 +142,24 @@ class PostgresFactStore:
                 f"  embedding vector({self._dimensions()}) "
                 f");"
             ),
-            "ALTER TABLE facts ADD COLUMN IF NOT EXISTS user_id TEXT;",
+            f"ALTER TABLE {self._table} ADD COLUMN IF NOT EXISTS user_id TEXT;",
             (
-                "CREATE INDEX IF NOT EXISTS facts_subject_idx "
-                "ON facts (subject);"
+                f"CREATE INDEX IF NOT EXISTS {self._index('facts_subject_idx')} "
+                f"ON {self._table} (subject);"
             ),
             (
-                "CREATE INDEX IF NOT EXISTS facts_user_subject_predicate_idx "
-                "ON facts (user_id, subject, predicate);"
+                "CREATE INDEX IF NOT EXISTS "
+                f"{self._index('facts_user_subject_predicate_idx')} "
+                f"ON {self._table} (user_id, subject, predicate);"
             ),
         ]
-        if self._embedder is not None:
+        # pgvector can't HNSW-index more than 2000 dimensions; above
+        # that the index is skipped (``init_schema`` logs it) and
+        # recall falls back to an exact scan.
+        if self._embedder is not None and self._dimensions() <= HNSW_MAX_DIMENSIONS:
             statements.append(
-                "CREATE INDEX IF NOT EXISTS facts_embedding_idx "
-                "ON facts USING hnsw (embedding vector_cosine_ops) "
+                f"CREATE INDEX IF NOT EXISTS {self._index('facts_embedding_idx')} "
+                f"ON {self._table} USING hnsw (embedding vector_cosine_ops) "
                 "WHERE embedding IS NOT NULL;"
             )
         return statements
@@ -134,7 +168,21 @@ class PostgresFactStore:
         return self._embedder.dimensions if self._embedder is not None else 1
 
     async def init_schema(self) -> None:
+        if self._embedder is not None and self._dimensions() > HNSW_MAX_DIMENSIONS:
+            logger.warning(
+                "PostgresFactStore: the embedder produces %d-dimensional "
+                "vectors, above pgvector's %d-dimension limit for HNSW "
+                "indexes; no vector index is created on %s and fact recall "
+                "scans the table (exact, but slow when large).",
+                self._dimensions(),
+                HNSW_MAX_DIMENSIONS,
+                self._table,
+            )
         async with self._pool.acquire() as conn:
+            if self._schema is not None:
+                await conn.execute(
+                    f'CREATE SCHEMA IF NOT EXISTS "{self._schema}";'
+                )
             for stmt in self.schema_sql():
                 await conn.execute(stmt)
 
@@ -201,7 +249,7 @@ class PostgresFactStore:
         rows = await conn.fetch(
             "SELECT id, user_id, subject, predicate, object, confidence, "
             "valid_from, valid_until, recorded_at, sources, embedding "
-            "FROM facts WHERE user_id IS NOT DISTINCT FROM $1 "
+            f"FROM {self._table} WHERE user_id IS NOT DISTINCT FROM $1 "
             "AND subject = $2 AND predicate = $3 AND object != $4",
             fact.user_id,
             fact.subject,
@@ -211,11 +259,13 @@ class PostgresFactStore:
         closes, until = plan_supersession(fact, [_row_to_fact(r) for r in rows])
         for existing_id, valid_until in closes.items():
             await conn.execute(
-                "UPDATE facts SET valid_until = $1 WHERE id = $2", valid_until, existing_id
+                f"UPDATE {self._table} SET valid_until = $1 WHERE id = $2",
+                valid_until,
+                existing_id,
             )
         fact = fact.model_copy(update={"valid_until": until})
         await conn.execute(
-            "INSERT INTO facts "
+            f"INSERT INTO {self._table} "
             "(id, user_id, subject, predicate, object, confidence, "
             " valid_from, valid_until, recorded_at, sources, embedding) "
             "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) "
@@ -274,7 +324,7 @@ class PostgresFactStore:
         sql = (
             "SELECT id, user_id, subject, predicate, object, confidence, "
             "valid_from, valid_until, recorded_at, sources, embedding "
-            "FROM facts "
+            f"FROM {self._table} "
             f"WHERE {' AND '.join(clauses)} "
             f"ORDER BY recorded_at DESC LIMIT ${idx}"
         )
@@ -327,7 +377,7 @@ class PostgresFactStore:
         sql = (
             "SELECT id, user_id, subject, predicate, object, confidence, "
             "valid_from, valid_until, recorded_at, sources, embedding "
-            "FROM facts "
+            f"FROM {self._table} "
             f"WHERE {' AND '.join(clauses)} "
             f"ORDER BY embedding <=> ${embed_idx} "
             f"LIMIT ${idx}"
@@ -372,7 +422,7 @@ class PostgresFactStore:
         sql = (
             "SELECT id, user_id, subject, predicate, object, confidence, "
             "valid_from, valid_until, recorded_at, sources, embedding "
-            "FROM facts "
+            f"FROM {self._table} "
             f"WHERE {' AND '.join(clauses)} "
             f"ORDER BY recorded_at DESC LIMIT ${idx}"
         )
@@ -386,7 +436,7 @@ class PostgresFactStore:
             rows = await conn.fetch(
                 "SELECT id, user_id, subject, predicate, object, confidence, "
                 "valid_from, valid_until, recorded_at, sources, embedding "
-                "FROM facts ORDER BY recorded_at DESC"
+                f"FROM {self._table} ORDER BY recorded_at DESC"
             )
         return [_row_to_fact(r) for r in rows]
 
@@ -406,7 +456,7 @@ class PostgresFactStore:
         if before is not None:
             clauses.append("recorded_at < $2")
             params.append(before)
-        sql = "DELETE FROM facts WHERE " + " AND ".join(clauses)
+        sql = f"DELETE FROM {self._table} WHERE " + " AND ".join(clauses)
         async with self._pool.acquire() as conn:
             result = await conn.execute(sql, *params)
         return _parse_delete_count(result)
@@ -415,7 +465,7 @@ class PostgresFactStore:
         """``SELECT COUNT(*)`` over the ``user_id`` partition."""
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT COUNT(*) AS c FROM facts "
+                f"SELECT COUNT(*) AS c FROM {self._table} "
                 "WHERE user_id IS NOT DISTINCT FROM $1",
                 user_id,
             )

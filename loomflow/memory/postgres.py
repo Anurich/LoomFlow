@@ -10,6 +10,18 @@ The ``vector(N)`` column dimension is fixed at table-creation time and
 must match the configured embedder's ``dimensions``. Switching
 embedders later requires migrating the table.
 
+The table names above are the defaults. ``table_prefix="myapp_"``
+and / or ``schema="agent"`` (on the constructor and :meth:`connect`)
+move every table — ``episodes``, ``memory_blocks``,
+``episode_tool_transcripts`` and the fact store's ``facts`` — out of
+the way of an application that already has tables with those names.
+:meth:`init_schema` refuses to touch an existing ``episodes`` /
+``memory_blocks`` table that isn't this backend's.
+
+pgvector can HNSW-index at most 2000 dimensions. With a wider
+embedder (``text-embedding-3-large`` is 3072) the vector index is
+skipped with a warning and recall runs an exact scan.
+
 Both ``asyncpg`` and ``pgvector`` are imported lazily inside
 :meth:`connect` / :meth:`init_schema` so the module loads in
 environments without those extras installed; the import only fires
@@ -18,10 +30,12 @@ when actually opening a connection.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
 from datetime import datetime
 from typing import Any
 
+from ..core.errors import ConfigError
 from ..core.protocols import Embedder
 from ..core.types import (
     Episode,
@@ -33,14 +47,37 @@ from ..core.types import (
     Message,
     Role,
 )
-from ..vectorstore._pgvector import hnsw_scan
+from ..vectorstore._pgvector import (
+    HNSW_MAX_DIMENSIONS,
+    hnsw_scan,
+    index_reference,
+    table_reference,
+    validate_schema,
+    validate_table_prefix,
+)
 from . import _extractions
+from ._bounds import (
+    DEFAULT_MAX_BLOCK_CHARS,
+    resolve_max_block_chars,
+    validate_limit,
+)
 from ._embedding_util import vector_to_list
 from ._user_key import ANON_USER_ID, decode_user_id, encode_user_id
 from .embedder import HashEmbedder, warn_hash_embedder_fallback
 from .facts import count_facts, delete_facts
 
+logger = logging.getLogger(__name__)
+
 DEFAULT_NAMESPACE = "default"
+
+# Columns a table must have to be one of ours. ``init_schema`` runs
+# ``ALTER TABLE`` migrations, so it first makes sure an existing table
+# of the same name really is this backend's (any loomflow version)
+# and not the application's own ``episodes`` table.
+_EPISODES_COLUMNS = frozenset(
+    {"id", "namespace", "session_id", "occurred_at", "input", "output", "embedding"}
+)
+_BLOCKS_COLUMNS = frozenset({"namespace", "name", "content"})
 
 # Postgres can't carry NULL inside a primary key column, so the
 # anonymous bucket needs a non-NULL representation on the wire.
@@ -61,6 +98,12 @@ class PostgresMemory:
     ``pool`` is an ``asyncpg.Pool`` (or anything with the same API).
     Tests can pass a fake pool whose ``acquire()`` returns a fake
     connection.
+
+    ``table_prefix`` / ``schema`` rename and relocate the tables (see
+    the module docstring); both must be plain identifiers and default
+    to the historical unprefixed names in the connection's search
+    path. ``append_block`` keeps the newest ``max_block_chars``
+    characters of a block (default 20,000; ``None`` for no limit).
     """
 
     def __init__(
@@ -70,8 +113,25 @@ class PostgresMemory:
         embedder: Embedder | None = None,
         namespace: str = DEFAULT_NAMESPACE,
         fact_store: Any | None = None,
+        table_prefix: str = "",
+        schema: str | None = None,
+        max_block_chars: int | None = DEFAULT_MAX_BLOCK_CHARS,
     ) -> None:
         self._pool = pool
+        self._table_prefix = validate_table_prefix(table_prefix)
+        self._schema = validate_schema(schema)
+        self._blocks_table = table_reference(
+            self._schema, self._table_prefix, "memory_blocks"
+        )
+        self._episodes_table = table_reference(
+            self._schema, self._table_prefix, "episodes"
+        )
+        self._transcripts_table = table_reference(
+            self._schema, self._table_prefix, "episode_tool_transcripts"
+        )
+        # Validate the longest derived index name up front too.
+        self._index("episode_tool_transcripts_episode_idx")
+        self._max_block_chars = resolve_max_block_chars(max_block_chars)
         if embedder is None:
             warn_hash_embedder_fallback("PostgresMemory")
             embedder = HashEmbedder()
@@ -82,6 +142,9 @@ class PostgresMemory:
         # :class:`PostgresFactStore` (or set ``with_facts=True`` on
         # :meth:`connect`) to enable it.
         self.facts: Any | None = fact_store
+
+    def _index(self, name: str) -> str:
+        return index_reference(self._table_prefix, name)
 
     # ---- factory ---------------------------------------------------------
 
@@ -96,6 +159,9 @@ class PostgresMemory:
         max_size: int = 10,
         with_facts: bool = False,
         init_schema: bool = False,
+        table_prefix: str = "",
+        schema: str | None = None,
+        max_block_chars: int | None = DEFAULT_MAX_BLOCK_CHARS,
     ) -> PostgresMemory:
         """Open an asyncpg pool and register the pgvector codec.
 
@@ -106,7 +172,12 @@ class PostgresMemory:
         ``init_schema=True`` creates the ``vector`` extension and the
         tables if they don't exist (idempotent): the default when the
         store comes from a ``memory="postgres://..."`` URL.
+
+        ``table_prefix`` / ``schema`` apply to the fact store too.
         """
+        # Bad identifiers fail here, before any connection is opened.
+        validate_table_prefix(table_prefix)
+        validate_schema(schema)
         try:
             import asyncpg  # type: ignore[import-not-found, import-untyped]
         except ImportError as exc:  # pragma: no cover
@@ -140,11 +211,23 @@ class PostgresMemory:
             max_size=max_size,
             init=_setup,
         )
-        instance = cls(pool, embedder=embedder, namespace=namespace)
+        instance = cls(
+            pool,
+            embedder=embedder,
+            namespace=namespace,
+            table_prefix=table_prefix,
+            schema=schema,
+            max_block_chars=max_block_chars,
+        )
         if with_facts:
             from .postgres_facts import PostgresFactStore
 
-            instance.facts = PostgresFactStore(pool, embedder=embedder)
+            instance.facts = PostgresFactStore(
+                pool,
+                embedder=embedder,
+                table_prefix=table_prefix,
+                schema=schema,
+            )
         if init_schema:
             await instance.init_schema()
         return instance
@@ -170,10 +253,10 @@ class PostgresMemory:
         usable from migration scripts that want to apply the schema in
         their own transaction.
         """
-        return [
+        statements = [
             "CREATE EXTENSION IF NOT EXISTS vector;",
             (
-                "CREATE TABLE IF NOT EXISTS memory_blocks ("
+                f"CREATE TABLE IF NOT EXISTS {self._blocks_table} ("
                 "  namespace TEXT NOT NULL,"
                 # ``user_id`` cannot be NULL inside a PK in Postgres,
                 # so the anonymous bucket gets a reserved sentinel
@@ -194,19 +277,19 @@ class PostgresMemory:
             # default '' was used by 0.9.x; 0.10+ uses the sentinel.
             # Both ALTERs are no-ops if the column already exists at
             # the right shape.
-            "ALTER TABLE memory_blocks ADD COLUMN IF NOT EXISTS "
+            f"ALTER TABLE {self._blocks_table} ADD COLUMN IF NOT EXISTS "
             f"user_id TEXT NOT NULL DEFAULT '{_ANON_USER_ID}';",
             # Migrate 0.9.x-era empty-string rows to the sentinel.
             # No-op once already migrated.
-            "UPDATE memory_blocks SET user_id = "
+            f"UPDATE {self._blocks_table} SET user_id = "
             f"'{_ANON_USER_ID}' WHERE user_id = '';",
             # Update the column default so freshly-inserted rows
             # without an explicit user_id (legacy callers) land in
             # the sentinel bucket too.
-            "ALTER TABLE memory_blocks ALTER COLUMN user_id "
+            f"ALTER TABLE {self._blocks_table} ALTER COLUMN user_id "
             f"SET DEFAULT '{_ANON_USER_ID}';",
             (
-                f"CREATE TABLE IF NOT EXISTS episodes ("
+                f"CREATE TABLE IF NOT EXISTS {self._episodes_table} ("
                 f"  id TEXT PRIMARY KEY,"
                 f"  namespace TEXT NOT NULL,"
                 f"  session_id TEXT NOT NULL,"
@@ -218,25 +301,29 @@ class PostgresMemory:
                 f");"
             ),
             # Idempotent ALTER for upgrades from pre-``user_id`` schemas.
-            "ALTER TABLE episodes ADD COLUMN IF NOT EXISTS user_id TEXT;",
             (
-                "CREATE INDEX IF NOT EXISTS episodes_namespace_idx "
-                "ON episodes (namespace, occurred_at DESC);"
+                f"ALTER TABLE {self._episodes_table} "
+                "ADD COLUMN IF NOT EXISTS user_id TEXT;"
             ),
             (
-                "CREATE INDEX IF NOT EXISTS episodes_user_id_idx "
-                "ON episodes (namespace, user_id, occurred_at DESC);"
+                "CREATE INDEX IF NOT EXISTS "
+                f"{self._index('episodes_namespace_idx')} "
+                f"ON {self._episodes_table} (namespace, occurred_at DESC);"
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS "
+                f"{self._index('episodes_user_id_idx')} "
+                f"ON {self._episodes_table} "
+                "(namespace, user_id, occurred_at DESC);"
             ),
             # ``session_messages`` filters on (namespace, session_id)
             # and sorts by occurred_at — without this index it scans
             # the whole namespace partition.
             (
-                "CREATE INDEX IF NOT EXISTS episodes_session_idx "
-                "ON episodes (namespace, session_id, occurred_at DESC);"
-            ),
-            (
-                "CREATE INDEX IF NOT EXISTS episodes_embedding_idx "
-                "ON episodes USING hnsw (embedding vector_cosine_ops);"
+                "CREATE INDEX IF NOT EXISTS "
+                f"{self._index('episodes_session_idx')} "
+                f"ON {self._episodes_table} "
+                "(namespace, session_id, occurred_at DESC);"
             ),
             # Tool-transcript sidecar table — see the matching
             # comment in sqlite.py for the design rationale. One
@@ -246,9 +333,9 @@ class PostgresMemory:
             # restarts; pre-existing DBs add the table on next
             # init without touching existing episodes.
             (
-                "CREATE TABLE IF NOT EXISTS episode_tool_transcripts ("
+                f"CREATE TABLE IF NOT EXISTS {self._transcripts_table} ("
                 "  episode_id TEXT NOT NULL "
-                "    REFERENCES episodes(id) ON DELETE CASCADE,"
+                f"    REFERENCES {self._episodes_table}(id) ON DELETE CASCADE,"
                 "  sequence INTEGER NOT NULL,"
                 "  message_json TEXT NOT NULL,"
                 "  PRIMARY KEY (episode_id, sequence)"
@@ -256,22 +343,87 @@ class PostgresMemory:
             ),
             (
                 "CREATE INDEX IF NOT EXISTS "
-                "episode_tool_transcripts_episode_idx "
-                "ON episode_tool_transcripts (episode_id, sequence);"
+                f"{self._index('episode_tool_transcripts_episode_idx')} "
+                f"ON {self._transcripts_table} (episode_id, sequence);"
             ),
         ]
+        if self._schema is not None:
+            statements.insert(1, f'CREATE SCHEMA IF NOT EXISTS "{self._schema}";')
+        # pgvector's HNSW index takes at most 2000 dimensions; a wider
+        # column simply gets no ANN index (``init_schema`` warns) and
+        # recall is an exact scan.
+        if self.embedding_dimensions <= HNSW_MAX_DIMENSIONS:
+            statements.append(
+                "CREATE INDEX IF NOT EXISTS "
+                f"{self._index('episodes_embedding_idx')} "
+                f"ON {self._episodes_table} "
+                "USING hnsw (embedding vector_cosine_ops);"
+            )
+        return statements
 
     async def init_schema(self) -> None:
         """Apply :meth:`schema_sql` against the connected pool.
 
         When a :class:`PostgresFactStore` is attached as ``self.facts``,
         its schema is initialised in the same call.
+
+        Raises :class:`ConfigError` — before changing anything — when
+        a table named like one of ours already exists but isn't ours
+        (an application's own ``episodes`` table, say): pass
+        ``table_prefix=`` or ``schema=`` to keep the two apart.
         """
+        if self.embedding_dimensions > HNSW_MAX_DIMENSIONS:
+            logger.warning(
+                "PostgresMemory: the embedder produces %d-dimensional "
+                "vectors, above pgvector's %d-dimension limit for HNSW "
+                "indexes; no vector index is created on %s and recall "
+                "scans the table (exact, but slow when large). Use an "
+                "embedder with at most %d dimensions (e.g. "
+                "OpenAIEmbedder('text-embedding-3-large', "
+                "dimensions=1536)) to get an index.",
+                self.embedding_dimensions,
+                HNSW_MAX_DIMENSIONS,
+                self._episodes_table,
+                HNSW_MAX_DIMENSIONS,
+            )
         async with self._pool.acquire() as conn:
+            await self._refuse_foreign_tables(conn)
             for stmt in self.schema_sql():
                 await conn.execute(stmt)
         if self.facts is not None and hasattr(self.facts, "init_schema"):
             await self.facts.init_schema()
+
+    async def _refuse_foreign_tables(self, conn: Any) -> None:
+        """Raise if ``episodes`` / ``memory_blocks`` exist with a shape
+        that isn't ours — the DDL that follows would ``ALTER`` them."""
+        for bare, required in (
+            ("episodes", _EPISODES_COLUMNS),
+            ("memory_blocks", _BLOCKS_COLUMNS),
+        ):
+            name = self._table_prefix + bare
+            try:
+                rows = await conn.fetch(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_schema::text = "
+                    "COALESCE($1::text, current_schema()::text) "
+                    "AND table_name::text = $2::text",
+                    self._schema,
+                    name,
+                )
+                columns = {str(row["column_name"]) for row in rows}
+            except (KeyError, TypeError, IndexError, AttributeError):
+                continue  # can't introspect (a stand-in connection)
+            if columns and not required <= columns:
+                missing = ", ".join(sorted(required - columns))
+                raise ConfigError(
+                    f"PostgresMemory: a table named {name!r} already "
+                    "exists in this database but is not a loomflow "
+                    f"memory table (it has no column(s): {missing}). "
+                    "Refusing to alter it. Give loomflow its own tables "
+                    "with PostgresMemory(..., table_prefix='loomflow_') "
+                    "or schema='loomflow' (also accepted by "
+                    "PostgresMemory.connect)."
+                )
 
     # ---- working blocks --------------------------------------------------
 
@@ -284,7 +436,7 @@ class PostgresMemory:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 "SELECT name, content, updated_at, pinned_order "
-                "FROM memory_blocks WHERE namespace = $1 "
+                f"FROM {self._blocks_table} WHERE namespace = $1 "
                 "AND user_id = $2 "
                 "ORDER BY pinned_order ASC",
                 self._namespace,
@@ -305,7 +457,8 @@ class PostgresMemory:
     ) -> None:
         async with self._pool.acquire() as conn:
             await conn.execute(
-                "INSERT INTO memory_blocks(namespace, user_id, name, content) "
+                f"INSERT INTO {self._blocks_table}"
+                "(namespace, user_id, name, content) "
                 "VALUES ($1, $2, $3, $4) "
                 "ON CONFLICT (namespace, user_id, name) DO UPDATE "
                 "SET content = EXCLUDED.content, updated_at = NOW();",
@@ -318,17 +471,29 @@ class PostgresMemory:
     async def append_block(
         self, name: str, content: str, *, user_id: str | None = None
     ) -> None:
+        # Oldest-first trimming in SQL: RIGHT(text, n) keeps the
+        # newest n characters of the appended block.
+        if self._max_block_chars is None:
+            new_content = "$4"
+            merged = "existing.content || EXCLUDED.content"
+            args: tuple[Any, ...] = ()
+        else:
+            new_content = "RIGHT($4, $5)"
+            merged = "RIGHT(existing.content || EXCLUDED.content, $5)"
+            args = (self._max_block_chars,)
         async with self._pool.acquire() as conn:
             await conn.execute(
-                "INSERT INTO memory_blocks(namespace, user_id, name, content) "
-                "VALUES ($1, $2, $3, $4) "
+                f"INSERT INTO {self._blocks_table} AS existing"
+                "(namespace, user_id, name, content) "
+                f"VALUES ($1, $2, $3, {new_content}) "
                 "ON CONFLICT (namespace, user_id, name) DO UPDATE "
-                "SET content = memory_blocks.content || EXCLUDED.content, "
+                f"SET content = {merged}, "
                 "    updated_at = NOW();",
                 self._namespace,
                 _encode_user_id(user_id),
                 name,
                 content,
+                *args,
             )
 
     # ---- episodes --------------------------------------------------------
@@ -348,8 +513,9 @@ class PostgresMemory:
             # with the transcript sidecar below, which already
             # replaces (DELETE + INSERT) on re-remember.
             insert_episode = (
-                "INSERT INTO episodes(id, namespace, session_id, user_id, "
-                "                     occurred_at, input, output, embedding) "
+                f"INSERT INTO {self._episodes_table}"
+                "(id, namespace, session_id, user_id, "
+                " occurred_at, input, output, embedding) "
                 "VALUES ($1, $2, $3, $4, $5, $6, $7, $8) "
                 "ON CONFLICT (id) DO UPDATE SET "
                 "  session_id = EXCLUDED.session_id, "
@@ -387,7 +553,7 @@ class PostgresMemory:
                 async with conn.transaction():
                     await conn.execute(insert_episode, *episode_args)
                     await conn.execute(
-                        "DELETE FROM episode_tool_transcripts "
+                        f"DELETE FROM {self._transcripts_table} "
                         "WHERE episode_id = $1;",
                         episode.id,
                     )
@@ -399,7 +565,7 @@ class PostgresMemory:
                             )
                         ]
                         await conn.executemany(
-                            "INSERT INTO episode_tool_transcripts "
+                            f"INSERT INTO {self._transcripts_table} "
                             "(episode_id, sequence, message_json) "
                             "VALUES ($1, $2, $3);",
                             rows,
@@ -415,6 +581,7 @@ class PostgresMemory:
         time_range: tuple[datetime, datetime] | None = None,
         user_id: str | None = None,
     ) -> list[Episode]:
+        validate_limit(limit)
         if not query.strip():
             return await self._recall_recent(limit, time_range, user_id)
 
@@ -430,7 +597,7 @@ class PostgresMemory:
         async with self._pool.acquire() as conn, hnsw_scan(conn, fetch=limit, filtered=True):
             rows = await conn.fetch(
                 "SELECT id, session_id, user_id, occurred_at, input, output, embedding "
-                "FROM episodes "
+                f"FROM {self._episodes_table} "
                 "WHERE namespace = $1 "
                 "  AND user_id IS NOT DISTINCT FROM $2 "
                 "  AND ($3::timestamptz IS NULL OR occurred_at >= $3) "
@@ -472,6 +639,7 @@ class PostgresMemory:
         """
         from ._hybrid import hybrid_rank_episodes
 
+        validate_limit(limit)
         if not query.strip():
             recent = await self._recall_recent(limit, time_range, user_id)
             return [EpisodeMatch(episode=e, score=1.0) for e in recent]
@@ -486,7 +654,7 @@ class PostgresMemory:
         ):
             rows = await conn.fetch(
                 "SELECT id, session_id, user_id, occurred_at, input, output, embedding "
-                "FROM episodes "
+                f"FROM {self._episodes_table} "
                 "WHERE namespace = $1 "
                 "  AND user_id IS NOT DISTINCT FROM $2 "
                 "  AND ($3::timestamptz IS NULL OR occurred_at >= $3) "
@@ -524,7 +692,7 @@ class PostgresMemory:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 "SELECT id, session_id, user_id, occurred_at, input, output, embedding "
-                "FROM episodes "
+                f"FROM {self._episodes_table} "
                 "WHERE namespace = $1 "
                 "  AND user_id IS NOT DISTINCT FROM $2 "
                 "  AND ($3::timestamptz IS NULL OR occurred_at >= $3) "
@@ -569,7 +737,7 @@ class PostgresMemory:
             rows = await conn.fetch(
                 "SELECT id, session_id, user_id, occurred_at, "
                 "       input, output, embedding "
-                "FROM episodes "
+                f"FROM {self._episodes_table} "
                 "WHERE namespace = $1 "
                 "  AND session_id = $2 "
                 "  AND user_id IS NOT DISTINCT FROM $3 "
@@ -592,7 +760,7 @@ class PostgresMemory:
                 ep_ids = [ep.id for ep in episodes]
                 ts_rows = await conn.fetch(
                     "SELECT episode_id, sequence, message_json "
-                    "FROM episode_tool_transcripts "
+                    f"FROM {self._transcripts_table} "
                     "WHERE episode_id = ANY($1::TEXT[]) "
                     "ORDER BY episode_id, sequence",
                     ep_ids,
@@ -625,14 +793,14 @@ class PostgresMemory:
         async with self._pool.acquire() as conn:
             count_row = await conn.fetchrow(
                 "SELECT COUNT(*) AS c, MAX(occurred_at) AS last "
-                "FROM episodes WHERE namespace = $1 "
+                f"FROM {self._episodes_table} WHERE namespace = $1 "
                 "AND user_id IS NOT DISTINCT FROM $2",
                 self._namespace,
                 user_id,
             )
             sessions_rows = await conn.fetch(
                 "SELECT DISTINCT session_id, MAX(occurred_at) AS m "
-                "FROM episodes WHERE namespace = $1 "
+                f"FROM {self._episodes_table} WHERE namespace = $1 "
                 "AND user_id IS NOT DISTINCT FROM $2 "
                 "GROUP BY session_id ORDER BY m DESC LIMIT 10",
                 self._namespace,
@@ -684,7 +852,7 @@ class PostgresMemory:
             clauses.append(f"occurred_at < ${idx}")
             params.append(before)
             idx += 1
-        sql = "DELETE FROM episodes WHERE " + " AND ".join(clauses)
+        sql = f"DELETE FROM {self._episodes_table} WHERE " + " AND ".join(clauses)
         async with self._pool.acquire() as conn:
             result = await conn.execute(sql, *params)
             # asyncpg returns "DELETE <n>" — parse the count.
@@ -692,7 +860,7 @@ class PostgresMemory:
             if session_id is None:
                 # Working blocks are per user too (no session).
                 block_sql = (
-                    "DELETE FROM memory_blocks "
+                    f"DELETE FROM {self._blocks_table} "
                     "WHERE namespace = $1 AND user_id = $2"
                 )
                 block_params: list[Any] = [
@@ -721,7 +889,7 @@ class PostgresMemory:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 "SELECT id, session_id, user_id, occurred_at, input, output, embedding "
-                "FROM episodes WHERE namespace = $1 "
+                f"FROM {self._episodes_table} WHERE namespace = $1 "
                 "AND user_id IS NOT DISTINCT FROM $2 "
                 "ORDER BY occurred_at ASC",
                 self._namespace,

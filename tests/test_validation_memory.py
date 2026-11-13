@@ -366,7 +366,8 @@ async def test_non_string_user_ids_are_refused(tmp_path: Path) -> None:
     from loomflow.memory import SqliteMemory
 
     memory = SqliteMemory(tmp_path / "m.db")
-    assert await memory.recall("", limit=0) == []
+    with pytest.raises(ValueError, match="limit"):
+        await memory.recall("", limit=0)
     with pytest.raises(TypeError, match="user_id must be a string"):
         from loomflow.memory._user_key import encode_user_id
 

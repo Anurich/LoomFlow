@@ -20,16 +20,27 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
+
+import anyio
 
 from ..core.protocols import Embedder
 from ..loader.base import Chunk
 from ._bm25 import BM25Index, fuse_weighted
 from ._filter import evaluate_filter
 from ._mmr import mmr_select
-from ._util import embed_all, resolve_ids
+from ._util import (
+    dedupe_last,
+    embed_all,
+    embedder_identity,
+    resolve_ids,
+    validate_k,
+    validate_query_vector,
+)
 from .base import SearchResult, _chunks_from_texts
 
 
@@ -57,7 +68,12 @@ class InMemoryVectorStore:
         # Norms are cached at add/load time so a query doesn't
         # recompute every stored vector's norm on every search.
         self._norms: list[float] = []
+        # id → row, so re-adding an id replaces it (upsert).
+        self._row_for_id: dict[str, int] = {}
         self._bm25: BM25Index | None = None  # built lazily
+
+    def _dimensions(self) -> int | None:
+        return len(self._vectors[0]) if self._vectors else None
 
     @property
     def embedder(self) -> Embedder:
@@ -116,17 +132,37 @@ class InMemoryVectorStore:
         if not chunks:
             return []
         assigned_ids = resolve_ids(ids, len(chunks))
+        # An id repeated in one call upserts onto itself: last wins.
+        unique_ids, unique_chunks = dedupe_last(assigned_ids, chunks)
         vectors = await embed_all(
-            self._embedder, [c.content for c in chunks]
+            self._embedder, [c.content for c in unique_chunks]
         )
+        # One store, one vector space: a different-sized vector means
+        # the embedder changed, and every later search would break.
+        expected = self._dimensions() or len(vectors[0])
+        for vec in vectors:
+            if len(vec) != expected:
+                raise ValueError(
+                    f"embedder produced a {len(vec)}-dimensional vector "
+                    f"but the store holds {expected}-dimensional vectors. "
+                    "Use the embedder the store was built with, or "
+                    "re-index into a new store."
+                )
 
         for cid, chunk, vec in zip(
-            assigned_ids, chunks, vectors, strict=True
+            unique_ids, unique_chunks, vectors, strict=True
         ):
-            self._ids.append(cid)
-            self._chunks.append(chunk)
-            self._vectors.append(vec)
-            self._norms.append(_norm(vec))
+            row = self._row_for_id.get(cid)
+            if row is None:
+                self._row_for_id[cid] = len(self._ids)
+                self._ids.append(cid)
+                self._chunks.append(chunk)
+                self._vectors.append(vec)
+                self._norms.append(_norm(vec))
+            else:  # upsert: same id, new content
+                self._chunks[row] = chunk
+                self._vectors[row] = vec
+                self._norms[row] = _norm(vec)
 
         # Invalidate BM25 index — built lazily on next hybrid query.
         self._bm25 = None
@@ -143,12 +179,13 @@ class InMemoryVectorStore:
         self._chunks = [self._chunks[i] for i in keep_indices]
         self._vectors = [self._vectors[i] for i in keep_indices]
         self._norms = [self._norms[i] for i in keep_indices]
+        self._row_for_id = {cid: i for i, cid in enumerate(self._ids)}
         self._bm25 = None
 
     async def get_by_ids(self, ids: list[str]) -> list[Chunk]:
         if not ids:
             return []
-        index = {cid: i for i, cid in enumerate(self._ids)}
+        index = self._row_for_id
         return [
             self._chunks[index[cid]] for cid in ids if cid in index
         ]
@@ -182,6 +219,9 @@ class InMemoryVectorStore:
         filter: Mapping[str, Any] | None = None,
         diversity: float | None = None,
     ) -> list[SearchResult]:
+        validate_k(k)
+        if not self._vectors:
+            return []
         q_vec = await self._embedder.embed(query)
         return await self.search_by_vector(
             q_vec, k=k, filter=filter, diversity=diversity
@@ -195,6 +235,8 @@ class InMemoryVectorStore:
         filter: Mapping[str, Any] | None = None,
         diversity: float | None = None,
     ) -> list[SearchResult]:
+        validate_k(k)
+        validate_query_vector(vector, dimensions=self._dimensions())
         if not self._vectors:
             return []
 
@@ -257,6 +299,7 @@ class InMemoryVectorStore:
         person names) — together they outperform either alone on
         most retrieval benchmarks.
         """
+        validate_k(k)
         if not self._vectors:
             return []
 
@@ -268,6 +311,7 @@ class InMemoryVectorStore:
 
         # Rank by vector (cached stored-vector norms).
         q_vec = await self._embedder.embed(query)
+        validate_query_vector(q_vec, dimensions=self._dimensions())
         q_norm = _norm(q_vec)
         vector_scored: list[tuple[int, float]] = []
         for i in range(len(self._vectors)):
@@ -303,14 +347,21 @@ class InMemoryVectorStore:
 
     async def save(self, path: str | Path) -> None:
         """Write the full store (chunks + vectors + ids) to a JSON
-        file. The embedder is NOT serialized — supply the same
-        embedder when calling :meth:`load`."""
+        file. The embedder itself is NOT serialized — supply the same
+        embedder when calling :meth:`load`; its name and dimension
+        are recorded so :meth:`load` can refuse a different one.
+
+        The write is atomic (a temp file in the same directory, then
+        ``os.replace``) and runs in a worker thread, so a crash
+        mid-save never leaves a truncated file and a large store
+        doesn't block the event loop.
+        """
         target = Path(path)
+        name, dims = embedder_identity(self._embedder)
         data = {
             "version": _PERSIST_VERSION,
-            "dimensions": (
-                len(self._vectors[0]) if self._vectors else None
-            ),
+            "dimensions": self._dimensions(),
+            "embedder": {"name": name, "dimensions": dims},
             "rows": [
                 {
                     "id": self._ids[i],
@@ -321,40 +372,86 @@ class InMemoryVectorStore:
                 for i in range(len(self._ids))
             ],
         }
-        target.write_text(  # noqa: ASYNC240 — sync I/O is fine here, persistence is rare and small
-            # ``default=str`` is the safety net so an exotic metadata
-            # value can never crash save(); lists/dicts (e.g. a
-            # MarkdownChunker ``headers`` list) serialise natively and
-            # round-trip on load().
-            json.dumps(data, ensure_ascii=False, default=str),
-            encoding="utf-8",
-        )
+        await anyio.to_thread.run_sync(_write_json_atomic, target, data)
 
     @classmethod
     async def load(
         cls, path: str | Path, *, embedder: Embedder
     ) -> InMemoryVectorStore:
-        """Restore a store previously :meth:`save`-d. Pass the same
-        embedder kind/dimensions or queries will produce nonsense
-        scores."""
-        # noqa: ASYNC240 — sync I/O is fine here, called once at startup
-        data = json.loads(
-            Path(path).read_text(encoding="utf-8")  # noqa: ASYNC240
-        )
+        """Restore a store previously :meth:`save`-d.
+
+        ``embedder`` must be the one the store was saved with: a
+        different dimension (or, when the file records it, a different
+        embedder name) raises :class:`ValueError` instead of returning
+        nonsense scores. Files written before the embedder was
+        recorded are checked on dimension only.
+        """
+        data = await anyio.to_thread.run_sync(_read_json, Path(path))
         if data.get("version") != _PERSIST_VERSION:
             raise ValueError(
                 f"Unsupported persist version: "
                 f"{data.get('version')!r} (expected {_PERSIST_VERSION})"
             )
-        store = cls(embedder=embedder)
-        for row in data["rows"]:
-            store._ids.append(row["id"])
-            store._chunks.append(
-                Chunk(
-                    content=row["content"],
-                    metadata=row["metadata"],
-                )
+        rows = data["rows"]
+        saved_dims = data.get("dimensions")
+        if saved_dims is None and rows:
+            saved_dims = len(rows[0]["vector"])
+        saved = data.get("embedder") or {}
+        name, dims = embedder_identity(embedder)
+        saved_name = saved.get("name")
+        if rows and (
+            (dims is not None and saved_dims is not None and dims != saved_dims)
+            or (name is not None and saved_name is not None and name != saved_name)
+        ):
+            raise ValueError(
+                f"{path} was saved with embedder "
+                f"{saved_name or 'unknown'!r} ({saved_dims} dimensions) but "
+                f"is being loaded with {name or 'unknown'!r} "
+                f"({dims} dimensions). Vectors from different embedders "
+                "are not comparable: load with the original embedder, or "
+                "re-index the documents with the new one."
             )
-            store._vectors.append(row["vector"])
-            store._norms.append(_norm(row["vector"]))
+        store = cls(embedder=embedder)
+        for row in rows:
+            cid = row["id"]
+            vector = row["vector"]
+            chunk = Chunk(content=row["content"], metadata=row["metadata"])
+            at = store._row_for_id.get(cid)
+            if at is not None:  # pre-upsert files could hold duplicate ids
+                store._chunks[at] = chunk
+                store._vectors[at] = vector
+                store._norms[at] = _norm(vector)
+                continue
+            store._row_for_id[cid] = len(store._ids)
+            store._ids.append(cid)
+            store._chunks.append(chunk)
+            store._vectors.append(vector)
+            store._norms.append(_norm(vector))
         return store
+
+
+def _read_json(path: Path) -> Any:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _write_json_atomic(target: Path, data: Any) -> None:
+    """Serialise ``data`` next to ``target`` and move it into place."""
+    # ``default=str`` is the safety net so an exotic metadata value
+    # can never crash save(); lists/dicts (e.g. a MarkdownChunker
+    # ``headers`` list) serialise natively and round-trip on load().
+    payload = json.dumps(data, ensure_ascii=False, default=str)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=target.parent, prefix=f".{target.name}.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(payload)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_name, target)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise

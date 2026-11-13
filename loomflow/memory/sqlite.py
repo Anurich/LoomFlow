@@ -59,7 +59,20 @@ from ..core.types import (
     Role,
 )
 from . import _extractions
-from ._embedding_util import cosine, pack_float32, unpack_float32
+from ._bounds import (
+    DEFAULT_MAX_BLOCK_CHARS,
+    resolve_max_block_chars,
+    trim_block,
+    validate_limit,
+)
+from ._embedding_util import (
+    EmbedderMismatchError,
+    cosine,
+    embedder_identity,
+    embedder_mismatch_message,
+    pack_float32,
+    unpack_float32,
+)
 from .embedder import HashEmbedder, warn_hash_embedder_fallback
 from .facts import FactStore, count_facts, delete_facts
 from .sqlite_facts import SqliteFactStore, open_target
@@ -91,6 +104,43 @@ CREATE TABLE IF NOT EXISTS working_blocks (
 _BLOCKS_MIGRATE_CHECK = (
     "SELECT COUNT(*) FROM pragma_table_info('working_blocks') "
     "WHERE name = 'user_id'"
+)
+
+# ``PRIMARY KEY (user_id, name)`` does not make anonymous blocks
+# unique: SQLite treats every NULL as distinct, so two writers racing
+# on the same anonymous block could each insert a row. A partial
+# unique index closes that for ``user_id IS NULL`` (named users are
+# already covered by the primary key). Existing duplicates are
+# collapsed to the most recently updated row before it is created.
+_BLOCKS_ANON_UNIQUE_INDEX_NAME = "working_blocks_anon_name_uq"
+_BLOCKS_ANON_DEDUPE = """
+DELETE FROM working_blocks
+WHERE user_id IS NULL
+  AND rowid <> (
+      SELECT keep.rowid FROM working_blocks AS keep
+      WHERE keep.user_id IS NULL AND keep.name = working_blocks.name
+      ORDER BY keep.updated_at DESC, keep.rowid DESC
+      LIMIT 1
+  )
+"""
+_BLOCKS_ANON_UNIQUE_INDEX = (
+    f"CREATE UNIQUE INDEX IF NOT EXISTS {_BLOCKS_ANON_UNIQUE_INDEX_NAME} "
+    "ON working_blocks (name) WHERE user_id IS NULL"
+)
+
+# Small key/value table for facts about the database itself — today
+# the embedder its vectors were written with.
+_META_DDL = """
+CREATE TABLE IF NOT EXISTS loomflow_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+)
+"""
+_META_EMBEDDER_NAME = "embedder_name"
+_META_EMBEDDER_DIMENSIONS = "embedder_dimensions"
+
+_EPISODE_COLUMNS = (
+    "id, session_id, user_id, occurred_at, input, output, embedding"
 )
 
 _EPISODES_DDL = """
@@ -174,6 +224,17 @@ class SqliteMemory:
     ``with_facts=False`` to skip it; pass an explicit
     ``fact_store=`` to override (e.g. point facts at a different
     sqlite file).
+
+    The database remembers which embedder its vectors came from
+    (recorded on the first embedded write; databases created by older
+    versions are recorded the first time they are opened). Opening it
+    later with a different embedder — another model, another
+    dimension — raises :class:`~loomflow.memory._embedding_util.
+    EmbedderMismatchError` instead of quietly ranking against vectors
+    from a different space. An empty database accepts any embedder.
+
+    ``append_block`` keeps the newest ``max_block_chars`` characters
+    of a block (default 20,000; ``None`` for no limit).
     """
 
     def __init__(
@@ -183,7 +244,9 @@ class SqliteMemory:
         embedder: Embedder | None = None,
         with_facts: bool = True,
         fact_store: FactStore | None = None,
+        max_block_chars: int | None = DEFAULT_MAX_BLOCK_CHARS,
     ) -> None:
+        self._max_block_chars = resolve_max_block_chars(max_block_chars)
         self._path = Path(path) if str(path) != ":memory:" else Path(":memory:")
         self._db, self._uri, self._keepalive = open_target(path)
         if not self._uri:
@@ -197,6 +260,11 @@ class SqliteMemory:
             warn_hash_embedder_fallback("SqliteMemory")
             embedder = HashEmbedder()
         self._embedder: Embedder = embedder
+        self._identity_recorded = False
+        # The default fact store lives in this file and embeds with
+        # this embedder, so its vectors count for the identity check;
+        # a caller-supplied ``fact_store`` answers for itself.
+        self._facts_share_embedder = fact_store is None and with_facts
         # Coordinate writes — sqlite handles cross-connection locking
         # but the python-side Episode/working state still benefits
         # from a single mutator at a time.
@@ -266,6 +334,8 @@ class SqliteMemory:
             # rebuild the table.
             self._migrate_working_blocks(conn)
             conn.execute(_BLOCKS_DDL)
+            self._ensure_unique_anonymous_blocks(conn)
+            conn.execute(_META_DDL)
             conn.execute(_EPISODES_DDL)
             # Best-effort migration for legacy schemas that predate
             # ``user_id`` on episodes.
@@ -283,7 +353,119 @@ class SqliteMemory:
             # in the sidecar and rehydrate without a transcript.
             conn.execute(_TOOL_TRANSCRIPTS_DDL)
             conn.execute(_TOOL_TRANSCRIPTS_INDEX)
+            self._check_embedder_identity(conn)
             conn.commit()
+
+    def _ensure_unique_anonymous_blocks(self, conn: sqlite3.Connection) -> None:
+        """Install the partial unique index on anonymous blocks,
+        collapsing duplicates left by older versions first (the newest
+        row of each name survives). Runs once per database."""
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?",
+            (_BLOCKS_ANON_UNIQUE_INDEX_NAME,),
+        ).fetchone()
+        if exists is not None:
+            return
+        conn.execute(_BLOCKS_ANON_DEDUPE)
+        conn.execute(_BLOCKS_ANON_UNIQUE_INDEX)
+
+    # ---- embedder identity -----------------------------------------------
+
+    def _read_identity(
+        self, conn: sqlite3.Connection
+    ) -> tuple[str | None, int | None] | None:
+        rows = dict(
+            conn.execute(
+                "SELECT key, value FROM loomflow_meta WHERE key IN (?, ?)",
+                (_META_EMBEDDER_NAME, _META_EMBEDDER_DIMENSIONS),
+            ).fetchall()
+        )
+        if not rows:
+            return None
+        dims = rows.get(_META_EMBEDDER_DIMENSIONS)
+        return (
+            rows.get(_META_EMBEDDER_NAME) or None,
+            int(dims) if dims and str(dims).isdigit() else None,
+        )
+
+    def _write_identity(self, conn: sqlite3.Connection) -> None:
+        """Record this embedder unless one is already recorded."""
+        name, dims = embedder_identity(self._embedder)
+        for key, value in (
+            (_META_EMBEDDER_NAME, name),
+            (_META_EMBEDDER_DIMENSIONS, None if dims is None else str(dims)),
+        ):
+            if value is not None:
+                conn.execute(
+                    "INSERT OR IGNORE INTO loomflow_meta (key, value) "
+                    "VALUES (?, ?)",
+                    (key, value),
+                )
+
+    def _stored_vector_dimensions(self, conn: sqlite3.Connection) -> int | None:
+        """Dimension of a stored embedding (episodes, else the default
+        fact store's facts in the same file); ``None`` when nothing is
+        embedded yet."""
+        tables = ("episodes", "facts") if self._facts_share_embedder else ("episodes",)
+        for table in tables:
+            try:
+                row = conn.execute(
+                    f"SELECT length(embedding) FROM {table} "  # noqa: S608 — fixed names
+                    "WHERE embedding IS NOT NULL AND length(embedding) > 0 "
+                    "LIMIT 1"
+                ).fetchone()
+            except sqlite3.OperationalError:
+                continue  # no such table (facts are optional)
+            if row is not None:
+                return int(row[0]) // 4  # float32
+        return None
+
+    def _check_embedder_identity(self, conn: sqlite3.Connection) -> None:
+        """Refuse to open a database whose vectors came from another
+        embedder; adopt (record) the embedder for databases that
+        predate the record."""
+        current = embedder_identity(self._embedder)
+        stored = self._read_identity(conn)
+        stored_dims = self._stored_vector_dimensions(conn)
+        if stored_dims is None:
+            # Nothing embedded yet, so nothing can be mismatched: a
+            # stale record (e.g. from a first run without an API key)
+            # is dropped and the next embedded write records afresh.
+            if stored is not None and not _same_identity(stored, current):
+                conn.execute(
+                    "DELETE FROM loomflow_meta WHERE key IN (?, ?)",
+                    (_META_EMBEDDER_NAME, _META_EMBEDDER_DIMENSIONS),
+                )
+            return
+        if stored is None:
+            # Written before identities were recorded: the vectors'
+            # size is all there is to check. Record on first use.
+            stored = (None, stored_dims)
+        if not _same_identity(stored, current):
+            raise EmbedderMismatchError(
+                embedder_mismatch_message(
+                    f"SQLite memory {str(self._path)!r}", stored, current
+                )
+            )
+        self._write_identity(conn)
+        self._identity_recorded = True
+
+    def _record_identity_on_write(self, conn: sqlite3.Connection) -> None:
+        """First embedded write through this instance: record the
+        embedder, and make sure no other writer recorded a different
+        one in the meantime."""
+        if self._identity_recorded:
+            return
+        self._write_identity(conn)
+        stored = self._read_identity(conn)
+        current = embedder_identity(self._embedder)
+        if stored is not None and not _same_identity(stored, current):
+            raise EmbedderMismatchError(
+                embedder_mismatch_message(
+                    f"SQLite memory {str(self._path)!r}", stored, current
+                )
+            )
+        self._identity_recorded = True
 
     def _migrate_working_blocks(self, conn: sqlite3.Connection) -> None:
         """Bring a legacy ``working_blocks`` table to the M9 schema.
@@ -356,6 +538,10 @@ class SqliteMemory:
         self, name: str, content: str, user_id: str | None
     ) -> None:
         with self._connect() as conn:
+            # Take the write lock before reading, so another process
+            # can't insert the same block between our SELECT and
+            # INSERT (the read-modify-write below is one transaction).
+            conn.execute("BEGIN IMMEDIATE")
             # Upsert keyed by (user_id, name): keep existing
             # pinned_order if the row exists in this user's bucket,
             # else assign the next slot scoped to that user.
@@ -395,6 +581,7 @@ class SqliteMemory:
         self, name: str, content: str, user_id: str | None
     ) -> None:
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")  # see ``_update_block_sync``
             existing = conn.execute(
                 "SELECT content, pinned_order FROM working_blocks "
                 "WHERE user_id IS ? AND name = ?",
@@ -409,13 +596,25 @@ class SqliteMemory:
                     "INSERT INTO working_blocks "
                     "(user_id, name, content, pinned_order, updated_at) "
                     "VALUES (?, ?, ?, ?, ?)",
-                    (user_id, name, content, count, _now_epoch()),
+                    (
+                        user_id,
+                        name,
+                        trim_block(content, self._max_block_chars),
+                        count,
+                        _now_epoch(),
+                    ),
                 )
             else:
+                # Oldest-first trimming keeps the block bounded.
                 conn.execute(
                     "UPDATE working_blocks SET content = ?, updated_at = ? "
                     "WHERE user_id IS ? AND name = ?",
-                    (existing[0] + content, _now_epoch(), user_id, name),
+                    (
+                        trim_block(existing[0] + content, self._max_block_chars),
+                        _now_epoch(),
+                        user_id,
+                        name,
+                    ),
                 )
             conn.commit()
 
@@ -442,6 +641,8 @@ class SqliteMemory:
         self, episode: Episode, embedding_blob: bytes | None
     ) -> None:
         with self._connect() as conn:
+            if embedding_blob:
+                self._record_identity_on_write(conn)
             conn.execute(
                 "INSERT OR REPLACE INTO episodes "
                 "(id, session_id, user_id, occurred_at, input, output, embedding) "
@@ -496,6 +697,7 @@ class SqliteMemory:
         time_range: tuple[datetime, datetime] | None = None,
         user_id: str | None = None,
     ) -> list[Episode]:
+        validate_limit(limit)
         # Footgun protection — see ``InMemoryMemory.recall``.
         if user_id is None:
             await self._maybe_warn_isolation()
@@ -516,24 +718,33 @@ class SqliteMemory:
         """Brute-force cosine over every candidate in the user's
         partition, best-first, WITH the cosine similarity attached.
         Time-range filter happens at the SQL layer to cut the
-        candidate set first."""
+        candidate set first.
+
+        The scan reads only ``(id, embedding)``; the full rows (text
+        included) are fetched for the ``limit`` winners alone, instead
+        of loading every episode's input and output to rank them."""
         query_vector = await self._embedder.embed(query)
         rows = await anyio.to_thread.run_sync(
-            self._scan_episodes_sync, user_id, time_range
+            self._scan_embeddings_sync, user_id, time_range
         )
 
-        scored: list[tuple[float, tuple[Any, ...]]] = []
-        for row in rows:
-            blob = row[6]  # embedding column
+        scored: list[tuple[float, str]] = []
+        for eid, blob in rows:
             if not blob:
                 continue
             try:
                 vec = unpack_float32(bytes(blob))
             except (TypeError, ValueError):
                 continue
-            scored.append((cosine(query_vector, vec), row))
+            scored.append((cosine(query_vector, vec), eid))
         scored.sort(key=lambda pair: pair[0], reverse=True)
-        return [(_row_to_episode(r), s) for s, r in scored[:limit]]
+        top = scored[:limit]
+        if not top:
+            return []
+        full = await anyio.to_thread.run_sync(
+            self._fetch_episodes_sync, [eid for _, eid in top]
+        )
+        return [(_row_to_episode(full[eid]), s) for s, eid in top if eid in full]
 
     async def recall_scored(
         self,
@@ -558,6 +769,7 @@ class SqliteMemory:
         """
         from ._hybrid import hybrid_rank_episodes
 
+        validate_limit(limit)
         # Footgun protection — mirror ``recall``.
         if user_id is None:
             await self._maybe_warn_isolation()
@@ -600,15 +812,68 @@ class SqliteMemory:
         time_range: tuple[datetime, datetime] | None,
         user_id: str | None,
     ) -> list[Episode]:
-        rows = await anyio.to_thread.run_sync(
-            self._scan_episodes_sync, user_id, time_range
-        )
-        # ``_scan_episodes_sync`` sorts oldest-first; recency-recall
-        # wants newest-first, so reverse here. (``rows[-0:]`` is every
-        # row, so ``limit=0`` needs its own case.)
+        # Newest ``limit`` rows straight from the index on
+        # ``(user_id, occurred_at DESC)`` — not the whole partition.
         if limit <= 0:
             return []
-        return [_row_to_episode(r) for r in rows[-limit:][::-1]]
+        rows = await anyio.to_thread.run_sync(
+            self._recent_episodes_sync, user_id, time_range, limit
+        )
+        return [_row_to_episode(r) for r in rows]
+
+    def _recent_episodes_sync(
+        self,
+        user_id: str | None,
+        time_range: tuple[datetime, datetime] | None,
+        limit: int,
+    ) -> list[tuple[Any, ...]]:
+        with self._connect() as conn:
+            sql = f"SELECT {_EPISODE_COLUMNS} FROM episodes WHERE user_id IS ?"
+            params: list[Any] = [user_id]
+            if time_range is not None:
+                sql += " AND occurred_at >= ? AND occurred_at <= ?"
+                params.extend(
+                    [_to_epoch(time_range[0]), _to_epoch(time_range[1])]
+                )
+            sql += " ORDER BY occurred_at DESC, rowid DESC LIMIT ?"
+            params.append(limit)
+            return conn.execute(sql, params).fetchall()
+
+    def _scan_embeddings_sync(
+        self,
+        user_id: str | None,
+        time_range: tuple[datetime, datetime] | None,
+    ) -> list[tuple[str, Any]]:
+        """``(id, embedding)`` for the user's partition, oldest first
+        (the same order ``_scan_episodes_sync`` yields, so equal
+        scores rank identically)."""
+        with self._connect() as conn:
+            sql = "SELECT id, embedding FROM episodes WHERE user_id IS ?"
+            params: list[Any] = [user_id]
+            if time_range is not None:
+                sql += " AND occurred_at >= ? AND occurred_at <= ?"
+                params.extend(
+                    [_to_epoch(time_range[0]), _to_epoch(time_range[1])]
+                )
+            sql += " ORDER BY occurred_at ASC"
+            return conn.execute(sql, params).fetchall()
+
+    def _fetch_episodes_sync(
+        self, episode_ids: list[str]
+    ) -> dict[str, tuple[Any, ...]]:
+        """Full episode rows by id."""
+        out: dict[str, tuple[Any, ...]] = {}
+        with self._connect() as conn:
+            for start in range(0, len(episode_ids), 500):
+                batch = episode_ids[start : start + 500]
+                placeholders = ",".join("?" * len(batch))
+                for row in conn.execute(
+                    f"SELECT {_EPISODE_COLUMNS} FROM episodes "
+                    f"WHERE id IN ({placeholders})",
+                    batch,
+                ):
+                    out[row[0]] = row
+        return out
 
     def _scan_episodes_sync(
         self,
@@ -733,25 +998,14 @@ class SqliteMemory:
     async def profile(
         self, *, user_id: str | None = None
     ) -> MemoryProfile:
-        episodes = await anyio.to_thread.run_sync(
-            self._scan_episodes_sync, user_id, None
+        # Aggregates in SQL — no need to load every episode (and its
+        # embedding) to count them.
+        episode_count, last_epoch, recent_sessions = (
+            await anyio.to_thread.run_sync(self._profile_sync, user_id)
         )
-        episode_count = len(episodes)
-        last_seen: datetime | None = None
-        if episodes:
-            last_seen = _from_epoch(max(row[3] for row in episodes))
-
-        # Recent sessions, newest-first, dedup'd, capped at 10.
-        seen: set[str] = set()
-        recent_sessions: list[str] = []
-        for row in sorted(episodes, key=lambda r: r[3], reverse=True):
-            sid = row[1]
-            if sid in seen:
-                continue
-            seen.add(sid)
-            recent_sessions.append(sid)
-            if len(recent_sessions) >= 10:
-                break
+        last_seen: datetime | None = (
+            _from_epoch(last_epoch) if last_epoch is not None else None
+        )
 
         sample_facts: list[Fact] = []
         fact_count = 0
@@ -769,6 +1023,27 @@ class SqliteMemory:
             recent_sessions=recent_sessions,
             sample_facts=sample_facts,
         )
+
+    def _profile_sync(
+        self, user_id: str | None
+    ) -> tuple[int, float | None, list[str]]:
+        with self._connect() as conn:
+            count, last = conn.execute(
+                "SELECT COUNT(*), MAX(occurred_at) FROM episodes "
+                "WHERE user_id IS ?",
+                (user_id,),
+            ).fetchone()
+            # Recent sessions, newest-first, dedup'd, capped at 10.
+            sessions = [
+                row[0]
+                for row in conn.execute(
+                    "SELECT session_id, MAX(occurred_at) AS latest "
+                    "FROM episodes WHERE user_id IS ? "
+                    "GROUP BY session_id ORDER BY latest DESC LIMIT 10",
+                    (user_id,),
+                )
+            ]
+        return int(count), last, sessions
 
     async def forget(
         self,
@@ -898,6 +1173,18 @@ class SqliteMemory:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _same_identity(
+    stored: tuple[str | None, int | None],
+    current: tuple[str | None, int | None],
+) -> bool:
+    """Two embedder identities agree when every part both declare
+    (name, dimension) is equal."""
+    for a, b in zip(stored, current, strict=True):
+        if a is not None and b is not None and a != b:
+            return False
+    return True
 
 
 def _now_epoch() -> float:

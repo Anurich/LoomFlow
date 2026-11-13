@@ -78,6 +78,15 @@ class ToolDef(BaseModel):
     again. Used for control-transfer tools such as Swarm handoffs,
     where the next agent takes over and the current one should not
     keep talking. Not sent to the model."""
+    timeout: float | None = None
+    """Per-tool wall-clock cap in seconds, from ``@tool(timeout=...)``.
+    ``None`` (the default) uses the agent's ``Tuning(tool_timeout=...)``;
+    ``float("inf")`` means no cap for this tool. Not sent to the model."""
+    cancellable: bool = True
+    """Whether a timeout can actually stop a running call. ``False``
+    for synchronous in-process tools: they run in a worker thread,
+    which cannot be killed, so a timed-out call keeps running in the
+    background (and the timeout error says so). Not sent to the model."""
 
 
 class ToolCall(BaseModel):
@@ -88,6 +97,14 @@ class ToolCall(BaseModel):
     args: dict[str, Any] = Field(default_factory=dict)
     tool_def: ToolDef | None = None
     destructive: bool = False
+    args_error: str | None = None
+    """Set by a model adapter when the arguments the model emitted
+    could not be used: not valid JSON (often a reply cut off by the
+    token limit) or valid JSON that is not an object. ``args`` is then
+    empty and the call must NOT be executed — the tool dispatcher
+    (:func:`loomflow.architecture.helpers.run_single_tool`) returns
+    this text to the model as a tool error instead of running the tool
+    with its defaults."""
 
     def is_destructive(self) -> bool:
         return self.destructive
@@ -213,6 +230,18 @@ class ToolResult(BaseModel):
     @classmethod
     def error_(cls, call_id: str, message: str, **kwargs: Any) -> "ToolResult":
         return cls(call_id=call_id, ok=False, error=message, **kwargs)
+
+    @classmethod
+    def from_exception(
+        cls, call_id: str, exc: BaseException, **kwargs: Any
+    ) -> "ToolResult":
+        """An error result for a tool that raised:
+        ``<ExceptionType>: <message>``. The type name is kept because
+        many exceptions are unreadable without it (``KeyError('id')``
+        prints as ``'id'``, a bare ``AssertionError`` as nothing)."""
+        text = str(exc)
+        name = type(exc).__name__
+        return cls.error_(call_id, f"{name}: {text}" if text else name, **kwargs)
 
     @classmethod
     def denied_(cls, call_id: str, reason: str, **kwargs: Any) -> "ToolResult":
@@ -739,6 +768,19 @@ class Event(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+# Provider ``finish_reason`` values that mean the reply is incomplete:
+# cut off by the output-token limit (OpenAI ``length``, Anthropic
+# ``max_tokens`` / ``model_context_window_exceeded``) ...
+TRUNCATED_FINISH_REASONS: frozenset[str] = frozenset(
+    {"length", "max_tokens", "model_context_window_exceeded"}
+)
+# ... or stopped for policy reasons (OpenAI ``content_filter``,
+# Anthropic ``refusal``).
+FILTERED_FINISH_REASONS: frozenset[str] = frozenset(
+    {"content_filter", "refusal"}
+)
+
+
 class RunResult(BaseModel):
     """Final outcome of an ``Agent.run`` call.
 
@@ -794,6 +836,13 @@ class RunResult(BaseModel):
     finished_at: datetime
     interrupted: bool = False
     interruption_reason: str | None = None
+    finish_reason: str | None = None
+    """Why the model stopped on its last call, as the provider reported
+    it (``"stop"`` / ``"end_turn"``, ``"length"`` / ``"max_tokens"``,
+    ``"content_filter"`` / ``"refusal"``, ...). ``None`` when the
+    architecture doesn't report one. A truncated or filtered reply is
+    NOT a complete answer: check :attr:`truncated` /
+    :attr:`content_filtered` before trusting ``output``."""
     run_id: str | None = None
     """This run's id (``RunContext.run_id``): pass it, or the result
     itself, to :func:`loomflow.studio.score` to score the run."""
@@ -823,6 +872,20 @@ class RunResult(BaseModel):
         schema was passed.
         """
         return self.parsed if self.parsed is not None else self.output
+
+    @property
+    def truncated(self) -> bool:
+        """True when the model's last reply was cut off by its output
+        token limit (``finish_reason`` ``length`` / ``max_tokens``):
+        ``output`` is an incomplete answer."""
+        return self.finish_reason in TRUNCATED_FINISH_REASONS
+
+    @property
+    def content_filtered(self) -> bool:
+        """True when the provider stopped the model's last reply for
+        policy reasons (``finish_reason`` ``content_filter`` /
+        ``refusal``)."""
+        return self.finish_reason in FILTERED_FINISH_REASONS
 
     @property
     def total_tokens(self) -> int:

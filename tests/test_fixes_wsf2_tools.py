@@ -212,7 +212,7 @@ async def test_int_tool_gets_clear_error_not_wrong_answer() -> None:
 
     # Integral strings still work end-to-end...
     assert await paginate.execute({"offset": "5"}) == "[5:15]"
-    # ...but "8.5" must NOT silently become 8; the original value
-    # reaches the function and raises rather than corrupting.
-    with pytest.raises(TypeError):
+    # ...but "8.5" must NOT silently become 8: it is rejected before
+    # the function runs, with an error naming the parameter.
+    with pytest.raises(ValueError, match="parameter 'offset'"):
         await paginate.execute({"offset": "8.5"})

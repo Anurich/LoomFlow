@@ -60,10 +60,10 @@ import hashlib
 import re
 import warnings
 from collections import OrderedDict
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import TYPE_CHECKING, Any
 
-from ..core.types import Message, ModelChunk, Role
+from ..core.types import Message, ModelChunk, Role, Usage
 
 if TYPE_CHECKING:
     from ..core.protocols import Model
@@ -258,6 +258,7 @@ async def maybe_auto_compact(
     at_tokens: int,
     current_token_count: int,
     keep_recent_turns: int = 4,
+    on_usage: Callable[[Usage], None] | None = None,
 ) -> tuple[list[Message] | None, str]:
     """If ``current_token_count`` exceeds ``at_tokens``, compact
     ``messages`` and return the new list + summary text.
@@ -266,6 +267,11 @@ async def maybe_auto_compact(
     returns ``(None, "")`` when no compact happened (below
     threshold, no anchor to slice at, summariser failed, or
     summary came back empty).
+
+    ``on_usage`` is called with the summariser call's
+    :class:`~loomflow.core.types.Usage` (when it reports one) — also
+    when the summary is then discarded — so the caller can count that
+    spend in the run's usage and budget instead of losing it.
 
     The new message list has shape:
 
@@ -328,6 +334,11 @@ async def maybe_auto_compact(
             text = getattr(chunk, "text", None)
             if text:
                 parts.append(text)
+            # The summariser is a paid model call: hand its usage to
+            # the caller rather than dropping it.
+            chunk_usage = getattr(chunk, "usage", None)
+            if on_usage is not None and isinstance(chunk_usage, Usage):
+                on_usage(chunk_usage)
     except Exception as exc:  # noqa: BLE001 — never kill a turn
         # Graceful no-op, but NOT silent: a summariser that fails on
         # every iteration effectively disables compaction, and the
