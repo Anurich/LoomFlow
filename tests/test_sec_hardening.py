@@ -203,14 +203,15 @@ def _ann(**hints: Any) -> SimpleNamespace:
 def test_mcp_spec_default_for_destructive_hint_is_true() -> None:
     """Pin the spec text this behaviour follows (skipped without the SDK)."""
     types_mod = pytest.importorskip("mcp.types")
-    doc = types_mod.ToolAnnotations.model_fields["destructiveHint"].description or ""
-    source = doc or (types_mod.ToolAnnotations.__doc__ or "")
     import inspect
+    import re
 
+    # mcp 1.x spells the fields ``destructiveHint``, 2.x ``destructive_hint``.
     text = inspect.getsource(types_mod.ToolAnnotations)
-    assert "destructiveHint" in text
-    after = text.split("destructiveHint", 1)[1].split("idempotentHint", 1)[0]
-    assert "Default: true" in after, source
+    parts = re.split(r"destructive_?[hH]int", text, maxsplit=1)
+    assert len(parts) == 2, text
+    after = re.split(r"idempotent_?[hH]int", parts[1], maxsplit=1)[0]
+    assert "Default: true" in after, text
 
 
 @pytest.mark.parametrize(
