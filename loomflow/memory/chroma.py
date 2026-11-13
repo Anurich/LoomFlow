@@ -31,6 +31,12 @@ from ..core.types import (
 )
 from ..vectorstore.chroma import get_or_create_cosine_collection
 from . import _extractions
+from ._bounds import (
+    DEFAULT_MAX_BLOCK_CHARS,
+    resolve_max_block_chars,
+    trim_block,
+    validate_limit,
+)
 from ._user_key import (
     decode_legacy_user_id,
     encode_user_id,
@@ -48,6 +54,9 @@ class ChromaMemory:
 
     Construct via :meth:`local` for an on-disk persistent client or
     :meth:`ephemeral` for a process-local in-memory client.
+
+    ``append_block`` keeps the newest ``max_block_chars`` characters
+    of a block (default 20,000; ``None`` for no limit).
     """
 
     def __init__(
@@ -57,8 +66,10 @@ class ChromaMemory:
         embedder: Embedder | None = None,
         collection_name: str = DEFAULT_COLLECTION,
         fact_store: Any | None = None,
+        max_block_chars: int | None = DEFAULT_MAX_BLOCK_CHARS,
     ) -> None:
         self._client = client
+        self._max_block_chars = resolve_max_block_chars(max_block_chars)
         if embedder is None:
             warn_hash_embedder_fallback("ChromaMemory")
             embedder = HashEmbedder()
@@ -95,6 +106,7 @@ class ChromaMemory:
         collection_name: str = DEFAULT_COLLECTION,
         with_facts: bool = False,
         facts_collection_name: str = "jeeves_facts",
+        max_block_chars: int | None = DEFAULT_MAX_BLOCK_CHARS,
     ) -> ChromaMemory:
         """Persistent on-disk client at ``persist_directory``.
 
@@ -104,7 +116,10 @@ class ChromaMemory:
         """
         client = _make_client(persist_directory=persist_directory)
         instance = cls(
-            client, embedder=embedder, collection_name=collection_name
+            client,
+            embedder=embedder,
+            collection_name=collection_name,
+            max_block_chars=max_block_chars,
         )
         if with_facts:
             from .chroma_facts import ChromaFactStore
@@ -124,11 +139,15 @@ class ChromaMemory:
         collection_name: str = DEFAULT_COLLECTION,
         with_facts: bool = False,
         facts_collection_name: str = "jeeves_facts",
+        max_block_chars: int | None = DEFAULT_MAX_BLOCK_CHARS,
     ) -> ChromaMemory:
         """In-memory client (lost on process exit). Great for tests."""
         client = _make_client(persist_directory=None)
         instance = cls(
-            client, embedder=embedder, collection_name=collection_name
+            client,
+            embedder=embedder,
+            collection_name=collection_name,
+            max_block_chars=max_block_chars,
         )
         if with_facts:
             from .chroma_facts import ChromaFactStore
@@ -189,13 +208,15 @@ class ChromaMemory:
             if existing is None:
                 user_blocks[name] = MemoryBlock(
                     name=name,
-                    content=content,
+                    content=trim_block(content, self._max_block_chars),
                     pinned_order=len(user_blocks),
                 )
             else:
                 user_blocks[name] = MemoryBlock(
                     name=name,
-                    content=existing.content + content,
+                    content=trim_block(
+                        existing.content + content, self._max_block_chars
+                    ),
                     pinned_order=existing.pinned_order,
                 )
 
@@ -257,6 +278,7 @@ class ChromaMemory:
         time_range: tuple[datetime, datetime] | None = None,
         user_id: str | None = None,
     ) -> list[Episode]:
+        validate_limit(limit)
         coll = await self._get_collection()
 
         if not query.strip():
@@ -346,6 +368,7 @@ class ChromaMemory:
         """
         from ._hybrid import hybrid_rank_episodes
 
+        validate_limit(limit)
         coll = await self._get_collection()
 
         if not query.strip():
@@ -389,19 +412,42 @@ class ChromaMemory:
         user_id: str | None,
     ) -> list[Episode]:
         where_filter = user_id_where_clause(user_id)
+        # Pass 1: metadata only — enough to order by time. Fetching
+        # every row's document and embedding just to keep ``limit`` of
+        # them made a recency recall cost the whole partition.
         result = await anyio.to_thread.run_sync(
             lambda: coll.get(
                 limit=None,  # we'll sort + slice ourselves
                 where=where_filter,
+                include=["metadatas"],
+            )
+        )
+        ids = _safe_list(result, "ids")
+        metas = _safe_list(result, "metadatas")
+        dated: list[tuple[datetime, str]] = []
+        for i, eid in enumerate(ids):
+            meta = metas[i] if i < len(metas) and metas[i] is not None else {}
+            occurred = _parse_occurred(meta)
+            if time_range is not None and not (
+                time_range[0] <= occurred <= time_range[1]
+            ):
+                continue
+            dated.append((occurred, str(eid)))
+        # Stable sort on the timestamp only, so ties keep Chroma's
+        # order exactly as the full-fetch version did.
+        dated.sort(key=lambda pair: pair[0], reverse=True)
+        wanted = [eid for _, eid in dated[:limit]]
+        if not wanted:
+            return []
+        # Pass 2: the full rows (with embeddings) for the winners only.
+        full = await anyio.to_thread.run_sync(
+            lambda: coll.get(
+                ids=wanted,
                 include=["metadatas", "documents", "embeddings"],
             )
         )
-        episodes = _decode_get_result(result)
-        if time_range is not None:
-            lo, hi = time_range
-            episodes = [e for e in episodes if lo <= e.occurred_at <= hi]
-        episodes.sort(key=lambda e: e.occurred_at, reverse=True)
-        return episodes[:limit]
+        by_id = {e.id: e for e in _decode_get_result(full)}
+        return [by_id[eid] for eid in wanted if eid in by_id]
 
     async def recall_facts(
         self,

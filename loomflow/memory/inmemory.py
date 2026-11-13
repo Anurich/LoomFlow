@@ -27,6 +27,13 @@ from ..core.types import (
     Role,
 )
 from . import _extractions
+from ._bounds import (
+    DEFAULT_MAX_BLOCK_CHARS,
+    EpisodeIndex,
+    resolve_max_block_chars,
+    trim_block,
+    validate_limit,
+)
 from ._hybrid import hybrid_rank_episodes
 from .consolidator import Consolidator
 from .facts import (
@@ -53,6 +60,16 @@ class InMemoryMemory:
     Eviction *drops* a user's working blocks; callers needing
     durable spill-to-disk should use :class:`SqliteMemory` or a
     SQL-backed memory instead.
+
+    Episodes are indexed by ``user_id``: a recall only touches the
+    asking user's episodes. They are kept forever by default; pass
+    ``max_episodes=N`` to keep only each user's ``N`` newest (by
+    ``occurred_at``) — the cap is per user, so one tenant can never
+    push out another's history.
+
+    ``append_block`` keeps the newest ``max_block_chars`` characters
+    of a block (default 20,000; ``None`` for no limit), dropping the
+    oldest text first.
     """
 
     def __init__(
@@ -62,6 +79,8 @@ class InMemoryMemory:
         fact_store: FactStore | None = None,
         max_users: int | None = _DEFAULT_MAX_USERS,
         user_idle_ttl_seconds: float | None = _DEFAULT_USER_TTL_SECONDS,
+        max_episodes: int | None = None,
+        max_block_chars: int | None = DEFAULT_MAX_BLOCK_CHARS,
     ) -> None:
         # Working blocks are partitioned by ``user_id`` to keep one
         # tenant's pinned context invisible to another. Outer key is
@@ -76,7 +95,12 @@ class InMemoryMemory:
                 ttl_seconds=user_idle_ttl_seconds,
             )
         )
-        self._episodes: dict[str, Episode] = {}
+        # Episodes live in a per-user index; ``_episodes`` is its flat
+        # ``id -> Episode`` view (read-only for callers — writes go
+        # through ``remember`` so the per-user index stays in step).
+        self._index = EpisodeIndex(max_episodes)
+        self._episodes: dict[str, Episode] = self._index.episodes
+        self._max_block_chars = resolve_max_block_chars(max_block_chars)
         self._consolidator = consolidator
         self.facts: FactStore = (
             fact_store if fact_store is not None else InMemoryFactStore()
@@ -125,12 +149,16 @@ class InMemoryMemory:
             existing = user_blocks.get(name)
             if existing is None:
                 user_blocks[name] = MemoryBlock(
-                    name=name, content=content, pinned_order=len(user_blocks)
+                    name=name,
+                    content=trim_block(content, self._max_block_chars),
+                    pinned_order=len(user_blocks),
                 )
             else:
                 user_blocks[name] = MemoryBlock(
                     name=name,
-                    content=existing.content + content,
+                    content=trim_block(
+                        existing.content + content, self._max_block_chars
+                    ),
                     pinned_order=existing.pinned_order,
                 )
 
@@ -138,7 +166,8 @@ class InMemoryMemory:
 
     async def remember(self, episode: Episode) -> str:
         async with self._lock:
-            self._episodes[episode.id] = episode
+            for evicted in self._index.put(episode):
+                self._consolidated_ids.discard(evicted)
             return episode.id
 
     async def recall(
@@ -152,6 +181,7 @@ class InMemoryMemory:
     ) -> list[Episode]:
         # ``kind`` and the absent semantic store are pre-existing
         # caveats; both modes still go through recency-fallback.
+        validate_limit(limit)
         return await self._recall_recent(query, limit, time_range, user_id)
 
     async def recall_scored(
@@ -181,6 +211,7 @@ class InMemoryMemory:
         ordering with neutral scores so the caller always sees the
         most-recent episodes when no lexical signal is present.
         """
+        validate_limit(limit)
         # Reuse the existing partitioning + warning + time-range
         # logic by sharing a single private candidate-pool helper.
         candidates = await self._candidate_episodes(
@@ -223,9 +254,12 @@ class InMemoryMemory:
         ``recall_scored`` share the user_id / time_range logic
         (including the IsolationWarning footgun-guard) and only
         differ on ranking."""
+        # Only this user's episodes are copied — other tenants' are
+        # never touched (the index is keyed by user_id).
         async with self._lock:
-            episodes = list(self._episodes.values())
-        if user_id is None and any(e.user_id is not None for e in episodes):
+            episodes = self._index.for_user(user_id)
+            has_named = user_id is None and self._index.has_named_users()
+        if has_named:
             warnings.warn(
                 "Memory.recall called without user_id, but the store "
                 "contains episodes for one or more named users. The "
@@ -235,7 +269,6 @@ class InMemoryMemory:
                 IsolationWarning,
                 stacklevel=4,
             )
-        episodes = [e for e in episodes if e.user_id == user_id]
         if time_range is not None:
             lo, hi = time_range
             episodes = [e for e in episodes if lo <= e.occurred_at <= hi]
@@ -248,15 +281,20 @@ class InMemoryMemory:
         time_range: tuple[datetime, datetime] | None,
         user_id: str | None,
     ) -> list[Episode]:
+        # Hard namespace partition by ``user_id`` — see Episode docstring.
+        # ``None`` reads the ``None`` bucket; a string reads exactly
+        # that user's; the buckets never cross (and other tenants'
+        # episodes are never scanned).
         async with self._lock:
-            episodes = list(self._episodes.values())
+            episodes = self._index.for_user(user_id)
+            has_named = user_id is None and self._index.has_named_users()
         # Footgun protection: if the caller forgot ``user_id`` on a
         # memory that DOES contain named-user data, warn loudly.
-        # The query is still safe (we'll only return None-bucket
-        # rows below), but the dev has almost certainly left a
+        # The query is still safe (we only return None-bucket
+        # rows), but the dev has almost certainly left a
         # ``user_id=`` off somewhere and is about to be confused
         # by suspiciously-empty results.
-        if user_id is None and any(e.user_id is not None for e in episodes):
+        if has_named:
             warnings.warn(
                 "Memory.recall called without user_id, but the store "
                 "contains episodes for one or more named users. The "
@@ -266,10 +304,6 @@ class InMemoryMemory:
                 IsolationWarning,
                 stacklevel=3,
             )
-        # Hard namespace partition by ``user_id`` — see Episode docstring.
-        # ``None`` filters to ``None``; a string filters to that exact
-        # value; the buckets never cross.
-        episodes = [e for e in episodes if e.user_id == user_id]
         if time_range is not None:
             lo, hi = time_range
             episodes = [e for e in episodes if lo <= e.occurred_at <= hi]
@@ -313,13 +347,9 @@ class InMemoryMemory:
         assistant text per turn is sufficient context for follow-ups.
         """
         async with self._lock:
-            episodes = list(self._episodes.values())
-        # Hard namespace partition + session match.
-        episodes = [
-            e
-            for e in episodes
-            if e.session_id == session_id and e.user_id == user_id
-        ]
+            episodes = self._index.for_user(user_id)
+        # Hard namespace partition (the index) + session match.
+        episodes = [e for e in episodes if e.session_id == session_id]
         episodes.sort(key=lambda e: e.occurred_at)
         # Each episode contributes 2 messages; keep the most-recent
         # ``limit`` total messages (so ``limit // 2`` recent turns).
@@ -347,9 +377,7 @@ class InMemoryMemory:
         self, *, user_id: str | None = None
     ) -> MemoryProfile:
         async with self._lock:
-            user_episodes = [
-                e for e in self._episodes.values() if e.user_id == user_id
-            ]
+            user_episodes = self._index.for_user(user_id)
         # Sample of most-recent facts; the fact store handles the
         # filter for us via ``query``.
         sample = await self.facts.query(user_id=user_id, limit=10)
@@ -394,16 +422,14 @@ class InMemoryMemory:
         deleted = 0
         async with self._lock:
             to_delete: list[str] = []
-            for eid, ep in self._episodes.items():
-                if ep.user_id != user_id:
-                    continue
+            for ep in self._index.for_user(user_id):
                 if session_id is not None and ep.session_id != session_id:
                     continue
                 if before is not None and ep.occurred_at >= before:
                     continue
-                to_delete.append(eid)
+                to_delete.append(ep.id)
             for eid in to_delete:
-                self._episodes.pop(eid, None)
+                self._index.remove(eid)
                 self._consolidated_ids.discard(eid)
             deleted += len(to_delete)
 
@@ -428,9 +454,7 @@ class InMemoryMemory:
         self, *, user_id: str | None = None
     ) -> MemoryExport:
         async with self._lock:
-            episodes = [
-                e for e in self._episodes.values() if e.user_id == user_id
-            ]
+            episodes = self._index.for_user(user_id)
         facts = await self.facts.query(user_id=user_id, limit=100_000)
         return MemoryExport(
             user_id=user_id,

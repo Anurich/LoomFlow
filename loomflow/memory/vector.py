@@ -5,9 +5,10 @@ compute and attach an embedding (if the caller didn't already supply
 one). :meth:`recall` embeds the query and ranks all episodes by cosine
 similarity, with optional time-range filtering.
 
-This backend doesn't scale past a few thousand episodes — the recall is
-O(N) over every episode every call. Past that, switch to
-:class:`PostgresMemory` (HNSW index) or :class:`ChromaMemory`.
+This backend doesn't scale past a few thousand episodes per user — a
+recall is O(N) over that user's episodes (other users' are never
+scanned). Past that, switch to :class:`PostgresMemory` (HNSW index) or
+:class:`ChromaMemory`.
 """
 
 from __future__ import annotations
@@ -30,6 +31,13 @@ from ..core.types import (
     Role,
 )
 from . import _extractions
+from ._bounds import (
+    DEFAULT_MAX_BLOCK_CHARS,
+    EpisodeIndex,
+    resolve_max_block_chars,
+    trim_block,
+    validate_limit,
+)
 from ._embedding_util import cosine as _cosine
 from .consolidator import Consolidator
 from .embedder import HashEmbedder
@@ -49,7 +57,16 @@ def _embedding_text(episode: Episode) -> str:
 
 
 class VectorMemory:
-    """Pure-Python embedding-backed :class:`Memory`."""
+    """Pure-Python embedding-backed :class:`Memory`.
+
+    ``max_episodes`` caps the episodes kept **per user** (``None``,
+    the default, keeps everything): when a user goes over, that
+    user's oldest episode (by ``occurred_at``) is evicted. One
+    tenant's writes never evict another tenant's episodes.
+
+    ``append_block`` keeps the newest ``max_block_chars`` characters
+    of a block (default 20,000; ``None`` for no limit).
+    """
 
     def __init__(
         self,
@@ -58,9 +75,11 @@ class VectorMemory:
         max_episodes: int | None = None,
         consolidator: Consolidator | None = None,
         fact_store: FactStore | None = None,
+        max_block_chars: int | None = DEFAULT_MAX_BLOCK_CHARS,
     ) -> None:
         self._embedder: Embedder = embedder if embedder is not None else HashEmbedder()
         self._max_episodes = max_episodes
+        self._max_block_chars = resolve_max_block_chars(max_block_chars)
         # Working blocks are partitioned by ``user_id`` (outer key,
         # so eviction drops a user's blocks together); the container
         # is bounded (LRU + TTL) with the same defaults as
@@ -72,7 +91,10 @@ class VectorMemory:
                 ttl_seconds=_DEFAULT_USER_TTL_SECONDS,
             )
         )
-        self._episodes: dict[str, Episode] = {}
+        # Per-user index with the per-user cap; ``_episodes`` is its
+        # flat ``id -> Episode`` view.
+        self._index = EpisodeIndex(max_episodes)
+        self._episodes: dict[str, Episode] = self._index.episodes
         self._consolidator = consolidator
         # Default the fact store's embedder to ours, so the same
         # embedder powers both episode and fact recall.
@@ -135,13 +157,15 @@ class VectorMemory:
             if existing is None:
                 user_blocks[name] = MemoryBlock(
                     name=name,
-                    content=content,
+                    content=trim_block(content, self._max_block_chars),
                     pinned_order=len(user_blocks),
                 )
             else:
                 user_blocks[name] = MemoryBlock(
                     name=name,
-                    content=existing.content + content,
+                    content=trim_block(
+                        existing.content + content, self._max_block_chars
+                    ),
                     pinned_order=existing.pinned_order,
                 )
 
@@ -154,17 +178,10 @@ class VectorMemory:
             episode = episode.model_copy(update={"embedding": embedding})
 
         async with self._lock:
-            self._episodes[episode.id] = episode
-            if (
-                self._max_episodes is not None
-                and len(self._episodes) > self._max_episodes
-            ):
-                # FIFO eviction by recorded time.
-                oldest = min(
-                    self._episodes.values(), key=lambda e: e.occurred_at
-                )
-                if oldest.id != episode.id:
-                    self._episodes.pop(oldest.id, None)
+            # Per-user FIFO eviction by recorded time (see the class
+            # docstring): only this user's oldest episodes can go.
+            for evicted in self._index.put(episode):
+                self._consolidated_ids.discard(evicted)
         return episode.id
 
     async def recall(
@@ -176,20 +193,20 @@ class VectorMemory:
         time_range: tuple[datetime, datetime] | None = None,
         user_id: str | None = None,
     ) -> list[Episode]:
+        validate_limit(limit)
         if not query.strip():
             return await self._recall_recent(limit, time_range, user_id)
 
         query_embedding = await self._embedder.embed(query)
 
+        # Hard namespace partition by ``user_id``: the index hands
+        # back this user's episodes only.
         async with self._lock:
             candidates = [
                 e
-                for e in self._episodes.values()
+                for e in self._index.for_user(user_id)
                 if e.embedding is not None
             ]
-
-        # Hard namespace partition by ``user_id``.
-        candidates = [e for e in candidates if e.user_id == user_id]
         if time_range is not None:
             lo, hi = time_range
             candidates = [
@@ -235,6 +252,7 @@ class VectorMemory:
         """
         from ._hybrid import hybrid_rank_episodes
 
+        validate_limit(limit)
         if not query.strip():
             recent = await self._recall_recent(limit, time_range, user_id)
             return [EpisodeMatch(episode=e, score=1.0) for e in recent]
@@ -242,10 +260,9 @@ class VectorMemory:
         async with self._lock:
             candidates = [
                 e
-                for e in self._episodes.values()
+                for e in self._index.for_user(user_id)
                 if e.embedding is not None
             ]
-        candidates = [e for e in candidates if e.user_id == user_id]
         if time_range is not None:
             lo, hi = time_range
             candidates = [
@@ -270,8 +287,7 @@ class VectorMemory:
         user_id: str | None,
     ) -> list[Episode]:
         async with self._lock:
-            episodes = list(self._episodes.values())
-        episodes = [e for e in episodes if e.user_id == user_id]
+            episodes = self._index.for_user(user_id)
         if time_range is not None:
             lo, hi = time_range
             episodes = [e for e in episodes if lo <= e.occurred_at <= hi]
@@ -298,12 +314,8 @@ class VectorMemory:
         limit: int = 20,
     ) -> list[Message]:
         async with self._lock:
-            episodes = list(self._episodes.values())
-        episodes = [
-            e
-            for e in episodes
-            if e.session_id == session_id and e.user_id == user_id
-        ]
+            episodes = self._index.for_user(user_id)
+        episodes = [e for e in episodes if e.session_id == session_id]
         episodes.sort(key=lambda e: e.occurred_at)
         max_episodes = max(1, limit // 2)
         episodes = episodes[-max_episodes:]
@@ -328,9 +340,7 @@ class VectorMemory:
         self, *, user_id: str | None = None
     ) -> MemoryProfile:
         async with self._lock:
-            user_eps = [
-                e for e in self._episodes.values() if e.user_id == user_id
-            ]
+            user_eps = self._index.for_user(user_id)
         sample_facts: list[Fact] = []
         fact_count = 0
         if self.facts is not None:
@@ -377,16 +387,15 @@ class VectorMemory:
         deleted = 0
         async with self._lock:
             to_delete = []
-            for eid, ep in self._episodes.items():
-                if ep.user_id != user_id:
-                    continue
+            for ep in self._index.for_user(user_id):
                 if session_id is not None and ep.session_id != session_id:
                     continue
                 if before is not None and ep.occurred_at >= before:
                     continue
-                to_delete.append(eid)
+                to_delete.append(ep.id)
             for eid in to_delete:
-                self._episodes.pop(eid, None)
+                self._index.remove(eid)
+                self._consolidated_ids.discard(eid)
             deleted += len(to_delete)
         # Facts: delegate to the FactStore's public ``delete`` so the
         # count reflects rows actually removed.
@@ -406,9 +415,7 @@ class VectorMemory:
         self, *, user_id: str | None = None
     ) -> MemoryExport:
         async with self._lock:
-            episodes = [
-                e for e in self._episodes.values() if e.user_id == user_id
-            ]
+            episodes = self._index.for_user(user_id)
         facts: list[Fact] = []
         if self.facts is not None:
             facts = list(
