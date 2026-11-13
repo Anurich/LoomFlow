@@ -19,6 +19,7 @@ producing the right OTel instrument under the hood.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 import time
@@ -40,6 +41,17 @@ from .semconv import instrument_for, otel_span_identity
 def _clean(attrs: dict[str, Any]) -> dict[str, Any]:
     """Drop None values; OTel attribute APIs reject them."""
     return {k: v for k, v in attrs.items() if v is not None}
+
+
+def _is_cancellation(exc: BaseException) -> bool:
+    """True when ``exc`` means the span's work was cancelled rather
+    than failed: the task was cancelled (a timeout, a failing sibling,
+    the caller going away) or the generator it ran in was closed."""
+    try:
+        cancelled: type[BaseException] = anyio.get_cancelled_exc_class()
+    except Exception:  # noqa: BLE001 - no running event loop
+        cancelled = asyncio.CancelledError
+    return isinstance(exc, cancelled | asyncio.CancelledError | GeneratorExit)
 
 
 def _instrument_kind(name: str) -> Literal["counter", "histogram"]:
@@ -73,6 +85,10 @@ class CapturedSpan:
     duration_ms: float
     attributes: Mapping[str, Any] = field(default_factory=dict)
     exception: str | None = None  # ``repr(exc)`` if the body raised
+    # True when the body didn't fail but was cancelled (a timeout, a
+    # failing sibling, a closed stream); ``exception`` then holds the
+    # cancellation's type name, e.g. ``"CancelledError"``.
+    cancelled: bool = False
 
 
 @dataclass(frozen=True)
@@ -202,7 +218,12 @@ class OTelTelemetry:
             failed = False
             try:
                 yield our_span
-            except Exception as exc:
+            except BaseException as exc:
+                if _is_cancellation(exc):
+                    # Cancelled, not failed: say so instead of closing
+                    # the span as if it had succeeded.
+                    otel_span.set_attribute("loom.cancelled", True)
+                    raise
                 failed = True
                 otel_span.record_exception(exc)
                 otel_span.set_attribute("error.type", type(exc).__qualname__)
@@ -297,6 +318,7 @@ class InMemoryTelemetry:
             trace_token = _trace_id.set(trace_id)
             parent_token = _parent_span_id.set(span_id)
         exc_repr: str | None = None
+        cancelled = False
         # Keep a handle on the yielded span: emit sites may set
         # attributes on it post-hoc (e.g. gen_ai.usage.* once token
         # counts are known); the captured record reads them at close.
@@ -308,8 +330,12 @@ class InMemoryTelemetry:
         )
         try:
             yield span
-        except Exception as exc:
-            exc_repr = repr(exc)
+        except BaseException as exc:
+            # BaseException: a cancelled span is recorded as cancelled,
+            # not as one that ended normally.
+            cancelled = _is_cancellation(exc)
+            # A cancellation's repr carries task and scope addresses.
+            exc_repr = type(exc).__name__ if cancelled else repr(exc)
             raise
         finally:
             if parent_token is not None:
@@ -328,6 +354,7 @@ class InMemoryTelemetry:
                     duration_ms=elapsed_ms,
                     attributes=_clean(dict(span.attributes)),
                     exception=exc_repr,
+                    cancelled=cancelled,
                 )
             )
 
@@ -410,6 +437,7 @@ class ConsoleTelemetry:
             parent_token = _parent_span_id.set(span_id)
         depth_token = _console_depth.set(depth + 1)
         exc_repr: str | None = None
+        cancelled = False
         # Yielded span kept so post-hoc attribute sets (gen_ai.usage.*
         # etc.) show up in the printed line.
         span = Span(
@@ -420,8 +448,10 @@ class ConsoleTelemetry:
         )
         try:
             yield span
-        except Exception as exc:
-            exc_repr = repr(exc)
+        except BaseException as exc:
+            cancelled = _is_cancellation(exc)
+            # A cancellation's repr carries task and scope addresses.
+            exc_repr = type(exc).__name__ if cancelled else repr(exc)
             raise
         finally:
             _console_depth.reset(depth_token)
@@ -437,7 +467,7 @@ class ConsoleTelemetry:
                 if final_attrs
                 else ""
             )
-            err = f"  [ERROR: {exc_repr}]" if exc_repr else ""
+            err = "  [CANCELLED]" if cancelled else f"  [ERROR: {exc_repr}]" if exc_repr else ""
             print(
                 f"{indent}• {name}  ({elapsed_ms:.1f}ms){attrs_str}{err}",
                 file=self._stream,
@@ -612,7 +642,9 @@ class FileTelemetry:
     Each line has a ``"kind"`` field discriminating span vs
     metric records. Span lines additionally carry the parent
     linkage (``parent_span_id``) needed to reconstruct the trace
-    tree offline.
+    tree offline. A span whose work was cancelled (a timeout, a
+    failing sibling) is still written — the write is shielded from
+    the cancellation — with ``"cancelled": true``.
 
     .. code-block:: python
 
@@ -671,6 +703,7 @@ class FileTelemetry:
             trace_token = _trace_id.set(trace_id)
             parent_token = _parent_span_id.set(span_id)
         exc_repr: str | None = None
+        cancelled = False
         # Yielded span kept so post-hoc attribute sets (gen_ai.usage.*
         # etc.) land in the written record.
         span = Span(
@@ -681,8 +714,10 @@ class FileTelemetry:
         )
         try:
             yield span
-        except Exception as exc:
-            exc_repr = repr(exc)
+        except BaseException as exc:
+            cancelled = _is_cancellation(exc)
+            # A cancellation's repr carries task and scope addresses.
+            exc_repr = type(exc).__name__ if cancelled else repr(exc)
             raise
         finally:
             if parent_token is not None:
@@ -690,20 +725,25 @@ class FileTelemetry:
             if trace_token is not None:
                 _trace_id.reset(trace_token)
             elapsed_ms = (time.perf_counter() - t0) * 1000.0
-            await self._write(
-                {
-                    "kind": "span",
-                    "name": name,
-                    "trace_id": trace_id,
-                    "span_id": span_id,
-                    "parent_span_id": parent_id,
-                    "started_at": started_at.isoformat(),
-                    "ended_at": datetime.now(UTC).isoformat(),
-                    "duration_ms": elapsed_ms,
-                    "attributes": _clean(dict(span.attributes)),
-                    "exception": exc_repr,
-                }
-            )
+            # Shielded: when the span's task is being cancelled, an
+            # unshielded await here is cancelled too and the span —
+            # the one a timeout investigation needs — is never written.
+            with anyio.CancelScope(shield=True):
+                await self._write(
+                    {
+                        "kind": "span",
+                        "name": name,
+                        "trace_id": trace_id,
+                        "span_id": span_id,
+                        "parent_span_id": parent_id,
+                        "started_at": started_at.isoformat(),
+                        "ended_at": datetime.now(UTC).isoformat(),
+                        "duration_ms": elapsed_ms,
+                        "attributes": _clean(dict(span.attributes)),
+                        "exception": exc_repr,
+                        "cancelled": cancelled,
+                    }
+                )
 
     async def emit_metric(
         self, name: str, value: float, **attrs: Any
