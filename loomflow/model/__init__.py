@@ -18,7 +18,7 @@ from .echo import EchoModel
 from .fallback import FallbackModel, default_fall_on
 from .litellm import LiteLLMModel
 from .openai import OpenAIModel
-from .scripted import ScriptedModel, ScriptedTurn
+from .scripted import ScriptedCall, ScriptedModel, ScriptedTurn, ScriptExhaustedError
 
 __all__ = [
     "AnthropicModel",
@@ -26,6 +26,8 @@ __all__ = [
     "FallbackModel",
     "LiteLLMModel",
     "OpenAIModel",
+    "ScriptExhaustedError",
+    "ScriptedCall",
     "ScriptedModel",
     "ScriptedTurn",
     "count_tokens",

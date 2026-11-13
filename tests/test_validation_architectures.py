@@ -580,7 +580,9 @@ async def test_reflexion_lesson_block_is_bounded() -> None:
     turns: list[ScriptedTurn] = []
     for i in range(4):
         turns += [ScriptedTurn(text=f"answer {i}"), ScriptedTurn(text="score: 0.1"), ScriptedTurn(text=f"lesson {i}")]
-    agent = Agent("x", model=ScriptedModel(turns), architecture=Reflexion(max_attempts=5, max_lessons=2))
+    # The fifth attempt runs past the script on purpose: empty answers are fine here.
+    model = ScriptedModel(turns, on_exhausted="empty")
+    agent = Agent("x", model=model, architecture=Reflexion(max_attempts=5, max_lessons=2))
     await agent.run("task")
     blocks = await agent.memory.working()
     lessons = next(b.content for b in blocks if b.name == "reflexion_lessons")

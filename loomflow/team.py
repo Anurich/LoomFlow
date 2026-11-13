@@ -582,6 +582,27 @@ class Team:
         ``prompt_caching=`` enables provider-native caching on the
         classifier-coordinator (see :meth:`Team.supervisor` for
         accepted shapes). Specialists cache via their own ``Agent``.
+
+        **What the classifier must answer.** The router's ``model``
+        gets one call and has to reply in this format (the default
+        ``classifier_prompt`` asks for it)::
+
+            route: <route name>
+            confidence: <number between 0 and 1>
+
+        The ``route:`` line is required — a reply without one (a bare
+        route name included) is not routed: the run goes to
+        ``fallback_route`` when set, otherwise it ends with a "Could
+        not route this request" output. ``confidence:`` is optional
+        (a missing one counts as 0 when ``require_confidence_above``
+        is set, 1 otherwise). Matching is forgiving about case,
+        ``=`` for ``:``, markdown / quotes, and spaces vs ``-`` / ``_``
+        in the name. So a scripted classifier in a test looks like::
+
+            router = Team.router(
+                routes=[RouterRoute(name="billing", agent=billing)],
+                model=ScriptedModel([ScriptedTurn(text="route: billing")]),
+            )
         """
         common = _common_kwargs(locals())
         worker_registry, role_to_worker_id = _build_registry(

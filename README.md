@@ -1,4 +1,4 @@
-# Loom
+# Loomflow
 
 [![CI](https://github.com/Anurich/LoomFlow/actions/workflows/ci.yml/badge.svg)](https://github.com/Anurich/LoomFlow/actions/workflows/ci.yml)
 [![PyPI version](https://img.shields.io/pypi/v/loomflow.svg)](https://pypi.org/project/loomflow/)
@@ -45,7 +45,8 @@ async def main():
 asyncio.run(main())
 ```
 
-Set `OPENAI_API_KEY` and run. Swap `"gpt-4.1-mini"` for
+Set `OPENAI_API_KEY` and run (without it, `Agent(...)` raises a
+`ConfigError` that names the missing variable). Swap `"gpt-4.1-mini"` for
 `"claude-opus-4-7"`, `"deepseek-chat"`, `"mistral-large"`,
 `"command-r-plus"`, `"echo"` (zero-key fake), or any of ~100
 providers via LiteLLM.
@@ -71,9 +72,10 @@ providers via LiteLLM.
   ReWOO, Router, Supervisor, ActorCritic, MultiAgentDebate, Swarm,
   Blackboard) behind one `Agent` constructor. **One kwarg flips
   the iteration pattern.**
-* Async-only, anyio everywhere, structured concurrency cancellation
-  works correctly. Fast path when production features (audit / OTel
-  / permissions / hooks / journaling) aren't wired up.
+* Async-first, anyio everywhere, structured concurrency cancellation
+  works correctly (`agent.run_sync(...)` is there for scripts that
+  don't want `asyncio`). Fast path when production features (audit /
+  OTel / permissions / hooks / journaling) aren't wired up.
 
 > ⚠️ **`model` is required** as of v0.2.0. Earlier `0.1.x` releases
 > silently defaulted to `EchoModel` which produced confusing output;
@@ -96,7 +98,7 @@ Every agent framework forces a choice you shouldn't have to make:
 * **CrewAI / AutoGen** are abstractions over LangChain — same
   problems.
 
-Loom is the harness for engineers shipping production agents
+Loomflow is the harness for engineers shipping production agents
 without binding their stack to one model lab — and without wiring
 multi-tenancy / structured outputs / retries by hand.
 
@@ -126,11 +128,11 @@ multi-tenancy / structured outputs / retries by hand.
 * **MCP-native** — MCP is the tool spine, not an integration. Any
   MCP server (Composio, custom hosted gateways, local stdio
   servers) plugs into a single `MCPRegistry`.
-* **Memory done right** — five backends (in-memory / vector /
-  Chroma / Postgres+pgvector / Redis), pluggable embedders, and
-  **bi-temporal facts** that track when claims were true in the
-  world vs when you learned them. All five backends partition by
-  `user_id`.
+* **Memory done right** — six backends (in-memory / single-file
+  SQLite / vector / Chroma / Postgres+pgvector / Redis), pluggable
+  embedders, and **bi-temporal facts** that track when claims were
+  true in the world vs when you learned them. Every backend
+  partitions by `user_id`.
 * **Durable runtime** — `SqliteRuntime` gives crash-recovery replay
   with zero infrastructure: re-running a crashed run resumes it
   without repeating finished tool calls, sub-agents' included.
@@ -140,7 +142,7 @@ multi-tenancy / structured outputs / retries by hand.
 * **Safe** — permission policies, sandbox layers, append-only
   HMAC-signed audit log, freshness/lineage policies for certified
   values.
-* **Async-only, structured concurrency** — anyio everywhere, zero
+* **Async-first, structured concurrency** — anyio everywhere, zero
   raw `asyncio.create_task` / `gather`. Parallel tool dispatch via
   task groups. Backpressure-aware streaming.
 
@@ -222,6 +224,28 @@ asyncio.run(main())
 Set `ANTHROPIC_API_KEY` (or `OPENAI_API_KEY`) before running. That's
 it — no LangChain, no LangGraph, no `chat_engine = AgentExecutor.from_llm_and_tools(...)`.
 
+**No `asyncio`?** `agent.run_sync(...)` takes the same arguments as
+`agent.run(...)` and blocks until the result is ready — handy in a
+script or a REPL. (Inside code that is already async — an `async def`,
+a notebook cell — it raises and tells you to `await agent.run(...)`.)
+
+```python
+from loomflow import Agent, tool
+
+@tool
+def get_weather(city: str) -> str:
+    """Look up the current weather."""
+    return f"It's sunny and 72°F in {city}."
+
+agent = Agent("You are a travel assistant.", model="echo", tools=[get_weather])
+result = agent.run_sync("What's the weather like in Tokyo?")
+print(result.output)   # Echo: What's the weather like in Tokyo?
+```
+
+`model="echo"` is a built-in fake that repeats the prompt back — no
+key, no network — so the snippet above runs as-is. Swap in a real
+model name when you have a key.
+
 Want to see *what's happening* as the agent runs?
 
 ```python
@@ -231,6 +255,69 @@ async for event in agent.stream("plan a 3-day Tokyo trip"):
 
 You'll see `STARTED → MODEL_CHUNK × N → TOOL_CALL → TOOL_RESULT →
 MODEL_CHUNK × N → COMPLETED` flow through.
+
+---
+
+## Testing your agent offline
+
+Two fake models ship at the top level, so your tests need no API key
+and no network.
+
+**`ScriptedModel`** replays the model turns you write, in order — text,
+tool calls, or both — and records what it was sent on `.calls`, so you
+can assert on the prompt and the tools as well as on the answer:
+
+```python
+import asyncio
+
+from loomflow import Agent, ScriptedModel, ScriptedTurn, ToolCall, tool
+
+
+@tool
+def get_weather(city: str) -> str:
+    """Look up the current weather."""
+    return f"Sunny, 22°C in {city}."
+
+
+async def test_agent_uses_the_weather_tool():
+    model = ScriptedModel([
+        # Model call 1: the "model" asks for a tool.
+        ScriptedTurn(tool_calls=[ToolCall(tool="get_weather", args={"city": "Tokyo"})]),
+        # Model call 2: it answers from the tool result.
+        ScriptedTurn(text="It's sunny in Tokyo."),
+    ])
+    agent = Agent("You are a travel assistant.", model=model, tools=[get_weather])
+
+    result = await agent.run("What's the weather in Tokyo?")
+
+    assert result.output == "It's sunny in Tokyo."
+    # model.calls records what each model call was sent.
+    first, second = model.calls
+    assert first.messages[-1].content == "What's the weather in Tokyo?"
+    assert [t.name for t in first.tools] == ["get_weather"]
+    assert "Sunny, 22°C in Tokyo." in second.messages[-1].content
+
+
+asyncio.run(test_agent_uses_the_weather_tool())
+```
+
+If the agent makes more model calls than you scripted, `ScriptedModel`
+raises `ScriptExhaustedError` saying how many turns there were, rather
+than quietly answering with empty text (`ScriptedModel(turns,
+on_exhausted="empty")` brings the empty answer back).
+
+**`model="echo"`** (`EchoModel`) answers every prompt with
+`"Echo: <prompt>"`. Use it to wire up and smoke-test everything around
+the model — memory, tool registration, a workflow — before you have a
+key:
+
+```python
+from loomflow import Agent
+
+agent = Agent("You are a travel assistant.", model="echo")
+result = agent.run_sync("Plan a day in Kyoto.")
+print(result.output)   # Echo: Plan a day in Kyoto.
+```
 
 ---
 
@@ -621,8 +708,8 @@ is picked up by every agent in the graph that didn't specify its
 own `memory=`, so episodes / facts written by one agent are
 recall-able by the next without per-agent wiring.
 
-Full rubric (when to use Workflow at all vs. Agent, anti-patterns,
-both-at-once shapes): [`docs/workflow_vs_agent.md`](docs/workflow_vs_agent.md).
+Runnable versions of each shape: [`examples/06_workflow_chain.py`](examples/06_workflow_chain.py)
+through [`examples/11_workflow_custom_step.py`](examples/11_workflow_custom_step.py).
 
 ---
 
@@ -641,10 +728,10 @@ from loomflow import Agent
 agent = Agent(
     "...",
     model="claude-opus-4-7",
-    skills=[
-        "~/.jeeves/skills/system/",          # base layer
-        "~/.jeeves/skills/user/",            # user override
-        ("./.jeeves-skills/", "Project"),    # project-local with label
+    skills=[                                   # any folders you like; each must exist
+        "~/.loomflow/skills/system/",          # base layer
+        "~/.loomflow/skills/user/",            # user override
+        ("./.loomflow-skills/", "Project"),    # project-local with label
     ],
 )
 ```
@@ -729,18 +816,18 @@ Tool names get prefixed with the skill name automatically:
 For tiny one-off skills that don't justify a folder:
 
 ```python
+from loomflow import Agent
 from loomflow.skills import Skill
 
-skill = Skill.from_text("""
----
+skill = Skill.from_text("""---
 name: standup
 description: Format a daily standup from rough notes.
 ---
 # Standup
 Always 3 sections: Yesterday, Today, Blockers.
-""")
+""")   # the text must start with the `---` line
 
-agent = Agent("...", skills=[skill])
+agent = Agent("...", model="echo", skills=[skill])
 ```
 
 ### Layered sources with last-wins override
@@ -750,10 +837,12 @@ wins. Lets you stack: system → user → project.
 
 ```python
 agent = Agent(
+    "...",
+    model="echo",
     skills=[
-        "~/.jeeves/skills/system/",      # base
-        "~/.jeeves/skills/user/",        # user customizes
-        "./.jeeves-skills/",             # project-local override
+        "~/.loomflow/skills/system/",      # base
+        "~/.loomflow/skills/user/",        # user customizes
+        "./.loomflow-skills/",             # project-local override
     ],
 )
 ```
@@ -769,7 +858,7 @@ custom-step prompt formatting).
 
 ## Fast path by default
 
-Loom ships with the full production surface — audit log, OTel
+Loomflow ships with the full production surface — audit log, OTel
 telemetry, permissions, hooks, durable runtime, budget — but **you
 don't pay for what you don't wire up**. Every layer has a no-op
 default, and the loop detects those defaults at construction time
@@ -816,7 +905,7 @@ speed when you don't, with no code changes between modes.
 ## Resilient by default
 
 Real model APIs fail. Rate limits, 5xx blips, transient connection
-drops happen on every production deployment. Loom ships
+drops happen on every production deployment. Loomflow ships
 **retry on transient errors enabled by default** for the in-tree
 network adapters (OpenAI, Anthropic, LiteLLM) — the moment you
 construct a real-world agent it's already covered:
@@ -927,7 +1016,8 @@ What the framework does:
    back as a USER message ("Your previous response failed schema
    validation: ...; return only a corrected JSON object"). After
    the retry budget is exhausted, raises
-   `OutputValidationError` with the underlying Pydantic
+   `OutputValidationError` — its message names the fields that
+   failed — with the underlying Pydantic
    `ValidationError` attached as `.cause`, the bad text on `.raw`,
    and the schema on `.schema` — so callers can build whatever
    recovery strategy they need.
@@ -990,7 +1080,7 @@ What you get out of the box:
 * **Auto-picked embedder** — `OpenAIEmbedder("text-embedding-3-small")`
   when `OPENAI_API_KEY` is set, `HashEmbedder()` (deterministic,
   zero-key) otherwise.
-* **`user_id` partition** — every backend honours the M1 multi-tenant
+* **`user_id` partition** — every backend honours the multi-tenant
   contract, so one shared memory file or pool serves N users with
   no cross-contamination.
 * **Lazy connection for async backends** — `Agent("...",
@@ -1159,17 +1249,17 @@ tenants with hard isolation across **all** layers:
 | Sub-agent context inheritance | ✅ |
 | Tools (read via `get_run_context().user_id`) | ✅ |
 | Telemetry span attributes | ✅ |
-| **Working memory blocks** (`update_block` / `working`) | ✅ M9 |
-| **Budget accounting** (`StandardBudget` per-user totals) | ✅ M9 |
-| **Audit log** (`AuditEntry.user_id` top-level field) | ✅ M9 |
-| **Permissions** (route to per-user policy via `PerUserPermissions`) | ✅ M9 |
-| **Hooks** (`pre_tool` / `post_tool` see user_id) | ✅ M9 |
+| **Working memory blocks** (`update_block` / `working`) | ✅ |
+| **Budget accounting** (`StandardBudget` per-user totals) | ✅ |
+| **Audit log** (`AuditEntry.user_id` top-level field) | ✅ |
+| **Permissions** (route to per-user policy via `PerUserPermissions`) | ✅ |
+| **Hooks** (`pre_tool` / `post_tool` see user_id) | ✅ |
 
-Concrete examples of what M9 enables:
+Concrete examples of what that enables:
 
 ```python
 from loomflow import Agent, StandardPermissions, Mode, BudgetConfig, StandardBudget
-from loomflow.security import PerUserPermissions
+from loomflow.security import FileAuditLog, PerUserPermissions
 
 # Per-user permission policies — admins get more, free users get less.
 permissions = PerUserPermissions(
@@ -1189,17 +1279,20 @@ budget = StandardBudget(BudgetConfig(
     per_user_max_cost_usd=1.0,
 ))
 
+# Keep a reference to the audit log: you query it directly.
+audit_log = FileAuditLog("./audit.jsonl", secret="prod-secret")
+
 agent = Agent(
     "...",
     model="gpt-4.1-mini",
     memory="postgres://prod-db/agent",
     permissions=permissions,
     budget=budget,
-    audit_log=FileAuditLog("./audit.jsonl", secret="prod-secret"),
+    audit_log=audit_log,
 )
 
 # Per-user audit queries — clean SIEM integration, no payload digging.
-alice_entries = await agent._audit_log.query(user_id="alice")
+alice_entries = await audit_log.query(user_id="alice")
 
 # Per-user budget snapshot — for ops dashboards.
 print(budget.usage_for("alice"))  # {tokens_in, tokens_out, cost_usd, ...}
@@ -1215,7 +1308,7 @@ back gracefully.
 
 ## Multi-tenancy by default
 
-Loom treats `user_id` and `session_id` as **first-class typed
+Loomflow treats `user_id` and `session_id` as **first-class typed
 primitives**, not strings buried in a free-form config dict. The
 moment you pass them to `agent.run(...)`, the framework partitions
 memory automatically and rehydrates conversation history without
@@ -1293,76 +1386,57 @@ End-to-end demo: [`examples/03_multi_user_sessions.py`](examples/03_multi_user_s
 | **Memory string resolver** | Pick backend by URL scheme: `"sqlite:./bot.db"`, `"chroma:./vec"`, `"postgres://..."`, `"redis://..."`, `"inmemory"`. Async-connect backends return a lazy proxy — `Agent(...)` stays synchronous. Config-dict form for tweaks; instance pass-through for power users. | `resolve_memory` (top-level); `from loomflow.memory import SqliteMemory, LazyMemory`; `Agent(memory=)` |
 | **Memory inspection / GDPR** | `profile(user_id)` summarises what the bot knows about a user; `forget(user_id, session_id=, before=)` erases (right-to-be-forgotten); `export(user_id)` dumps everything for portability / DSAR. Implemented across all six backends; hard user_id partition. | `Memory.profile`, `Memory.forget`, `Memory.export`, `MemoryProfile`, `MemoryExport` (top-level types) |
 | **Auto fact extraction** | Default ON for real network models. Each `agent.run()` finishes by extracting structured `(subject, predicate, object)` facts from the conversation and writing them to the user-partitioned bi-temporal fact store. "Your bot just remembers" with no manual `Consolidator` calls. Best-effort: failures don't break the run. Emits `loom.auto_extract.duration_ms` + invocations metrics for observability. | `Agent(auto_extract=)`; `from loomflow.memory import AutoExtractMemory, Consolidator` |
-| **Bounded per-user state** | `StandardBudget` and `InMemoryMemory` cap their per-user dicts at 100k users by default with 24h idle-TTL eviction so multi-tenant deployments can't OOM under runaway tenants or one-shot user_id explosions. LRU eviction order; durable backends (Sqlite/Postgres) for callers needing spill-to-disk. | `BoundedDict`, `StandardBudget(max_users=, user_idle_ttl_seconds=)`, `InMemoryMemory(max_users=, user_idle_ttl_seconds=)` |
-| **Approval handler** | Permissions returning `Decision.ask_(...)` route through `Agent(approval_handler=callable)` so destructive tool calls can be gated by a human / Slack / ticket prompt. Without a handler, `ask` falls back to deny — no silent bypass. Handlers that raise are treated as deny too. | `Agent(approval_handler=)`, `ApprovalHandler` |
-| **Secrets protocol** | `Agent(tuning=Tuning(secrets=...))` resolves API keys via `api_key=` → `secrets.lookup_sync` → `os.environ` precedence. `EnvSecrets` (default, env-var backed) and `DictSecrets` (in-memory) ship in-tree; production callers wire their own vault adapter. `redact()` masks common API-key shapes for safe audit log output. | `EnvSecrets`, `DictSecrets`, `Secrets` protocol, `Agent(tuning=Tuning(secrets=))` |
+| **Bounded per-user state** | `StandardBudget` and `InMemoryMemory` cap their per-user dicts at 100k users by default with 24h idle-TTL eviction so multi-tenant deployments can't OOM under runaway tenants or one-shot user_id explosions. LRU eviction order; durable backends (Sqlite/Postgres) for callers needing spill-to-disk. | `StandardBudget(max_users=, user_idle_ttl_seconds=)`, `InMemoryMemory(max_users=, user_idle_ttl_seconds=)`; `from loomflow.governance.budget import BoundedDict` |
+| **Approval handler** | Permissions returning `Decision.ask_(...)` route through `Agent(approval_handler=callable)` so destructive tool calls can be gated by a human / Slack / ticket prompt. Without a handler, `ask` falls back to deny — no silent bypass. Handlers that raise are treated as deny too. | `Agent(approval_handler=)`; `from loomflow.architecture import ApprovalHandler` |
+| **Secrets protocol** | `Agent(tuning=Tuning(secrets=...))` resolves API keys via `api_key=` → `secrets.lookup_sync` → `os.environ` precedence. `EnvSecrets` (default, env-var backed) and `DictSecrets` (in-memory) ship in-tree; production callers wire their own vault adapter. `redact()` masks common API-key shapes for safe audit log output. | `Secrets` protocol (top-level); `from loomflow.security import EnvSecrets, DictSecrets`; `Agent(tuning=Tuning(secrets=))` |
 | **Structured outputs** | Pass `output_schema=` to get a typed, validated Pydantic instance back. Framework augments the system prompt with the schema, parses + validates, retries with feedback on failure | `Agent.run(output_schema=)`, `RunResult.parsed`, `OutputValidationError` |
-| **Resilient model calls** | Network adapters auto-wrapped with retry-on-transient (rate limit, 5xx, network blip). Typed error taxonomy. Provider `Retry-After` honoured. | `RetryPolicy`, `RetryPolicy.disabled/aggressive`, `ModelError`, `TransientModelError`, `RateLimitError`, `PermanentModelError`, `AuthenticationError`, `InvalidRequestError`, `ContentFilterError`, `classify_model_error` |
+| **Resilient model calls** | Network adapters auto-wrapped with retry-on-transient (rate limit, 5xx, network blip). Typed error taxonomy. Provider `Retry-After` honoured. | `from loomflow.governance import RetryPolicy, classify_model_error` (`RetryPolicy.disabled()` / `.aggressive()`); `from loomflow.core.errors import ModelError, TransientModelError, RateLimitError, PermanentModelError, AuthenticationError, InvalidRequestError, ContentFilterError` |
 | **Architecture protocol** | Pluggable agent-loop strategy: 12 architectures shipped. `ReAct` is top-level (the default); the others are accessed via `from loomflow.architecture import SelfRefine, Reflexion, ...` | `Architecture`, `ReAct` (top-level); `loomflow.architecture.{SelfRefine, Reflexion, TreeOfThoughts, PlanAndExecute, ReWOO, Router, Supervisor, ActorCritic, MultiAgentDebate, Swarm, BlackboardArchitecture}` |
-| **Workflow primitive** | Developer-controlled DAG — peer of `Agent`, not a subtype. Use when you can draw the path on a whiteboard before writing code (`Workflow.chain` for sequences, `Workflow.route` for classify-then-dispatch, `Workflow.parallel` for fan-out + merge, explicit graph builder for custom shapes including cycles). Both composition directions are first-class: drop an `Agent` in as a workflow node, or expose a `Workflow` as an `Agent` tool via `wf.as_tool()`. Same observability spine as `Agent` — telemetry, audit log, `user_id` partition. Cycles supported with `max_visits_per_node` / `max_steps` safety caps. See [`docs/workflow_vs_agent.md`](docs/workflow_vs_agent.md) for the rubric. | `Workflow`, `WorkflowResult`, `step`, `START`, `END` |
+| **Workflow primitive** | Developer-controlled DAG — peer of `Agent`, not a subtype. Use when you can draw the path on a whiteboard before writing code (`Workflow.chain` for sequences, `Workflow.route` for classify-then-dispatch, `Workflow.parallel` for fan-out + merge, explicit graph builder for custom shapes including cycles). Both composition directions are first-class: drop an `Agent` in as a workflow node, or expose a `Workflow` as an `Agent` tool via `wf.as_tool()`. Same observability spine as `Agent` — telemetry, audit log, `user_id` partition. Cycles supported with `max_visits_per_node` / `max_steps` safety caps. | `Workflow`, `WorkflowResult`, `step`, `START`, `END` |
 | **Team facade** | Sibling-style builders (`Team.supervisor`, `Team.swarm`, `Team.router`, `Team.debate`, `Team.actor_critic`, `Team.blackboard`) for the common multi-agent shapes | `from loomflow.team import Team, Handoff, run_architecture` |
 | **Vector store** | `add` / `search` / `delete` with Mongo-style filters, MMR diversity, BM25 hybrid search, save/load | `from loomflow.vectorstore import InMemoryVectorStore, ChromaVectorStore, PostgresVectorStore, FAISSVectorStore, SearchResult` |
 | **Document loader** | One-line load for PDF / DOCX / Excel / CSV / HTML / Markdown into markdown chunks. PDF supports two interchangeable backends: `unstructured` (default, Apache 2.0, what LangChain wraps) with `fast` / `hi_res` / `ocr_only` strategies, or `docling` (MIT, IBM Research, 2026 benchmark winner on native PDFs). Per-page extraction failures emit a `RuntimeWarning` — no more silent empty pages. | `loomflow.loader.load`, `load_pdf(path, *, backend=, strategy=)`, `MarkdownChunker`, `RecursiveChunker`, `SentenceChunker`, `TokenChunker` |
 | **Built-in tools** | `read` / `write` / `edit` / `bash` factories with sandbox-aware workdirs | `from loomflow.tools import read_tool, write_tool, edit_tool, bash_tool, default_workdir` |
 | **Skills (Anthropic-compatible)** | Packaged playbooks loaded on demand. Three modes coexist: pure markdown, frontmatter-declared subprocess tools (any language), and `tools.py` with `@tool` (Python, in-process). Layered sources with last-wins override. | `from loomflow.skills import Skill, SkillRegistry, SkillSource, SkillMetadata, SkillError`; `Agent(skills=...)` |
-| **Model adapters** | Anthropic, OpenAI, LiteLLM (~100 providers), Echo (zero-key), Scripted (tests). Echo + Scripted are top-level (zero-dep test fakes); real network adapters require their submodule for an explicit "I'm picking this provider" signal. | `EchoModel`, `ScriptedModel` (top-level); `from loomflow.model.openai import OpenAIModel`, `from loomflow.model.anthropic import AnthropicModel`, `from loomflow.model.litellm import LiteLLMModel` |
+| **Model adapters** | Anthropic, OpenAI, LiteLLM (~100 providers), Echo (zero-key), Scripted (tests; records what it was sent on `.calls`). Echo + Scripted are top-level (zero-dep test fakes); real network adapters require their submodule for an explicit "I'm picking this provider" signal. | `EchoModel`, `ScriptedModel` (top-level); `from loomflow.model.openai import OpenAIModel`, `from loomflow.model.anthropic import AnthropicModel`, `from loomflow.model.litellm import LiteLLMModel` |
 | **String model resolver** | `model="claude-opus-4-7"`, `"gpt-4o"`, `"mistral-large"`, `"command-r"`, `"echo"`, `"litellm/<any>"` | `Agent.__init__` |
-| **Tools** | `@tool` decorator with auto-schema (full recursive JSON Schema for Pydantic models, `list[...]`, `dict[...]`, `Literal`, optionals — the model's raw args are validated back into real Python types before your function runs), sync + async; `agent.with_tool` decorator; `add_tool` / `remove_tool` / `tools_list` | `tool`, `Tool` (top-level) |
+| **Tools** | `@tool` decorator with auto-schema (full recursive JSON Schema for Pydantic models, `list[...]`, `dict[...]`, `Literal`, optionals — the model's raw args are validated back into real Python types before your function runs), sync + async; `agent.with_tool` decorator; `add_tool` / `remove_tool`; `agent.tools` (the `Tool` objects, sync) / `await agent.tools_list()` (names, any host) | `tool`, `Tool` (top-level) |
 | **MCP servers** | stdio + Streamable HTTP, multi-server registry, name disambiguation | `from loomflow.mcp import MCPClient, MCPRegistry, MCPServerSpec` |
 | **Memory backends** | In-memory dict, vector cosine, Chroma, Postgres+pgvector, Redis, single-file SQLite | `InMemoryMemory` (top-level); `from loomflow.memory.{sqlite,chroma,postgres,redis,vector} import {SqliteMemory, ChromaMemory, PostgresMemory, RedisMemory, VectorMemory}` |
 | **Embedders** | HashEmbedder (deterministic, zero deps), OpenAIEmbedder, VoyageEmbedder, CohereEmbedder | `HashEmbedder` (top-level); `from loomflow.memory import OpenAIEmbedder, VoyageEmbedder, CohereEmbedder` |
-| **Bi-temporal facts** | All five memory backends. LLM-driven `Consolidator`. Auto-consolidate, plus `ConsolidationWorker` for long-lived agents. | `Fact` (top-level); `from loomflow.memory import Consolidator, ConsolidationWorker, FactStore` |
+| **Bi-temporal facts** | Every memory backend. LLM-driven `Consolidator`. Auto-consolidate, plus `ConsolidationWorker` for long-lived agents. | `Fact` (top-level); `from loomflow.memory import Consolidator, ConsolidationWorker, FactStore` |
 | **Durable runtime** | sqlite or postgres-backed replay across process restarts | `InProcRuntime` (top-level); `from loomflow.runtime import SqliteRuntime, PostgresRuntime, JournaledRuntime` |
 | **Streaming** | `agent.stream()` → `AsyncIterator[Event]` with backpressure | `Agent.stream` |
+| **Blocking call** | `agent.run_sync(...)` runs one prompt to completion without `asyncio` (same arguments as `run`); raises inside a running event loop | `Agent.run_sync` |
 | **Permissions** | mode-based + allow/deny lists; per-user policy routing via `PerUserPermissions` | `StandardPermissions`, `AllowAll`, `Mode` (top-level); `from loomflow.security import PerUserPermissions` |
 | **Hooks** | `@agent.before_tool` / `@agent.after_tool` decorators | `HookRegistry` (top-level) |
 | **Sandbox** | `FilesystemSandbox` blocks path-arg escapes; `SubprocessSandbox` for full isolation | `NoSandbox` (top-level); `from loomflow.security import FilesystemSandbox, SubprocessSandbox` |
 | **Budget** | Per-token / per-cost / per-wall-clock limits with soft warnings; per-user caps via `BudgetConfig(per_user_max_*)` | `StandardBudget`, `BudgetConfig`, `NoBudget` (top-level) |
 | **Run timeout** | Wall-clock ceiling for the whole run — setup, every model + tool call (incl. parallel dispatch and sub-agents), teardown — via `anyio.fail_after`. Default `None` = unbounded, zero overhead. `run()` raises `RunTimeout` (carries `.seconds`); `stream()` consumers see an `ERROR` event. TOML-expressible (`timeout = 30.0`). | `Agent(timeout=)`, `RunTimeout` (top-level) |
 | **Run-until-done loop** | `Agent(run_until="all tests pass")` re-prompts the agent until a fast checker model confirms a measurable stop condition. Guardrails against runaway loops: `max_iterations`, `max_no_progress`, `max_cost_usd` (also honours the Agent-wide `Budget`). Exit reason in `session.metadata["run_until.exit"]`; guardrail stops set `RunResult.interrupted`. Wraps any architecture; `Team.*` builders forward it. | `Agent(run_until=)`, `GoalStopHook`, `StopHook`, `StopHookResult` (top-level) |
-| **Studio** | Local recording of every run (traces with model messages, tool calls, approvals, guardrails), an agent catalog with automatic versions and architecture diagrams, eval experiments compared case by case, and a read-only web UI (`loom studio`). One switch; SQLite; no account. | `loomflow.studio.enable/session/score`, `LOOMFLOW_STUDIO`, `loom studio`, `loomflow.studio.web.create_app` |
+| **Studio** | Local recording of every run (traces with model messages, tool calls, approvals, guardrails), an agent catalog with automatic versions and architecture diagrams, eval experiments compared case by case, and a web UI (`loom studio`; add `--read-only` to turn off scoring and dataset edits from the page). One switch; SQLite; no account. | `loomflow.studio.enable/session/score`, `LOOMFLOW_STUDIO`, `loom studio`, `loomflow.studio.web.create_app` |
 | **Telemetry** | OpenTelemetry spans + metrics for every milestone | `NoTelemetry` (top-level); `from loomflow.observability import OTelTelemetry` |
 | **Audit log** | HMAC-signed, hash-chained JSONL or in-memory; tracks every tool call; entries attributed by `user_id`; `verify()` reports edited, deleted or reordered entries | `InMemoryAuditLog`, `AuditLog` (top-level); `from loomflow.security import FileAuditLog, verify_chain, verify_signature` |
 | **Certified values** | Freshness + lineage policies | `from loomflow.data import FreshnessPolicy, LineagePolicy` |
-| **Living plan (TodoWrite-style)** | Structured plan the agent atomically rewrites each turn. ``Agent(living_plan=True)`` wires ``plan_write`` / ``plan_read`` and, when ``workspace=`` is also set, mirrors the plan as a ``kind="plan"`` note and auto-adds ``recall_past_plans(query)`` for cross-run plan lineage. Plan becomes load-bearing in the conversation (tool result returns the rendered plan) so drift becomes structurally hard. Per-run state via contextvar — concurrent runs on the same Agent have isolated plans. Default is opt-in for v0.10.0; v0.11 flips to smart-default-on for tool-using agents. | `Agent(living_plan=)`; `LivingPlan`, `LivingPlanStep` (top-level); `from loomflow.tools import make_plan_tools, make_recall_past_plans_tool, get_active_plan, living_plan_prompt_section, resolve_living_plan` |
+| **Living plan (TodoWrite-style)** | Structured plan the agent atomically rewrites each turn. ``Agent(living_plan=True)`` wires ``plan_write`` / ``plan_read`` and, when ``workspace=`` is also set, mirrors the plan as a ``kind="plan"`` note and auto-adds ``recall_past_plans(query)`` for cross-run plan lineage. Plan becomes load-bearing in the conversation (tool result returns the rendered plan) so drift becomes structurally hard. Per-run state via contextvar — concurrent runs on the same Agent have isolated plans. Opt-in (off unless you pass `living_plan=`). | `Agent(living_plan=)`; `LivingPlan`, `LivingPlanStep` (top-level); `from loomflow.tools import make_plan_tools, make_recall_past_plans_tool, get_active_plan, living_plan_prompt_section, resolve_living_plan` |
 | **Declarative config** | Build agents from TOML or dicts | `Agent.from_config(path)`, `Agent.from_dict(cfg)` |
 
 ---
 
 ## Documentation
 
-The full Sphinx-built documentation site is configured but not yet
-deployed. To go live:
-
-1. Sign in to <https://readthedocs.org/> with the repo's GitHub
-   account
-2. Click *Import Project* → pick the Loom repo
-3. RTD reads `.readthedocs.yaml`, builds, and the site comes up at
-   `https://<your-project-slug>.readthedocs.io/`
-
-Until then, build locally with:
-
-```bash
-pip install -e ".[docs]"
-sphinx-build -b html docs docs/_build/html
-open docs/_build/html/index.html
-```
-
-In-tree starting points:
+This README is the reference that ships with the repository; the
+files below sit next to it.
 
 | Doc | What's there |
 |---|---|
-| [`docs/quickstart.md`](docs/quickstart.md) | Step-by-step examples for each backend combo |
-| [`docs/recipes.md`](docs/recipes.md) | Production patterns: persistent memory, MCP, durable replay, audit |
-| [`docs/architecture.md`](docs/architecture.md) | Module tour, lifecycle, extension points |
-| [`docs/migrations/from-langgraph.md`](docs/migrations/from-langgraph.md) | LangGraph → Loom translation guide |
-| [`docs/migrations/from-openai-sdk.md`](docs/migrations/from-openai-sdk.md) | Hand-rolled OpenAI loop → Loom translation guide |
-| [`docs/migration_0.1_to_0.2.md`](docs/migration_0.1_to_0.2.md) | What changed in 0.2.0; how to migrate |
+| [`examples/`](examples/) | Runnable end-to-end samples, indexed in [`examples/README.md`](examples/README.md): RAG over PDFs, multi-agent teams, multi-user sessions, structured outputs, every memory backend, the Workflow shapes, audit log and telemetry, config files, workspaces, the living plan, sandboxing, durable resume, approvals, guardrails, evals, model routing, decisions and Studio. Most call a real model and need an API key. |
 | [`CHANGELOG.md`](CHANGELOG.md) | Version-by-version release notes |
-| [`Subagent.md`](Subagent.md) | Architecture-protocol design rationale; full 14-architecture catalogue (the 5 shipped, the 9 candidates) |
+| [`Subagent.md`](Subagent.md) | Architecture reference: how each shipped architecture works, when to use it, and how they compose |
 | [`project.md`](project.md) | The full engineering plan (the design doc) |
-| [`BUILD_LOG.md`](BUILD_LOG.md) | Slice-by-slice changelog |
-| [`examples/`](examples/) | Eleven runnable end-to-end samples. Agent + retrieval + memory: [`01_rag_pdf.py`](examples/01_rag_pdf.py) (PDF RAG with `unstructured` / `docling` backends), [`02_specialist_debate.py`](examples/02_specialist_debate.py) (multi-agent debate), [`03_multi_user_sessions.py`](examples/03_multi_user_sessions.py) (multi-tenant + session continuity), [`04_structured_outputs.py`](examples/04_structured_outputs.py) (typed Pydantic outputs), [`05_memory_showcase.py`](examples/05_memory_showcase.py) (every memory backend behind one parameter, including GDPR ops). Workflow composition story: [`06_workflow_chain.py`](examples/06_workflow_chain.py) (no LLM — simplest possible), [`07_workflow_route.py`](examples/07_workflow_route.py) (route to specialist Agents), [`08_workflow_loop.py`](examples/08_workflow_loop.py) (refinement loop with cycles), [`09_workflow_as_tool.py`](examples/09_workflow_as_tool.py) (workflow exposed as Agent tool), [`10_workflow_architecture.py`](examples/10_workflow_architecture.py) (Agent with non-default architecture inside a workflow), [`11_workflow_custom_step.py`](examples/11_workflow_custom_step.py) (Agent wrapped in a custom step for prompt formatting + capturing `RunResult` metadata) |
+| [`BUILD_LOG.md`](BUILD_LOG.md) | Slice-by-slice build history |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | Dev setup, the CI gate, how to release |
+| [`SECURITY.md`](SECURITY.md) | Security policy and how to report a vulnerability |
 
 ---
 
@@ -1374,12 +1448,12 @@ adopters know what they can pin against today.
 
 The package is split into **two import tiers**:
 
-* **Top-level** (`from loomflow import ...`) — the daily-use surface. 66 names. Stable; will not break in 0.x without a migration note. This is what 90% of code touches.
+* **Top-level** (`from loomflow import ...`) — the daily-use surface: everything in `loomflow.__all__`. Stable; will not break in 0.x without a migration note. This is what 90% of code touches.
 * **Submodule** (`from loomflow.memory.postgres import PostgresMemory`, etc.) — backend-specific or specialized classes. Importing them deliberately signals "I'm picking this concrete backend / architecture / adapter."
 
 | Tier | What's in it | Example imports |
 |---|---|---|
-| **Stable top-level** | `Agent`, `Workflow`, `WorkflowResult`, `step`, `START`, `END`, `tool`, `Tool`, `RunContext`, `RunResult`, `get_run_context`, `set_run_context`, common types (`Message`, `Episode`, `Fact`, `Role`, `Event`, `Usage`, `MemoryBlock`, `MemoryProfile`, `MemoryExport`, `BudgetStatus`, `PermissionDecision`, `ToolCall`, `ToolDef`, `ToolResult`), core protocols (`Memory`, `Model`, `Permissions`, `Budget`, `HookHost`, `Sandbox`, `Telemetry`, `ToolHost`, `Runtime`, `Embedder`, `Secrets`, `AuditLog`, `Architecture`), default backends (`InMemoryMemory`, `InMemoryAuditLog`, `NoBudget`, `NoTelemetry`, `NoSandbox`, `AllowAll`, `Mode`, `StandardPermissions`, `HookRegistry`, `StandardBudget`, `BudgetConfig`, `InProcRuntime`, `ReAct`, `HashEmbedder`), `resolve_memory`, test fakes (`EchoModel`, `ScriptedModel`, `ScriptedTurn`), common errors (`LoomError`, `OutputValidationError`, `IsolationWarning`, `BudgetExceeded`, `ConfigError`, `RunTimeout`, `LoomDeprecationWarning`), stop hooks (`StopHook`, `StopHookResult`, `GoalStopHook`), `new_id` | `from loomflow import Agent, Workflow, step, tool` |
+| **Stable top-level** | `Agent`, `Workflow`, `WorkflowResult`, `step`, `START`, `END`, `tool`, `Tool`, `RunContext`, `RunResult`, `get_run_context`, `set_run_context`, common types (`Message`, `Episode`, `Fact`, `Role`, `Event`, `Usage`, `MemoryBlock`, `MemoryProfile`, `MemoryExport`, `BudgetStatus`, `PermissionDecision`, `ToolCall`, `ToolDef`, `ToolResult`), core protocols (`Memory`, `Model`, `Permissions`, `Budget`, `HookHost`, `Sandbox`, `Telemetry`, `ToolHost`, `Runtime`, `Embedder`, `Secrets`, `AuditLog`, `Architecture`), default backends (`InMemoryMemory`, `InMemoryAuditLog`, `NoBudget`, `NoTelemetry`, `NoSandbox`, `AllowAll`, `Mode`, `StandardPermissions`, `HookRegistry`, `StandardBudget`, `BudgetConfig`, `InProcRuntime`, `ReAct`, `HashEmbedder`), `resolve_memory`, test fakes (`EchoModel`, `ScriptedModel`, `ScriptedTurn`), common errors (`LoomError`, `OutputValidationError`, `IsolationWarning`, `BudgetExceeded`, `ConfigError`, `RunTimeout`, `LoomDeprecationWarning`), stop hooks (`StopHook`, `StopHookResult`, `GoalStopHook`), `new_id`, `Tuning`, `Image`, `EventKind`, `EpisodeMatch`, `ApprovalDecision`, `RateLimitExceeded`, `TokenBucketRateLimiter`, `FullTranscriptAuditLog`, `OSSandbox`, `LivingPlan`, `LivingPlanStep`, the shared workspace (`Workspace`, `InMemoryWorkspace`, `LocalDiskWorkspace`, `WorkspaceMembership`, `Note`, `NoteMatch`, `NoteSummary`, `NoteVersion`, `PruneResult`, `resolve_workspace`), context helpers (`count_tokens`, `context_window_for`, `snip_messages`, `maybe_auto_compact`), `web_tool` | `from loomflow import Agent, Workflow, step, tool` |
 | **Stable submodule** | All backend-specific concrete classes — they live in their submodule and are intentionally NOT re-exported at top level. `PostgresMemory`, `ChromaMemory`, `RedisMemory`, `SqliteMemory`, `VectorMemory`, `LazyMemory`, `AutoExtractMemory`, `OpenAIModel`, `AnthropicModel`, `LiteLLMModel`, `SqliteRuntime`, `PostgresRuntime`, `JournaledRuntime`, `PerUserPermissions`, `EnvSecrets`, `DictSecrets`, `FilesystemSandbox`, `SubprocessSandbox`, `FileAuditLog`, `OTelTelemetry`, all vector stores, all embedders, all Anthropic-cookbook architectures (`SelfRefine`, `Reflexion`, `TreeOfThoughts`, `PlanAndExecute`, `ReWOO`, `Supervisor`, `Swarm`, `Router`, `MultiAgentDebate`, `BlackboardArchitecture`, `ActorCritic`), built-in tools (`read_tool`, `write_tool`, `bash_tool`, `edit_tool`), `Team`, `Skill`, `MCPClient`, `MCPRegistry` | `from loomflow.memory.postgres import PostgresMemory`<br>`from loomflow.model.openai import OpenAIModel`<br>`from loomflow.architecture import SelfRefine`<br>`from loomflow.security import PerUserPermissions, EnvSecrets`<br>`from loomflow.observability import OTelTelemetry`<br>`from loomflow.team import Team` |
 | **Experimental** | `agent.generate_graph()`, the `Team.*` builders | Useful, tested, but newer — internals may change. |
 | **Internal** | `_loop`, `_wrapped_model`, `_wrapped_memory`, `Dependencies`, `AgentSession`, anything starting with `_` | No stability promise. Subject to change without notice. |
@@ -1392,66 +1466,43 @@ need it promoted.
 
 ## Status
 
-* **1010 tests pass** offline in ~22 seconds; **10 live tests pass**
-  against real OpenAI in ~30 seconds (5 env-gated integrations
-  skip without `JEEVES_TEST_PG_DSN` / `JEEVES_TEST_REDIS_URL`)
-* **mypy `--strict`** clean across 112 production source files
-* **ruff** clean including `flake8-async` lints
-* v0.10 ships **multi-tenancy by default**, **structured outputs**,
-  **retry-on-transient by default**, and the **fast path by
-  default**. Every layer (audit, telemetry, permissions, hooks,
-  runtime, budget) is detected as no-op or production-wired at
-  construction time, so a barebones `Agent` runs at LangChain-class
-  latency with the integration skipped. `user_id` and `session_id`
-  are first-class typed primitives — memory is hard-partitioned
-  per `user_id`, conversations continue when a `session_id` is
-  reused, and sub-agents inherit the parent's `RunContext`
-  automatically via a contextvar (`get_run_context()`). Pass
-  `output_schema=` (any Pydantic `BaseModel`) and `agent.run`
-  returns a typed, validated instance on `result.parsed` — with
-  retry-with-feedback on validation failure. Network model
-  adapters are auto-wrapped with a typed error taxonomy
-  (`TransientModelError` / `RateLimitError` /
-  `PermanentModelError` / `AuthenticationError` /
-  `InvalidRequestError` / `ContentFilterError`) and a configurable
-  `RetryPolicy` so transient 5xx / 429 / network blips don't blow
-  up production runs. All zero-config; no flags.
-* v0.9 ships **Skills** (Anthropic Agent Skills format, with
-  `tools.py` auto-discovery for in-process Python tools and
-  frontmatter `tools:` manifest for any-language scripts wrapped
-  as typed tools), agent-graph visualization (`agent.generate_graph()`
-  → Mermaid / PNG), the `Team` facade for ergonomic multi-agent
-  construction, the full vector-store stack (`InMemoryVectorStore` /
-  Chroma / Postgres / FAISS — Mongo-style filters, MMR diversity,
-  BM25 hybrid search, persistence), the document loader with
-  chunking strategies, and 12 architectures including selective
-  lesson recall (Reflexion), typed handoffs (Swarm),
-  forward_message (Supervisor), final-answer voting (Debate), and
-  parallel proposer/evaluator with min_score floor (TreeOfThoughts).
+Pre-1.0 and moving quickly — [CHANGELOG.md](CHANGELOG.md) lists what
+each release added.
+
+* The **test suite runs offline** against `ScriptedModel` and
+  in-process fakes: no API key, no network.
+* **Live tests** (`pytest -m live`) call a real model and need
+  `OPENAI_API_KEY`; they are deselected by default.
+* **Postgres and Redis integration tests** skip unless
+  `JEEVES_TEST_PG_DSN` / `JEEVES_TEST_REDIS_URL` point at a server
+  (yes, `JEEVES_` — those are the names the test suite reads).
+* **mypy `--strict`** and **ruff** (including the `flake8-async`
+  lints) are clean on the package and are part of the CI gate.
 
 ---
 
 ## Verify your install
 
 ```bash
-git clone <repo>
-cd loomflow
+git clone https://github.com/Anurich/LoomFlow.git
+cd LoomFlow
 pip install -e '.[dev]'
 ruff check loomflow
 mypy --strict loomflow
-pytest tests/ -v
+pytest -q
 ```
 
-You should see 815 passed. Five integration tests skip without
-`JEEVES_TEST_PG_DSN` / `JEEVES_TEST_REDIS_URL` / API-key env vars set.
+Everything should pass. Some tests skip when an optional dependency or
+a backend server isn't available (see *Status* above).
 
 ---
 
 ## Contributing
 
 The harness has a strict CI gate: ruff + mypy `--strict` + pytest. All
-three must pass. Async-only — every public function returning anything
-other than a value is `async`. Every fan-out uses `anyio` task groups.
+three must pass. Async-first — public functions that do I/O are `async`
+(`Agent.run_sync` is the one blocking convenience wrapper). Every fan-out
+uses `anyio` task groups.
 Zero raw `asyncio.create_task` or `asyncio.gather` calls.
 
 See [`project.md`](project.md) §2 for the non-negotiable engineering

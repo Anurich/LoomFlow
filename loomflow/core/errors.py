@@ -108,6 +108,26 @@ class RunTimeout(LoomError):
         self.seconds = seconds
 
 
+def _short_validation_cause(cause: BaseException | None, limit: int = 3) -> str:
+    """One-line summary of a Pydantic ``ValidationError`` for an error
+    message: the first few ``field: problem`` pairs. ``""`` for any
+    other cause."""
+    errors = getattr(cause, "errors", None)
+    if not callable(errors):
+        return ""
+    try:
+        items = list(errors())
+    except Exception:  # noqa: BLE001 — a summary must never mask the real error
+        return ""
+    parts: list[str] = []
+    for item in items[:limit]:
+        loc = ".".join(str(p) for p in item.get("loc", ())) or "(root)"
+        parts.append(f"{loc}: {item.get('msg', 'invalid')}")
+    if len(items) > limit:
+        parts.append(f"and {len(items) - limit} more")
+    return "; ".join(parts)
+
+
 class OutputValidationError(LoomError):
     """The model's final answer did not validate against the supplied
     ``output_schema``.
@@ -134,6 +154,9 @@ class OutputValidationError(LoomError):
         schema: type,
         cause: BaseException | None = None,
     ) -> None:
+        detail = _short_validation_cause(cause)
+        if detail:
+            message = f"{message.rstrip().rstrip('.')}: {detail}"
         super().__init__(message)
         self.raw = raw
         self.schema = schema
