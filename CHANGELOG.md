@@ -7,7 +7,7 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 For development-history detail (per-slice notes, file maps, gate
 counts), see [`BUILD_LOG.md`](BUILD_LOG.md).
 
-## [Unreleased]
+## [0.21.0] — 2026-11-13
 
 Fixes from a full review of the framework. Several change behaviour;
 those are listed under **Changed**.
