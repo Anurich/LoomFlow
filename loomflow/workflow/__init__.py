@@ -68,8 +68,10 @@ were LLM-driven, tagged via the ``pattern`` span attribute.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import inspect
 import math
+import warnings
 from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
 from contextlib import aclosing
 from dataclasses import dataclass, field
@@ -93,6 +95,17 @@ from ..observability.tracing import NoTelemetry
 from ..runtime.journaled import journal_container
 from ..studio import _hooks as _studio
 from ..tools.registry import Tool
+from .checkpoint import (
+    InMemoryCheckpointer,
+    SqliteCheckpointer,
+    WorkflowCheckpointer,
+    WorkflowCheckpointError,
+    check_value,
+    checkpoint_key,
+    decode_state,
+    encode_state,
+    fingerprint,
+)
 
 if TYPE_CHECKING:
     # ``Agent`` isn't referenced in annotations here (we import it
@@ -108,7 +121,11 @@ if TYPE_CHECKING:
 __all__ = [
     "END",
     "START",
+    "InMemoryCheckpointer",
+    "SqliteCheckpointer",
     "Workflow",
+    "WorkflowCheckpointError",
+    "WorkflowCheckpointer",
     "WorkflowResult",
     "step",
 ]
@@ -176,6 +193,9 @@ class WorkflowResult:
       nodes added up (nested Workflow nodes and ``parallel`` branches
       included). An agent a plain function node calls itself is not
       counted — the workflow never sees that run's result.
+    * ``resumed`` — True when the run continued from a checkpoint
+      (``checkpointer=``): ``visited`` / ``per_step`` / ``usage`` then
+      cover the earlier attempt's completed nodes as well.
     """
 
     output: Any
@@ -184,6 +204,7 @@ class WorkflowResult:
     interrupted: bool = False
     interruption_reason: str | None = None
     usage: Usage = field(default_factory=Usage)
+    resumed: bool = False
 
     @property
     def cost_usd(self) -> float:
@@ -663,6 +684,10 @@ class Workflow:
     * With ``telemetry=``, one ``loom.workflow`` span covers the run
       and every ``loom.workflow.step`` span is its child, so a run
       is one trace.
+    * A run is not durable unless you pass ``checkpointer=`` (and a
+      ``session_id``) to :meth:`run` / :meth:`stream`: then a run
+      that failed, was interrupted or crashed continues from its
+      completed nodes when run again — see :meth:`run`.
     * Every edge, router route and default must name a registered
       node; a typo fails when the run starts, before any node runs.
 
@@ -936,6 +961,7 @@ class Workflow:
         user_id: str | None = None,
         session_id: str | None = None,
         metadata: dict[str, Any] | None = None,
+        checkpointer: WorkflowCheckpointer | None = None,
     ) -> WorkflowResult:
         """Execute the graph. Each node receives its upstream
         node's return value (an AND-join with several delivered
@@ -946,6 +972,65 @@ class Workflow:
         live :class:`RunContext` for the duration of the run. Any
         nested :class:`Agent` runs (when a node is an Agent) inherit
         this context automatically.
+
+        **Checkpoint and resume (opt-in).** Pass ``checkpointer=`` (an
+        :class:`~loomflow.workflow.InMemoryCheckpointer`, a
+        :class:`~loomflow.workflow.SqliteCheckpointer`, or anything
+        with their ``load`` / ``save`` / ``delete``) together with a
+        ``session_id`` you choose. After every node that completes,
+        the scheduler saves that node's output and what it needs to
+        continue (buffered inputs, the nodes in flight and their
+        inputs, visit counts, usage). Run again with the same
+        workflow name, ``session_id``, ``user_id`` and input after
+        the run failed, was cancelled or the process died, and it
+        continues: completed nodes are not run again (their outputs
+        come from the checkpoint and are re-emitted as
+        ``WORKFLOW_STEP_COMPLETED`` events marked ``"replayed":
+        True``), and the nodes that were in flight run again with the
+        inputs they had. ``result.resumed`` says a checkpoint was used.
+
+        The guarantee, precisely:
+
+        * **Resume is between nodes, at-least-once.** A node's side
+          effect happens before its checkpoint is written. Every node
+          that was in flight when the run stopped — the one that
+          failed, siblings cancelled with it, one that had finished
+          but whose checkpoint had not been written yet — runs again
+          from its start. Give such nodes idempotent side effects (or
+          an idempotency key the downstream system honours). A node
+          whose checkpoint was written never runs again in that run.
+          ``Workflow.parallel``'s fan-out and a nested Workflow are
+          each ONE node: they are redone as a whole.
+        * **An interrupted Agent node leaves the run resumable.** The
+          run returns ``interrupted=True`` as usual and keeps its
+          checkpoint; running again re-runs that node (and any
+          sibling cancelled with it) with the same input, then
+          carries on downstream. The agent run itself starts over
+          unless the agent has its own durable runtime.
+        * **A finished run leaves nothing behind.** Its checkpoint is
+          deleted, so the next run on the same ``session_id`` starts
+          from the first node — a completed run is never replayed
+          into a new request. A run with a *different input* on a
+          session that holds an unfinished checkpoint is a new
+          request too: it starts over and replaces that checkpoint.
+        * **Only node outputs carry over.** The workflow input and
+          every node output must be storable (JSON types, tuples,
+          sets, bytes, datetimes, enums, dataclasses, Pydantic
+          models); anything else raises
+          :class:`~loomflow.workflow.WorkflowCheckpointError` naming
+          the node, and the run fails there. State a node kept
+          elsewhere (``RunContext.metadata``, globals) is not
+          restored.
+        * **The graph must be the same.** A checkpoint written by a
+          different graph (nodes or edges changed) is discarded with
+          a warning and the run starts over. A change inside a node's
+          code is not detected.
+        * One run per (workflow, user, session) at a time: two
+          concurrent runs on the same key overwrite each other's
+          checkpoint.
+
+        Without ``checkpointer=`` nothing is stored and a rerun starts
+        from the first node, as before.
         """
         events: list[Event] = []
         async with aclosing(
@@ -954,6 +1039,7 @@ class Workflow:
                 user_id=user_id,
                 session_id=session_id,
                 metadata=metadata,
+                checkpointer=checkpointer,
             )
         ) as stream:
             async for ev in stream:
@@ -967,8 +1053,11 @@ class Workflow:
         interrupted = False
         reason: str | None = None
         usage = Usage()
+        resumed = False
         for ev in events:
-            if ev.kind == EventKind.WORKFLOW_STEP_COMPLETED:
+            if ev.kind == EventKind.WORKFLOW_STARTED:
+                resumed = bool(ev.payload.get("resumed", False))
+            elif ev.kind == EventKind.WORKFLOW_STEP_COMPLETED:
                 node = ev.payload["node"]
                 visited.append(node)
                 per_step[node] = ev.payload["output"]
@@ -986,7 +1075,19 @@ class Workflow:
             interrupted=interrupted,
             interruption_reason=reason,
             usage=usage,
+            resumed=resumed,
         )
+
+    async def clear_checkpoint(
+        self,
+        checkpointer: WorkflowCheckpointer,
+        *,
+        session_id: str,
+        user_id: str | None = None,
+    ) -> None:
+        """Delete this workflow's checkpoint for ``session_id`` (and
+        ``user_id``), so the next run starts from the first node."""
+        await checkpointer.delete(checkpoint_key(self.name, session_id, user_id))
 
     async def stream(
         self,
@@ -995,6 +1096,7 @@ class Workflow:
         user_id: str | None = None,
         session_id: str | None = None,
         metadata: dict[str, Any] | None = None,
+        checkpointer: WorkflowCheckpointer | None = None,
     ) -> Any:  # AsyncIterator[Event] — typed as Any for sphinx-autoapi
         """Execute the graph as an async generator of
         :class:`~loomflow.Event` instances.
@@ -1011,6 +1113,11 @@ class Workflow:
         appear before a sibling's ``STEP_COMPLETED``); purely
         sequential graphs yield the exact sequence the sequential
         walker produced.
+
+        ``checkpointer=`` makes the run resumable, as in :meth:`run`.
+        A resumed run's ``WORKFLOW_STARTED`` carries ``"resumed":
+        True`` and is followed by one ``WORKFLOW_STEP_COMPLETED``
+        (``"replayed": True``) per node completed earlier.
         """
 
         async def produce(send: Callable[[Event], Awaitable[None]]) -> None:
@@ -1020,7 +1127,11 @@ class Workflow:
             # that cancel scope and may simply ``break``.
             async with aclosing(
                 self._stream_impl(
-                    input, user_id=user_id, session_id=session_id, metadata=metadata
+                    input,
+                    user_id=user_id,
+                    session_id=session_id,
+                    metadata=metadata,
+                    checkpointer=checkpointer,
                 )
             ) as inner:
                 async for event in inner:
@@ -1040,13 +1151,26 @@ class Workflow:
         user_id: str | None = None,
         session_id: str | None = None,
         metadata: dict[str, Any] | None = None,
+        checkpointer: WorkflowCheckpointer | None = None,
     ) -> AsyncGenerator[Event, None]:
+        if checkpointer is not None and session_id is None:
+            raise ValueError(
+                "checkpointer= needs a session_id: the checkpoint is found again "
+                "by (workflow name, user_id, session_id), so pass the same "
+                "session_id when you run again to resume"
+            )
         # Studio records the run (a no-op unless recording): the
         # workflow's own span, then each step's output from the events.
         sid = session_id if session_id is not None else new_id("wf_session")
         async with _studio.workflow_run(self, input, user_id=user_id, session_id=sid) as studio:
             async with aclosing(
-                self._run_graph(input, user_id=user_id, session_id=sid, metadata=metadata)
+                self._run_graph(
+                    input,
+                    user_id=user_id,
+                    session_id=sid,
+                    metadata=metadata,
+                    checkpointer=checkpointer,
+                )
             ) as events:
                 async for event in events:
                     _studio.workflow_event(studio, event)
@@ -1059,6 +1183,7 @@ class Workflow:
         user_id: str | None = None,
         session_id: str | None = None,
         metadata: dict[str, Any] | None = None,
+        checkpointer: WorkflowCheckpointer | None = None,
     ) -> AsyncGenerator[Event, None]:
         """The scheduler under one ``loom.workflow`` root span.
 
@@ -1071,7 +1196,13 @@ class Workflow:
         root = self._telemetry
         if root is None or isinstance(root, NoTelemetry):
             async with aclosing(
-                self._schedule(input, user_id=user_id, session_id=session_id, metadata=metadata)
+                self._schedule(
+                    input,
+                    user_id=user_id,
+                    session_id=session_id,
+                    metadata=metadata,
+                    checkpointer=checkpointer,
+                )
             ) as events:
                 async for event in events:
                     yield event
@@ -1084,7 +1215,13 @@ class Workflow:
             pattern="workflow",
         ) as span:
             async with aclosing(
-                self._schedule(input, user_id=user_id, session_id=session_id, metadata=metadata)
+                self._schedule(
+                    input,
+                    user_id=user_id,
+                    session_id=session_id,
+                    metadata=metadata,
+                    checkpointer=checkpointer,
+                )
             ) as events:
                 async for event in events:
                     if event.kind == EventKind.WORKFLOW_COMPLETED and event.payload.get(
@@ -1102,6 +1239,7 @@ class Workflow:
         user_id: str | None = None,
         session_id: str | None = None,
         metadata: dict[str, Any] | None = None,
+        checkpointer: WorkflowCheckpointer | None = None,
     ) -> AsyncGenerator[Event, None]:
         if self._start is None and self._entry_router is None:
             raise RuntimeError(
@@ -1156,16 +1294,54 @@ class Workflow:
         workspace_token = _ambient_workspace_var.set(self._workspace)
 
         try:
+            # ---- checkpoint: find an unfinished run to continue ---
+            ckpt_key = checkpoint_key(self.name, sid, user_id)
+            input_digest = graph_digest = ""
+            restored: dict[str, Any] | None = None
+            if checkpointer is not None:
+                check_value(input, f"the input of workflow {self.name!r}")
+                input_digest = fingerprint(input)
+                graph_digest = self._graph_signature()
+                blob = await checkpointer.load(ckpt_key)
+                if blob is not None:
+                    state = decode_state(blob, workflow=self.name, session_id=sid)
+                    if state.get("input") != input_digest:
+                        # A different input is a new request on this
+                        # session, not the old run again: start over.
+                        restored = None
+                    elif state.get("graph") != graph_digest:
+                        warnings.warn(
+                            f"the checkpoint of workflow {self.name!r} for session "
+                            f"{sid!r} was written by a different graph (nodes or "
+                            "edges changed); discarding it and starting the run over",
+                            UserWarning,
+                            stacklevel=2,
+                        )
+                    else:
+                        restored = state
+            if restored is not None:
+                # ``Workflow.route`` handlers read the original input
+                # from the run's metadata; the classifier that put it
+                # there is not run again.
+                run_meta.setdefault("_route_original_input", input)
+
             yield Event(
                 kind=EventKind.WORKFLOW_STARTED,
                 session_id=sid,
-                payload={"workflow": self.name, "input": input},
+                payload={
+                    "workflow": self.name,
+                    "input": input,
+                    **({"resumed": True} if restored is not None else {}),
+                },
             )
 
             # Resolve the first node. When ``add_router(START, ...)``
             # was used, evaluate the entry router on the input to
             # pick the entry node. Otherwise use the explicit start.
-            if self._entry_router is not None:
+            # (A resumed run is past its entry.)
+            if restored is not None:
+                first = None
+            elif self._entry_router is not None:
                 key = await _eval_classifier(self._entry_router.fn, input)
                 target = self._entry_router.routes.get(str(key))
                 if target is None:
@@ -1271,6 +1447,66 @@ class Workflow:
                     return [buffered[0]]
                 return ready
 
+            # What a checkpoint needs beyond the buffers above: the
+            # completed steps in order (for ``visited`` / ``per_step``)
+            # and each running node's wave and input (to run it again).
+            history: list[tuple[str, Any]] = []
+            in_flight: dict[str, tuple[int, Any]] = {}
+            if restored is not None:
+                visit_counts.update(restored["visit_counts"])
+                total_steps = int(restored["total_steps"])
+                arrival = int(restored["arrival"])
+                last_value = restored["last_value"]
+                for name, wave_, deliveries in restored["pending"]:
+                    pending[(name, wave_)] = [(i, a, v) for i, a, v in deliveries]
+                for name, wave_, value in restored["ended"]:
+                    ended[name] = (wave_, value)
+                for name, wave_, value in restored["in_flight"]:
+                    in_flight[name] = (wave_, value)
+                history.extend((name, value) for name, value in restored["history"])
+                earlier = Usage(**restored["usage"])
+                if earlier != Usage():
+                    usage_parts.append(earlier)
+                for name, value in history:
+                    yield Event(
+                        kind=EventKind.WORKFLOW_STEP_COMPLETED,
+                        session_id=sid,
+                        payload={
+                            "workflow": self.name,
+                            "node": name,
+                            "output": value,
+                            "replayed": True,
+                        },
+                    )
+
+            async def _save() -> None:
+                """Persist the scheduler's state (one atomic write)."""
+                if checkpointer is None:
+                    return
+                await checkpointer.save(
+                    ckpt_key,
+                    encode_state(
+                        {
+                            "workflow": self.name,
+                            "input": input_digest,
+                            "graph": graph_digest,
+                            "visit_counts": dict(visit_counts),
+                            "total_steps": total_steps,
+                            "arrival": arrival,
+                            "last_value": last_value,
+                            "pending": [
+                                [name, wave_, [list(d) for d in buf]]
+                                for (name, wave_), buf in pending.items()
+                                if buf
+                            ],
+                            "ended": [[n, w, v] for n, (w, v) in ended.items()],
+                            "in_flight": [[n, w, v] for n, (w, v) in in_flight.items()],
+                            "history": [[n, v] for n, v in history],
+                            "usage": _sum_usage(usage_parts).model_dump(),
+                        }
+                    ),
+                )
+
             async def _run_node(node: str, wave: int, fn: _StepFn, val: Any) -> None:
                 # Worker: take a concurrency slot, announce start,
                 # run the node under its telemetry span, report the
@@ -1329,17 +1565,21 @@ class Workflow:
                         "controlling the loop probably never picks the "
                         "termination branch"
                     )
-                fn = self._nodes[node]
                 buf = sorted(pending.pop((node, wave)), key=lambda d: d[:2])
                 vals = [v for _, _, v in buf]
                 # Join contract: one delivered input -> the bare
                 # value (sequential semantics); several -> a list in
                 # edge declaration order (``parallel()``'s contract).
                 node_input = vals[0] if len(vals) == 1 else vals
+                in_flight[node] = (wave, node_input)
+                _spawn(scope, node, wave, node_input)
+
+            def _spawn(scope: TaskGroup, node: str, wave: int, node_input: Any) -> None:
+                nonlocal inflight
                 active[node] = active.get(node, 0) + 1
                 running[(node, wave)] = running.get((node, wave), 0) + 1
                 inflight += 1
-                scope.start_soon(_run_node, node, wave, fn, node_input)
+                scope.start_soon(_run_node, node, wave, self._nodes[node], node_input)
 
             def _fire_ready(scope: TaskGroup) -> None:
                 for nxt, nxt_wave in _ready_nodes():
@@ -1358,7 +1598,14 @@ class Workflow:
             async with send, recv:
                 async with anyio.create_task_group() as tg:
                     try:
-                        if first is not None:
+                        if restored is not None:
+                            # The nodes that were in flight run again
+                            # with the inputs they had (at-least-once;
+                            # already counted against the caps).
+                            for name, (wave_, value) in list(in_flight.items()):
+                                _spawn(tg, name, wave_, value)
+                            _fire_ready(tg)
+                        elif first is not None:
                             _deliver(first, -1, input, 0)
                             _fire_ready(tg)
                         while inflight > 0:
@@ -1404,10 +1651,21 @@ class Workflow:
                                         },
                                     )
                                     # Stop: nothing downstream runs on
-                                    # a partial answer.
+                                    # a partial answer. The node stays
+                                    # in flight in the checkpoint (saved
+                                    # before the scope is cancelled), so
+                                    # a later run can try it again.
                                     interrupted_at = (node, data.reason)
+                                    await _save()
                                     tg.cancel_scope.cancel()
                                     break
+                                if checkpointer is not None:
+                                    check_value(
+                                        data,
+                                        f"the output of node {node!r} in workflow {self.name!r}",
+                                    )
+                                in_flight.pop(node, None)
+                                history.append((node, data))
                                 last_value = data
                                 yield Event(
                                     kind=EventKind.WORKFLOW_STEP_COMPLETED,
@@ -1436,6 +1694,10 @@ class Workflow:
                                         wave + 1 if (node, dst) in back_edges else wave,
                                     )
                                 _fire_ready(tg)
+                                # After the routing: the checkpoint
+                                # holds this node's output, where it
+                                # went, and what just started.
+                                await _save()
                     except BaseException as exc:
                         # BaseException on purpose: besides node /
                         # scheduler errors this must also catch
@@ -1466,6 +1728,10 @@ class Workflow:
                     },
                 )
                 return
+
+            if checkpointer is not None:
+                # Finished: a later run on this session starts over.
+                await checkpointer.delete(ckpt_key)
 
             # The last wave's endings, then the deepest, then the one
             # declared last: fixed by the graph, not by timing.
@@ -2042,6 +2308,24 @@ class Workflow:
                 + ", ".join(unknown)
                 + ". add_node() them or fix the names."
             )
+
+    def _graph_signature(self) -> str:
+        """Digest of the graph's shape — nodes, edges, routes, entry —
+        so a checkpoint is only resumed by the graph that wrote it."""
+
+        def _router(router: _Router) -> str:
+            routes = ",".join(f"{k}={v}" for k, v in router.routes.items())
+            return f"router({routes};default={router.default!r})"
+
+        parts = [f"start={self._start!r}", "nodes=" + "\x1f".join(self._nodes)]
+        if self._entry_router is not None:
+            parts.append("entry=" + _router(self._entry_router))
+        for src, targets in self._edges.items():
+            described = [
+                _router(t) if isinstance(t, _Router) else repr(t) for t in targets
+            ]
+            parts.append(f"{src}->" + "|".join(described))
+        return hashlib.sha256("\n".join(parts).encode()).hexdigest()
 
     def _validate_source(self, source: str) -> None:
         if source not in self._nodes:
