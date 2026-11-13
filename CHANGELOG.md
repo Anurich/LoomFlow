@@ -75,9 +75,9 @@ those are listed under **Changed**.
   (``batch_size=``, ``max_concurrency=``); Chroma adds are split too.
 * **Vector stores behave alike:** re-adding an id replaces it,
   ``k <= 0`` raises, filters compare types strictly.
-* SQLite memory and saved in-memory stores raise
-  ``EmbedderMismatchError`` when reopened with a different embedder;
-  they used to return wrong results silently.
+* SQLite memory raises ``EmbedderMismatchError`` when reopened with a
+  different embedder, and a saved in-memory vector store raises
+  ``ValueError``; both used to return wrong results silently.
 * ``VectorMemory(max_episodes=)`` is per user; one user's writes no
   longer evict another's.
 * The HTML loader keeps headings, lists and tables inside ``div`` /
@@ -107,7 +107,8 @@ those are listed under **Changed**.
 * ``EvalHarness.run(case_timeout=..., allow_interrupted=...)``,
   ``LLMJudge(name=...)``.
 * ``PostgresMemory(table_prefix=..., schema=...)``;
-  ``append_block(max_block_chars=...)``.
+  ``max_block_chars=`` on the memory backends, which caps what
+  ``append_block`` keeps.
 
 ### Changed
 
